@@ -1,5 +1,8 @@
 services:
   backend:
+    build:
+      args:
+        SLEEPAGENT_INSTALL_EXTRAS: "postgres,experiments"
     environment:
       SLEEPAGENT_SHHS_ROOT: /data/shhs_sample
     volumes:

@@ -7,13 +7,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+ARG SLEEPAGENT_INSTALL_EXTRAS=postgres
+
 COPY pyproject.toml README.md ./
 COPY backend ./backend
 COPY scripts ./scripts
 COPY sleepagent ./sleepagent
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install ".[postgres]"
+    && python -m pip install ".[${SLEEPAGENT_INSTALL_EXTRAS}]"
 
 RUN adduser --disabled-password --gecos "" sleepagent \
     && chown -R sleepagent:sleepagent /app /tmp
