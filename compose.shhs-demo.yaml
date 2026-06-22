@@ -1,0 +1,9 @@
+services:
+  backend:
+    environment:
+      SLEEPAGENT_SHHS_ROOT: /data/shhs_sample
+    volumes:
+      - type: bind
+        source: ${SLEEPAGENT_SHHS_ROOT_HOST:-../data/raw/shhs_sample}
+        target: /data/shhs_sample
+        read_only: true

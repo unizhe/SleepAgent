@@ -1,0 +1,75 @@
+name: sleepagent
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: sleepagent
+      POSTGRES_USER: sleepagent
+      POSTGRES_PASSWORD: sleepagent
+    ports:
+      - "15432:5432"
+    volumes:
+      - sleepagent_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U sleepagent -d sleepagent"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18000"
+    environment:
+      DATABASE_URL: postgresql://sleepagent:sleepagent@postgres:5432/sleepagent
+      SLEEPAGENT_REPOSITORY_BACKEND: postgres
+      SLEEPAGENT_DATA_STORE_DIR: /tmp/sleepagent_stage9_api
+      SLEEPAGENT_REPORT_RETRIEVER: memory
+    ports:
+      - "18000:18000"
+    volumes:
+      - sleepagent_stage9_store:/tmp/sleepagent_stage9_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18000/health', timeout=5).read()"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_SLEEPAGENT_API_BASE_URL: http://127.0.0.1:18000
+        NEXT_PUBLIC_SLEEPAGENT_MOCK_MODE: "false"
+    environment:
+      NEXT_PUBLIC_SLEEPAGENT_API_BASE_URL: http://127.0.0.1:18000
+      NEXT_PUBLIC_SLEEPAGENT_MOCK_MODE: "false"
+    ports:
+      - "18510:18510"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  sleepagent_stage9_store:
+  sleepagent_postgres:

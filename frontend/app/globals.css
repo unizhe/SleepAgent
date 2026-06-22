@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: #171a1f;
+  background:
+    linear-gradient(180deg, rgba(238, 248, 245, 0.65) 0%, rgba(247, 248, 245, 0) 34%),
+    #f7f8f5;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(44, 143, 123, 0.18);
+}
+
+.recharts-wrapper text {
+  font-size: 12px;
+  fill: #667085;
+}
