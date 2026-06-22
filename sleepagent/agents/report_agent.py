@@ -4,7 +4,7 @@ from sleepagent.services import (
     DeepSeekReportGeneratorConfig,
     ReportKnowledgeRetriever,
     ReportRetrieverConfig,
-    generate_mock_sleep_report,
+    generate_sleep_report,
     generate_sleep_report_with_deepseek_fallback,
 )
 
@@ -40,7 +40,7 @@ class ReportAgent:
                 retriever_config=self.retriever_config,
             )
 
-        return generate_mock_sleep_report(
+        return generate_sleep_report(
             analysis,
             retriever=self.retriever,
             retriever_config=self.retriever_config,

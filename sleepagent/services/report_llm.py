@@ -16,10 +16,10 @@ from sleepagent.schemas import (
     SleepAnalysisResult,
 )
 from sleepagent.services.report_templates import (
-    MEDICAL_DISCLAIMER,
     _build_report_knowledge_query,
     _build_report_summary,
-    generate_mock_sleep_report,
+    generate_sleep_report,
+    report_disclaimer_for_analysis,
 )
 from sleepagent.services.report_retrievers import (
     ReportKnowledgeRetriever,
@@ -223,7 +223,7 @@ def build_report_from_llm_draft(
         elder_report=draft.elder_report,
         professional_report=draft.professional_report,
         care_suggestions=care_suggestions,
-        medical_disclaimer=MEDICAL_DISCLAIMER,
+        medical_disclaimer=report_disclaimer_for_analysis(analysis),
         generated_at=analysis.generated_at,
     )
 
@@ -236,7 +236,7 @@ def generate_sleep_report_with_llm_fallback(
     retriever_config: ReportRetrieverConfig | None = None,
 ) -> MockSleepReport:
     if llm_response_json is None:
-        return generate_mock_sleep_report(
+        return generate_sleep_report(
             analysis,
             retriever=retriever,
             retriever_config=retriever_config,
@@ -245,7 +245,7 @@ def generate_sleep_report_with_llm_fallback(
     try:
         draft = validate_llm_report_json(llm_response_json)
     except LLMReportValidationError:
-        return generate_mock_sleep_report(
+        return generate_sleep_report(
             analysis,
             retriever=retriever,
             retriever_config=retriever_config,
@@ -279,7 +279,7 @@ def generate_sleep_report_with_deepseek_fallback(
             config=resolved_config,
         )
     except DeepSeekAPIError:
-        return generate_mock_sleep_report(
+        return generate_sleep_report(
             analysis,
             retriever=retriever,
             retriever_config=retriever_config,

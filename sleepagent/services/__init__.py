@@ -82,7 +82,9 @@ from sleepagent.services.repository_factory import (
 )
 from sleepagent.services.report_templates import (
     MEDICAL_DISCLAIMER,
+    REAL_MEDICAL_DISCLAIMER,
     generate_mock_sleep_report,
+    generate_sleep_report,
 )
 from sleepagent.services.report_knowledge import (
     DEFAULT_REPORT_KNOWLEDGE_CHUNKS,
@@ -214,6 +216,7 @@ __all__ = [
     "AnalysisServiceError",
     "EDFSignalInfo",
     "MEDICAL_DISCLAIMER",
+    "REAL_MEDICAL_DISCLAIMER",
     "DEFAULT_BATCH_WARNING_THRESHOLDS",
     "DEEPSEEK_API_KEY_ENV",
     "DEFAULT_DEEPSEEK_BASE_URL",
@@ -327,6 +330,7 @@ __all__ = [
     "evaluate_yasa_summary_against_shhs_xml",
     "evaluate_respiratory_model_gate",
     "generate_mock_sleep_report",
+    "generate_sleep_report",
     "generate_sleep_report_with_deepseek_fallback",
     "generate_sleep_report_with_llm_fallback",
     "infer_risk_level_from_respiratory_summary",

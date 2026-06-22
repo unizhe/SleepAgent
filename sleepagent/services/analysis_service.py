@@ -22,6 +22,7 @@ from sleepagent.schemas import (
     SignalChannel,
     SleepAnalysisResult,
     SleepRecordMetadata,
+    SleepStagingMetrics,
     SleepStageSummary,
 )
 from sleepagent.services.risk_assessment import (
@@ -121,9 +122,11 @@ class AnalysisService:
                 generated_at=generated_at,
             )
 
-        sleep_staging_result, sleep_summary, epochs = self._sleep_staging(
-            request,
-            resolved_paths,
+        sleep_staging_result, sleep_summary, epochs, sleep_staging_metrics = (
+            self._sleep_staging(
+                request,
+                resolved_paths,
+            )
         )
         if sleep_summary is None or epochs is None:
             return self._failed_run(
@@ -161,6 +164,7 @@ class AnalysisService:
             edf_info=edf_info,
             sleep_summary=sleep_summary,
             epochs=epochs,
+            sleep_staging_metrics=sleep_staging_metrics,
             respiratory_events=respiratory_events,
             respiratory_summary=respiratory_summary,
             generated_at=generated_at,
@@ -303,7 +307,12 @@ class AnalysisService:
         self,
         request: AnalysisRequest,
         paths: _ResolvedRecordPaths,
-    ) -> tuple[AnalysisNodeResult, SleepStageSummary | None, list | None]:
+    ) -> tuple[
+        AnalysisNodeResult,
+        SleepStageSummary | None,
+        list | None,
+        SleepStagingMetrics | None,
+    ]:
         try:
             runner_result = self._yasa_runner(
                 paths.edf_path,
@@ -322,6 +331,7 @@ class AnalysisService:
                     source_paths=paths.source_paths,
                     error=error,
                 ),
+                None,
                 None,
                 None,
             )
@@ -348,6 +358,7 @@ class AnalysisService:
             ),
             sleep_summary,
             runner_result.staging.epochs,
+            metrics,
         )
 
     def _respiratory_detection(
@@ -430,6 +441,7 @@ class AnalysisService:
         edf_info: EDFSignalInfo,
         sleep_summary: SleepStageSummary,
         epochs: list,
+        sleep_staging_metrics: SleepStagingMetrics | None,
         respiratory_events: list[RespiratoryEvent],
         respiratory_summary: RespiratorySummary,
         generated_at: datetime,
@@ -461,7 +473,7 @@ class AnalysisService:
             respiratory_trend=[],
             sleep_summary=sleep_summary,
             respiratory_summary=respiratory_summary,
-            sleep_staging_metrics=None,
+            sleep_staging_metrics=sleep_staging_metrics,
             respiratory_detection_metrics=None,
             risk_level=infer_risk_level_from_respiratory_summary(respiratory_summary),
             generated_at=generated_at,

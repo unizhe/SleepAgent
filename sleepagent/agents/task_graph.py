@@ -840,6 +840,7 @@ def _append_node_finding(
             "caveats": node_result.caveats,
             "metrics": node_result.metrics,
             "source_paths": node_result.source_paths,
+            "source_artifacts": node_result.source_artifacts,
             "payload": node_result.payload,
         },
     )
@@ -992,13 +993,40 @@ def _family_report_content(report: MockSleepReport) -> str:
 
 
 def _technical_report_content(analysis_run: Any) -> str:
+    analysis = analysis_run.sleep_analysis_result
+    record_id = (
+        analysis.metadata.record_id
+        if analysis is not None
+        else analysis_run.record_result.payload.get("record_id", "unknown")
+    )
+    source_paths: dict[str, str] = {}
+    source_artifacts: dict[str, str] = {}
+    for node_result in (
+        analysis_run.record_result,
+        analysis_run.quality_result,
+        analysis_run.sleep_staging_result,
+        analysis_run.respiratory_result,
+        analysis_run.risk_result,
+    ):
+        source_paths.update(node_result.source_paths)
+        source_artifacts.update(node_result.source_artifacts)
+    source_path_lines = "\n".join(
+        f"  - {role}: {path}" for role, path in sorted(source_paths.items())
+    ) or "  - none"
+    source_artifact_lines = "\n".join(
+        f"  - {role}: {path}" for role, path in sorted(source_artifacts.items())
+    ) or "  - none"
     return (
         "技术说明：\n"
+        "- analysis_origin: real_shhs_yasa\n"
+        f"- record_id: {record_id}\n"
         f"- record_status: {analysis_run.record_status.value}\n"
         f"- quality_status: {analysis_run.quality_result.status.value}\n"
         f"- sleep_staging_status: {analysis_run.sleep_staging_result.status.value}\n"
         f"- respiratory_status: {analysis_run.respiratory_result.status.value}\n"
         f"- risk_status: {analysis_run.risk_result.status.value}\n"
+        f"- source_paths:\n{source_path_lines}\n"
+        f"- source_artifacts:\n{source_artifact_lines}\n"
         f"- caveats: {', '.join(analysis_run.caveats)}\n\n"
         f"{MEDICAL_DISCLAIMER}"
     )

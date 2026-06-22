@@ -52,6 +52,7 @@ def test_analysis_service_runs_real_shhs_yasa_minimal_loop(tmp_path: Path) -> No
     assert result.sleep_analysis_result.sleep_summary.total_sleep_time_minutes == pytest.approx(
         1.5
     )
+    assert result.sleep_analysis_result.sleep_staging_metrics is not None
     assert result.sleep_analysis_result.respiratory_summary.hypopnea_count == 1
     assert result.sleep_analysis_result.respiratory_summary.suspected_apnea_count == 1
     assert result.sleep_analysis_result.risk_level == RiskLevel.HIGH
@@ -212,6 +213,7 @@ def _fake_yasa_runner(
     edf_info = _fake_edf_inspector(edf_path)
     staging = build_yasa_sleep_staging_result(
         ["WAKE", "N2", "REM", "N2"],
+        reference_stages=["WAKE", "N2", "REM", "N2"],
         recording_duration_seconds=120.0,
     )
     return YASARunnerResult(

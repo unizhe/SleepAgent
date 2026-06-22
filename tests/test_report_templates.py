@@ -1,6 +1,11 @@
 from sleepagent.preprocessing import generate_mock_sleep_analysis
 from sleepagent.schemas import ReportKnowledgeChunk, RetrievedReportKnowledgeChunk, RiskLevel
-from sleepagent.services import MEDICAL_DISCLAIMER, generate_mock_sleep_report
+from sleepagent.services import (
+    MEDICAL_DISCLAIMER,
+    REAL_MEDICAL_DISCLAIMER,
+    generate_mock_sleep_report,
+    generate_sleep_report,
+)
 
 
 class FakeReportRetriever:
@@ -86,3 +91,21 @@ def test_mock_sleep_report_can_use_injected_retriever_without_contract_change() 
         "generated_at",
     }
     assert "ahi-basic" in payload["professional_report"]
+
+
+def test_source_aware_report_does_not_label_real_analysis_as_mock() -> None:
+    analysis = generate_mock_sleep_analysis(duration_hours=0.5, seed=11).model_copy(
+        update={
+            "metadata": generate_mock_sleep_analysis(
+                duration_hours=0.5,
+                seed=11,
+            ).metadata.model_copy(update={"source_dataset": "shhs"})
+        }
+    )
+
+    report = generate_sleep_report(analysis)
+
+    assert "本地 SHHS PSG" in report.elder_report
+    assert "SleepAgent SHHS PSG analysis report" in report.professional_report
+    assert "synthetic mock data" not in report.professional_report
+    assert report.medical_disclaimer == REAL_MEDICAL_DISCLAIMER
