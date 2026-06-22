@@ -26,7 +26,7 @@ data/**/*.xml
 data/**/*.npy
 data/**/*.npz
 data/**/*.parquet
-shhs/
+/shhs/
 shhs*.zip
 shhs/**/*.xml
 polysomnography/
@@ -42,7 +42,7 @@ models/checkpoints/
 *.pth
 *.ckpt
 
-logs/
+/logs/
 reports/
 
 frontend/.next/
@@ -74,20 +74,20 @@ frontend/dist/
 frontend/build/
 
 # data and experiment outputs
-data/
-datasets/
-raw_data/
-processed_data/
-shhs/
-SHHS/
-outputs/
-runs/
-logs/
-results/
-artifacts/
-checkpoints/
-models/
-weights/
+/data/
+/datasets/
+/raw_data/
+/processed_data/
+/shhs/
+/SHHS/
+/outputs/
+/runs/
+/logs/
+/results/
+/artifacts/
+/checkpoints/
+/models/
+/weights/
 
 # large data/model files
 *.edf
