@@ -4,6 +4,42 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_pyproject_defines_real_shhs_experiment_extra() -> None:
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "experiments = [" in pyproject
+    experiments = pyproject.split("experiments = [", maxsplit=1)[1].split(
+        "]", maxsplit=1
+    )[0]
+    for requirement in [
+        "numpy>=1.26,<2",
+        "pandas>=1.5,<3",
+        "scipy>=1.10,<1.14",
+        "scikit-learn>=1.2,<1.6",
+        "torch>=2.2,<2.3",
+        "mne>=1.6,<1.10",
+        "yasa>=0.6.5,<0.7",
+        "pyEDFlib>=0.1.36,<0.2",
+    ]:
+        assert f'"{requirement}"' in experiments
+
+
+def test_server_demo_uses_single_sleepagent_exp_conda_environment() -> None:
+    demo = (PROJECT_ROOT / "docs" / "STAGE10_SHHS_DEMO.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "conda create --name sleepagent-exp --clone stress" in demo
+    assert "conda activate sleepagent-exp" in demo
+    assert 'python -m pip install -e ".[postgres]"' in demo
+    assert "python -m pip install mne yasa pyedflib" in demo
+    assert 'modules = ["sleepagent.models", "torch", "mne", "yasa", "pyedflib"]' in demo
+    assert '"numpy": numpy.__version__' in demo
+    assert '"torch": torch.__version__' in demo
+    assert '"sklearn": sklearn.__version__' in demo
+    assert '"yasa": yasa.__version__' in demo
+
+
 def test_dockerfile_defines_sleepagent_backend_runtime() -> None:
     dockerfile = (PROJECT_ROOT / "docker" / "Dockerfile").read_text(
         encoding="utf-8"
@@ -13,7 +49,8 @@ def test_dockerfile_defines_sleepagent_backend_runtime() -> None:
     assert "WORKDIR /app" in dockerfile
     assert "COPY backend ./backend" in dockerfile
     assert "COPY sleepagent ./sleepagent" in dockerfile
-    assert 'python -m pip install ".[postgres]"' in dockerfile
+    assert "ARG SLEEPAGENT_INSTALL_EXTRAS=postgres" in dockerfile
+    assert 'python -m pip install ".[${SLEEPAGENT_INSTALL_EXTRAS}]"' in dockerfile
     assert 'CMD ["uvicorn", "backend.main:app"' in dockerfile
     assert "EXPOSE 18000" in dockerfile
     assert "8501" not in dockerfile
@@ -69,6 +106,7 @@ def test_shhs_demo_override_mounts_local_data_read_only() -> None:
     )
 
     assert "SLEEPAGENT_SHHS_ROOT: /data/shhs_sample" in override
+    assert 'SLEEPAGENT_INSTALL_EXTRAS: "postgres,experiments"' in override
     assert "source: ${SLEEPAGENT_SHHS_ROOT_HOST:-../data/raw/shhs_sample}" in override
     assert "target: /data/shhs_sample" in override
     assert "read_only: true" in override

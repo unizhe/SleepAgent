@@ -10,6 +10,20 @@ archived in `docs/CHANGELOG.md`.
 - Previous stage: Stage 9 completed for the current MVP scope.
 - Stage 10 focus: final integration, Docker, README, demo scripts, and
   paper/defense materials.
+- Stage 10 server experiment environment is standardized on the Conda environment
+  `sleepagent-exp`, created with `conda create --name sleepagent-exp --clone stress`.
+  Real SHHS commands must activate this environment first and must not
+  be split across `base`, `yasa`, and `stress`. The `experiments` extra now keeps
+  NumPy on 1.26.x / `<2`, constrains the scientific/YASA stack conservatively,
+  and preserves the cloned Torch 2.2.x environment. Docker extras remain
+  build-configurable; raw data, weights, checkpoints, and outputs remain
+  Git-ignored and outside Docker images.
+- Model source recovery verified at commit `9957f90`: `sleepagent/models/` now
+  contains the YASA adapter, respiratory tensor contract, and 1D-CNN + BiLSTM
+  implementation and is tracked by Git. Model-focused tests and the temporary
+  Stage 6 train/evaluate/infer/checkpoint smoke pass locally; the previously
+  skipped batched-inference test double was corrected to advance through logits
+  across batches.
 - Stage 10 React v4 product experience pass completed: Next frontend now presents
   task composer, Plan/Act/Result Agent Run, report generator, chat-style QA,
   care plan, sleep record library, and role-specific content using mock data

@@ -24,9 +24,13 @@ class FixedLogitModel(torch.nn.Module):
         super().__init__()
         self.config = config
         self.logits = logits
+        self.offset = 0
 
     def forward(self, batch: torch.Tensor) -> torch.Tensor:
-        return self.logits[: batch.shape[0]]
+        stop = self.offset + batch.shape[0]
+        batch_logits = self.logits[self.offset:stop]
+        self.offset = stop
+        return batch_logits
 
 
 def test_infers_single_window_prediction() -> None:
