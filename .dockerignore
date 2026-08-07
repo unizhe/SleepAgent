@@ -34,3 +34,7 @@ polysomnography/
 *.ckpt
 
 docs/CHANGELOG.md
+*.docx
+Radar_monitor.py
+server.py
+radar_data.csv

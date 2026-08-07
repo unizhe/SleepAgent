@@ -1,0 +1,709 @@
+{
+  "evidence_kind": "simulated",
+  "review_report_id": "habit-domain-review:template-replace",
+  "review_type": "catalog_wording_options_ttl_persistence",
+  "reviewed_at": "2000-01-01T00:00:00Z",
+  "catalog": {
+    "catalog_id": "habit-question-catalog",
+    "catalog_version": "1.0.0",
+    "catalog_hash": "a75aa424e3260f042b65be82dbd45600d370515b073d8d17f31e69c539f44ae1",
+    "content_version": "sleep-habit-concepts.zh-CN.v1",
+    "concept_count": 10
+  },
+  "reviewers": [
+    {
+      "reviewer_ref": "reviewer:template-replace",
+      "display_name": "Template reviewer — replace",
+      "professional_role": "Template role — replace",
+      "qualification": "Template qualification — replace",
+      "organization_ref": "organization:template-replace",
+      "conflict_of_interest": "Template declaration — replace"
+    }
+  ],
+  "scope": {
+    "wording": true,
+    "options": true,
+    "ttl": true,
+    "persistence_eligibility": true,
+    "source_semantics": true,
+    "safety_escalation_boundary": true
+  },
+  "concept_reviews": [
+    {
+      "concept_id": "habit.primary_goal",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.primary_goal"
+    },
+    {
+      "concept_id": "habit.schedule_constraint",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.schedule_constraint"
+    },
+    {
+      "concept_id": "habit.nap_pattern",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.nap_pattern"
+    },
+    {
+      "concept_id": "habit.nap_duration_minutes",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.nap_duration_minutes"
+    },
+    {
+      "concept_id": "habit.pre_sleep_behavior",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.pre_sleep_behavior"
+    },
+    {
+      "concept_id": "habit.environment_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.environment_preference"
+    },
+    {
+      "concept_id": "habit.stimulant_timing",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.stimulant_timing"
+    },
+    {
+      "concept_id": "habit.sleep_satisfaction_recent",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 14,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.sleep_satisfaction_recent"
+    },
+    {
+      "concept_id": "habit.observed_snoring",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 30,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.observed_snoring"
+    },
+    {
+      "concept_id": "habit.device_position_last_night",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 1,
+      "domain_review_status": "rejected",
+      "reviewer_ref": "reviewer:template-replace",
+      "wording_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template wording finding; replace with signed review.",
+        "required_changes": [
+          "Complete the wording review."
+        ],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template answer options finding; replace with signed review.",
+        "required_changes": [
+          "Complete the answer options review."
+        ],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template TTL finding; replace with signed review.",
+        "required_changes": [
+          "Complete the TTL review."
+        ],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template persistence eligibility finding; replace with signed review.",
+        "required_changes": [
+          "Complete the persistence eligibility review."
+        ],
+        "eligible": false
+      },
+      "safety_review": {
+        "decision": "changes_requested",
+        "reviewer_refs": [
+          "reviewer:template-replace"
+        ],
+        "finding": "Template safety boundary finding; replace with signed review.",
+        "required_changes": [
+          "Complete the safety boundary review."
+        ],
+        "eligible": null
+      },
+      "final_decision": "changes_requested",
+      "reviewed_at": "2000-01-01T00:00:00Z",
+      "approval_record_ref": "approval:template-replace:habit.device_position_last_night"
+    }
+  ],
+  "overall_decision": "changes_requested",
+  "overall_findings": [
+    "Template only; every concept requires an actual named review."
+  ],
+  "changes_requested": [
+    "Replace every template review and signoff."
+  ],
+  "approval_reference": "approval:template-replace",
+  "signoff": {
+    "status": "changes_requested",
+    "signed_at": "2000-01-01T00:00:00Z",
+    "signed_by": [
+      "reviewer:template-replace"
+    ],
+    "signature_reference": "signature:template-replace"
+  }
+}

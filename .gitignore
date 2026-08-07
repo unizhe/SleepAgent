@@ -43,7 +43,7 @@ models/checkpoints/
 *.ckpt
 
 /logs/
-reports/
+/reports/
 
 frontend/.next/
 frontend/node_modules/
@@ -55,6 +55,12 @@ frontend/tsconfig.tsbuildinfo
 !.env.example
 *.key
 *.pem
+*.docx
+
+# local vendor prototypes/reference captures; formal code lives under sleepagent/
+Radar_monitor.py
+server.py
+radar_data.csv
 
 # local agent/tool state
 .codex/

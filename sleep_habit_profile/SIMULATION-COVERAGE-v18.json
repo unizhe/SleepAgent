@@ -1,0 +1,36 @@
+{
+  "schema_version": "sleepagent-development-simulation-coverage.v1",
+  "purpose": "development_test_only",
+  "production_release_eligible": false,
+  "must_not_be_promoted_to_real_evidence": true,
+  "release_identity_hash": "a9e7408883759e8d914c2f1fc37e8525659d09d4c017cd8f42815de04c32fe2b",
+  "habit_catalog_hash": "a75aa424e3260f042b65be82dbd45600d370515b073d8d17f31e69c539f44ae1",
+  "material_root": "sleep_habit_profile/simulated-evidence-v18-complete",
+  "coverage": {
+    "simulated_usability_observations": 5,
+    "synthetic_facilitator_attestations": 1,
+    "simulated_named_reviewer_personas": 2,
+    "reviewed_habit_concepts": 10,
+    "simulated_provider_observations": 68,
+    "synthetic_provider_receipts": 66,
+    "synthetic_provider_request_ids": 66,
+    "deterministic_observations_without_receipts": 2
+  },
+  "canonical_file_sha256": {
+    "habit_usability_report.json": "8146e3352b2da7560ee254a7be6742f900bf1a417e02929fdb906aeab33041f6",
+    "habit_domain_review.json": "dbeac632da44a6ac682336ad41ef49e793a106eef8e513d04584478eed5d4f2f",
+    "provider_observations.json": "cd8d41750098c17072c56bb42997f17dfb37d4e516a561a6d98899fbad5c30d5",
+    "README.md": "8116b2156fd7169625a79c77d43c5a9b61891cfe492cec965ca9941899641cb7"
+  },
+  "archive": {
+    "path": "sleepagent-v18-complete-simulated-evidence.zip",
+    "sha256": "8dc3e39f55c76cfb1eb72053e68784a24fb6f0b29eb4ab5487e790b83c7ebea9"
+  },
+  "declarations": [
+    "All participant identities and interactions are synthetic.",
+    "The facilitator attestation and its signature reference are synthetic.",
+    "All reviewer identities, qualifications, organizations, approvals and signatures are fictional test data.",
+    "All provider receipts, request IDs and invocation IDs are deterministic synthetic shapes; no API request produced them.",
+    "The fixture remains evidence_kind=simulated and real_provider=false."
+  ]
+}

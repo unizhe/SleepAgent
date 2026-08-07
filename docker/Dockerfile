@@ -2,8 +2,7 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    SLEEPAGENT_DATA_STORE_DIR=/tmp/sleepagent_stage9_api
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
@@ -11,7 +10,6 @@ ARG SLEEPAGENT_INSTALL_EXTRAS=postgres
 
 COPY pyproject.toml README.md ./
 COPY backend ./backend
-COPY scripts ./scripts
 COPY sleepagent ./sleepagent
 
 RUN python -m pip install --upgrade pip \

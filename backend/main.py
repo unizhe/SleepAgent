@@ -1,71 +1,171 @@
 import os
-import asyncio
-import json
-from pathlib import Path
-from collections.abc import AsyncIterator
-from typing import Annotated
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from sleepagent.integrations.perceptor import (
+    PerceptorPushAuthenticationError,
+    PerceptorPushConfigurationError,
+    PerceptorPushRateLimitError,
+    PerceptorPushReplayError,
+    PerceptorPushRequestTooLarge,
+    get_perceptor_push_runtime,
+    read_bounded_starlette_request,
+    start_perceptor_push_worker,
+    stop_perceptor_push_worker,
+)
+from sleepagent.product_device import (
+    PRODUCT_RADAR_API_KEY_ENV,
+    FakeRadarProductDataProvider,
+    LLM_NOT_CONFIGURED_MESSAGE,
+    RadarDialogueStatus,
+    RadarProductChatRequest,
+    RadarAgentAskRequest,
+    RadarAgentRoleRequest,
+    RadarAgentRun,
+    RadarAgentRunCreateRequest,
+    RadarSleepAgentService,
+    RadarPublicAlertEvent,
+    RadarPublicDashboardSummary,
+    RadarPublicDevice,
+    RadarPublicDialogueResult,
+    RadarPublicSleepReport,
+    RadarRealtimeState,
+    RadarRefreshResult,
+    build_public_alert,
+    build_public_dashboard,
+    build_public_device,
+    build_public_sleep_report,
+)
+from sleepagent.radar_agent.product_agent import (
+    AgentId,
+    AuthenticatedBinding,
+    ClaimKind,
+    EpisodeStatus,
+    EpisodeType,
+    FactSnapshot,
+    ProductEpisodeRunRequest,
+    ProductEpisodeRunner,
+    ProductInductionScheduler,
+    SourceScope,
+    SourceScopeKind,
+    build_unavailable_entry_decisions,
+    build_product_episode_runner_from_env,
+    product_episode_runner_is_configured,
+    stable_hash,
+    snapshot_binding_material,
+)
+from sleepagent.observability import (
+    build_status_snapshot,
+    log_event,
+    record_error,
+    record_push,
+)
+from sleepagent.radar_agent.replay import (
+    ReplayScenario,
+    ReplayScenarioSummary,
+    get_replay_scenario,
+    list_replay_scenarios,
+)
+from sleepagent.radar_agent.api.http import (
+    router as radar_agent_router,
+    start_radar_dynamic_worker,
+    stop_radar_dynamic_worker,
+)
+from sleepagent.radar_agent.product_agent.habit_api import (
+    router as habit_profile_router,
+)
 
-from sleepagent.agents import (
-    LangGraphUnavailableError,
-    run_sleep_agent_langgraph_orchestration,
-    run_sleep_agent_orchestration,
-)
-from sleepagent.preprocessing import generate_mock_sleep_analysis
-from sleepagent.schemas import (
-    AnalysisMode,
-    AnalysisRequest,
-    AnalysisRunResult,
-    AgentEvent,
-    Artifact,
-    ArtifactExportRequest,
-    ArtifactExportResult,
-    ArtifactReviseRequest,
-    ArtifactVersion,
-    MockSleepReport,
-    SleepAgentEndpointRequest,
-    SleepAgentOrchestrationRequest,
-    SleepAgentOrchestrationResult,
-    SleepAgentTask,
-    SleepAnalysisResult,
-    Stage9MockContextRequest,
-    Stage9MockContextResult,
-    TaskConfirmRequest,
-    TaskCreateRequest,
-    TaskStatus,
-)
-from sleepagent.services import (
-    SLEEPAGENT_DATA_STORE_DIR_ENV,
-    AnalysisService,
-    AnalysisServiceError,
-    LocalJsonlAlertEventRepository,
-    LocalJsonlSleepDataRepository,
-    build_mock_external_context,
-    compress_memory_from_repository,
-    generate_mock_sleep_report,
-    generate_sleep_report_with_deepseek_fallback,
-    record_high_risk_alert_if_needed,
-)
-from sleepagent.services.artifact_repository import ArtifactNotFoundError
-from sleepagent.services.artifact_service import (
-    ArtifactExportBlockedError,
-    ArtifactSafetyBlockedError,
-    ArtifactService,
-)
-from sleepagent.services.repository_factory import build_repository_bundle
-from sleepagent.services.task_repository import TaskNotFoundError
-from sleepagent.services.task_service import InvalidTaskTransitionError, TaskService
+LEGACY_DEBUG_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
+PRODUCT_PROVIDER_MODE_ENV = "SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE"
+DEPLOYMENT_MODE_ENV = "SLEEPAGENT_DEPLOYMENT_MODE"
 
 
-app = FastAPI(title="SleepAgent", version="0.1.0")
-DEFAULT_STAGE9_API_STORE_DIR = "/tmp/sleepagent_stage9_api"
+def _legacy_debug_enabled() -> bool:
+    return (
+        os.getenv(LEGACY_DEBUG_ENV, "false").strip().lower() == "true"
+        and os.getenv(DEPLOYMENT_MODE_ENV, "development").strip().lower()
+        != "production"
+    )
+
+
+async def _require_legacy_debug_surface(_request: Request) -> None:
+    if not _legacy_debug_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+@asynccontextmanager
+async def _application_lifespan(_app: FastAPI):
+    start_radar_dynamic_worker()
+    start_product_induction_worker()
+    start_perceptor_push_worker()
+    try:
+        yield
+    finally:
+        stop_perceptor_push_worker()
+        stop_product_induction_worker()
+        stop_radar_dynamic_worker()
+
+
+app = FastAPI(title="SleepAgent", version="0.1.0", lifespan=_application_lifespan)
+app.include_router(
+    radar_agent_router,
+    dependencies=[Depends(_require_legacy_debug_surface)],
+)
+app.include_router(habit_profile_router)
 DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:18510",
     "http://localhost:18510",
 )
+_RADAR_PRODUCT_PROVIDER: FakeRadarProductDataProvider | None = None
+_RADAR_AGENT_SERVICE: RadarSleepAgentService | None = None
+_PRODUCT_EPISODE_RUNNER: ProductEpisodeRunner | None = None
+_PRODUCT_INDUCTION_SCHEDULER = ProductInductionScheduler(
+    lambda: _PRODUCT_EPISODE_RUNNER,
+)
+
+
+def start_product_induction_worker() -> None:
+    _PRODUCT_INDUCTION_SCHEDULER.start()
+
+
+def stop_product_induction_worker() -> None:
+    _PRODUCT_INDUCTION_SCHEDULER.stop()
+
+
+def _product_episode_runner() -> ProductEpisodeRunner:
+    global _PRODUCT_EPISODE_RUNNER
+    if _PRODUCT_EPISODE_RUNNER is None:
+        _PRODUCT_EPISODE_RUNNER = build_product_episode_runner_from_env()
+    return _PRODUCT_EPISODE_RUNNER
+
+
+def _product_agent_is_configured(runner: ProductEpisodeRunner) -> bool:
+    return product_episode_runner_is_configured(runner)
+
+
+def _require_product_actor_binding_configuration() -> tuple[str, str, str]:
+    actor_id = os.getenv("SLEEPAGENT_PRODUCT_ACTOR_ID")
+    subject_id = os.getenv("SLEEPAGENT_PRODUCT_SUBJECT_ID")
+    role = os.getenv("SLEEPAGENT_PRODUCT_ACTOR_ROLE")
+    if not actor_id or not subject_id or not role:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Product actor binding is not configured; "
+                "SLEEPAGENT_PRODUCT_ACTOR_ID, "
+                "SLEEPAGENT_PRODUCT_SUBJECT_ID and "
+                "SLEEPAGENT_PRODUCT_ACTOR_ROLE are required."
+            ),
+        )
+    if role not in {"elder", "family", "doctor"}:
+        raise HTTPException(status_code=503, detail="Product actor role is invalid.")
+    return actor_id, subject_id, role
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,489 +183,608 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
-def health_check() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "project": "SleepAgent",
-        "stage": "project_skeleton",
-    }
-
-
-@app.get("/mock-analysis", response_model=SleepAnalysisResult)
-def mock_analysis(
-    record_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock PSG record identifier."),
-    ] = "mock-shhs-0001",
-    subject_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock subject identifier."),
-    ] = "mock-subject-0001",
-    duration_hours: Annotated[
-        float,
-        Query(ge=0.5, le=12.0, description="Synthetic recording duration in hours."),
-    ] = 8.0,
-    seed: Annotated[
-        int,
-        Query(description="Random seed for deterministic mock data."),
-    ] = 42,
-    abnormal_event_rate_per_hour: Annotated[
-        float,
-        Query(ge=0.0, le=60.0, description="Synthetic abnormal respiratory event rate."),
-    ] = 6.0,
-) -> SleepAnalysisResult:
-    return generate_mock_sleep_analysis(
-        record_id=record_id,
-        subject_id=subject_id,
-        duration_hours=duration_hours,
-        seed=seed,
-        abnormal_event_rate_per_hour=abnormal_event_rate_per_hour,
-    )
-
-
-@app.get("/mock-report", response_model=MockSleepReport)
-def mock_report(
-    record_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock PSG record identifier."),
-    ] = "mock-shhs-0001",
-    subject_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock subject identifier."),
-    ] = "mock-subject-0001",
-    duration_hours: Annotated[
-        float,
-        Query(ge=0.5, le=12.0, description="Synthetic recording duration in hours."),
-    ] = 8.0,
-    seed: Annotated[
-        int,
-        Query(description="Random seed for deterministic mock data."),
-    ] = 42,
-    abnormal_event_rate_per_hour: Annotated[
-        float,
-        Query(ge=0.0, le=60.0, description="Synthetic abnormal respiratory event rate."),
-    ] = 6.0,
-) -> MockSleepReport:
-    analysis = generate_mock_sleep_analysis(
-        record_id=record_id,
-        subject_id=subject_id,
-        duration_hours=duration_hours,
-        seed=seed,
-        abnormal_event_rate_per_hour=abnormal_event_rate_per_hour,
-    )
-    return generate_mock_sleep_report(analysis)
-
-
-@app.get("/mock-report/llm", response_model=MockSleepReport)
-def mock_report_llm(
-    record_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock PSG record identifier."),
-    ] = "mock-shhs-0001",
-    subject_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock subject identifier."),
-    ] = "mock-subject-0001",
-    duration_hours: Annotated[
-        float,
-        Query(ge=0.5, le=12.0, description="Synthetic recording duration in hours."),
-    ] = 8.0,
-    seed: Annotated[
-        int,
-        Query(description="Random seed for deterministic mock data."),
-    ] = 42,
-    abnormal_event_rate_per_hour: Annotated[
-        float,
-        Query(ge=0.0, le=60.0, description="Synthetic abnormal respiratory event rate."),
-    ] = 6.0,
-    use_deepseek: Annotated[
-        bool,
-        Query(description="Opt in to the guarded DeepSeek report fallback path."),
-    ] = False,
-) -> MockSleepReport:
-    analysis = generate_mock_sleep_analysis(
-        record_id=record_id,
-        subject_id=subject_id,
-        duration_hours=duration_hours,
-        seed=seed,
-        abnormal_event_rate_per_hour=abnormal_event_rate_per_hour,
-    )
-    if not use_deepseek:
-        return generate_mock_sleep_report(analysis)
-    return generate_sleep_report_with_deepseek_fallback(analysis)
-
-
-@app.post("/analysis/run", response_model=AnalysisRunResult)
-def run_analysis(request: AnalysisRequest) -> AnalysisRunResult:
-    return AnalysisService().run_analysis(request)
-
-
-@app.post("/tasks", response_model=SleepAgentTask)
-def create_task(request: TaskCreateRequest) -> SleepAgentTask:
-    return _task_service().create_task(request)
-
-
-@app.get("/tasks/{task_id}", response_model=SleepAgentTask)
-def get_task(task_id: str) -> SleepAgentTask:
-    try:
-        return _task_service().get_task(task_id)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-
-
-@app.get("/tasks/{task_id}/events", response_model=list[AgentEvent])
-def get_task_events(task_id: str) -> list[AgentEvent]:
-    try:
-        return _task_service().list_events(task_id)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-
-
-@app.get("/tasks/{task_id}/events/stream")
-def stream_task_events(task_id: str) -> StreamingResponse:
-    try:
-        _task_service().get_task(task_id)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-
-    return StreamingResponse(
-        _iter_task_event_sse(task_id),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-@app.get("/tasks/{task_id}/artifacts", response_model=list[Artifact])
-def get_task_artifacts(task_id: str) -> list[Artifact]:
-    try:
-        return _task_service().list_artifacts(task_id)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-
-
-@app.get("/artifacts/{artifact_id}", response_model=Artifact)
-def get_artifact(artifact_id: str) -> Artifact:
-    try:
-        return _artifact_service().get_artifact(artifact_id)
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
-
-
-@app.post("/artifacts/{artifact_id}/revise", response_model=Artifact)
-def revise_artifact(
-    artifact_id: str,
-    request: ArtifactReviseRequest,
-) -> Artifact:
-    try:
-        return _artifact_service().revise_artifact(artifact_id, request)
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
-    except ArtifactSafetyBlockedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/artifacts/{artifact_id}/confirm", response_model=Artifact)
-def confirm_artifact(artifact_id: str) -> Artifact:
-    try:
-        return _artifact_service().confirm_artifact(artifact_id)
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
-
-
-@app.get("/artifacts/{artifact_id}/versions", response_model=list[ArtifactVersion])
-def get_artifact_versions(artifact_id: str) -> list[ArtifactVersion]:
-    try:
-        _artifact_service().get_artifact(artifact_id)
-        return _artifact_service().list_versions(artifact_id)
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
-
-
-@app.post("/artifacts/{artifact_id}/export", response_model=ArtifactExportResult)
-def export_artifact(
-    artifact_id: str,
-    request: ArtifactExportRequest,
-) -> ArtifactExportResult:
-    try:
-        return _artifact_service().export_artifact(artifact_id, request)
-    except ArtifactNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
-    except ArtifactExportBlockedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ArtifactSafetyBlockedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/tasks/{task_id}/confirm", response_model=SleepAgentTask)
-def confirm_task(
-    task_id: str,
-    request: TaskConfirmRequest | None = None,
-) -> SleepAgentTask:
-    try:
-        return _task_service().confirm_task(task_id, request)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-    except InvalidTaskTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.post("/tasks/{task_id}/cancel", response_model=SleepAgentTask)
-def cancel_task(task_id: str) -> SleepAgentTask:
-    try:
-        return _task_service().cancel_task(task_id)
-    except TaskNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Task not found.") from exc
-    except InvalidTaskTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@app.get("/agent/orchestrate", response_model=SleepAgentOrchestrationResult)
-def agent_orchestrate(
-    record_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock PSG record identifier."),
-    ] = "mock-shhs-0001",
-    subject_id: Annotated[
-        str,
-        Query(min_length=1, description="Mock subject identifier."),
-    ] = "mock-subject-0001",
-    duration_hours: Annotated[
-        float,
-        Query(ge=0.5, le=12.0, description="Synthetic recording duration in hours."),
-    ] = 8.0,
-    seed: Annotated[
-        int,
-        Query(description="Random seed for deterministic mock data."),
-    ] = 42,
-    abnormal_event_rate_per_hour: Annotated[
-        float,
-        Query(ge=0.0, le=60.0, description="Synthetic abnormal respiratory event rate."),
-    ] = 6.0,
-    user_question: Annotated[
-        str | None,
-        Query(min_length=1, description="Optional report-grounded user question."),
-    ] = None,
-    use_deepseek_report: Annotated[
-        bool,
-        Query(description="Opt in to the guarded DeepSeek report fallback path."),
-    ] = False,
-    use_langgraph: Annotated[
-        bool,
-        Query(description="Opt in to the optional LangGraph orchestration path."),
-    ] = False,
-    analysis_mode: Annotated[
-        AnalysisMode,
-        Query(description="Choose mock or real SHHS/YASA analysis mode."),
-    ] = AnalysisMode.MOCK,
-    shhs_root: Annotated[
-        str | None,
-        Query(min_length=1, description="Local SHHS root for real analysis mode."),
-    ] = None,
-    eeg_channel: Annotated[
-        str,
-        Query(min_length=1, description="EEG channel name passed to YASA."),
-    ] = "EEG",
-    eog_channel: Annotated[
-        str | None,
-        Query(min_length=1, description="Optional EOG channel name passed to YASA."),
-    ] = "EOG(L)",
-    emg_channel: Annotated[
-        str | None,
-        Query(min_length=1, description="Optional EMG channel name passed to YASA."),
-    ] = "EMG",
-    use_respiratory_model: Annotated[
-        bool,
-        Query(description="Request respiratory model inference; gated in Phase 1."),
-    ] = False,
-    respiratory_checkpoint_path: Annotated[
-        str | None,
-        Query(min_length=1, description="Optional respiratory checkpoint path."),
-    ] = None,
-    allow_demo_respiratory_model: Annotated[
-        bool,
-        Query(description="Mark a demo respiratory checkpoint as pipeline-demo only."),
-    ] = False,
-) -> SleepAgentOrchestrationResult:
-    request = SleepAgentEndpointRequest(
-        record_id=record_id,
-        subject_id=subject_id,
-        duration_hours=duration_hours,
-        seed=seed,
-        abnormal_event_rate_per_hour=abnormal_event_rate_per_hour,
-        user_question=user_question,
-        use_deepseek_report=use_deepseek_report,
-        use_langgraph=use_langgraph,
-        analysis_mode=analysis_mode,
-        shhs_root=shhs_root,
-        eeg_channel=eeg_channel,
-        eog_channel=eog_channel,
-        emg_channel=emg_channel,
-        use_respiratory_model=use_respiratory_model,
-        respiratory_checkpoint_path=respiratory_checkpoint_path,
-        allow_demo_respiratory_model=allow_demo_respiratory_model,
-    )
-    return _run_agent_orchestration_request(request)
-
-
-@app.post("/agent/orchestrate", response_model=SleepAgentOrchestrationResult)
-def agent_orchestrate_post(
-    request: SleepAgentEndpointRequest,
-) -> SleepAgentOrchestrationResult:
-    return _run_agent_orchestration_request(request)
-
-
-@app.post("/stage9/mock-context", response_model=Stage9MockContextResult)
-def stage9_mock_context(
-    request: Stage9MockContextRequest,
-) -> Stage9MockContextResult:
-    store_dir = _resolve_stage9_store_dir()
-    data_repository = LocalJsonlSleepDataRepository(store_dir)
-    alert_repository = LocalJsonlAlertEventRepository(store_dir)
-
-    analysis = generate_mock_sleep_analysis(
-        record_id=request.record_id,
-        subject_id=request.subject_id,
-        duration_hours=request.duration_hours,
-        seed=request.seed,
-        abnormal_event_rate_per_hour=request.abnormal_event_rate_per_hour,
-    )
-    report = generate_mock_sleep_report(analysis)
-
-    analysis_record = data_repository.save_analysis(analysis)
-    report_record = data_repository.save_report(
-        report,
-        analysis_id=analysis_record.analysis_id,
-    )
-    memory_summary = compress_memory_from_repository(
-        data_repository,
-        subject_id=request.subject_id,
-        max_records=request.max_memory_records,
-    )
-    alert_event = record_high_risk_alert_if_needed(
-        alert_repository,
-        analysis_record,
-    )
-    external_context = build_mock_external_context(
-        subject_id=request.subject_id,
-        location=request.location,
-        context_date=request.context_date,
-        seed=request.external_context_seed,
-    )
-
-    return Stage9MockContextResult(
-        analysis_record=analysis_record,
-        report_record=report_record,
-        memory_summary=memory_summary,
-        alert_event=alert_event,
-        external_context=external_context,
-        local_store_dir=str(store_dir),
-        generated_at=analysis.generated_at,
-    )
-
-
-def _run_agent_orchestration_request(
-    request: SleepAgentEndpointRequest,
-) -> SleepAgentOrchestrationResult:
-    try:
-        if not request.use_langgraph:
-            return run_sleep_agent_orchestration(
-                SleepAgentOrchestrationRequest.model_validate(
-                    request.model_dump(exclude={"use_langgraph"})
-                )
-            )
-
-        graph_request = SleepAgentOrchestrationRequest.model_validate(
-            request.model_dump(exclude={"use_langgraph"})
+async def _require_product_radar_auth(request: Request) -> None:
+    await _require_legacy_debug_surface(request)
+    expected_token = os.getenv(PRODUCT_RADAR_API_KEY_ENV)
+    if not expected_token:
+        context = _product_auth_context(request)
+        log_event(
+            "product_api_auth_not_configured",
+            level=logging.ERROR,
+            source="product_api",
+            **context,
         )
-        return run_sleep_agent_langgraph_orchestration(graph_request)
-    except LangGraphUnavailableError as exc:
+        record_error(
+            event="product_api_auth_not_configured",
+            error=f"{PRODUCT_RADAR_API_KEY_ENV} is required.",
+            source="product_api",
+            context=context,
+        )
         raise HTTPException(
             status_code=503,
-            detail="LangGraph is not installed. Install the agent extra to use this path.",
-        ) from exc
-    except AnalysisServiceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+            detail="Product radar API authentication is not configured.",
+        )
+    provided_token = _extract_product_radar_auth_token(request)
+    if provided_token != expected_token:
+        context = _product_auth_context(request)
+        log_event(
+            "product_api_auth_failure",
+            level=logging.WARNING,
+            source="product_api",
+            **context,
+        )
+        record_error(
+            event="product_api_auth_failure",
+            error="Product radar API authentication failed.",
+            source="product_api",
+            context=context,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Product radar API authentication required.",
+        )
 
 
-def _resolve_stage9_store_dir() -> Path:
-    return Path(os.getenv(SLEEPAGENT_DATA_STORE_DIR_ENV, DEFAULT_STAGE9_API_STORE_DIR))
+def _extract_product_radar_auth_token(request: Request) -> str | None:
+    api_key = request.headers.get("x-api-key")
+    if api_key:
+        return api_key.strip()
+
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
 
 
-def _task_service() -> TaskService:
-    return TaskService()
+@app.get("/health")
+async def health_check() -> dict[str, Any]:
+    return _status_payload()
 
 
-def _artifact_service() -> ArtifactService:
-    repositories = build_repository_bundle()
-    return ArtifactService(
-        artifact_repository=repositories.artifact_repository,
-        task_repository=repositories.task_repository,
+@app.get("/status")
+async def status_check() -> dict[str, Any]:
+    return _status_payload()
+
+
+@app.get("/product/radar/devices", response_model=list[RadarPublicDevice])
+async def list_radar_product_devices(
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> list[RadarPublicDevice]:
+    return [
+        build_public_device(device)
+        for device in _radar_product_data_provider(scenario).list_devices()
+    ]
+
+
+@app.get(
+    "/product/radar/replay-scenarios",
+    response_model=list[ReplayScenarioSummary],
+)
+async def list_radar_replay_scenarios(
+    _: None = Depends(_require_product_radar_auth),
+) -> list[ReplayScenarioSummary]:
+    return list_replay_scenarios()
+
+
+@app.get(
+    "/product/radar/replay-scenarios/{scenario_id}",
+    response_model=ReplayScenario,
+)
+async def get_radar_replay_scenario(
+    scenario_id: str,
+    _: None = Depends(_require_product_radar_auth),
+) -> ReplayScenario:
+    try:
+        return get_replay_scenario(scenario_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Replay scenario not found.") from exc
+
+
+@app.get(
+    "/product/radar/devices/{radar_device_id}/dashboard",
+    response_model=RadarPublicDashboardSummary,
+)
+async def get_radar_product_dashboard(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarPublicDashboardSummary:
+    try:
+        dashboard = _radar_product_data_provider(scenario).build_dashboard(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
+    return build_public_dashboard(dashboard)
+
+
+@app.post(
+    "/product/radar/devices/{radar_device_id}/refresh",
+    response_model=RadarRefreshResult,
+)
+async def refresh_radar_product_device(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarRefreshResult:
+    try:
+        dashboard = _radar_product_data_provider(scenario).refresh_device(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
+    return RadarRefreshResult(
+        radar_device_id=radar_device_id,
+        refreshed_at=dashboard.generated_at,
+        dashboard=build_public_dashboard(dashboard),
+        message="Radar device refreshed with fake provider data.",
     )
 
 
-async def _iter_task_event_sse(
-    task_id: str,
-    *,
-    poll_interval_seconds: float = 0.5,
-    idle_timeout_seconds: float = 300.0,
-) -> AsyncIterator[str]:
-    seen_event_ids: set[str] = set()
-    idle_seconds = 0.0
+@app.post(
+    "/product/radar/devices/{radar_device_id}/realtime/start",
+    response_model=RadarRealtimeState,
+)
+async def start_radar_product_realtime(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarRealtimeState:
+    try:
+        return _radar_product_data_provider(scenario).start_realtime(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
 
-    while idle_seconds <= idle_timeout_seconds:
-        service = _task_service()
-        try:
-            task = service.get_task(task_id)
-        except TaskNotFoundError:
-            yield _format_sse_event(
-                AgentEvent(
-                    id=f"{task_id}-event-not-found",
-                    type="error",
-                    title="任务不存在",
-                    message="无法继续订阅事件流，因为任务不存在。",
-                    payload={"error_code": "task_not_found"},
-                )
-            )
-            return
 
-        events = service.list_events(task_id)
-        new_events = [
-            event for event in events if event.id not in seen_event_ids
-        ]
-        for event in new_events:
-            seen_event_ids.add(event.id)
-            yield _format_sse_event(event)
+@app.get(
+    "/product/radar/devices/{radar_device_id}/realtime",
+    response_model=RadarRealtimeState,
+)
+async def get_radar_product_realtime(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarRealtimeState:
+    try:
+        return _radar_product_data_provider(scenario).get_realtime(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
 
-        if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
-            return
 
-        if new_events:
-            idle_seconds = 0.0
-        else:
-            idle_seconds += poll_interval_seconds
-            yield ": keep-alive\n\n"
-        await asyncio.sleep(poll_interval_seconds)
+@app.get(
+    "/product/radar/devices/{radar_device_id}/sleep-report",
+    response_model=RadarPublicSleepReport,
+)
+async def get_radar_product_sleep_report(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarPublicSleepReport:
+    try:
+        report = _radar_product_data_provider(scenario).get_latest_sleep_report(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail="Radar sleep report not found.")
+    return build_public_sleep_report(report)
 
-    yield _format_sse_event(
-        AgentEvent(
-            id=f"{task_id}-event-stream-timeout",
-            type="error",
-            title="事件流超时",
-            message="任务事件流在等待新事件时超时，请重新拉取任务状态。",
-            payload={"error_code": "event_stream_timeout"},
+
+@app.get(
+    "/product/radar/devices/{radar_device_id}/alerts",
+    response_model=list[RadarPublicAlertEvent],
+)
+async def get_radar_product_alerts(
+    radar_device_id: str,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> list[RadarPublicAlertEvent]:
+    try:
+        alerts = _radar_product_data_provider(scenario).get_recent_alerts(radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
+    return [build_public_alert(alert) for alert in alerts]
+
+
+@app.post("/product/radar/chat", response_model=RadarPublicDialogueResult)
+async def radar_product_chat(
+    request: RadarProductChatRequest,
+    scenario: Annotated[
+        str | None,
+        Query(description="Optional deterministic replay scenario id."),
+    ] = None,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarPublicDialogueResult:
+    provider = _radar_product_data_provider(scenario)
+    try:
+        dashboard = provider.build_dashboard(request.radar_device_id)
+        snapshots = provider.get_recent_snapshots(request.radar_device_id)
+        alerts = provider.get_recent_alerts(request.radar_device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar device not found.") from exc
+    runner = _product_episode_runner()
+    if not _product_agent_is_configured(runner):
+        return RadarPublicDialogueResult(
+            radar_device_id=request.radar_device_id,
+            status=RadarDialogueStatus.LLM_NOT_CONFIGURED,
+            assistant_message=LLM_NOT_CONFIGURED_MESSAGE,
+            caveats=["四角色 ProductEpisodeRunner 未调用未配置的模型。"],
+            generated_at=datetime.now(timezone.utc),
+        )
+    timezone_name = os.getenv(
+        "SLEEPAGENT_PRODUCT_TIMEZONE",
+        "Asia/Shanghai",
+    )
+    now = datetime.now(timezone.utc)
+    source_as_of = dashboard.generated_at
+    local_date = source_as_of.astimezone(ZoneInfo(timezone_name)).date()
+    actor_id, subject_id, role = _require_product_actor_binding_configuration()
+    source_ref = (
+        f"product-radar:{request.radar_device_id}:"
+        f"{dashboard.generated_at.isoformat()}"
+    )
+    scope = SourceScope(
+        kind=SourceScopeKind.CURRENT_NIGHT,
+        as_of=source_as_of,
+        timezone_name=timezone_name,
+        date_start=local_date,
+        date_end=local_date,
+        # This dialogue can discuss several metrics, so the legacy scalar is
+        # deliberately non-authoritative.
+        valid_night_count=0,
+    )
+    readiness_decisions = build_unavailable_entry_decisions(
+        decision_namespace=(
+            f"product-chat:{stable_hash((request.radar_device_id, now.isoformat()))[:20]}"
+        ),
+        claim_kind=ClaimKind.DESCRIBE_CURRENT_NIGHT,
+    )
+    fact_snapshot = FactSnapshot.create(
+        fact_snapshot_id=(
+            f"product-chat:{stable_hash((request.radar_device_id, now.isoformat()))[:20]}"
+        ),
+        binding=AuthenticatedBinding(
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            authorization_scope=(
+                "read_sleep_data",
+                "read_device_data",
+                "draft_material",
+            ),
+        ),
+        source_scope=scope,
+        canonical_data_version=stable_hash(
+            {
+                "dashboard": dashboard.model_dump(mode="json"),
+                "snapshots": [
+                    item.model_dump(mode="json") for item in snapshots
+                ],
+                "alerts": [item.model_dump(mode="json") for item in alerts],
+            }
+        ),
+        care_context_version=runner.commit_controller.care_store.get(
+            subject_id
+        ).version,
+        memory_context_version=runner.commit_controller.memory_store.get(
+            subject_id
+        ).version,
+        source_refs=(source_ref,),
+        **snapshot_binding_material(decisions=readiness_decisions),
+        created_at=now,
+    )
+    episode_result = runner.run(
+        ProductEpisodeRunRequest(
+            episode_id=f"api:{stable_hash((actor_id, request.user_message, now.isoformat()))[:24]}",
+            episode_type=EpisodeType.MORNING_REVIEW,
+            objective="基于已授权雷达信息回答当前用户问题",
+            fact_snapshot=fact_snapshot,
+            runtime_readiness_decisions=readiness_decisions,
+            user_text=request.user_message,
+            personalized=True,
+            tool_inputs={
+                "radar.get_night_evidence": {
+                    "data": {
+                        "dashboard": dashboard.model_dump(mode="json"),
+                        "recent_snapshots": [
+                            item.model_dump(mode="json") for item in snapshots
+                        ],
+                        "recent_alerts": [
+                            item.model_dump(mode="json") for item in alerts
+                        ],
+                    },
+                    "source_refs": [source_ref],
+                },
+                "radar.assess_data_quality": {
+                    "coverage_ratio": (
+                        0.0
+                        if dashboard.data_quality.blocks_current_values
+                        else 1.0
+                    ),
+                    "source_refs": [source_ref],
+                },
+            },
         )
     )
-
-
-def _format_sse_event(event: AgentEvent) -> str:
-    payload = event.model_dump(mode="json", by_alias=True)
-    return (
-        f"id: {event.id}\n"
-        f"event: {event.type.value}\n"
-        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    publication = episode_result.publication
+    status = (
+        RadarDialogueStatus.BLOCKED
+        if episode_result.receipt.status == EpisodeStatus.BLOCKED
+        else (
+            RadarDialogueStatus.COMPLETED
+            if publication is not None
+            else RadarDialogueStatus.FAILED
+        )
     )
+    return RadarPublicDialogueResult(
+        radar_device_id=request.radar_device_id,
+        status=status,
+        assistant_message=(
+            publication.text
+            if publication is not None
+            else "当前无法可靠完成这次解释，请稍后重试。"
+        ),
+        safety_flags=(
+            ["safety_reviewed"]
+            if episode_result.receipt.safety_decision_refs
+            else []
+        ),
+        blocked_reasons=episode_result.receipt.failure_codes,
+        caveats=(
+            [publication.context_notice]
+            if publication is not None
+            else ["四角色运行时已安全降级。"]
+        ),
+        generated_at=now,
+    )
+
+
+@app.post("/product/radar/agent-runs", response_model=RadarAgentRun)
+async def create_radar_agent_run(
+    request: RadarAgentRunCreateRequest,
+    http_request: Request,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarAgentRun:
+    runner = _product_episode_runner()
+    if _product_agent_is_configured(runner):
+        _require_product_actor_binding_configuration()
+    return _radar_sleep_agent_service().create_run(
+        request,
+        idempotency_key=http_request.headers.get("idempotency-key"),
+    )
+
+
+@app.get("/product/radar/agent-runs/{run_id}", response_model=RadarAgentRun)
+async def get_radar_agent_run(
+    run_id: str,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarAgentRun:
+    try:
+        return _radar_sleep_agent_service().get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
+
+
+@app.get(
+    "/product/radar/agent-runs/{run_id}/events",
+    response_model=list[dict[str, Any]],
+)
+async def get_radar_agent_run_events(
+    run_id: str,
+    _: None = Depends(_require_product_radar_auth),
+) -> list[dict[str, Any]]:
+    try:
+        run = _radar_sleep_agent_service().get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
+    return [event.model_dump(mode="json", by_alias=True) for event in run.events]
+
+
+@app.get(
+    "/product/radar/agent-runs/{run_id}/artifacts",
+    response_model=list[dict[str, Any]],
+)
+async def get_radar_agent_run_artifacts(
+    run_id: str,
+    _: None = Depends(_require_product_radar_auth),
+) -> list[dict[str, Any]]:
+    try:
+        run = _radar_sleep_agent_service().get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
+    return [artifact.model_dump(mode="json", by_alias=True) for artifact in run.artifacts]
+
+
+@app.post("/product/radar/agent-runs/{run_id}/role", response_model=RadarAgentRun)
+async def set_radar_agent_run_role(
+    run_id: str,
+    request: RadarAgentRoleRequest,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarAgentRun:
+    try:
+        return _radar_sleep_agent_service().set_role(run_id, request.role)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
+
+
+@app.post("/product/radar/agent-runs/{run_id}/ask", response_model=RadarAgentRun)
+async def ask_radar_agent_run(
+    run_id: str,
+    request: RadarAgentAskRequest,
+    _: None = Depends(_require_product_radar_auth),
+) -> RadarAgentRun:
+    try:
+        runner = _product_episode_runner()
+        if _product_agent_is_configured(runner):
+            _require_product_actor_binding_configuration()
+        return _radar_sleep_agent_service().ask(run_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
+
+
+@app.post("/integrations/perceptor/webhook")
+async def perceptor_webhook(
+    request: Request,
+) -> dict[str, object]:
+    log_event(
+        "webhook_ingestion_received",
+        source="perceptor_webhook",
+        method=request.method,
+        path=request.url.path,
+    )
+    try:
+        runtime = get_perceptor_push_runtime()
+        raw_request = await read_bounded_starlette_request(
+            request,
+            limits=runtime.ingestion.http_limits,
+        )
+        result = runtime.ingestion.ingest(
+            raw_request,
+            received_at=datetime.now(timezone.utc),
+        )
+    except PerceptorPushRequestTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except PerceptorPushRateLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except PerceptorPushAuthenticationError as exc:
+        log_event(
+            "webhook_ingestion_rejected",
+            level=logging.WARNING,
+            source="perceptor_webhook",
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except PerceptorPushReplayError as exc:
+        log_event(
+            "webhook_ingestion_replay_rejected",
+            level=logging.WARNING,
+            source="perceptor_webhook",
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PerceptorPushConfigurationError as exc:
+        log_event(
+            "webhook_ingestion_configuration_error",
+            level=logging.ERROR,
+            source="perceptor_webhook",
+            error_type=exc.__class__.__name__,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        record_error(
+            event="webhook_ingestion_storage_error",
+            error=exc,
+            source="perceptor_webhook",
+            context={"path": request.url.path},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Perceptor push could not be durably committed",
+        ) from exc
+
+    record_push(source="perceptor_webhook", event_type=result.event_type)
+    log_event(
+        "webhook_ingestion_completed",
+        source="perceptor_webhook",
+        event_type=result.event_type,
+        duplicate=result.duplicate,
+        collision=result.collision,
+        normalization_status=result.normalization_status,
+    )
+    return result.to_response_payload()
+
+
+def _radar_product_data_provider(
+    scenario: str | None = None,
+) -> FakeRadarProductDataProvider:
+    global _RADAR_PRODUCT_PROVIDER
+    if (
+        not _legacy_debug_enabled()
+        or os.getenv(PRODUCT_PROVIDER_MODE_ENV, "").strip().lower() != "fake"
+    ):
+        raise RuntimeError(
+            "FakeRadarProductDataProvider requires explicit development/test "
+            "mode and SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE=fake"
+        )
+    if scenario is not None:
+        if (
+            _RADAR_PRODUCT_PROVIDER is not None
+            and getattr(_RADAR_PRODUCT_PROVIDER, "scenario_id", None) == scenario
+        ):
+            return _RADAR_PRODUCT_PROVIDER
+        return FakeRadarProductDataProvider(scenario)
+    if _RADAR_PRODUCT_PROVIDER is None:
+        _RADAR_PRODUCT_PROVIDER = FakeRadarProductDataProvider()
+    return _RADAR_PRODUCT_PROVIDER
+
+
+def _radar_sleep_agent_service() -> RadarSleepAgentService:
+    global _RADAR_AGENT_SERVICE
+    if _RADAR_AGENT_SERVICE is None:
+        _RADAR_AGENT_SERVICE = RadarSleepAgentService(
+            data_provider=_radar_product_data_provider(),
+            episode_runner=_product_episode_runner(),
+        )
+    return _RADAR_AGENT_SERVICE
+
+
+def _status_payload() -> dict[str, Any]:
+    if (
+        _legacy_debug_enabled()
+        and os.getenv(PRODUCT_PROVIDER_MODE_ENV, "").strip().lower() == "fake"
+    ):
+        _refresh_product_data_freshness_for_status()
+    return build_status_snapshot()
+
+
+def _refresh_product_data_freshness_for_status() -> None:
+    try:
+        provider = _radar_product_data_provider()
+        devices = provider.list_devices()
+        if devices:
+            provider.build_dashboard(devices[0].radar_device_id)
+    except Exception as exc:  # pragma: no cover - health must stay best effort.
+        log_event(
+            "status_data_freshness_error",
+            level=logging.WARNING,
+            source="status",
+            error_type=exc.__class__.__name__,
+        )
+        record_error(
+            event="status_data_freshness_error",
+            error=exc,
+            source="status",
+        )
+
+
+def _product_auth_context(request: Request) -> dict[str, Any]:
+    authorization = request.headers.get("authorization")
+    scheme = authorization.partition(" ")[0] if authorization else None
+    return {
+        "method": request.method,
+        "path": str(request.scope.get("path") or ""),
+        "client_host": request.client.host if request.client else None,
+        "key_header_present": bool(request.headers.get("x-api-key")),
+        "auth_scheme": scheme,
+        "auth_header_present": bool(authorization),
+    }

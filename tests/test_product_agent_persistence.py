@@ -1,0 +1,476 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+import pytest
+
+from sleepagent.radar_agent.persistence import RadarPersistenceStore
+from sleepagent.radar_agent.product_agent import (
+    AgentId,
+    AuthenticatedBinding,
+    CareContextState,
+    CareTransitionEvent,
+    CommitJournalEntry,
+    ConfiguredExternalActionExecutor,
+    ConfirmationToken,
+    DeterministicCommitController,
+    EpisodeReceipt,
+    EpisodeStatus,
+    EpisodeType,
+    ExecutionMode,
+    ExternalActionConfigurationError,
+    ExternalActionExecutionRequest,
+    ExternalActionExecutionResult,
+    FactSnapshot,
+    InvocationOutcome,
+    MemoryChangeCandidate,
+    PersistentCareContextStore,
+    PersistentCommitJournal,
+    PersistentMemoryContextStore,
+    PersistentProductEpisodeResultStore,
+    ProductEpisodeRunResult,
+    SourceScope,
+    SourceScopeKind,
+    UnconfiguredExternalActionExecutor,
+    build_product_episode_runner_from_env,
+    state_persistence_receipt_from_restart,
+    stable_hash,
+)
+
+
+NOW = datetime(2026, 7, 27, 7, 0, tzinfo=timezone.utc)
+
+
+def _persistence(path: Path) -> RadarPersistenceStore:
+    return RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(path, check_same_thread=False)
+    )
+
+
+def _snapshot() -> FactSnapshot:
+    return FactSnapshot.create(
+        fact_snapshot_id="snapshot:persistence",
+        binding=AuthenticatedBinding(
+            actor_id="actor-1",
+            subject_id="subject-1",
+            role="elder",
+        ),
+        source_scope=SourceScope(
+            kind=SourceScopeKind.CURRENT_NIGHT,
+            as_of=NOW,
+            timezone_name="UTC",
+            date_start=date(2026, 7, 27),
+            date_end=date(2026, 7, 27),
+            valid_night_count=1,
+        ),
+        canonical_data_version="canonical-v1",
+        created_at=NOW,
+    )
+
+
+def _controller(persistence: RadarPersistenceStore) -> DeterministicCommitController:
+    return DeterministicCommitController(
+        care_store=PersistentCareContextStore(persistence),
+        memory_store=PersistentMemoryContextStore(persistence),
+        commit_journal=PersistentCommitJournal(persistence),
+    )
+
+
+def test_memory_care_and_commit_receipts_survive_process_restart(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "product-state.sqlite3"
+    first_persistence = _persistence(database)
+    first = _controller(first_persistence)
+    memory = MemoryChangeCandidate(
+        candidate_id="memory-persistent-1",
+        operation="create",
+        subject_id="subject-1",
+        memory_type="routine",
+        concept_id="sleep.preferred_wake_time",
+        value_schema_id="bounded_string.v1",
+        typed_value="希望每天七点起床",
+        provenance_type="elder_confirmed",
+        source_ref="user_report:persistent-1",
+        sensitivity_class="personal",
+        allowed_roles=(AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING),
+        allowed_purposes=(
+            "personal_evidence_context",
+            "explicit_memory_review",
+            "explicit_memory_change",
+            "explicit_memory_forget",
+        ),
+        explicit_user_authorization=True,
+        confirmation_required=False,
+    )
+    first_receipt = first.commit_memory(
+        candidate=memory,
+        expected_version=0,
+        fact_snapshot=_snapshot(),
+        idempotency_key="memory:persistent:1",
+    )
+    first.care_store.compare_and_set(
+        "subject-1",
+        0,
+        CareContextState(
+            subject_id="subject-1",
+            version=1,
+            active_primary_action={"candidate_id": "care-persistent-1"},
+            transition_history=[
+                CareTransitionEvent(
+                    strategy_id="activation:care-persistent-1",
+                    disposition="propose",
+                    to_candidate_id="care-persistent-1",
+                    committed_at=NOW,
+                )
+            ],
+        ),
+    )
+    first_persistence.connection.close()
+
+    restarted_persistence = _persistence(database)
+    restarted = _controller(restarted_persistence)
+    memory_state = restarted.memory_store.get("subject-1")
+    care_state = restarted.care_store.get("subject-1")
+    replay = restarted.commit_memory(
+        candidate=memory,
+        expected_version=0,
+        fact_snapshot=_snapshot(),
+        idempotency_key="memory:persistent:1",
+    )
+
+    assert memory_state.version == 1
+    assert memory_state.items[0].value == "希望每天七点起床"
+    assert care_state.version == 1
+    assert care_state.active_primary_action == {
+        "candidate_id": "care-persistent-1"
+    }
+    assert care_state.transition_history[0].disposition == "propose"
+    assert replay == first_receipt
+    assert restarted.memory_store.get("subject-1").version == 1
+    proof = state_persistence_receipt_from_restart(
+        state_kind="memory",
+        subject_id="subject-1",
+        version_before=0,
+        version_after_restart=memory_state.version,
+        commit_receipt=replay,
+        restarted_at=NOW + timedelta(hours=1),
+    )
+    assert proof.restart_verified
+    assert proof.subject_ref_hash == stable_hash("subject-1")
+
+
+def test_production_runner_factory_uses_database_backed_product_state(
+    tmp_path: Path,
+) -> None:
+    persistence = _persistence(tmp_path / "factory-state.sqlite3")
+
+    def resolver(_refs, _query):
+        return None
+
+    runner = build_product_episode_runner_from_env(
+        persistence_store=persistence,
+        source_resolvers={"accepted_ledger": resolver},
+    )
+
+    assert isinstance(
+        runner.commit_controller.care_store,
+        PersistentCareContextStore,
+    )
+    assert isinstance(
+        runner.commit_controller.memory_store,
+        PersistentMemoryContextStore,
+    )
+    assert isinstance(
+        runner.commit_controller.commit_journal,
+        PersistentCommitJournal,
+    )
+    assert isinstance(
+        runner.result_store,
+        PersistentProductEpisodeResultStore,
+    )
+    assert isinstance(runner.external_executor, ConfiguredExternalActionExecutor)
+    assert (
+        runner.longitudinal_memory.source_resolvers["accepted_ledger"]
+        is resolver
+    )
+    assert (
+        runner.tool_executor.handlers["memory.read"]
+        == runner.longitudinal_memory.read
+    )
+    assert runner.result_store.digest_read_enabled() is False
+
+
+def test_external_effect_receipt_is_durable_and_not_reexecuted_after_restart(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "external-journal.sqlite3"
+    calls: list[ExternalActionExecutionRequest] = []
+
+    def execute(
+        request: ExternalActionExecutionRequest,
+    ) -> ExternalActionExecutionResult:
+        calls.append(request)
+        return ExternalActionExecutionResult(
+            provider="test-gateway",
+            provider_request_id="gateway-request-1",
+            delivery_status="pending",
+            executed_at=NOW,
+        )
+
+    target_hash = "e" * 64
+    token = ConfirmationToken(
+        token_id="external-token",
+        candidate_id="share-target-1",
+        candidate_hash=target_hash,
+        actor_id="actor-1",
+        actor_role="elder",
+        subject_id="subject-1",
+        action_scope="share_artifact",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    first_persistence = _persistence(database)
+    first = _controller(first_persistence)
+    receipt = first.execute_external(
+        tool_name="external.share",
+        target={"artifact_ref": "artifact-1", "recipient": "doctor-1"},
+        snapshot=_snapshot(),
+        idempotency_key="external:persistent:1",
+        executor=execute,
+        token=token,
+        actor_id="actor-1",
+        subject_id="subject-1",
+        action_scope="share_artifact",
+        target_id="share-target-1",
+        target_version=1,
+        target_hash=target_hash,
+    )
+    first_persistence.connection.close()
+
+    restarted = _controller(_persistence(database))
+    replay = restarted.execute_external(
+        tool_name="external.share",
+        target={"artifact_ref": "artifact-1", "recipient": "doctor-1"},
+        snapshot=_snapshot(),
+        idempotency_key="external:persistent:1",
+        executor=execute,
+        token=token,
+        actor_id="actor-1",
+        subject_id="subject-1",
+        action_scope="share_artifact",
+        target_id="share-target-1",
+        target_version=1,
+        target_hash=target_hash,
+    )
+
+    assert receipt == replay
+    assert receipt.outcome == InvocationOutcome.SUCCEEDED
+    assert receipt.output["delivery_status"] == "pending"
+    assert len(calls) == 1
+
+
+def test_pending_commit_reservation_recovers_as_unknown_without_execution(
+    tmp_path: Path,
+) -> None:
+    persistence = _persistence(tmp_path / "pending-journal.sqlite3")
+    journal = PersistentCommitJournal(persistence)
+    snapshot = _snapshot()
+    target_hash = "e" * 64
+    target = {"artifact_ref": "artifact-1"}
+    commit_payload = {
+        "tool_name": "external.share",
+        "target_id": "share-target-1",
+        "target_version": 1,
+        "target_hash": target_hash,
+        "actor_id": "actor-1",
+        "subject_id": "subject-1",
+        "action_scope": "share_artifact",
+        "payload": target,
+    }
+    created_at = NOW
+    assert journal.reserve(
+        CommitJournalEntry(
+            idempotency_key="external:pending:1",
+            tool_name="external.share",
+            input_hash=stable_hash(commit_payload),
+            fact_snapshot_hash=snapshot.fact_snapshot_hash,
+            state="pending",
+            created_at=created_at,
+            updated_at=created_at,
+        )
+    )
+    entry = journal.get("external:pending:1")
+
+    assert entry is not None
+    assert entry.state == "pending"
+    assert entry.receipt is None
+    calls = 0
+
+    def must_not_execute(
+        _request: ExternalActionExecutionRequest,
+    ) -> ExternalActionExecutionResult:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("pending external effect must not be retried")
+
+    receipt = DeterministicCommitController(
+        commit_journal=journal
+    ).execute_external(
+        tool_name="external.share",
+        target=target,
+        snapshot=snapshot,
+        idempotency_key="external:pending:1",
+        executor=must_not_execute,
+        token=ConfirmationToken(
+            token_id="external-token",
+            candidate_id="share-target-1",
+            candidate_hash=target_hash,
+            actor_id="actor-1",
+            actor_role="elder",
+            subject_id="subject-1",
+            action_scope="share_artifact",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        ),
+        actor_id="actor-1",
+        subject_id="subject-1",
+        action_scope="share_artifact",
+        target_id="share-target-1",
+        target_version=1,
+        target_hash=target_hash,
+    )
+
+    assert receipt.outcome == InvocationOutcome.UNKNOWN
+    assert receipt.error_code == "IndeterminatePriorAttempt"
+    assert calls == 0
+
+
+def test_product_episode_result_history_survives_restart(tmp_path: Path) -> None:
+    database = tmp_path / "episode-results.sqlite3"
+    persistence = _persistence(database)
+    scope = _snapshot().source_scope
+    result = ProductEpisodeRunResult(
+        registry_hash="b" * 64,
+        receipt=EpisodeReceipt(
+            episode_id="episode:persistent-result",
+            episode_type=EpisodeType.URGENT_BOUNDARY,
+            receipt_revision=1,
+            terminal=True,
+            execution_mode=ExecutionMode.DETERMINISTIC_ONLY,
+            status=EpisodeStatus.COMPLETE,
+            goal_achieved=True,
+            fact_snapshot_id="snapshot:persistence",
+            fact_snapshot_hash=_snapshot().fact_snapshot_hash,
+            source_scope=scope,
+            final_episode_state_revision=1,
+            trace_ref="trace:persistent-result",
+        ),
+        publication_delivered=True,
+    )
+    PersistentProductEpisodeResultStore(persistence).append_terminal_bundle(
+        result,
+        subject_id="subject-1",
+        now=NOW,
+    )
+    persistence.connection.close()
+
+    restarted = PersistentProductEpisodeResultStore(_persistence(database))
+
+    assert restarted.latest("episode:persistent-result") == result
+    assert restarted.history("episode:persistent-result") == [result]
+
+
+def test_configured_external_executor_posts_exact_target_and_keeps_receipt(
+) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "provider": "notification-gateway",
+                "request_id": "provider-request-1",
+                "status": "accepted",
+            },
+        )
+
+    executor = ConfiguredExternalActionExecutor(
+        endpoints={"external.share": "https://actions.example/share"},
+        api_key="secret-token",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    request = ExternalActionExecutionRequest(
+        tool_name="external.share",
+        target_id="target-1",
+        target_version=2,
+        target_hash="c" * 64,
+        actor_id="actor-1",
+        subject_id="subject-1",
+        action_scope="share_artifact",
+        fact_snapshot_hash="d" * 64,
+        idempotency_key="external:target-1",
+        payload={"artifact_ref": "artifact-1"},
+    )
+
+    result = executor(request)
+
+    assert result.provider_request_id == "provider-request-1"
+    assert result.delivery_status == "pending"
+    assert captured["body"] == request.model_dump(mode="json")
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers["idempotency-key"] == "external:target-1"
+    assert headers["x-sleepagent-target-hash"] == "c" * 64
+    assert headers["authorization"] == "Bearer secret-token"
+
+
+def test_unconfigured_external_executor_fails_closed() -> None:
+    with pytest.raises(ExternalActionConfigurationError, match="not configured"):
+        UnconfiguredExternalActionExecutor()(
+            ExternalActionExecutionRequest(
+                tool_name="external.export",
+                target_id="target-1",
+                target_version=1,
+                target_hash="c" * 64,
+                actor_id="actor-1",
+                subject_id="subject-1",
+                action_scope="export_summary",
+                fact_snapshot_hash="d" * 64,
+                idempotency_key="external:target-1",
+                payload={},
+            )
+        )
+
+
+def test_external_executor_env_placeholders_stay_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SLEEPAGENT_EXTERNAL_SHARE_URL",
+        "<https-share-gateway-url>",
+    )
+    monkeypatch.setenv(
+        "SLEEPAGENT_EXTERNAL_ACTION_TIMEOUT_SECONDS",
+        "<seconds>",
+    )
+
+    executor = ConfiguredExternalActionExecutor.from_env()
+
+    assert executor.endpoints == {}
+
+
+def test_external_executor_rejects_cleartext_nonlocal_endpoint() -> None:
+    with pytest.raises(
+        ExternalActionConfigurationError,
+        match="must use HTTPS",
+    ):
+        ConfiguredExternalActionExecutor(
+            endpoints={
+                "external.notify": "http://actions.example/notify",
+            }
+        )

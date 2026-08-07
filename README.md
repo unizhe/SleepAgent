@@ -1,100 +1,194 @@
 # SleepAgent
 
-SleepAgent 是一个面向老年用户、家属和医生的智能睡眠健康分析系统。项目以 SHHS 多导睡眠 PSG 数据为主要实验数据，结合睡眠分期、呼吸暂停风险检测、医学知识检索增强报告生成和多轮对话交互，输出可解释、可追踪、可持续扩展的睡眠健康分析结果。
+SleepAgent 是面向居家老人、家属和医生协同场景的睡眠健康观察与照护产品。产品提供持续观察、晨间解释、按需对话、经确认的低风险行动和后续跟进，不替代医疗诊断、治疗或急救判断。
 
-本项目主目录为 `sleepagent/`。仓库根目录下的 `yasa/` 是第三方源码目录，仅作为参考或依赖，不在其中放置 SleepAgent 项目文件。
+## 架构权威
 
-## 目标用户
+以下四组文档分别约束不同层面，避免把历史实现当成目标架构：
 
-- 老年用户：获得通俗、温和、可执行的睡眠健康反馈。
-- 家属：理解长期睡眠风险、异常趋势和就医建议。
-- 医生或研究人员：查看相对专业的指标、模型结果和风险依据。
+- [产品定位](product_positioning/PLAN.md)
+- [产品信息架构](product_information_architecture/PLAN.md)
+- [Agent 架构](agent_architecture/PLAN.md)
+- [Skill 设计](skills_design/PLAN.md)
+- [渐进式睡眠习惯画像](sleep_habit_profile/PLAN.md)
 
-## 核心目标
+目标 Agent 架构由 `SleepCareAgent`、`EvidenceReasoningAgent`、`CareStrategyAgent` 和条件触发的 `SafetyReviewAgent` 构成。Agent 是有独立目标、状态、权限、反馈闭环和审计身份的责任主体；计算、检索、渲染、存储、权限检查与外部执行属于 Tool、Service 或确定性 Policy。
 
-- 基于 SHHS PSG 数据构建睡眠健康分析实验闭环。
-- 使用 YASA 完成 Wake、REM、NREM 三分类睡眠分期。
-- 使用自建 1D-CNN + BiLSTM 完成 normal breathing、hypopnea、suspected apnea 三分类呼吸事件检测。
-- 睡眠分期评估 Accuracy、Cohen's Kappa、macro F1、weighted F1 和各类别 F1。
-- 呼吸暂停检测以 Recall 为核心，辅以 AUC 和 F1，目标为 AUC > 0.85、Recall > 0.80。
-- 通过 Agent 架构整合模型推理、医学知识检索、报告生成和对话交互。
+四角色 `product_agent` 内核已经完成原地收口；现行雷达 API 仍保留其独立运行时，后续产品接线不得把旧角色重新引入 `product_agent`：
 
-## 计划技术栈
+- `sleepagent/radar_agent/` 是现行雷达任务、动态运行时、证据、确认、持久化和 API 基础。
+- `sleepagent/radar_agent/product_agent/` 是已收口的四 Agent 合同、Episode、治理、工具与 runner 内核，不应复制为平行实现。
+- 渐进式 Habit Profile 作为 Questionnaire、类型化 Profile Store、Evidence adapter 和 Commit Controller 能力融入该内核，不新增 Agent；旧自由文本 Memory 和 family-only legacy writer 不是 Habit Profile 写入路径。
+- `sleepagent/product_device/` 提供当前前端仍使用的设备和产品兼容 API。
+- `sleepagent/integrations/perceptor/` 提供供应商 client、签名、统一 push/pull 规范化和真实验收合同；旧本地 webhook SQLite 仅用于显式诊断与一次性导入。
+- `backend/main.py` 只挂载当前雷达、产品兼容、健康状态和 Perceptor webhook 入口。
+- `frontend/` 是唯一保留的 Next.js 用户界面。
 
-- 后端：FastAPI
-- 模型：PyTorch
-- Agent 编排：LangGraph
-- 数据库：PostgreSQL
-- 向量库：Chroma
-- 前端：Next.js / React
-- 部署：Docker
-- 睡眠分期依赖：YASA
+`sleepagent/radar_agent/` 的旧角色只服务尚未迁移的雷达 API，不属于产品四 Agent roster，也不得作为新的架构依据。
 
-## 核心输出
+## 快速启动
 
-- 睡眠总览
-- AHI 指数
-- 疑似呼吸暂停统计
-- 呼吸频率趋势
-- 老人易懂版报告
-- 子女/医生专业版报告
-- 睡眠风险等级
-- 可视化趋势图
-- 进一步就医建议
+要求 Python 3.10+ 和 Node.js。创建环境文件并安装依赖：
 
-## Agent 设计
+```bash
+cp .env.example .env
+python -m pip install -e .
+cd frontend
+npm ci
+cd ..
+```
 
-SleepAgent 包含三个核心 Agent：
+至少配置：
 
-- 睡眠分析 Agent：调用模型推理、整合信号统计、识别异常事件。
-- 报告生成 Agent：基于 RAG 检索医学知识库，生成老人易懂版和子女/医生专业版报告。
-- 对话交互 Agent：支持多轮问答、个性化建议和主动关怀问候。
+```dotenv
+SLEEPAGENT_DEPLOYMENT_MODE=development
+SLEEPAGENT_RADAR_AGENT_API_KEY=<strong-local-api-key>
+SLEEPAGENT_PRODUCT_RADAR_API_KEY=<strong-local-product-key>
+SLEEPAGENT_PRODUCT_ACTOR_ID=<authenticated-actor-id>
+SLEEPAGENT_PRODUCT_ACTOR_ROLE=elder
+SLEEPAGENT_PRODUCT_SUBJECT_ID=<authorized-subject-id>
+SLEEPAGENT_PRODUCT_TIMEZONE=Asia/Shanghai
+SLEEPAGENT_RADAR_AGENT_ACTOR_ID=<authenticated-actor-id>
+SLEEPAGENT_RADAR_AGENT_ACTOR_ROLE=<elder-or-family-or-doctor>
+SLEEPAGENT_RADAR_AGENT_SUBJECT_ID=<authorized-subject-id>
+SLEEPAGENT_RADAR_AGENT_AUTHORIZATION_ID=<active-data-authorization-id>
+SLEEPAGENT_RADAR_AGENT_ROLE_BINDING_IDS=<comma-separated-role-binding-ids>
+SLEEPAGENT_RADAR_AGENT_SQLITE_PATH=/tmp/sleepagent_radar_agent.sqlite3
+SLEEPAGENT_API_BASE_URL=http://127.0.0.1:18000
+SLEEPAGENT_RADAR_AGENT_RUNTIME_MODE=hybrid
+SLEEPAGENT_RADAR_AGENT_DEV_MODE=true
+SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE=fake
+SLEEPAGENT_PRODUCT_RADAR_NAMESPACE=replay:local-product-demo
+```
 
-系统还包含三个独立服务：
+配置真实模型后，`/product/radar/chat`、`/product/radar/agent-runs`
+及其追问都只调用同一个四角色 `ProductEpisodeRunner`。缺少上述
+actor/role/subject 服务端绑定时会返回 503，不会退回旧单模型决策链。
+固定绑定只适用于受控单对象部署；多用户环境必须由可信身份网关按会话提供。
+Product 任务若需要补充事实或确认 Memory、Care、通知、分享、导出目标，
+API 会保存不可对外返回的冻结请求检查点。续跑复用同一 FactSnapshot；
+确认绑定候选 ID、实际 payload hash、actor、subject、scope 和有效期，
+目标漂移或过期时确定性拒绝，不会把旧确认套到新目标。
 
-- 报警推送服务：负责高危事件预警。
-- 数据管理服务：负责用户数据、分析结果和长期记忆压缩。
-- 外部数据工具服务：融合天气、温度、饮食等生活方式因素。
+如需运行受控的老人本人睡眠习惯可用性测试，还需在前端服务端配置：
 
-## MVP 策略
+```dotenv
+SLEEPAGENT_HABIT_PROFILE_ACTOR_ID=<authenticated-elder-actor-id>
+SLEEPAGENT_HABIT_PROFILE_ACTOR_ROLE=elder
+SLEEPAGENT_HABIT_PROFILE_SUBJECT_ID=<elder-subject-id>
+SLEEPAGENT_HABIT_PROFILE_AUTHORIZATION_SCOPES=
+```
 
-项目采用增量开发方式。第一阶段只完成最小可运行闭环，不追求一次性实现完整医疗系统。
+这组固定身份只适用于单对象、受控访问的测试部署；多用户生产环境必须由可信身份网关按会话绑定 actor、role 和 subject，不能允许浏览器自行声明身份。
 
-MVP 优先完成：
-
-- 项目结构和文档规范。
-- SHHS 数据字段和访问方式说明。
-- YASA 睡眠分期三分类流程设计。
-- 呼吸暂停检测模型的数据接口和评估方案。
-- 报告生成的数据结构和模板骨架。
-- 最小 FastAPI 接口、Next.js 任务工作台和 legacy Streamlit 调试入口。
-- 每次任务结束后更新 `TASK_LOG.md`。
-
-## 本地启动
-
-默认开发部署为：
-
-- FastAPI backend: `http://127.0.0.1:18000`
-- Next.js frontend: `http://127.0.0.1:18510`
-
-终端 1：
+启动后端：
 
 ```bash
 uvicorn backend.main:app --host 127.0.0.1 --port 18000
 ```
 
-终端 2：
+上述命令启动旧 UI 的本地调试后端。独立外部睡眠域 API 使用：
 
 ```bash
-cd frontend && npm run dev
+uvicorn sleepagent.sleep_api.app:app --host 127.0.0.1 --port 18001
 ```
 
-前端默认使用真实任务 API 和 SSE 事件流；只有显式设置
-`NEXT_PUBLIC_SLEEPAGENT_MOCK_MODE=true` 时才进入无后端 mock 模式。
-`frontend/app.py` 保留为 legacy/debug 工具，不作为主 demo 路径。
+生产启动前必须按 `.env.example` 配置共享 PostgreSQL、canonical authority
+cutover、raw encryption/retention、service credential、actor key 与权威角色绑定。
 
-## 医学安全声明
+启动前端：
 
-SleepAgent 是医学辅助分析和科研原型系统，不替代医生诊断、治疗建议或急救判断。任何呼吸暂停、高危睡眠事件或严重症状提示，都应由专业医生结合临床检查、完整 PSG 报告和患者病史综合判断。
+```bash
+cd frontend
+npm run dev
+```
 
-SHHS 数据需通过合法授权渠道获取和使用，开发过程中应遵守数据使用协议、隐私保护要求和伦理规范。
+访问 `http://127.0.0.1:18510/`。前端通过同源 BFF 调用后端，不要把 API key 写入 `NEXT_PUBLIC_*`。
+
+## 当前 API
+
+- `/api/v1/*`：独立 Sleep API 应用中唯一受支持的外部睡眠域 API。
+- `/radar-agent/*` 与 `/product/radar/*`：仅在非生产环境显式开启
+  `SLEEPAGENT_RADAR_AGENT_DEV_MODE=true` 后可见的旧调试兼容面；Fake provider
+  还必须显式配置 `SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE=fake`。
+- `/product/habit-profile/*`：可选轻建档、当前回答、老人整体确认、查看、更正和遗忘；默认主动建档关闭。
+- `/integrations/perceptor/webhook`：唯一正式供应商 webhook 写入入口。
+- `/health`、`/status`：脱敏运行状态。
+
+Perceptor 边界详见 [接入说明](docs/PERCEPTOR_INTEGRATION.md)。
+睡眠习惯页面位于 `/habit-profile`。它通过同源 BFF 注入服务端身份，未配置时返回 503；发布仍要求 [3–5 人可用性测试](sleep_habit_profile/USABILITY-TEST-PROTOCOL.md)，自动化测试不能替代该门禁。
+验收材料的严格 JSON 格式、catalog/identity 绑定和审计命令见
+[证据格式](sleep_habit_profile/ACCEPTANCE-EVIDENCE-FORMAT.md)。
+可先用 `acceptance_materials --initialize-templates` 生成绑定当前版本且
+拒绝覆写的采集骨架；骨架始终不可发布，必须用真实会话、签字和执行
+receipt 逐项替换。审计器也可直接接收受限 ZIP；当前
+Product Agent v23 的采集骨架位于
+[`sleep_habit_profile/real-evidence-v23-collection`](sleep_habit_profile/real-evidence-v23-collection)，
+并绑定 release identity `e2d721ca…c689d2`；其中仍是 template，
+审计结果必须保持不可发布，直至真实材料完成。旧
+`sleepagent-v15-complete-simulated-evidence.zip` 保留为绑定旧 v15
+identity 的完整模拟 fixture，不会进入当前 v23 正式 manifest。
+历史习惯画像 v18 的完整模拟 fixture 位于
+[`sleep_habit_profile/simulated-evidence-v18-complete`](sleep_habit_profile/simulated-evidence-v18-complete)，
+并归档为 `sleepagent-v18-complete-simulated-evidence.zip`（SHA-256
+`8dc3e39f55c76cfb1eb72053e68784a24fb6f0b29eb4ab5487e790b83c7ebea9`）。
+它包含 5 条模拟可用性观察、10 条模拟 catalog 审核和 68 条合成
+provider receipt 形状，只用于开发与审计器验证，不能作为真实发布证据。
+机器可读的完整覆盖与文件哈希清单位于
+[`SIMULATION-COVERAGE-v18.json`](sleep_habit_profile/SIMULATION-COVERAGE-v18.json)，
+固定证明 5 条观察、1 份 synthetic attestation、2 名虚构审核角色、
+10 个 concept、68 条场景观测、66 份 synthetic provider receipt/request
+ID 和 2 条无 receipt 的确定性观测。
+旧 `real-evidence-v18-collection` 与 `real-evidence-v20-collection`
+只保留为历史模板，不能继续采集或升级到当前 identity。v23 骨架中的所有
+`template` 槽位都必须用实际会话、真实签字或真实 provider receipt
+完整替换，不能直接改成 `evidence_kind=real`。三条真实采集工作流和
+签字/receipt 交接规则见
+[`REAL-EVIDENCE-COLLECTION-RUNBOOK.md`](sleep_habit_profile/REAL-EVIDENCE-COLLECTION-RUNBOOK.md)。
+
+安装 editable package 后可使用：
+
+```bash
+radar-agent run-demo --scenario normal_night --format pretty
+radar-agent run-goal --goal-type night_review --date 2026-07-09 --format json
+radar-agent inspect-task <task_id> --decision-trace --format pretty
+```
+
+本地 demo 可显式使用 SQLite；生产必须配置 PostgreSQL、raw encryption key
+与 retention，且不得使用 `/tmp`/SQLite 作为 live authority。迁移位于
+`sleepagent/radar_agent/persistence/migrations/`。动态任务在模型未配置时必须明确标记安全降级，不能把模板结果冒充智能调用。
+已确认的 Habit Profile 复用同一个
+`SLEEPAGENT_RADAR_AGENT_DATABASE_URL`/`SLEEPAGENT_RADAR_AGENT_SQLITE_PATH`
+数据库，通过 `003_habit_profile` 迁移持久化；未确认 change set 仍只在
+当前进程短时保留，重启后要求重新汇总确认。经单独确认的“以后不要再问”
+偏好通过 `004_habit_question_suppression` 以最小字段持久化；普通跳过和
+未确认回答仍不形成长期画像。`005_habit_questionnaire_state` 持久化
+Episode 三题预算、短期 selection receipt/消费状态和 actor 级跨 Episode
+冷却，使重启或并发请求不能重置采集边界。
+四 Agent `product_agent` 的真实结构化调用使用
+`OpenAICompatibleStructuredAgentModel`；它复用服务端
+`SLEEPAGENT_PRODUCT_LLM_*`/`DEEPSEEK_API_KEY` 配置并保留 provider request
+ID。未配置密钥或 provider 不返回请求 ID 时，不能生成真实发布证据。
+Product Memory、跨天 Care、提交幂等 journal 和 Episode receipt 使用同一
+`SLEEPAGENT_RADAR_AGENT_DATABASE_URL`（本地演示可用 SQLite）持久化，
+服务重启后仍按版本 CAS。通知、分享和导出默认 fail-closed；只有配置
+对应 `SLEEPAGENT_EXTERNAL_*_URL` 的 HTTPS 网关并收到真实 request ID
+和 `pending | delivered` 状态后，才记录外部执行成功。未知结果持久化后
+不会自动重试。
+
+## 验证
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q
+cd frontend
+npm run typecheck
+npm run build
+```
+
+测试目录只保留当前雷达运行时、产品设备、Perceptor、可观测性、前端契约和 `product_agent` 迁移基础的回归测试。
+
+## 安全边界
+
+急症、身份、权限、隐私、用户确认和外部执行由确定性规则控制，优先于任何 Agent 判断。`SafetyReviewAgent` 即使批准，也不能授予权限、代替用户确认或绕过执行检查。
+
+出现胸痛、严重呼吸困难、意识异常、跌倒等急症线索时，系统应优先提示及时寻求线下医疗或急救协助。

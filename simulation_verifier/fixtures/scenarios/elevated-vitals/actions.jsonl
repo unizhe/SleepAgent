@@ -1,0 +1,2 @@
+{"schema_version":"simulation_action.v1","event_id":"elevated-advance-1","scenario_id":"elevated-vitals","checkpoint":1,"actor":"demo_controller","occurred_at":"2026-03-02T07:00:00+08:00","action":"advance","to_checkpoint":1}
+{"schema_version":"simulation_action.v1","event_id":"elevated-morning-question","scenario_id":"elevated-vitals","checkpoint":1,"actor":"elder","occurred_at":"2026-03-02T07:05:00+08:00","action":"ask","question_kind":"personalized_morning","text":"Synthetic question: summarize the observed measurements without diagnosing me."}

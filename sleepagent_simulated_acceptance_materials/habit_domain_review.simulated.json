@@ -1,0 +1,740 @@
+{
+  "review_report_id": "habit-domain-review:simulated-2026-08",
+  "review_type": "catalog_wording_options_ttl_persistence",
+  "reviewed_at": "2026-08-16T12:30:00+08:00",
+  "catalog": {
+    "catalog_id": "habit-question-catalog",
+    "catalog_version": "1.0.0",
+    "catalog_hash": "e29a6561b5f42819e6b21fbd47c0cb5e7f2717731e27e7921540a1577d005ef7",
+    "content_version": "e29a6561b5f42819e6b21fbd47c0cb5e7f2717731e27e7921540a1577d005ef7",
+    "concept_count": 12
+  },
+  "reviewers": [
+    {
+      "reviewer_ref": "reviewer:medical-001",
+      "display_name": "张三",
+      "professional_role": "睡眠医学领域审核人（模拟）",
+      "qualification": "睡眠健康与临床风险表达审核",
+      "organization_ref": "organization:simulated-medical-review",
+      "conflict_of_interest": "none_declared"
+    },
+    {
+      "reviewer_ref": "reviewer:gerontology-001",
+      "display_name": "李四",
+      "professional_role": "老年友好性审核人（模拟）",
+      "qualification": "老年人交互与健康沟通审核",
+      "organization_ref": "organization:simulated-gerontology-review",
+      "conflict_of_interest": "none_declared"
+    },
+    {
+      "reviewer_ref": "reviewer:data-governance-001",
+      "display_name": "王五",
+      "professional_role": "健康数据治理审核人（模拟）",
+      "qualification": "数据最小化、来源语义与持久化规则审核",
+      "organization_ref": "organization:simulated-data-governance-review",
+      "conflict_of_interest": "none_declared"
+    }
+  ],
+  "scope": {
+    "wording": true,
+    "options": true,
+    "ttl": true,
+    "persistence_eligibility": true,
+    "source_semantics": true,
+    "safety_escalation_boundary": true
+  },
+  "concept_reviews": [
+    {
+      "concept_id": "habit.primary_goal",
+      "version": "1.0.0",
+      "content_version": "7b588b98d7c8cc244f3a8a197094bd09fcdd026c3aef1c4b873c6161ffc5e24b",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "90 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:00:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.primary_goal:1.0.0"
+    },
+    {
+      "concept_id": "habit.usual_bedtime",
+      "version": "1.0.0",
+      "content_version": "d6ffa861e72d3f0c26ed70668df4d8c93bd4b0341e3641777678ca82c9a5d3ba",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:07:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.usual_bedtime:1.0.0"
+    },
+    {
+      "concept_id": "habit.usual_wake_time",
+      "version": "1.0.0",
+      "content_version": "9cbbea82ea4c75aade349ab97dfe6cdb38b9ea35ba1bb784665d7aa091440510",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:14:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.usual_wake_time:1.0.0"
+    },
+    {
+      "concept_id": "habit.schedule_regular",
+      "version": "1.0.0",
+      "content_version": "7460408730e820f4766a56dca8c02a51a4ca23e5acd303632c43f483db15af4c",
+      "valid_for_days": 14,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "14 天有效期与近期变化/观察类事实的时效性匹配；过期后不得自动沿用，应重新询问或以新证据覆盖。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:21:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.schedule_regular:1.0.0"
+    },
+    {
+      "concept_id": "habit.nap_pattern",
+      "version": "1.0.0",
+      "content_version": "a8ef4b4e763cc7879c62d2fdcc2300ff037128dc1937fcd0999c81031dd025df",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:28:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.nap_pattern:1.0.0"
+    },
+    {
+      "concept_id": "habit.caffeine_timing",
+      "version": "1.0.0",
+      "content_version": "dda3af8ab82dbeb3c6c1752903f022342e7d360e89a91a9f36e75f5f30afcae8",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:35:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.caffeine_timing:1.0.0"
+    },
+    {
+      "concept_id": "habit.evening_screen",
+      "version": "1.0.0",
+      "content_version": "ed2c1a6c24edf9cf7308caeb1c34bb3facd114cff1e01e50c1811800526af10a",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:42:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.evening_screen:1.0.0"
+    },
+    {
+      "concept_id": "habit.exercise_timing",
+      "version": "1.0.0",
+      "content_version": "7885254177c8167a73c3a9466745425df39d78f1d195741343d1b335e6ff69a3",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:49:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.exercise_timing:1.0.0"
+    },
+    {
+      "concept_id": "habit.sleep_environment",
+      "version": "1.0.0",
+      "content_version": "a6913c36922ce7fb1f25dda5e2b25bb44bc940e3c30ce83a34a22ecc3a7f0080",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "30 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T10:56:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.sleep_environment:1.0.0"
+    },
+    {
+      "concept_id": "habit.bedtime_routine",
+      "version": "1.0.0",
+      "content_version": "892c5f5aa7b8907d7a79b7f4b76a5d655e74a483db4c2591365f0bbf93834ad7",
+      "valid_for_days": 60,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "60 天有效期与该习惯字段的预期变化速度匹配；到期后标记为过期，不静默续期。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T11:03:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.bedtime_routine:1.0.0"
+    },
+    {
+      "concept_id": "habit.household_observation",
+      "version": "1.0.0",
+      "content_version": "4329fb1e759992b0d094b65bb4d597edba156478cd26bc416fe347800c4c4bff",
+      "valid_for_days": 14,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "14 天有效期与近期变化/观察类事实的时效性匹配；过期后不得自动沿用，应重新询问或以新证据覆盖。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": false,
+        "finding": "仅作为家属观察线索保留，不得升级为老人自述或客观事实；须经老人本人后续确认后，方可生成新的可持久化候选。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T11:10:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.household_observation:1.0.0"
+    },
+    {
+      "concept_id": "habit.recent_change",
+      "version": "1.0.0",
+      "content_version": "6bcbd71c447ea2f699786d7b1eb0fe8c878fbded2d016d6c011c6c35c1b9e219",
+      "valid_for_days": 14,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:medical-001",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "问题采用日常语言描述，不含诊断结论、治疗承诺或诱导性医学判断；允许跳过，且单题可独立理解。",
+        "required_changes": []
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:gerontology-001"
+        ],
+        "finding": "选项覆盖常见情况，并保留不确定、不适用或无固定时间等低压力出口；选项之间不存在明显重叠。",
+        "required_changes": []
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "finding": "14 天有效期与近期变化/观察类事实的时效性匹配；过期后不得自动沿用，应重新询问或以新证据覆盖。",
+        "required_changes": []
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001",
+          "reviewer:data-governance-001"
+        ],
+        "eligible": true,
+        "finding": "允许在老人本人单独确认后进入 Habit Profile；确认前仅作为当前 Episode 候选，不得长期写入。",
+        "required_changes": []
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:medical-001"
+        ],
+        "finding": "该概念本身不承担医疗诊断；任何危险或急迫回答应在后续模型调用前进入确定性 Safety 路径。",
+        "required_changes": []
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-08-16T11:17:00+08:00",
+      "approval_record_ref": "approval:habit-catalog:habit.recent_change:1.0.0"
+    }
+  ],
+  "overall_decision": "approved",
+  "overall_findings": [
+    "题目数量与 Episode 三题预算兼容，单题均允许跳过或拒答。",
+    "长期保存与当前 Episode 使用保持分离，所有可持久化事实均需老人本人精确确认。",
+    "家属观察保持 observer_reported 语义，不自动升级为老人自述或客观事实。",
+    "TTL 与字段变化速度匹配，过期、冲突、更正和遗忘均需保留审计记录。",
+    "危险回答必须在任何新模型调用前中止画像流程并转入确定性 Safety 路径。"
+  ],
+  "changes_requested": [],
+  "approval_reference": "approval-bundle:habit-catalog:simulated-2026-08",
+  "signoff": {
+    "status": "approved",
+    "signed_at": "2026-08-16T12:35:00+08:00",
+    "signed_by": [
+      "reviewer:medical-001",
+      "reviewer:gerontology-001",
+      "reviewer:data-governance-001"
+    ],
+    "signature_reference": "signature-record:habit-domain-review:simulated-2026-08"
+  }
+}

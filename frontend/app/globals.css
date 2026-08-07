@@ -9,9 +9,7 @@
 body {
   margin: 0;
   color: #171a1f;
-  background:
-    linear-gradient(180deg, rgba(238, 248, 245, 0.65) 0%, rgba(247, 248, 245, 0) 34%),
-    #f7f8f5;
+  background: #f4f1e9;
 }
 
 button,
@@ -27,4 +25,15 @@ textarea {
 .recharts-wrapper text {
   font-size: 12px;
   fill: #667085;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

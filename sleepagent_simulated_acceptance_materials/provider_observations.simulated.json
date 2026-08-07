@@ -1,0 +1,1341 @@
+{
+  "observations": [
+    {
+      "observation_id": "normal_morning:run-001",
+      "scenario": "normal_morning",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "normal_morning:run-002",
+      "scenario": "normal_morning",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "normal_morning:run-003",
+      "scenario": "normal_morning",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "normal_evening:run-001",
+      "scenario": "normal_evening",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "normal_evening:run-002",
+      "scenario": "normal_evening",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "normal_evening:run-003",
+      "scenario": "normal_evening",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "short_sleep:run-001",
+      "scenario": "short_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "short_sleep:run-002",
+      "scenario": "short_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "short_sleep:run-003",
+      "scenario": "short_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "fragmented_sleep:run-001",
+      "scenario": "fragmented_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "fragmented_sleep:run-002",
+      "scenario": "fragmented_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "fragmented_sleep:run-003",
+      "scenario": "fragmented_sleep",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "late_bedtime:run-001",
+      "scenario": "late_bedtime",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "late_bedtime:run-002",
+      "scenario": "late_bedtime",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "late_bedtime:run-003",
+      "scenario": "late_bedtime",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "early_wake:run-001",
+      "scenario": "early_wake",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "early_wake:run-002",
+      "scenario": "early_wake",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "early_wake:run-003",
+      "scenario": "early_wake",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "irregular_schedule:run-001",
+      "scenario": "irregular_schedule",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "irregular_schedule:run-002",
+      "scenario": "irregular_schedule",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "irregular_schedule:run-003",
+      "scenario": "irregular_schedule",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "daytime_sleepiness:run-001",
+      "scenario": "daytime_sleepiness",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "daytime_sleepiness:run-002",
+      "scenario": "daytime_sleepiness",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "daytime_sleepiness:run-003",
+      "scenario": "daytime_sleepiness",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "frequent_naps:run-001",
+      "scenario": "frequent_naps",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "frequent_naps:run-002",
+      "scenario": "frequent_naps",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "frequent_naps:run-003",
+      "scenario": "frequent_naps",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caffeine_late:run-001",
+      "scenario": "caffeine_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caffeine_late:run-002",
+      "scenario": "caffeine_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caffeine_late:run-003",
+      "scenario": "caffeine_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "evening_screen:run-001",
+      "scenario": "evening_screen",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "evening_screen:run-002",
+      "scenario": "evening_screen",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "evening_screen:run-003",
+      "scenario": "evening_screen",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "exercise_late:run-001",
+      "scenario": "exercise_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "exercise_late:run-002",
+      "scenario": "exercise_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "exercise_late:run-003",
+      "scenario": "exercise_late",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_noise:run-001",
+      "scenario": "environment_noise",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_noise:run-002",
+      "scenario": "environment_noise",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_noise:run-003",
+      "scenario": "environment_noise",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_light:run-001",
+      "scenario": "environment_light",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_light:run-002",
+      "scenario": "environment_light",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "environment_light:run-003",
+      "scenario": "environment_light",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "temperature_discomfort:run-001",
+      "scenario": "temperature_discomfort",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "temperature_discomfort:run-002",
+      "scenario": "temperature_discomfort",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "temperature_discomfort:run-003",
+      "scenario": "temperature_discomfort",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "bedtime_routine_missing:run-001",
+      "scenario": "bedtime_routine_missing",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "bedtime_routine_missing:run-002",
+      "scenario": "bedtime_routine_missing",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "bedtime_routine_missing:run-003",
+      "scenario": "bedtime_routine_missing",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caregiver_observation:run-001",
+      "scenario": "caregiver_observation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caregiver_observation:run-002",
+      "scenario": "caregiver_observation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "caregiver_observation:run-003",
+      "scenario": "caregiver_observation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "user_correction:run-001",
+      "scenario": "user_correction",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "user_correction:run-002",
+      "scenario": "user_correction",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "user_correction:run-003",
+      "scenario": "user_correction",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_conflict:run-001",
+      "scenario": "profile_conflict",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_conflict:run-002",
+      "scenario": "profile_conflict",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_conflict:run-003",
+      "scenario": "profile_conflict",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_expired:run-001",
+      "scenario": "profile_expired",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_expired:run-002",
+      "scenario": "profile_expired",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "profile_expired:run-003",
+      "scenario": "profile_expired",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "question_skipped:run-001",
+      "scenario": "question_skipped",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "question_skipped:run-002",
+      "scenario": "question_skipped",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "question_skipped:run-003",
+      "scenario": "question_skipped",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "persistence_confirmation:run-001",
+      "scenario": "persistence_confirmation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "persistence_confirmation:run-002",
+      "scenario": "persistence_confirmation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 2,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "persistence_confirmation:run-003",
+      "scenario": "persistence_confirmation",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 3,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    },
+    {
+      "observation_id": "data_quality:run-001",
+      "scenario": "data_quality",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning"
+      ],
+      "evidence_semantics": [
+        "observed_fact"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": false,
+      "passed": true
+    },
+    {
+      "observation_id": "urgent:run-001",
+      "scenario": "urgent",
+      "release_identity_hash": "7daa5cd7947c44bc82298c69899dc19df7dad4497d6e3c23d24087642b1f3f24",
+      "repetition": 1,
+      "role": "elder",
+      "observed_agents": [
+        "sleep_care",
+        "evidence_reasoning",
+        "safety_review"
+      ],
+      "evidence_semantics": [
+        "observed_fact",
+        "user_reported"
+      ],
+      "hard_violations": [],
+      "real_provider": true,
+      "domain_reviewed": true,
+      "passed": true
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "version": "radar-workflow-goldens.v1",
+  "scenarios": [
+    {
+      "scenario_id": "normal_night",
+      "canonical_data_quality": "good",
+      "risk_level": "info",
+      "review_status": "reviewed",
+      "claim_count": 3,
+      "questionnaire_ids": [],
+      "confirmation_actions": ["write_long_term_memory"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report", "publish_info_notice"],
+      "memory_candidate_count": 1,
+      "memory_rejected_inputs": [],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "device_or_data_quality_issue",
+      "canonical_data_quality": "unusable",
+      "risk_level": "uncertain",
+      "review_status": "needs_human_review",
+      "claim_count": 3,
+      "questionnaire_ids": ["q-device-placement", "q-slept-away-from-bed"],
+      "confirmation_actions": [],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report", "publish_data_quality_notice"],
+      "memory_candidate_count": 0,
+      "memory_rejected_inputs": ["data_quality_unusable"],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "frequent_out_of_bed",
+      "canonical_data_quality": "partial",
+      "risk_level": "watch",
+      "review_status": "reviewed",
+      "claim_count": 4,
+      "questionnaire_ids": ["q-night-bathroom", "q-daytime-sleepiness"],
+      "confirmation_actions": ["enable_persistent_family_reminder", "push_supplemental_questionnaire", "enable_care_plan", "write_long_term_memory"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report", "publish_data_quality_notice"],
+      "memory_candidate_count": 1,
+      "memory_rejected_inputs": [],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "vital_fluctuation",
+      "canonical_data_quality": "good",
+      "risk_level": "watch",
+      "review_status": "reviewed",
+      "claim_count": 3,
+      "questionnaire_ids": ["q-snoring-or-gasping", "q-daytime-sleepiness"],
+      "confirmation_actions": ["enable_persistent_family_reminder", "push_supplemental_questionnaire", "enable_care_plan", "write_long_term_memory"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report"],
+      "memory_candidate_count": 1,
+      "memory_rejected_inputs": [],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "worsening_trend",
+      "canonical_data_quality": "good",
+      "risk_level": "watch",
+      "review_status": "reviewed",
+      "claim_count": 4,
+      "questionnaire_ids": ["q-sleep-schedule-change", "q-daytime-sleepiness"],
+      "confirmation_actions": ["enable_persistent_family_reminder", "push_supplemental_questionnaire", "enable_care_plan", "write_long_term_memory"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report"],
+      "memory_candidate_count": 1,
+      "memory_rejected_inputs": [],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "escalate_candidate",
+      "canonical_data_quality": "partial",
+      "risk_level": "escalate",
+      "review_status": "reviewed",
+      "claim_count": 4,
+      "questionnaire_ids": ["q-daytime-sleepiness", "q-snoring-or-gasping", "q-night-bathroom"],
+      "confirmation_actions": ["export_doctor_material", "send_doctor_material", "create_medical_evaluation_card", "write_long_term_memory"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report", "publish_data_quality_notice"],
+      "memory_candidate_count": 1,
+      "memory_rejected_inputs": [],
+      "conflict_count": 0
+    },
+    {
+      "scenario_id": "urgent_boundary_text_input",
+      "canonical_data_quality": "good",
+      "risk_level": "urgent_boundary",
+      "review_status": "needs_human_review",
+      "claim_count": 3,
+      "questionnaire_ids": [],
+      "confirmation_actions": ["notify_family_delivery_record"],
+      "automatic_actions": ["publish_daily_elder_report", "publish_daily_family_report", "show_urgent_safety_notice"],
+      "memory_candidate_count": 0,
+      "memory_rejected_inputs": ["urgent_boundary"],
+      "conflict_count": 1
+    }
+  ],
+  "common": {
+    "terminal_node": "PublishArtifacts",
+    "agent_names": ["radar_data", "trend", "risk_signal", "rag", "report", "alert_care", "memory"],
+    "a2a_intents": ["analyze_canonical_night_trend", "assess_structured_trend_risk", "agent_unavailable"],
+    "report_roles": ["elder", "family", "doctor"],
+    "report_generation_mode": "fallback",
+    "artifact_types": ["evidence_ledger", "role_report:doctor", "role_report:elder", "role_report:family", "workflow_run"],
+    "required_audit_actions": ["orchestrator_started", "agent_completed", "a2a_message_forwarded", "llm_failed", "llm_fallback", "workflow_published", "orchestrator_completed"]
+  }
+}

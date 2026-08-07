@@ -1,0 +1,46 @@
+{
+  "evidence_kind": "simulated",
+  "report_id": "habit-usability:template-replace",
+  "conducted_at": "2000-01-01T00:00:00Z",
+  "interaction_only_not_medical_validation": true,
+  "observations": [
+    {
+      "participant_ref": "participant:template-replace-1",
+      "age_band": "60-69",
+      "understood_personalization_purpose": false,
+      "understood_questions_are_skippable": false,
+      "understood_separate_persistence_confirmation": false,
+      "skip_attempt_succeeded": false,
+      "questions_presented": 0,
+      "erroneous_confirmation": true,
+      "interruption_rating": 5,
+      "notes": "Template slot; replace with an actually observed interaction."
+    },
+    {
+      "participant_ref": "participant:template-replace-2",
+      "age_band": "60-69",
+      "understood_personalization_purpose": false,
+      "understood_questions_are_skippable": false,
+      "understood_separate_persistence_confirmation": false,
+      "skip_attempt_succeeded": false,
+      "questions_presented": 0,
+      "erroneous_confirmation": true,
+      "interruption_rating": 5,
+      "notes": "Template slot; replace with an actually observed interaction."
+    },
+    {
+      "participant_ref": "participant:template-replace-3",
+      "age_band": "60-69",
+      "understood_personalization_purpose": false,
+      "understood_questions_are_skippable": false,
+      "understood_separate_persistence_confirmation": false,
+      "skip_attempt_succeeded": false,
+      "questions_presented": 0,
+      "erroneous_confirmation": true,
+      "interruption_rating": 5,
+      "notes": "Template slot; replace with an actually observed interaction."
+    }
+  ],
+  "reviewer_ref": "reviewer:template-replace",
+  "attestation": null
+}

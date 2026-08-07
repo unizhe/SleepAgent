@@ -1,0 +1,32 @@
+{
+  "manifest_version": "sleepagent-product-agent-acceptance.v25",
+  "release_version": "unreleased",
+  "release_identity": {
+    "release_version": "unreleased",
+    "product_contract_version": "sleepagent-product-agent.v14",
+    "registry_version": "sleepagent-product-registry.v9",
+    "registry_hash": "bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22",
+    "episode_runtime_version": "sleepagent-product-episode-runtime.v17",
+    "episode_runner_version": "sleepagent-product-runner.v43",
+    "episode_result_schema_version": "ProductEpisodeRunResult.v38",
+    "tool_runtime_version": "sleepagent-product-tools.v8",
+    "governance_version": "sleepagent-product-governance.v19",
+    "skill_foundation_version": "sleepagent-product-skill-foundation.v5",
+    "habit_questionnaire_version": "sleepagent-habit-questionnaire.v3",
+    "habit_profile_version": "sleepagent-habit-profile.v3",
+    "habit_persistence_version": "sleepagent-habit-persistence.v3",
+    "habit_runtime_version": "sleepagent-habit-runtime.v2",
+    "habit_application_version": "sleepagent-habit-application.v5",
+    "structured_provider_version": "sleepagent-product-structured-provider.v1",
+    "product_external_action_version": "sleepagent-product-external-action.v1",
+    "product_state_persistence_version": "sleepagent-product-state-persistence.v2",
+    "product_api_adapter_version": "sleepagent-product-api-adapter.v2",
+    "longitudinal_memory_version": "sleepagent-longitudinal-memory.v1",
+    "induction_version": "sleepagent-deterministic-induction.v2",
+    "acceptance_manifest_version": "sleepagent-product-agent-acceptance.v25",
+    "identity_hash": "02d4eff71d5d208288133237e6846da72ba45e984ac081e16544c90e47d344ae"
+  },
+  "observations": [],
+  "habit_domain_review_report": null,
+  "habit_usability_report": null
+}

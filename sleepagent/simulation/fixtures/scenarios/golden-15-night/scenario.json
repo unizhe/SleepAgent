@@ -1,0 +1,126 @@
+{
+  "schema_version": "canonical_replay_scenario.v1",
+  "scenario_id": "golden-15-night",
+  "description": "Fifteen normal synthetic nights for longitudinal replay; non-clinical and non-release.",
+  "environment": {
+    "schema_version": "replay_environment.v1",
+    "seed": 20260802,
+    "scenario_clock_start": "2026-01-01T20:00:00+08:00",
+    "timezone_name": "Asia/Shanghai",
+    "sleep_day_boundary_hour": 12,
+    "namespace_id": "replay:golden-15-night",
+    "cohort_id": "canonical-replay-radar-v1",
+    "cohort_configuration_sha256": "c0ee4ec0320ce39f927d71572a40e09f01a4488bd149360eabbbbb3a098b8619",
+    "data_mode": "replay",
+    "generator_version": "canonical-replay-generator.v1",
+    "component_pins": [
+      {
+        "schema_version": "simulation_component_pin.v1",
+        "component": "adapter",
+        "component_id": "canonical-replay-adapter",
+        "version": "1.0.0",
+        "artifact_sha256": "9ca26d392edb2fdb0b56a9171792361ea72a90d6837a870105a806a934c52cec"
+      },
+      {
+        "schema_version": "simulation_component_pin.v1",
+        "component": "schema",
+        "component_id": "sleep-observation",
+        "version": "v1",
+        "artifact_sha256": "eeaf83a5f3db5585c5bc4d6439a8042e2b3fd6cb771a712de6bee639b23c72e2"
+      },
+      {
+        "schema_version": "simulation_component_pin.v1",
+        "component": "producer",
+        "component_id": "canonical-replay-generator",
+        "version": "v1",
+        "artifact_sha256": "9fd33540bbea57d33a7c1ca59b6477188abeab836a46650232c6e382496ae58b"
+      },
+      {
+        "schema_version": "simulation_component_pin.v1",
+        "component": "algorithm",
+        "component_id": "canonical-replay-algorithm",
+        "version": "1.0.0",
+        "artifact_sha256": "54c3c0e3d3de7c76560806f621757d03f04e3f8fadb0938496c4d5c6082f6e06"
+      },
+      {
+        "schema_version": "simulation_component_pin.v1",
+        "component": "policy",
+        "component_id": "simulation-baseline-policy",
+        "version": "v1",
+        "artifact_sha256": "c0ee4ec0320ce39f927d71572a40e09f01a4488bd149360eabbbbb3a098b8619"
+      }
+    ]
+  },
+  "identity": {
+    "schema_version": "synthetic_identity.v1",
+    "subject_id": "synthetic-subject-lin-001",
+    "subject_display_name": "Synthetic Elder Lin",
+    "synthetic": true,
+    "actors": [
+      {
+        "schema_version": "synthetic_actor.v1",
+        "actor_id": "synthetic-elder-001",
+        "role": "elder",
+        "display_name": "Synthetic Elder Lin",
+        "synthetic": true,
+        "authorization": {
+          "schema_version": "synthetic_authorization.v1",
+          "authorization_id": "synthetic-auth-elder-001",
+          "scopes": ["sleep:read", "interaction:answer", "care:confirm"],
+          "authorization_epoch": 1
+        }
+      },
+      {
+        "schema_version": "synthetic_actor.v1",
+        "actor_id": "synthetic-family-001",
+        "role": "family",
+        "display_name": "Synthetic Family Member Chen",
+        "synthetic": true,
+        "authorization": {
+          "schema_version": "synthetic_authorization.v1",
+          "authorization_id": "synthetic-auth-family-001",
+          "scopes": ["sleep:read:family", "observation:report"],
+          "authorization_epoch": 1
+        }
+      },
+      {
+        "schema_version": "synthetic_actor.v1",
+        "actor_id": "synthetic-doctor-001",
+        "role": "doctor",
+        "display_name": "Synthetic Doctor Zhao",
+        "synthetic": true,
+        "authorization": {
+          "schema_version": "synthetic_authorization.v1",
+          "authorization_id": "synthetic-auth-doctor-001",
+          "scopes": ["sleep:read:doctor"],
+          "authorization_epoch": 1
+        }
+      }
+    ],
+    "provider_id": "canonical-replay-provider",
+    "provider_account_id": "synthetic-provider-account-001",
+    "provider_device_id": "synthetic-device-native-001",
+    "device_id": "synthetic-device-001",
+    "device_binding_id": "synthetic-binding-001",
+    "binding_version": 1
+  },
+  "nights": [
+    {"schema_version":"night_recipe.v1","night_index":1,"sleep_day":"2026-01-01","bedtime_local":"22:30:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":63.0,"respiratory_rate_center":14.2,"movement_center":0.20,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":2,"sleep_day":"2026-01-02","bedtime_local":"22:30:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":62.8,"respiratory_rate_center":14.1,"movement_center":0.19,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":3,"sleep_day":"2026-01-03","bedtime_local":"22:25:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":62.4,"respiratory_rate_center":14.0,"movement_center":0.18,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":4,"sleep_day":"2026-01-04","bedtime_local":"22:35:00","wake_time_local":"06:35:00","cadence_minutes":3,"heart_rate_center":62.2,"respiratory_rate_center":13.9,"movement_center":0.17,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":5,"sleep_day":"2026-01-05","bedtime_local":"22:30:00","wake_time_local":"06:25:00","cadence_minutes":3,"heart_rate_center":62.0,"respiratory_rate_center":14.0,"movement_center":0.18,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":6,"sleep_day":"2026-01-06","bedtime_local":"22:30:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.9,"respiratory_rate_center":13.9,"movement_center":0.17,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":7,"sleep_day":"2026-01-07","bedtime_local":"22:25:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.8,"respiratory_rate_center":13.8,"movement_center":0.16,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":8,"sleep_day":"2026-01-08","bedtime_local":"22:30:00","wake_time_local":"06:35:00","cadence_minutes":3,"heart_rate_center":61.7,"respiratory_rate_center":13.9,"movement_center":0.17,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":9,"sleep_day":"2026-01-09","bedtime_local":"22:35:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.8,"respiratory_rate_center":14.0,"movement_center":0.16,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":10,"sleep_day":"2026-01-10","bedtime_local":"22:30:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.6,"respiratory_rate_center":13.8,"movement_center":0.15,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":11,"sleep_day":"2026-01-11","bedtime_local":"22:30:00","wake_time_local":"06:25:00","cadence_minutes":3,"heart_rate_center":61.5,"respiratory_rate_center":13.9,"movement_center":0.16,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":12,"sleep_day":"2026-01-12","bedtime_local":"22:25:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.4,"respiratory_rate_center":13.8,"movement_center":0.15,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":13,"sleep_day":"2026-01-13","bedtime_local":"22:30:00","wake_time_local":"06:35:00","cadence_minutes":3,"heart_rate_center":61.5,"respiratory_rate_center":13.9,"movement_center":0.16,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":14,"sleep_day":"2026-01-14","bedtime_local":"22:30:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.3,"respiratory_rate_center":13.8,"movement_center":0.15,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true},
+    {"schema_version":"night_recipe.v1","night_index":15,"sleep_day":"2026-01-15","bedtime_local":"22:25:00","wake_time_local":"06:30:00","cadence_minutes":3,"heart_rate_center":61.2,"respiratory_rate_center":13.7,"movement_center":0.14,"bed_exit_offsets_minutes":[],"stage_template":"balanced-adult-v1","include_vendor_profile":true}
+  ],
+  "overlays": [],
+  "tags": ["synthetic", "non-release", "golden-journey", "normal-coverage"]
+}
