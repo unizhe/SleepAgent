@@ -1,4 +1,6 @@
 # Plan Review Log: SleepAgent Agent 架构与真实行为
+
+> 本文件是非权威历史审计与构建记录，保留的旧 roster、兼容路径和阶段性结论不再构成架构许可。当前唯一权威是 [`PLAN.md`](PLAN.md) 中冻结的四角色 roster。
 Act 1 (grill) complete — plan locked with the user. MAX_ROUNDS=5.
 
 ## Round 1 — Codex review
@@ -3610,5 +3612,50 @@ Fix rounds used: 2. The first corrected legacy compatibility expectations and
 added the new migration to persistence proof. The second stabilized the
 time-sensitive external-token fixtures, updated the fail-closed release
 identity and fixed decision event/authority edge cases.
+
+No commit, push, release or remote mutation was made.
+
+### Round 61 — Codex build: Phase 1 closed four-role roster freeze
+
+Date: 2026-08-07
+
+- Froze the only production Agent roster as `SleepCareAgent`,
+  `EvidenceReasoningAgent`, `CareStrategyAgent` and conditionally invoked
+  `SafetyReviewAgent`. `AgentId` is alias-free, the ordered roster is immutable,
+  and registry surfaces now fail closed if they contain an extra identity,
+  string alias, historic route, additional publisher or Agent-owned side effect.
+- Made the outer registry maps immutable and added import-time plus manifest-time
+  roster validation. Authorization entry points reject plain strings that are
+  value-equal to `str`-backed Enum members; only the explicit `runtime` control
+  principal remains a permitted non-Agent caller.
+- Updated the radar boundary so `sleepagent.radar_agent.product_agent` is the
+  sole production Agent namespace and old Agent/orchestrator/dynamic identity
+  packages are not canonical architecture surfaces.
+- Synchronized the architecture, positioning, information architecture, HITL,
+  README and presentation documents around the closed four-role invariant.
+- Deliberately preserved the Product manifest format, registry version and hash,
+  existing Episode state machine, `ProductEpisodeRunner`, governance behavior
+  and all legacy source files. Legacy removal and capability migration remain
+  Phase 2 work; concrete role classes remain Phase 3 work.
+
+### Codex verification
+
+- Roster, registry, Episode runtime, invocation, Tool, governance, deterministic
+  model, HITL, cold-start and namespace group: `94 passed in 1.31s`.
+- Runner, persistence, Memory governance, Habit Profile, worker, provider,
+  acceptance identity, API and authority-boundary group: `182 passed in 6.83s`.
+- The Product registry manifest hash remains
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`;
+  the checked-in acceptance identity tests pass without a version or manifest
+  update.
+- Changed Python files compile, scoped `git diff --check` passes, and the
+  authoritative documents contain none of the obsolete fifth/sixth-Agent or
+  Dynamic-backend permission phrases.
+- The pre-existing dirty worktree was preserved; no unrelated file was reverted
+  or folded into the Phase 1 scope.
+
+Fix rounds used: 2. The first closed `str`-Enum equality masking inside roster
+registries. The second closed the same alias class at invocation and
+collaboration authorization entry points and added negative tests.
 
 No commit, push, release or remote mutation was made.

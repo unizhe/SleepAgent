@@ -128,10 +128,10 @@ Episode 和 FactSnapshot，由老人或授权专业人员在产品待办中处�
 - `product_episode_results` 与任务 checkpoint：冻结 Agent 结果。
 - `product_commit_journal`：副作用幂等和不确定结果防重试。
 
-旧 `HumanConfirmationRequest` 只作为兼容 UI 投影，不再是 Product Episode 的权威批准
-来源。旧 `legacy_fixed/dynamic_goal` 确认矩阵保留为开发兼容路径，不代表 Product
-Episode 的责任模型；生产 `product_episode` 中画像、长期记忆、持续 Care 和外部分享
-默认由老人决定。
+旧 `HumanConfirmationRequest` 只作为历史记录和迁移期 UI 的只读投影，不再是 Product
+Episode 的权威批准来源，也不能支撑可执行的旧 Runtime。`legacy_fixed/dynamic_goal`
+确认矩阵不属于目标架构并将在旧路径清理时删除；Product Episode 中画像、长期记忆、
+持续 Care 和外部分享默认由老人决定。
 
 ## 7. UI 要求
 

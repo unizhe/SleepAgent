@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
@@ -8,6 +10,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
     EpisodeBudget,
     EpisodePlan,
     EpisodeType,
+    PRODUCT_AGENT_ROSTER,
     ToolEffect,
     WorkProductKind,
 )
@@ -21,6 +24,10 @@ class InvocationPolicyError(ValueError):
 
 
 class EpisodePlanPolicyError(ValueError):
+    pass
+
+
+class RosterPolicyError(RuntimeError):
     pass
 
 
@@ -55,7 +62,7 @@ class EpisodeDefinition:
     budget: EpisodeBudget
 
 
-AGENT_DEFINITIONS = {
+AGENT_DEFINITIONS: Mapping[AgentId, AgentDefinition] = MappingProxyType({
     item.agent_id: item
     for item in (
         AgentDefinition(
@@ -80,10 +87,10 @@ AGENT_DEFINITIONS = {
             "SafetyDecision",
         ),
     )
-}
+})
 
 
-TOOL_DEFINITIONS = {
+TOOL_DEFINITIONS: Mapping[str, ToolDefinition] = MappingProxyType({
     item.name: item
     for item in (
         ToolDefinition("radar.get_night_evidence", ToolEffect.READ_ONLY, "data"),
@@ -176,10 +183,12 @@ TOOL_DEFINITIONS = {
             True,
         ),
     )
-}
+})
 
 
-AGENT_INVOCATION_ALLOWLIST: dict[AgentId | str, frozenset[AgentId]] = {
+AGENT_INVOCATION_ALLOWLIST: Mapping[
+    AgentId | str, frozenset[AgentId]
+] = MappingProxyType({
     "runtime": frozenset({AgentId.SLEEP_CARE}),
     AgentId.SLEEP_CARE: frozenset(
         {
@@ -192,12 +201,12 @@ AGENT_INVOCATION_ALLOWLIST: dict[AgentId | str, frozenset[AgentId]] = {
     AgentId.EVIDENCE_REASONING: frozenset(),
     AgentId.CARE_STRATEGY: frozenset(),
     AgentId.SAFETY_REVIEW: frozenset(),
-}
+})
 
 
-COLLABORATION_ALLOWLIST: dict[
+COLLABORATION_ALLOWLIST: Mapping[
     tuple[AgentId, AgentId], frozenset[CrossAgentRequestType]
-] = {
+] = MappingProxyType({
     (AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING): frozenset(
         {CrossAgentRequestType.EVIDENCE, CrossAgentRequestType.REVISION}
     ),
@@ -225,10 +234,12 @@ COLLABORATION_ALLOWLIST: dict[
     (AgentId.CARE_STRATEGY, AgentId.SLEEP_CARE): frozenset(
         {CrossAgentRequestType.USER_FACT, CrossAgentRequestType.CONFIRMATION}
     ),
-}
+})
 
 
-TOOL_INVOCATION_ALLOWLIST: dict[AgentId, frozenset[str]] = {
+TOOL_INVOCATION_ALLOWLIST: Mapping[
+    AgentId, frozenset[str]
+] = MappingProxyType({
     AgentId.SLEEP_CARE: frozenset(
         {
             "policy.read",
@@ -284,7 +295,7 @@ TOOL_INVOCATION_ALLOWLIST: dict[AgentId, frozenset[str]] = {
             "care.read_constraints",
         }
     ),
-}
+})
 
 
 COMMIT_CONTROLLER_TOOLS = frozenset(
@@ -341,7 +352,7 @@ _CARE = WorkProductKind.CARE_STRATEGY
 _SAFETY = WorkProductKind.SAFETY_DECISION
 _COMMUNICATION = WorkProductKind.COMMUNICATION
 
-EPISODE_DEFINITIONS = {
+EPISODE_DEFINITIONS: Mapping[EpisodeType, EpisodeDefinition] = MappingProxyType({
     item.episode_type: item
     for item in (
         _definition(
@@ -432,12 +443,124 @@ EPISODE_DEFINITIONS = {
             exits={"urgent_message_delivered"},
         ),
     )
-}
+})
+
+
+def _is_exact_agent_roster(values: object) -> bool:
+    try:
+        items = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    return (
+        len(items) == len(PRODUCT_AGENT_ROSTER)
+        and all(type(item) is AgentId for item in items)
+        and frozenset(items) == frozenset(PRODUCT_AGENT_ROSTER)
+    )
+
+
+def validate_product_agent_registry() -> None:
+    """Fail closed if any registration surface escapes the four-role roster."""
+
+    enum_members = tuple(AgentId.__members__.values())
+    if enum_members != PRODUCT_AGENT_ROSTER:
+        raise RosterPolicyError("AgentId must contain exactly the frozen roster")
+
+    definition_keys = tuple(AGENT_DEFINITIONS)
+    if definition_keys != PRODUCT_AGENT_ROSTER or not all(
+        type(item) is AgentId for item in definition_keys
+    ):
+        raise RosterPolicyError("Agent definitions must match the frozen roster")
+    if any(
+        definition.agent_id is not agent_id
+        for agent_id, definition in AGENT_DEFINITIONS.items()
+    ):
+        raise RosterPolicyError("Agent definition identity mismatch")
+
+    tool_allowlist_keys = tuple(TOOL_INVOCATION_ALLOWLIST)
+    if tool_allowlist_keys != PRODUCT_AGENT_ROSTER or not all(
+        type(item) is AgentId for item in tool_allowlist_keys
+    ):
+        raise RosterPolicyError("Agent tool allowlists must match the frozen roster")
+
+    invocation_keys = tuple(AGENT_INVOCATION_ALLOWLIST)
+    if (
+        not invocation_keys
+        or type(invocation_keys[0]) is not str
+        or invocation_keys[0] != "runtime"
+        or invocation_keys[1:] != PRODUCT_AGENT_ROSTER
+        or any(type(item) is not AgentId for item in invocation_keys[1:])
+    ):
+        raise RosterPolicyError(
+            "Agent invocation callers must be runtime plus the frozen roster"
+        )
+    runtime_targets = AGENT_INVOCATION_ALLOWLIST["runtime"]
+    if tuple(runtime_targets) != (AgentId.SLEEP_CARE,) or any(
+        type(item) is not AgentId for item in runtime_targets
+    ):
+        raise RosterPolicyError("runtime may invoke only SleepCareAgent")
+    sleepcare_targets = AGENT_INVOCATION_ALLOWLIST[AgentId.SLEEP_CARE]
+    if not _is_exact_agent_roster(sleepcare_targets):
+        raise RosterPolicyError("SleepCareAgent must coordinate the frozen roster")
+    if any(
+        AGENT_INVOCATION_ALLOWLIST[agent_id]
+        for agent_id in PRODUCT_AGENT_ROSTER
+        if agent_id is not AgentId.SLEEP_CARE
+    ):
+        raise RosterPolicyError("specialist Agents cannot directly invoke Agents")
+
+    for sender, receiver in COLLABORATION_ALLOWLIST:
+        if (
+            type(sender) is not AgentId
+            or type(receiver) is not AgentId
+            or sender not in PRODUCT_AGENT_ROSTER
+            or receiver not in PRODUCT_AGENT_ROSTER
+        ):
+            raise RosterPolicyError(
+                "collaboration endpoint is outside the frozen roster"
+            )
+
+    expected_agents = frozenset(PRODUCT_AGENT_ROSTER)
+    for episode_type, definition in EPISODE_DEFINITIONS.items():
+        if episode_type is EpisodeType.URGENT_BOUNDARY:
+            if definition.allowed_agents:
+                raise RosterPolicyError("urgent boundary cannot invoke model Agents")
+        elif not _is_exact_agent_roster(definition.allowed_agents):
+            raise RosterPolicyError(
+                f"{episode_type.value} must use the frozen Agent roster"
+            )
+        if any(type(item) is not AgentId for item in definition.allowed_agents):
+            raise RosterPolicyError("Episode Agent allowlist contains a string alias")
+        if definition.allowed_agents and definition.allowed_agents != expected_agents:
+            raise RosterPolicyError("Episode Agent allowlist expands the frozen roster")
+
+    publishers = tuple(
+        agent_id
+        for agent_id, definition in AGENT_DEFINITIONS.items()
+        if definition.may_publish
+    )
+    if publishers != (AgentId.SLEEP_CARE,):
+        raise RosterPolicyError("SleepCareAgent must be the unique publisher")
+    if any(
+        definition.may_mutate_shared_state
+        or definition.may_execute_side_effects
+        for definition in AGENT_DEFINITIONS.values()
+    ):
+        raise RosterPolicyError("model Agents cannot own writes or side effects")
+
+
+validate_product_agent_registry()
 
 
 def authorize_agent_invocation(caller: AgentId | str, target: AgentId) -> None:
+    if type(target) is not AgentId:
+        raise InvocationPolicyError("agent target must be a registered AgentId")
+    if type(caller) is str:
+        if caller != "runtime":
+            raise InvocationPolicyError(f"unknown agent caller: {caller}")
+    elif type(caller) is not AgentId:
+        raise InvocationPolicyError("agent caller must be runtime or a registered AgentId")
     if target not in AGENT_INVOCATION_ALLOWLIST.get(caller, frozenset()):
-        caller_name = caller.value if isinstance(caller, AgentId) else caller
+        caller_name = caller.value if type(caller) is AgentId else caller
         raise InvocationPolicyError(
             f"agent invocation denied by {REGISTRY_VERSION}: {caller_name} -> {target.value}"
         )
@@ -448,6 +571,14 @@ def authorize_collaboration(
     receiver: AgentId,
     request_type: CrossAgentRequestType,
 ) -> None:
+    if type(sender) is not AgentId or type(receiver) is not AgentId:
+        raise InvocationPolicyError(
+            "collaboration endpoints must be registered AgentId values"
+        )
+    if type(request_type) is not CrossAgentRequestType:
+        raise InvocationPolicyError(
+            "collaboration request type must be CrossAgentRequestType"
+        )
     if request_type not in COLLABORATION_ALLOWLIST.get(
         (sender, receiver), frozenset()
     ):
@@ -525,6 +656,7 @@ def validate_episode_plan(
 
 
 def product_agent_manifest() -> dict[str, object]:
+    validate_product_agent_registry()
     return {
         "registry_version": REGISTRY_VERSION,
         "agents": {
@@ -573,6 +705,7 @@ __all__ = [
     "COMMIT_CONTROLLER_TOOLS",
     "EPISODE_DEFINITIONS",
     "REGISTRY_VERSION",
+    "RosterPolicyError",
     "TOOL_DEFINITIONS",
     "TOOL_INVOCATION_ALLOWLIST",
     "AgentDefinition",
@@ -585,4 +718,5 @@ __all__ = [
     "authorize_tool_invocation",
     "product_agent_manifest",
     "validate_episode_plan",
+    "validate_product_agent_registry",
 ]

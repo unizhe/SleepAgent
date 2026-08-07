@@ -3,7 +3,7 @@ _Locked via grill — by Codex + user_
 
 ## Goal
 
-在既有产品定位、信息架构和 `sleepagent.radar_agent.product_agent` 运行时基础上，将当前九个逻辑 Agent 收口为四个有充分责任依据的 Agent：`SleepCareAgent`、`EvidenceReasoningAgent`、`CareStrategyAgent` 和条件触发的 `SafetyReviewAgent`。四者分别承担用户目标与发布、个人证据形成、跨天照护策略、安全复核四类不可互相替代的闭环责任；计算、检索、渲染、存储、权限和外部执行下沉为 Tool、Service 或确定性 Policy。当前名单不是不可扩展的数字模板，但任何新增 Agent 都必须通过人工架构评审并满足严格 Agent 定义，总数上限为六个。实现时必须改造和复用现有 `product_agent` 合同、Episode runtime、runner、治理、工具和测试，不建设平行版本。
+在既有产品定位、信息架构和 `sleepagent.radar_agent.product_agent` 运行时基础上，将当前九个逻辑 Agent 收口为四个有充分责任依据的 Agent：`SleepCareAgent`、`EvidenceReasoningAgent`、`CareStrategyAgent` 和条件触发的 `SafetyReviewAgent`。四者分别承担用户目标与发布、个人证据形成、跨天照护策略、安全复核四类不可互相替代的闭环责任；计算、检索、模型推理、渲染、存储、权限和外部执行下沉为 Tool、Service 或确定性 Policy。SleepAgent 的 Agent roster 在本规范下是唯一且封闭的四角色集合；禁止增加第五身份、通过 alias 恢复旧身份，或让 runtime 按历史 Agent 名称分流。实现时必须改造和复用现有 `product_agent` 合同、Episode runtime、runner、治理、工具和测试，不建设平行版本。
 
 ## Inherited product decisions
 
@@ -18,8 +18,8 @@ _Locked via grill — by Codex + user_
 
 1. `product_positioning/PLAN.md` 与 `product_information_architecture/PLAN.md` 分别继续决定产品定位和信息架构。
 2. 本文件是目标 Agent 名单、职责、协作、降级和 Agent/Skill/Tool 边界的权威规范。
-3. `skills_design/PLAN.md` 的 Package、Registry、Resolver、Compiler、版本锁、Outcome、审批、灰度和回滚机制继续复用，但其九角色 owner 映射必须按本计划更新。
-4. 旧三 Agent、固定多 Agent和现有九角色文档仅作为迁移资料；目标实现不得让相互冲突的 Agent 名单长期并存。
+3. `skills_design/PLAN.md` 的 Package、Registry、Resolver、Compiler、版本锁、Outcome、审批、灰度和回滚机制继续复用；其 owner 映射必须严格属于本计划的四角色 roster，不得引入额外 Agent 身份。
+4. 旧三 Agent、固定多 Agent、Dynamic runtime 和现有九角色文档仅作为迁移来源与 Git 历史；最终实现不得 import、调用、注册或通过开发、fallback、backup 路径执行这些旧身份。
 
 ## Agent definition
 
@@ -56,15 +56,16 @@ Agent 是稳定的逻辑责任与权限主体，不是进程、模型、Prompt �
 └─ Commit Controller 与外部动作执行
 ```
 
-当前四个 Agent 是已经论证成立的首版名单，不把“1+2+1”或其他数字公式写成不可更改的产品定义，也不预留两个空角色。未来可以新增第五或第六个 Agent，但必须：
+当前四个 Agent 是唯一且封闭的生产 Agent roster：
 
-1. 满足完整 Agent 定义，而不是因为功能复杂、使用另一模型或需要独立 Prompt 就升级。
-2. 证明其独立目标和闭环不能由现有 Agent 的新 Skill、Tool 或 Service 清晰承载。
-3. 明确新增后的责任转移、权限、状态所有权、协作边和失败行为。
-4. 通过人工架构与安全评审；Skill 自进化不能新增、拆分、合并或重命名 Agent。
-5. 总数超过六个时必须重新评审整体拓扑，不能通过局部例外继续添加。
+1. `SleepCareAgent`
+2. `EvidenceReasoningAgent`
+3. `CareStrategyAgent`
+4. `SafetyReviewAgent`
 
-六个上限统计所有拥有独立模型判断身份的 Agent，不因其被称为主 Agent、专业 Agent、审查 Agent、子 Agent、临时 Agent 或后台 Agent 而排除；同一 Agent 的多次 Invocation、Tool、Service 和离线控制面不计入。
+`SafetyReviewAgent` 条件执行，但始终是 roster 成员，不是按场景注册或移除的可选身份。Contract、manifest、factory、runtime、worker、API、CLI、调试面和插件均只能承认这四个身份。禁止增加第五身份，禁止通过 alias、历史名称、临时/后台/子 Agent 或独立模型 Prompt 绕过 roster，也禁止把旧 Runtime 当作开发或备用执行路径。
+
+新能力必须归入现有 Agent 的 Skill、Tool、Service 或 Policy。任何改变 roster 的需求都与本规范和当前收口目标冲突；实现必须停止并等待用户另行推翻本规范，不能把它设计成当前架构的扩展点。
 
 ## Agent responsibilities
 
@@ -415,7 +416,7 @@ Invocation / feedback / Safety return / failure
 4. 单次失败不能触发修改；必须先区分数据、Tool、Context、模型、runtime 和 Skill 问题，并建立可重复归因。
 5. 所有候选必须人工审批；医疗解释、风险判断、医生材料和 Safety Skill 还需医学或安全审批。
 6. 任一硬安全事件立即停止灰度并回滚上一 champion，同时保留完成调查所需的输入、输出、版本、评测、审批和发布证据；原始敏感内容仅在合法、最小必要、加密和严格访问控制的安全审计区保存，常规 `SkillOutcome` 仍只记录结构化字段、引用和哈希。
-7. 不新增 `EvolutionAgent`；控制面与生产 Agent隔离，不计入 Agent 数量。
+7. 演进控制面只能实现为与生产 Agent 隔离的 Service/Policy；不得命名、实现或路由为 `EvolutionAgent` 等额外 Agent 身份。
 
 第一阶段只实现或补齐 Skill Package、Registry、Resolver、Compiler、版本锁和 `SkillOutcome` 接口，不实现自动候选生成、线上自动改写或自动晋级。用户确认的偏好、个人基线与行动状态按 Memory/业务规则更新；底层模型学习与医学知识库更新走各自独立的离线评测和受控发布，不属于 Agent 在线自改。
 
@@ -430,7 +431,7 @@ Invocation / feedback / Safety return / failure
 7. **多 Agent 增加成本、延迟和失败面。** 场景最小路径、条件 Safety、调用预算、缓存不变工作成果和显式降级。
 8. **Skill 自进化可能形成隐式越权。** 生产/控制面隔离、PATCH diff allowlist、版本锁、人工审批和回滚。
 9. **新旧架构可能长期双轨。** 原地迁移同一 namespace，版本升级后删除旧 roster，不建 v2 平行实现。
-10. **角色数量可能再次膨胀。** 新 Agent人工评审、完整闭环证明、最多六个和整体拓扑复审。
+10. **旧身份、alias 或动态 Agent 可能重新泄漏。** 通过封闭 roster、manifest/registry 不变量、import 检查和生产入口搜索门禁阻断。
 
 ## Approach
 
@@ -447,11 +448,11 @@ Invocation / feedback / Safety return / failure
 
 ## Key decisions & tradeoffs
 
-1. 当前选择四个 Agent，不锁死数量公式；保留扩展空间，但用六个上限和人工评审防止重新膨胀。
+1. 当前锁定精确四个 Agent，并放弃在本规范内动态扩展 roster；新增能力必须落入 Skill、Tool、Service 或 Policy，换取责任和生产路径的长期确定性。
 2. SleepCare 合并编排与对话，减少一次角色转交；代价是必须用专业成果独占权和发布检查约束主 Agent。
 3. Evidence 与 Care 保持独立，换取事实和行动责任清晰；代价是多一次结构化交接。
 4. Safety 保持独立但条件触发，换取生成/审查职责分离；代价是高风险路径延迟增加。
-5. 四个旧子 Agent降级为 Skill/Tool/Service，减少上下文重复、成本和责任重叠；未来只有出现真正独立闭环才允许升级。
+5. 四个旧子 Agent降级为 Skill/Tool/Service，减少上下文重复、成本和责任重叠；这些能力不得再次升级为独立 Agent 身份。
 6. Agent无直接写权限，牺牲部分“自主执行”表象，换取医疗健康场景的可控、可确认和可审计。
 7. 自进化只作用于离线 Skill PATCH，放弃在线自改的展示效果，换取版本可追踪、审批和回滚。
 8. 不把消融实验作为本轮设计成立或实施的前置条件；架构依据是产品责任、闭环、权限和失败后果。实验比较可在未来研究设计中另行讨论。
@@ -462,14 +463,14 @@ Invocation / feedback / Safety return / failure
 2. reviewed Care catalog 的具体行动、禁忌和医学审批人需要领域工作单独确认。
 3. Safety 触发规则的误阻断率需要上线前通过场景集调优，但不能因此放宽硬规则。
 4. 长期 Memory 的具体保留期、敏感字段分类和授权撤回传播规则需与数据治理方案对齐。
-5. 当前 `product_agent` runner 体积较大，实施时应先按现有职责抽取内聚模块，不能以复制 runner 的方式规避重构。
-6. 新增第五或第六个 Agent 的具体候选为空；任何未来候选都必须重新走本计划的定义与评审。
+5. 当前 `product_agent` runner 体积较大；本轮不拆 `ProductEpisodeRunner`、不改变其状态机，只允许引入明确的四角色边界并让 Runner 受控委托。
+6. 新需求可能被误分类为新 Agent；本规范要求先证明其应归入现有四角色的 Skill、Tool、Service 或 Policy，并由静态 roster 门禁拒绝额外身份。
 
 ## Out of scope
 
-1. 本轮不编写或修改实现代码。
+1. 不新增面向用户的产品功能；实现修改仅限 Agent 架构收口。
 2. 不把单 Agent对照或消融实验设计作为当前交付物。
 3. 不实现自动 Candidate Generator、自动审批、线上 Skill 改写或自动晋级。
-4. 不命名未来第五、第六个 Agent，也不预留空实现。
+4. 不定义、命名、实现或注册任何第五 Agent，也不预留空身份或 alias。
 5. 不重做产品定位、前端信息架构或底层睡眠模型训练方案。
 6. 不执行与本 Agent 架构收口无关的旧研究代码清理。

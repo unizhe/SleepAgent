@@ -3,7 +3,7 @@ _Locked via grill — by Codex + user_
 
 ## Goal
 
-在上一轮已锁定的产品定位之上，将 SleepAgent 从“目标选择与 Agent 任务启动工作台”重新组织为以居家老年人为第一用户的产品信息架构。产品主入口固定为“今天、趋势、问问 SleepAgent、记录”四个页面，承载晨间解释与对话照护的连续主线；老人、子女、医生三身份模式保持不变。现有动态任务、Agent 运行、Evidence Ledger、决策日志和历史任务完整保留，但归入独立的开发／调试工作台，不再成为老人理解和使用产品的前提。
+在上一轮已锁定的产品定位之上，将 SleepAgent 从“目标选择与 Agent 任务启动工作台”重新组织为以居家老年人为第一用户的产品信息架构。产品主入口固定为“今天、趋势、问问 SleepAgent、记录”四个页面，承载晨间解释与对话照护的连续主线；老人、子女、医生三身份模式保持不变。开发／调试工作台只展示四角色 Product Episode 的 Invocation、ToolReceipt、Evidence、决策日志和历史结果，不执行旧 Dynamic 或固定多 Agent Runtime，也不成为老人理解和使用产品的前提。
 
 ## Inherited Product Decisions
 
@@ -24,7 +24,7 @@ _Locked via grill — by Codex + user_
 5. 将历史报告、每晚摘要、设备质量、照护历史和必要技术详情统一归入“记录”。
 6. 将关怀计划作为跨页面业务对象：今天展示当前行动，对话负责确认与调整，趋势观察变化，记录保存历史。
 7. 为首页定义完成、处理中、数据不足、无昨夜记录、设备异常和急症六类内容状态；任何状态都不把老人送回任务启动器。
-8. 将当前 `DynamicRadarWorkspace` 保留为独立开发／调试工作台，使已有动态任务能力继续可用，同时与老人产品入口彻底分层。
+8. 将开发／调试工作台收口为 `ProductEpisodeDiagnosticsWorkspace`，只观察四角色 Product Episode；不保留 `DynamicRadarWorkspace` 的旧 Runtime 执行能力。
 9. 优先复用现有页面能力和内容组件，只改变信息归属、默认入口和页面间流转；不在本轮设计新的 Agent 或分析链。
 10. 用任务归类测试和四条端到端路径验证信息架构；只有用户无需理解技术概念也能找到入口，才进入下一主题。
 
@@ -56,9 +56,9 @@ SleepAgent 产品
    └─ 技术详情入口
 
 内部开发／调试工作台
-└─ DynamicRadarWorkspace
-   ├─ 目标与任务
-   ├─ Agent运行
+└─ ProductEpisodeDiagnosticsWorkspace
+   ├─ Episode 与目标
+   ├─ 四角色 Invocation
    ├─ Evidence Ledger
    └─ 决策日志
 ```
@@ -182,15 +182,15 @@ SleepAgent 产品
 | `ReportCenter`、角色报告 Artifact | “记录—我的报告” |
 | `AlertSettings`、关怀候选与确认 | 跨页面当前行动和通知设置 |
 | `DataManagement`、质量摘要、设备实时状态 | “记录—设备与数据质量” |
-| `DynamicRadarWorkspace`、任务历史、决策日志 | 独立开发／调试工作台 |
-| 旧 `AgentRunPage`、Agent 时间线与工具卡 | 开发工作台或技术详情，不进入产品一级导航 |
+| Product Episode、任务历史、决策日志 | 独立开发／调试工作台 |
+| 旧 `AgentRunPage`、Agent 时间线与工具卡 | 只复用展示模式；不得保留旧 Runtime 执行入口 |
 
 复用分为两类，必须明确区分：
 
 1. **可复用产品能力**：当前 radar 任务结果、角色报告、数据质量、趋势摘要、确认状态和审计能力继续作为真实事实来源。
 2. **只复用交互模式**：`TodayAnalysis`、`TrendFollowup`、`ChatAgentPage`、`ReportCenter` 等旧组件中的卡片结构、图表交互、对话布局和报告操作可以借鉴，但其中的 SHHS／PSG、AHI、固定日期、mock 病人、单任务上下文和旧字段不能进入新的 radar-first 产品内容。
 
-`LegacyFixedRadarWorkspace` 可以提供老人／家属／医生内容分层、自动展示结果和安全提示的参考，但不能被整体重新启用为产品主线；`DynamicRadarWorkspace` 则原样保留为开发工作台。任何复用都必须服从新的页面层级和当前真实数据边界。
+`LegacyFixedRadarWorkspace` 与 `DynamicRadarWorkspace` 只能作为迁移期交互参考，不能作为产品或开发 Runtime 重新启用。诊断工作台必须读取四角色 Product Episode 的真实记录，任何复用都必须服从新的页面层级、封闭 roster 和当前真实数据边界。
 
 ## Preserved Role Boundary
 
@@ -245,7 +245,7 @@ SleepAgent 产品
 - 趋势使用结论优先、图表辅助且不设综合分数，牺牲单数字传播性，换取透明度与可信度。
 - 报告、设备、质量和技术记录合并到“记录”，减少导航数量，但要求记录页内部层级清晰。
 - 关怀计划跨页面分布而非独立存在，换取完整照护循环，但必须保持单一状态源和文案一致。
-- 动态工作台独立保留，避免丢弃既有能力，同时承认它不是老人产品界面。
+- Product Episode 诊断工作台只保留可观测性，不保留旧 Dynamic Runtime，避免调试面成为备用架构。
 - 技术详情仍可访问，但采用渐进披露，不让专业可追溯性支配老人默认体验。
 
 ## Risks / open questions

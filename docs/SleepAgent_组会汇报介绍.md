@@ -147,7 +147,7 @@ Episode Runtime / FactSnapshot / Tool / Policy / Gate
 Confirmation / Commit Controller / Persistence / Receipt
 ```
 
-“1+2+1”是当前首版责任拓扑，不是永久不变的产品数字口号。未来新增 Agent 必须证明其拥有无法由现有 Skill、Tool 或 Service 承载的独立目标、状态、权限和反馈闭环。
+“1+2+1”是当前唯一且封闭的责任拓扑。新能力必须由这四个 Agent 的 Skill、Tool、Service 或 Policy 承载，不增加第五身份，不保留旧 Agent alias。
 
 ### 2.2 四个 Agent 的职责
 
@@ -209,8 +209,8 @@ Safety 是条件触发的语义审查，但急症、身份、权限、隐私、�
 
 ### 2.6 已落地的关键工程约束
 
-- 生产 Product Agent 名单在合同中只有四个 `AgentId`。
-- 这一严格四角色名单专指 `product_agent` 生产 roster；仓库仍保留尚未迁移的旧雷达 Agent 模块，但生产 `product` 模式不启用它们，只有显式开发兼容模式可使用。
+- 全仓库生产 Agent 名单在合同中只有四个 `AgentId`，并由 manifest、registry 和入口测试共同冻结。
+- 仓库中的旧雷达 Agent 模块只作为迁移来源；收口验收后不存在可调用的生产、开发兼容或备用 Runtime 路径。
 - Agent、跨 Agent 请求和 Tool 均为 deny-by-default allowlist。
 - `FactSnapshot`、SourceScope、工作成果和 Safety 决定使用版本与 hash 绑定。
 - 四个模型 Agent 均没有共享状态直写权或外部副作用权。
@@ -293,7 +293,7 @@ Safety 是条件触发的语义审查，但急症、身份、权限、隐私、�
 - 确定性规则对每个回答做风险扫描；命中危险线索后立即停止普通习惯问题并进入 Safety 路径。
 - Commit Controller 是画像的唯一写入者。
 
-因此，睡眠习惯是一项横切能力，不是第五个 `HabitAgent`。
+因此，睡眠习惯只能作为 Tool、Service、Skill 与 Policy 的横切能力，绝不是独立 `HabitAgent`。
 
 ### 3.6 当前实现范围
 
@@ -550,7 +550,7 @@ npm run typecheck
 - 最多三问、可跳过；
 - 当前回答先用于本轮，长期保存需老人确认精确 change set；
 - 家属观察不能冒充老人自述；
-- Habit 是横切能力，不是第五个 Agent。
+- Habit 是 Tool、Service、Skill 与 Policy 的横切能力，绝不是 Agent。
 
 ### 第 8–9 分钟：HealthClaw 启发
 

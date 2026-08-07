@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,7 @@ from sleepagent.radar_agent.product_agent import (
     AGENT_INVOCATION_ALLOWLIST,
     COMMIT_CONTROLLER_TOOLS,
     EPISODE_DEFINITIONS,
+    PRODUCT_AGENT_ROSTER,
     TOOL_INVOCATION_ALLOWLIST,
     AgentEnvelope,
     AgentId,
@@ -48,7 +50,15 @@ from sleepagent.radar_agent.product_agent import (
     stable_hash,
     validate_episode_plan,
 )
+from sleepagent.radar_agent.boundary import (
+    CANONICAL_SUBPACKAGES,
+    PRODUCTION_AGENT_NAMESPACE,
+)
 from sleepagent.radar_agent.product_agent.contracts import CrossAgentRequestType
+from sleepagent.radar_agent.product_agent.registry import (
+    COLLABORATION_ALLOWLIST,
+    validate_product_agent_registry,
+)
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -79,14 +89,20 @@ def scope(kind: SourceScopeKind = SourceScopeKind.CURRENT_NIGHT) -> SourceScope:
 
 
 def test_roster_is_exactly_one_plus_two_plus_one() -> None:
-    assert tuple(AgentId) == (
+    expected = (
         AgentId.SLEEP_CARE,
         AgentId.EVIDENCE_REASONING,
         AgentId.CARE_STRATEGY,
         AgentId.SAFETY_REVIEW,
     )
-    assert set(AGENT_DEFINITIONS) == set(AgentId)
-    assert len(product_agent_manifest()["agents"]) == 4
+    assert PRODUCT_AGENT_ROSTER == expected
+    assert tuple(AgentId) == expected
+    assert tuple(AgentId.__members__.values()) == expected
+    assert tuple(AGENT_DEFINITIONS) == expected
+    assert all(type(item) is AgentId for item in AGENT_DEFINITIONS)
+    assert tuple(product_agent_manifest()["agents"]) == tuple(
+        item.value for item in expected
+    )
     for removed in (
         "ORCHESTRATOR",
         "DIALOGUE",
@@ -98,6 +114,63 @@ def test_roster_is_exactly_one_plus_two_plus_one() -> None:
         "CARE_PLANNING",
     ):
         assert not hasattr(AgentId, removed)
+
+
+def test_all_registry_surfaces_are_closed_over_typed_roster() -> None:
+    validate_product_agent_registry()
+    assert tuple(TOOL_INVOCATION_ALLOWLIST) == PRODUCT_AGENT_ROSTER
+    assert all(type(item) is AgentId for item in TOOL_INVOCATION_ALLOWLIST)
+    assert tuple(AGENT_INVOCATION_ALLOWLIST) == (
+        "runtime",
+        *PRODUCT_AGENT_ROSTER,
+    )
+    assert type(tuple(AGENT_INVOCATION_ALLOWLIST)[0]) is str
+    assert all(
+        type(item) is AgentId
+        for item in tuple(AGENT_INVOCATION_ALLOWLIST)[1:]
+    )
+    assert AGENT_INVOCATION_ALLOWLIST["runtime"] == {
+        AgentId.SLEEP_CARE
+    }
+    assert AGENT_INVOCATION_ALLOWLIST[AgentId.SLEEP_CARE] == frozenset(
+        PRODUCT_AGENT_ROSTER
+    )
+    assert all(
+        type(target) is AgentId
+        for targets in AGENT_INVOCATION_ALLOWLIST.values()
+        for target in targets
+    )
+    assert all(
+        type(sender) is AgentId and type(receiver) is AgentId
+        for sender, receiver in COLLABORATION_ALLOWLIST
+    )
+    for episode_type, definition in EPISODE_DEFINITIONS.items():
+        expected_agents = (
+            frozenset()
+            if episode_type is EpisodeType.URGENT_BOUNDARY
+            else frozenset(PRODUCT_AGENT_ROSTER)
+        )
+        assert definition.allowed_agents == expected_agents
+        assert all(type(item) is AgentId for item in definition.allowed_agents)
+
+    with pytest.raises(TypeError):
+        AGENT_DEFINITIONS[AgentId.SLEEP_CARE] = AGENT_DEFINITIONS[
+            AgentId.SLEEP_CARE
+        ]  # type: ignore[index]
+
+
+def test_canonical_boundary_points_to_product_agent_not_legacy_identities() -> None:
+    assert PRODUCTION_AGENT_NAMESPACE == "sleepagent.radar_agent.product_agent"
+    assert "product_agent" in CANONICAL_SUBPACKAGES
+    assert {
+        "agents",
+        "orchestrator",
+        "dynamic",
+        "a2a",
+        "prompts",
+        "skills",
+        "cli",
+    }.isdisjoint(CANONICAL_SUBPACKAGES)
 
 
 def test_only_sleepcare_may_publish_and_no_agent_may_write_or_execute() -> None:
@@ -133,6 +206,35 @@ def test_center_routing_and_deny_by_default() -> None:
             AgentId.CARE_STRATEGY,
             CrossAgentRequestType.CARE,
         )
+
+
+@pytest.mark.parametrize(
+    ("caller", "target"),
+    (
+        ("runtime", "sleep_care"),
+        ("sleep_care", AgentId.EVIDENCE_REASONING),
+        (AgentId.SLEEP_CARE, "evidence_reasoning"),
+    ),
+)
+def test_agent_authorization_rejects_plain_string_aliases(
+    caller: object,
+    target: object,
+) -> None:
+    with pytest.raises(InvocationPolicyError):
+        authorize_agent_invocation(caller, target)  # type: ignore[arg-type]
+
+
+def test_collaboration_authorization_rejects_plain_string_aliases() -> None:
+    invalid_calls = (
+        ("sleep_care", AgentId.EVIDENCE_REASONING, CrossAgentRequestType.EVIDENCE),
+        (AgentId.SLEEP_CARE, "evidence_reasoning", CrossAgentRequestType.EVIDENCE),
+        (AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING, "evidence"),
+    )
+    for sender, receiver, request_type in invalid_calls:
+        with pytest.raises(InvocationPolicyError):
+            authorize_collaboration(
+                sender, receiver, request_type  # type: ignore[arg-type]
+            )
 
 
 def test_tool_matrix_matches_responsibilities() -> None:
@@ -354,9 +456,29 @@ def test_general_knowledge_path_needs_only_sleepcare_plan_and_communication() ->
 def test_manifest_is_stable_and_does_not_publish_legacy_roster() -> None:
     first = product_agent_manifest()
     assert stable_hash(first) == stable_hash(product_agent_manifest())
-    serialized = str(first)
-    for removed in ("trend", "report", "memory", "dialogue", "orchestrator"):
-        assert f"'{removed}': {{'responsibility'" not in serialized
+    assert tuple(first["agents"]) == tuple(
+        item.value for item in PRODUCT_AGENT_ROSTER
+    )
+    assert set(first["agents"]) == {
+        "sleep_care",
+        "evidence_reasoning",
+        "care_strategy",
+        "safety_review",
+    }
+
+
+def test_authoritative_architecture_plan_closes_the_roster() -> None:
+    plan = (
+        Path(__file__).parents[1] / "agent_architecture" / "PLAN.md"
+    ).read_text()
+    assert "唯一且封闭的生产 Agent roster" in plan
+    for obsolete in (
+        "未来可以新增第五或第六个 Agent",
+        "总数上限为六个",
+        "最多六个",
+        "保留扩展空间",
+    ):
+        assert obsolete not in plan
 
 
 def test_skill_foundation_has_18_packages_owned_only_by_four_agents() -> None:

@@ -5,8 +5,8 @@ import json
 import math
 import re
 from datetime import date, datetime
-from enum import Enum
-from typing import Any, Literal
+from enum import Enum, unique
+from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -33,6 +33,7 @@ class FrozenContract(StrictContract):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+@unique
 class AgentId(str, Enum):
     """The complete production model-agent roster.
 
@@ -43,6 +44,16 @@ class AgentId(str, Enum):
     EVIDENCE_REASONING = "evidence_reasoning"
     CARE_STRATEGY = "care_strategy"
     SAFETY_REVIEW = "safety_review"
+
+
+# Adding, removing, renaming or aliasing an Agent is not a supported extension
+# point. Skills, tools, services, policies and runtime stages remain outside it.
+PRODUCT_AGENT_ROSTER: Final[tuple[AgentId, ...]] = (
+    AgentId.SLEEP_CARE,
+    AgentId.EVIDENCE_REASONING,
+    AgentId.CARE_STRATEGY,
+    AgentId.SAFETY_REVIEW,
+)
 
 
 class WorkProductKind(str, Enum):
@@ -1051,6 +1062,7 @@ def agent_target_hash(
 
 __all__ = [
     "PRODUCT_AGENT_CONTRACT_VERSION",
+    "PRODUCT_AGENT_ROSTER",
     "AgentEnvelope",
     "AgentId",
     "AuthenticatedBinding",
