@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, Field
@@ -56,12 +58,14 @@ class SafetyReviewModelOutput(AgentModelOutput):
     output_payload: SafetyDecision
 
 
-MODEL_OUTPUT_BY_AGENT: dict[AgentId, type[AgentModelOutput]] = {
+MODEL_OUTPUT_BY_AGENT: Mapping[
+    AgentId, type[AgentModelOutput]
+] = MappingProxyType({
     AgentId.SLEEP_CARE: SleepCareModelOutput,
     AgentId.EVIDENCE_REASONING: EvidenceReasoningModelOutput,
     AgentId.CARE_STRATEGY: CareStrategyModelOutput,
     AgentId.SAFETY_REVIEW: SafetyReviewModelOutput,
-}
+})
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -119,10 +123,19 @@ class AgentInvocationRecord(StrictContract):
 
 
 class ProductAgentInvoker:
-    """Invoke one of the four registered responsibility-bearing Agents."""
+    """Low-level model adapter bound to exactly one concrete Agent role."""
 
-    def __init__(self, model: StructuredAgentModel) -> None:
+    def __init__(
+        self,
+        *,
+        agent_id: AgentId,
+        model: StructuredAgentModel,
+    ) -> None:
+        if type(agent_id) is not AgentId:
+            raise TypeError("ProductAgentInvoker requires an exact AgentId")
+        self.agent_id = agent_id
         self.model = model
+        self.output_schema = MODEL_OUTPUT_BY_AGENT[agent_id]
 
     def invoke(
         self,
@@ -146,8 +159,10 @@ class ProductAgentInvoker:
         prompt_bundle_hash: str = "0" * 64,
         compiled_messages: list[dict[str, str]] | None = None,
     ) -> tuple[AgentEnvelope, AgentInvocationRecord]:
-        authorize_agent_invocation(caller, context.agent_id)
-        schema = MODEL_OUTPUT_BY_AGENT[context.agent_id]
+        if type(context.agent_id) is not AgentId or context.agent_id is not self.agent_id:
+            raise ValueError("ContextPacket Agent does not match bound invoker")
+        authorize_agent_invocation(caller, self.agent_id)
+        schema = self.output_schema
         started = datetime.now(timezone.utc)
         output = self.model.generate(
             messages=compiled_messages or _agent_messages(context),

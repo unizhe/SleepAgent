@@ -100,7 +100,10 @@ def context() -> ContextPacket:
 
 
 def invoke(model: EvidenceModel):
-    return ProductAgentInvoker(model).invoke(
+    return ProductAgentInvoker(
+        agent_id=AgentId.EVIDENCE_REASONING,
+        model=model,
+    ).invoke(
         caller=AgentId.SLEEP_CARE,
         context=context(),
         parent_invocation_id="sleepcare-plan-1",
@@ -127,7 +130,10 @@ def test_invoker_records_independent_agent_skill_and_policy_identity() -> None:
 
 def test_invoker_denies_noncentral_invocation() -> None:
     with pytest.raises(InvocationPolicyError):
-        ProductAgentInvoker(EvidenceModel()).invoke(
+        ProductAgentInvoker(
+            agent_id=AgentId.EVIDENCE_REASONING,
+            model=EvidenceModel(),
+        ).invoke(
             caller=AgentId.CARE_STRATEGY,
             context=context(),
             parent_invocation_id=None,
@@ -142,6 +148,32 @@ def test_invoker_denies_noncentral_invocation() -> None:
         )
 
 
+def test_bound_invoker_rejects_another_role_before_model_call() -> None:
+    model = EvidenceModel()
+    invoker = ProductAgentInvoker(
+        agent_id=AgentId.EVIDENCE_REASONING,
+        model=model,
+    )
+    wrong_context = context().model_copy(
+        update={"agent_id": AgentId.CARE_STRATEGY}
+    )
+    with pytest.raises(ValueError, match="bound invoker"):
+        invoker.invoke(
+            caller=AgentId.SLEEP_CARE,
+            context=wrong_context,
+            parent_invocation_id=None,
+            target_type="evidence_packet",
+            target_id="t",
+            target_hash=HASH,
+            skill_id="interpret_scoped_evidence",
+            skill_version="v1",
+            prompt_version="p",
+            agent_version="evidence_reasoning.v1",
+            policy_version="product-safety.v3",
+        )
+    assert model.calls == []
+
+
 def test_invoker_denies_side_effect_requested_by_model() -> None:
     with pytest.raises(InvocationPolicyError, match="external.notify"):
         invoke(EvidenceModel(tool_name="external.notify"))
@@ -149,7 +181,10 @@ def test_invoker_denies_side_effect_requested_by_model() -> None:
 
 def test_runtime_target_hash_changes_when_output_payload_changes() -> None:
     def runtime_invoke(statement: str):
-        return ProductAgentInvoker(EvidenceModel(statement=statement)).invoke(
+        return ProductAgentInvoker(
+            agent_id=AgentId.EVIDENCE_REASONING,
+            model=EvidenceModel(statement=statement),
+        ).invoke(
             caller=AgentId.SLEEP_CARE,
             context=context(),
             parent_invocation_id="sleepcare-plan-1",

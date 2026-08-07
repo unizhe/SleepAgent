@@ -7,6 +7,13 @@ from typing import Any, Callable, Literal, Mapping, Protocol
 
 from pydantic import Field, model_validator
 
+from sleepagent.radar_agent.product_agent.agents import (
+    ProductAgentFactory,
+    ProductAgentRoster,
+    ReviewTargetBinding,
+    RuntimeAgentPort,
+    RuntimeRoleInvocation,
+)
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentEnvelope,
     AgentId,
@@ -71,12 +78,10 @@ from sleepagent.radar_agent.product_agent.cold_start import (
 )
 from sleepagent.radar_agent.product_agent.invocation import (
     AgentInvocationRecord,
-    ProductAgentInvoker,
     StructuredAgentModel,
 )
 from sleepagent.radar_agent.product_agent.registry import (
     EPISODE_DEFINITIONS,
-    TOOL_INVOCATION_ALLOWLIST,
     product_agent_manifest,
 )
 from sleepagent.radar_agent.product_agent.skills import (
@@ -423,8 +428,9 @@ class ProductEpisodeRunner:
     def __init__(
         self,
         *,
-        sleepcare_model: StructuredAgentModel,
-        agent_models: dict[AgentId, StructuredAgentModel],
+        agent_roster: ProductAgentRoster | None = None,
+        sleepcare_model: StructuredAgentModel | None = None,
+        agent_models: Mapping[AgentId, StructuredAgentModel] | None = None,
         tool_executor: ProductToolExecutor | None = None,
         publisher: PublicationPublisher | None = None,
         result_store: ProductEpisodeResultStore | None = None,
@@ -440,21 +446,27 @@ class ProductEpisodeRunner:
         source_resolvers: Mapping[str, CanonicalSourceResolver] | None = None,
         fact_snapshot_revalidator: Callable[[FactSnapshot], bool] | None = None,
     ) -> None:
-        missing = {
-            AgentId.EVIDENCE_REASONING,
-            AgentId.CARE_STRATEGY,
-            AgentId.SAFETY_REVIEW,
-            AgentId.SLEEP_CARE,
-        } - set(agent_models)
-        if missing:
-            raise ValueError(
-                f"missing Agent models: {sorted(item.value for item in missing)}"
+        self.skill_registry = skill_registry or SkillRegistry(default_skill_packages())
+        if agent_roster is None:
+            if sleepcare_model is None or agent_models is None:
+                raise TypeError(
+                    "ProductEpisodeRunner requires a concrete Agent roster"
+                )
+            agent_roster = ProductAgentFactory.from_models(
+                agent_models,
+                sleepcare_planning_model=sleepcare_model,
+                skill_registry=self.skill_registry,
             )
-        self.sleepcare_model = sleepcare_model
-        self.invokers = {
-            agent_id: ProductAgentInvoker(model)
-            for agent_id, model in agent_models.items()
-        }
+        elif sleepcare_model is not None or agent_models is not None:
+            raise ValueError(
+                "provide agent_roster or legacy model bindings, not both"
+            )
+        if any(
+            agent.skill_registry.snapshot() != self.skill_registry.snapshot()
+            for agent in agent_roster
+        ):
+            raise ValueError("Agent roster and Runner Skill registries differ")
+        self.agent_roster = agent_roster
         self.tool_executor = tool_executor or ProductToolExecutor()
         self.habit_runtime = habit_runtime or HabitProfileRuntimeService()
         for tool_name, handler in self.habit_runtime.handlers().items():
@@ -468,7 +480,6 @@ class ProductEpisodeRunner:
             source_resolvers=dict(source_resolvers or {}),
         )
         self.care_catalog = care_catalog or CareActionCatalog()
-        self.skill_registry = skill_registry or SkillRegistry(default_skill_packages())
         self.skill_resolver = SkillResolver(self.skill_registry)
         self.prompt_compiler = PromptCompiler()
         self.agent_profiles = default_agent_profiles()
@@ -855,7 +866,7 @@ class ProductEpisodeRunner:
         runtime = ProductEpisodeRuntime(
             episode_id=request.episode_id,
             fact_snapshot=request.fact_snapshot,
-            sleepcare_model=self.sleepcare_model,
+            sleepcare_agent=self.agent_roster.sleepcare,
             skill_registry=self.skill_registry,
         )
         envelopes: list[AgentEnvelope] = []
@@ -957,9 +968,7 @@ class ProductEpisodeRunner:
                 envelope, accepted = self._invoke_and_accept(
                     request=request,
                     runtime=runtime,
-                    agent_id=AgentId.EVIDENCE_REASONING,
-                    kind=WorkProductKind.EVIDENCE_PACKET,
-                    skill_id=self._evidence_skill(request.episode_type),
+                    agent=self.agent_roster.evidence_reasoning,
                     tool_receipts=tool_receipts,
                     accepted_evidence=None,
                     accepted_care=None,
@@ -1036,9 +1045,7 @@ class ProductEpisodeRunner:
                 envelope, accepted = self._invoke_and_accept(
                     request=request,
                     runtime=runtime,
-                    agent_id=AgentId.CARE_STRATEGY,
-                    kind=WorkProductKind.CARE_STRATEGY,
-                    skill_id=self._care_skill(request.episode_type),
+                    agent=self.agent_roster.care_strategy,
                     tool_receipts=tool_receipts,
                     accepted_evidence=evidence,
                     accepted_care=None,
@@ -1100,9 +1107,7 @@ class ProductEpisodeRunner:
             envelope, accepted = self._invoke_and_accept(
                 request=request,
                 runtime=runtime,
-                agent_id=AgentId.SLEEP_CARE,
-                kind=WorkProductKind.COMMUNICATION,
-                skill_id=self._communication_skill(request),
+                agent=self.agent_roster.sleepcare,
                 tool_receipts=tool_receipts,
                 accepted_evidence=evidence,
                 accepted_care=care,
@@ -1550,9 +1555,7 @@ class ProductEpisodeRunner:
         *,
         request: ProductEpisodeRunRequest,
         runtime: ProductEpisodeRuntime,
-        agent_id: AgentId,
-        kind: WorkProductKind,
-        skill_id: str,
+        agent: RuntimeAgentPort,
         tool_receipts: list[ToolReceipt],
         accepted_evidence: AcceptedWorkProduct | None,
         accepted_care: AcceptedWorkProduct | None,
@@ -1563,6 +1566,12 @@ class ProductEpisodeRunner:
         seen_request_hashes: frozenset[str] = frozenset(),
         tool_session_id: str | None = None,
     ) -> tuple[AgentEnvelope, AcceptedWorkProduct]:
+        agent_id = agent.agent_id
+        kind = agent.boundary.work_product_kind
+        skill_id = agent.select_skill(
+            request.episode_type,
+            doctor_material=request.doctor_material,
+        )
         tool_session_id = tool_session_id or (
             f"tool-session:{request.episode_id}:{agent_id.value}:"
             f"{runtime.episode_state_revision}"
@@ -1579,14 +1588,15 @@ class ProductEpisodeRunner:
                 source_refs=(product.work_product_ref,),
             )
             for kind, product in runtime.accepted_work_products.items()
-            if self._accepted_product_visible_to(product, agent_id=agent_id)
+            if agent.can_view_work_product(product.agent_id)
         ]
         tool_items = [
             self._context_item_for_receipt(receipt)
             for receipt in tool_receipts
             if receipt.outcome == InvocationOutcome.SUCCEEDED
-            and self._tool_receipt_visible_to(
-                receipt, agent_id=agent_id, request=request
+            and agent.can_view_tool_receipt(
+                receipt,
+                profile_purpose=request.profile_purpose,
             )
         ]
         validation_context = ProductToolExecutionContext(
@@ -1605,10 +1615,9 @@ class ProductEpisodeRunner:
             if (
                 receipt.tool_name == "memory.read"
                 and receipt.outcome == InvocationOutcome.SUCCEEDED
-                and self._tool_receipt_visible_to(
+                and agent.can_view_tool_receipt(
                     receipt,
-                    agent_id=agent_id,
-                    request=request,
+                    profile_purpose=request.profile_purpose,
                 )
             ):
                 self.longitudinal_memory.validate_model_input(
@@ -1618,8 +1627,7 @@ class ProductEpisodeRunner:
         user_items = []
         if (
             request.user_text
-            and agent_id
-            in {AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING}
+            and agent.boundary.context.raw_user_text_visible
         ):
             source_prefix = (
                 "user_report"
@@ -1637,10 +1645,7 @@ class ProductEpisodeRunner:
                     ),
                 )
             )
-        if agent_id in {
-            AgentId.SLEEP_CARE,
-            AgentId.EVIDENCE_REASONING,
-        }:
+        if agent.boundary.context.user_fact_responses_visible:
             user_items.extend(
                 TrustedContextItem(
                     key=f"user_fact_response:{response.request_id}",
@@ -1680,7 +1685,7 @@ class ProductEpisodeRunner:
                     ),
                 )
             ]
-            if agent_id == AgentId.SLEEP_CARE
+            if agent.boundary.context.audience_visible
             else []
         )
         collaboration_items = [
@@ -1754,7 +1759,64 @@ class ProductEpisodeRunner:
             context=context,
         )
         package = bundle.packages[0]
-        provider_input_tokens = canonical_token_count(compiled.messages)
+        role_input = agent.bind(
+            RuntimeRoleInvocation(
+                context=context,
+                episode_type=request.episode_type,
+                subject_id=request.fact_snapshot.binding.subject_id,
+                doctor_material=request.doctor_material,
+                parent_invocation_id=(
+                    runtime.invocation_records[-1].invocation_id
+                    if runtime.invocation_records
+                    else None
+                ),
+                target_id=(
+                    f"{kind.value}:{request.episode_id}:"
+                    f"{runtime.episode_state_revision}"
+                ),
+                target_hash_material=target_material,
+                skill_id=skill_id,
+                skill_version=package.version,
+                prompt_version=f"{skill_id}.prompt.{package.version}",
+                policy_version=PRODUCT_SAFETY_POLICY_VERSION,
+                profile_version=profile.version,
+                profile_hash=profile.profile_hash,
+                skill_package_hash=package.package_hash,
+                skill_lock_hash=skill_lock.lock_hash,
+                prompt_bundle_hash=compiled.receipt.prompt_bundle_hash,
+                compiled_messages=compiled.messages,
+                profile_purpose=request.profile_purpose,
+                accepted_evidence_ref=(
+                    accepted_evidence.work_product_ref
+                    if kind is WorkProductKind.CARE_STRATEGY
+                    and accepted_evidence is not None
+                    else None
+                ),
+                review_target=(
+                    ReviewTargetBinding(
+                        work_product_ref=safety_target.work_product_ref,
+                        target_id=safety_target.target_id,
+                        target_hash=safety_target.target_hash,
+                        episode_state_revision=(
+                            safety_target.episode_state_revision
+                        ),
+                    )
+                    if safety_target is not None
+                    else None
+                ),
+                audience_role=(
+                    (
+                        request.audience_role
+                        or request.fact_snapshot.binding.role
+                    )
+                    if agent.boundary.context.audience_visible
+                    else None
+                ),
+            )
+        )
+        provider_input_tokens = canonical_token_count(
+            role_input.invocation.compiled_messages
+        )
         exposure_key = (request.episode_id, agent_id)
         cumulative_tokens = (
             self._provider_input_tokens.get(exposure_key, 0)
@@ -1767,32 +1829,8 @@ class ProductEpisodeRunner:
         ):
             raise AcceptanceError("provider input token budget exhausted")
         self._provider_input_tokens[exposure_key] = cumulative_tokens
-        caller: AgentId | str = (
-            "runtime" if agent_id == AgentId.SLEEP_CARE else AgentId.SLEEP_CARE
-        )
-        envelope, record = self.invokers[agent_id].invoke(
-            caller=caller,
-            context=context,
-            parent_invocation_id=(
-                runtime.invocation_records[-1].invocation_id
-                if runtime.invocation_records
-                else None
-            ),
-            target_type=kind.value,
-            target_id=f"{kind.value}:{request.episode_id}:{runtime.episode_state_revision}",
-            target_hash_material=target_material,
-            skill_id=skill_id,
-            skill_version=package.version,
-            prompt_version=f"{skill_id}.prompt.{package.version}",
-            agent_version=f"{agent_id.value}.v1",
-            policy_version=PRODUCT_SAFETY_POLICY_VERSION,
-            profile_version=profile.version,
-            profile_hash=profile.profile_hash,
-            skill_package_hash=package.package_hash,
-            skill_lock_hash=skill_lock.lock_hash,
-            prompt_bundle_hash=compiled.receipt.prompt_bundle_hash,
-            compiled_messages=list(compiled.messages),
-        )
+        role_output = agent.invoke_bound(role_input)
+        envelope, record = role_output.envelope, role_output.record
         runtime.record_agent_invocation(record)
         pending_requests = [
             *envelope.tool_requests,
@@ -1845,7 +1883,7 @@ class ProductEpisodeRunner:
                         ),
                         user_intent_purpose=(
                             detect_explicit_memory_purpose(request.user_text)
-                            if agent_id == AgentId.SLEEP_CARE
+                            if agent.boundary.context.memory_intent_visible
                             else None
                         ),
                     ),
@@ -1872,9 +1910,7 @@ class ProductEpisodeRunner:
                     _, accepted_evidence = self._invoke_and_accept(
                         request=request,
                         runtime=runtime,
-                        agent_id=AgentId.EVIDENCE_REASONING,
-                        kind=WorkProductKind.EVIDENCE_PACKET,
-                        skill_id=self._evidence_skill(request.episode_type),
+                        agent=self.agent_roster.evidence_reasoning,
                         tool_receipts=tool_receipts,
                         accepted_evidence=None,
                         accepted_care=None,
@@ -1896,9 +1932,7 @@ class ProductEpisodeRunner:
                     _, accepted_care = self._invoke_and_accept(
                         request=request,
                         runtime=runtime,
-                        agent_id=AgentId.CARE_STRATEGY,
-                        kind=WorkProductKind.CARE_STRATEGY,
-                        skill_id=self._care_skill(request.episode_type),
+                        agent=self.agent_roster.care_strategy,
                         tool_receipts=tool_receipts,
                         accepted_evidence=accepted_evidence,
                         accepted_care=None,
@@ -1917,9 +1951,7 @@ class ProductEpisodeRunner:
             return self._invoke_and_accept(
                 request=request,
                 runtime=runtime,
-                agent_id=agent_id,
-                kind=kind,
-                skill_id=skill_id,
+                agent=agent,
                 tool_receipts=tool_receipts,
                 accepted_evidence=accepted_evidence,
                 accepted_care=accepted_care,
@@ -1932,7 +1964,7 @@ class ProductEpisodeRunner:
                 ),
                 tool_session_id=tool_session_id,
             )
-        if agent_id == AgentId.EVIDENCE_REASONING:
+        if kind is WorkProductKind.EVIDENCE_PACKET:
             accepted = accept_evidence(
                 envelope,
                 snapshot=request.fact_snapshot,
@@ -1957,7 +1989,7 @@ class ProductEpisodeRunner:
                     ),
                 },
             )
-        elif agent_id == AgentId.CARE_STRATEGY:
+        elif kind is WorkProductKind.CARE_STRATEGY:
             if accepted_evidence is None:
                 raise AcceptanceError("Care requires accepted Evidence")
             care_state = self.commit_controller.care_store.get(
@@ -1977,7 +2009,7 @@ class ProductEpisodeRunner:
                 catalog=self.care_catalog,
                 active_primary_action_id=active_action_id,
             )
-        elif agent_id == AgentId.SAFETY_REVIEW:
+        elif kind is WorkProductKind.SAFETY_DECISION:
             if safety_target is None:
                 raise AcceptanceError("Safety requires exact target")
             accepted = accept_safety(
@@ -1986,6 +2018,8 @@ class ProductEpisodeRunner:
                 target=safety_target,
             )
         else:
+            if kind is not WorkProductKind.COMMUNICATION:
+                raise AcceptanceError("unsupported concrete Agent work product")
             accepted = accept_communication(
                 envelope,
                 snapshot=request.fact_snapshot,
@@ -2109,9 +2143,7 @@ class ProductEpisodeRunner:
             envelope, safety = self._invoke_and_accept(
                 request=request,
                 runtime=runtime,
-                agent_id=AgentId.SAFETY_REVIEW,
-                kind=WorkProductKind.SAFETY_DECISION,
-                skill_id="review_action_and_publication",
+                agent=self.agent_roster.safety_review,
                 tool_receipts=tool_receipts,
                 accepted_evidence=evidence,
                 accepted_care=care,
@@ -2135,24 +2167,11 @@ class ProductEpisodeRunner:
                 AgentId.SLEEP_CARE,
             }:
                 raise AcceptanceError("Safety revision has invalid owner")
-            revision_kind = {
-                AgentId.EVIDENCE_REASONING: WorkProductKind.EVIDENCE_PACKET,
-                AgentId.CARE_STRATEGY: WorkProductKind.CARE_STRATEGY,
-                AgentId.SLEEP_CARE: WorkProductKind.COMMUNICATION,
-            }[responsible]
-            revision_skill = {
-                AgentId.EVIDENCE_REASONING: self._evidence_skill(
-                    request.episode_type
-                ),
-                AgentId.CARE_STRATEGY: self._care_skill(request.episode_type),
-                AgentId.SLEEP_CARE: self._communication_skill(request),
-            }[responsible]
+            revision_agent = self.agent_roster.by_id(responsible)
             revised_envelope, current = self._invoke_and_accept(
                 request=request,
                 runtime=runtime,
-                agent_id=responsible,
-                kind=revision_kind,
-                skill_id=revision_skill,
+                agent=revision_agent,
                 tool_receipts=tool_receipts,
                 accepted_evidence=evidence,
                 accepted_care=care,
@@ -2630,57 +2649,6 @@ class ProductEpisodeRunner:
         )
 
     @staticmethod
-    def _tool_receipt_visible_to(
-        receipt: ToolReceipt,
-        *,
-        agent_id: AgentId,
-        request: ProductEpisodeRunRequest,
-    ) -> bool:
-        if receipt.tool_name.startswith("memory."):
-            return (
-                receipt.caller == agent_id.value
-                and receipt.tool_name in TOOL_INVOCATION_ALLOWLIST[agent_id]
-            )
-        if receipt.tool_name == "runtime.build_fact_snapshot":
-            return False
-        if receipt.tool_name == "cold_start.evaluate":
-            return agent_id in {
-                AgentId.SLEEP_CARE,
-                AgentId.EVIDENCE_REASONING,
-                AgentId.SAFETY_REVIEW,
-            }
-        if receipt.tool_name == "profile.read":
-            return agent_id == AgentId.EVIDENCE_REASONING or (
-                agent_id == AgentId.SLEEP_CARE
-                and request.profile_purpose == "profile_review"
-            )
-        if receipt.tool_name == "questionnaire.capture_profile":
-            return agent_id == AgentId.EVIDENCE_REASONING
-        if receipt.tool_name == "questionnaire.select_profile":
-            return agent_id == AgentId.SLEEP_CARE
-        if receipt.tool_name == "profile.build_change_set":
-            return agent_id == AgentId.SLEEP_CARE
-        return receipt.tool_name in TOOL_INVOCATION_ALLOWLIST[agent_id]
-
-    @staticmethod
-    def _accepted_product_visible_to(
-        product: AcceptedWorkProduct,
-        *,
-        agent_id: AgentId,
-    ) -> bool:
-        if agent_id == AgentId.EVIDENCE_REASONING:
-            return product.agent_id == AgentId.EVIDENCE_REASONING
-        if agent_id == AgentId.CARE_STRATEGY:
-            return product.agent_id == AgentId.EVIDENCE_REASONING
-        if agent_id == AgentId.SAFETY_REVIEW:
-            return False
-        return product.agent_id in {
-            AgentId.EVIDENCE_REASONING,
-            AgentId.CARE_STRATEGY,
-            AgentId.SAFETY_REVIEW,
-        }
-
-    @staticmethod
     def _request_requirements(
         request: ProductEpisodeRunRequest,
     ) -> tuple[set[WorkProductKind], set[str]]:
@@ -2697,34 +2665,6 @@ class ProductEpisodeRunner:
             required.add(WorkProductKind.SAFETY_DECISION)
             checkpoints.add("external_action_safety")
         return required, checkpoints
-
-    @staticmethod
-    def _evidence_skill(episode_type: EpisodeType) -> str:
-        return (
-            "interpret_longitudinal_pattern"
-            if episode_type == EpisodeType.TREND_REVIEW
-            else "interpret_scoped_evidence"
-        )
-
-    @staticmethod
-    def _care_skill(episode_type: EpisodeType) -> str:
-        return (
-            "assess_followup_outcome"
-            if episode_type == EpisodeType.CARE_FOLLOWUP
-            else "propose_single_care_action"
-        )
-
-    @staticmethod
-    def _communication_skill(request: ProductEpisodeRunRequest) -> str:
-        if request.episode_type == EpisodeType.ROLE_MATERIAL:
-            return (
-                "draft_doctor_material"
-                if request.doctor_material
-                else "draft_user_material"
-            )
-        if request.episode_type == EpisodeType.GROUNDED_DIALOGUE:
-            return "answer_grounded_question"
-        return "explain_for_elder"
 
     def _degraded(
         self,

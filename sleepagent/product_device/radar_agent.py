@@ -1408,9 +1408,14 @@ def _provider_is_configured(provider: ProductChatProvider) -> bool:
 
 
 def _episode_runner_is_configured(runner: Any) -> bool:
+    from sleepagent.radar_agent.product_agent.agents import ProductAgentRoster
+
+    roster = getattr(runner, "agent_roster", None)
+    if type(roster) is not ProductAgentRoster:
+        return False
     models = [
-        runner.sleepcare_model,
-        *(item.model for item in runner.invokers.values()),
+        roster.sleepcare.planning_model,
+        *(item.model for item in roster),
     ]
     return all(bool(getattr(model, "is_configured", True)) for model in models)
 

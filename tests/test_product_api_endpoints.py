@@ -24,6 +24,7 @@ from sleepagent.radar_agent.product_agent import (
     DeterministicCommitController,
     EpisodeStatus,
 )
+from sleepagent.radar_agent.product_agent.agents import ProductAgentFactory
 
 
 PRODUCT_API_KEY = "test-product-radar-key"
@@ -449,11 +450,12 @@ class _ConfiguredModel:
 class _RecordingProductEpisodeRunner:
     def __init__(self) -> None:
         model = _ConfiguredModel()
-        self.sleepcare_model = model
-        self.invokers = {
-            name: SimpleNamespace(model=model)
-            for name in ("sleepcare", "evidence", "care", "safety")
-        }
+        self.agent_roster = ProductAgentFactory.create(
+            sleepcare_model=model,
+            evidence_reasoning_model=model,
+            care_strategy_model=model,
+            safety_review_model=model,
+        )
         self.commit_controller = DeterministicCommitController()
         self.requests: list[Any] = []
 

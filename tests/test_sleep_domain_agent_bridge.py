@@ -20,6 +20,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
     EpisodeType,
     ExecutionMode,
 )
+from sleepagent.radar_agent.product_agent.agents import ProductAgentFactory
 from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunResult
 from sleepagent.sleep_domain import (
     AgentAnalysisTrigger,
@@ -357,11 +358,12 @@ class _ConfiguredModel:
 class _RecordingRunner:
     def __init__(self, *, configured: bool = True) -> None:
         model = _ConfiguredModel(configured)
-        self.sleepcare_model = model
-        self.invokers = {
-            role: SimpleNamespace(model=model)
-            for role in ("sleep", "evidence", "care", "safety")
-        }
+        self.agent_roster = ProductAgentFactory.create(
+            sleepcare_model=model,
+            evidence_reasoning_model=model,
+            care_strategy_model=model,
+            safety_review_model=model,
+        )
         self.commit_controller = SimpleNamespace(
             care_store=_VersionStore(),
             memory_store=_VersionStore(),

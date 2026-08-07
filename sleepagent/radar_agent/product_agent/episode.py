@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any
 
 from pydantic import Field
 
+from sleepagent.radar_agent.product_agent.agents.sleepcare import (
+    EpisodePlanProposal,
+    EvaluationDecision,
+    SleepCareAgent,
+    SleepCareEvaluation,
+    SleepCareEvaluationContext,
+    SleepCareEvaluationInput,
+    SleepCareEvaluationOutput,
+    SleepCarePlanContext,
+    SleepCarePlanInput,
+    SleepCarePlanOutput,
+)
+
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
-    ContextPacket,
     EpisodePlan,
     EpisodeReceipt,
     EpisodeStatus,
@@ -16,10 +26,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
     ExecutionMode,
     FactSnapshot,
     StrictContract,
-    TrustLabel,
-    TrustedContextItem,
     WorkProductKind,
-    stable_hash,
 )
 from sleepagent.radar_agent.product_agent.governance import AcceptedWorkProduct
 from sleepagent.radar_agent.product_agent.invocation import (
@@ -31,10 +38,7 @@ from sleepagent.radar_agent.product_agent.registry import (
     validate_episode_plan,
 )
 from sleepagent.radar_agent.product_agent.skills import (
-    PromptCompiler,
     SkillRegistry,
-    SkillResolver,
-    default_agent_profiles,
     default_skill_packages,
 )
 
@@ -64,32 +68,6 @@ class ResumeRequiresReplan(EpisodeRuntimeError):
 
 class PlanningFailed(EpisodeRuntimeError):
     pass
-
-
-class EvaluationDecision(str, Enum):
-    CONTINUE = "continue"
-    REPLAN = "replan"
-    WAIT_USER = "wait_user"
-    WAIT_CONFIRMATION = "wait_confirmation"
-    FINISH = "finish"
-    BLOCK = "block"
-
-
-class EpisodePlanProposal(StrictContract):
-    objective: str = Field(..., min_length=1, max_length=1200)
-    required_work_products: list[WorkProductKind]
-    conditional_work_products: list[WorkProductKind] = Field(default_factory=list)
-    safety_checkpoints: list[str] = Field(default_factory=list)
-    exit_conditions: list[str]
-    expected_agent_calls: int = Field(..., ge=0)
-    expected_tool_calls: int = Field(..., ge=0)
-
-
-class SleepCareEvaluation(StrictContract):
-    decision: EvaluationDecision
-    summary: str = Field(..., min_length=1, max_length=1000)
-    replan_reason: str | None = None
-    missing_work_products: list[WorkProductKind] = Field(default_factory=list)
 
 
 class RuntimeCounters(StrictContract):
@@ -127,13 +105,35 @@ class ProductEpisodeRuntime:
         *,
         episode_id: str,
         fact_snapshot: FactSnapshot,
-        sleepcare_model: StructuredAgentModel,
+        sleepcare_agent: SleepCareAgent | None = None,
+        sleepcare_model: StructuredAgentModel | None = None,
         started_at: datetime | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
+        if sleepcare_agent is None and sleepcare_model is None:
+            raise TypeError("ProductEpisodeRuntime requires SleepCareAgent")
+        resolved_registry = skill_registry or (
+            sleepcare_agent.skill_registry
+            if sleepcare_agent is not None
+            else SkillRegistry(default_skill_packages())
+        )
+        if sleepcare_agent is None:
+            assert sleepcare_model is not None
+            sleepcare_agent = SleepCareAgent(
+                sleepcare_model,
+                planning_model=sleepcare_model,
+                skill_registry=resolved_registry,
+            )
+        elif (
+            skill_registry is not None
+            and sleepcare_agent.skill_registry.snapshot()
+            != skill_registry.snapshot()
+        ):
+            raise ValueError("SleepCareAgent and Runtime Skill registries differ")
         self.episode_id = episode_id
         self.fact_snapshot = fact_snapshot
-        self.sleepcare_model = sleepcare_model
+        self.sleepcare_agent = sleepcare_agent
+        self.sleepcare_model = sleepcare_agent.planning_model
         self.started_at = started_at or datetime.now(timezone.utc)
         self.plan: EpisodePlan | None = None
         self.episode_state_revision = 0
@@ -146,11 +146,7 @@ class ProductEpisodeRuntime:
         self.failure_codes: list[str] = []
         self._paused_at: datetime | None = None
         self._paused_seconds = 0.0
-        self.skill_registry = skill_registry or SkillRegistry(default_skill_packages())
-        self.skill_resolver = SkillResolver(self.skill_registry)
-        self.prompt_compiler = PromptCompiler()
-        self.sleepcare_profile = default_agent_profiles()[AgentId.SLEEP_CARE]
-        self._last_skill_meta: dict[str, str] = {}
+        self.skill_registry = resolved_registry
 
     def create_plan(
         self,
@@ -164,40 +160,46 @@ class ProductEpisodeRuntime:
         required_safety_checkpoints = required_safety_checkpoints or set()
         definition = EPISODE_DEFINITIONS[episode_type]
         self._check_deadline(definition.budget.soft_deadline_seconds)
-        context = {
-            "episode_id": self.episode_id,
-            "episode_type": episode_type.value,
-            "objective": objective,
-            "fact_snapshot_id": self.fact_snapshot.fact_snapshot_id,
-            "fact_snapshot_hash": self.fact_snapshot.fact_snapshot_hash,
-            "source_scope": self.fact_snapshot.source_scope.model_dump(mode="json"),
-            "registry_required_work_products": sorted(
-                item.value for item in definition.required_work_products
-            ),
-            "request_required_work_products": sorted(
-                item.value for item in required_work_products
-            ),
-            "allowed_work_products": sorted(
-                item.value for item in definition.allowed_work_products
-            ),
-            "required_tools": sorted(definition.required_tools),
-            "allowed_agents": sorted(item.value for item in definition.allowed_agents),
-            "available_safety_checkpoints": sorted(
-                definition.conditional_safety_checkpoints
-            ),
-            "request_required_safety_checkpoints": sorted(
-                required_safety_checkpoints
-            ),
-            "exit_conditions": sorted(definition.exit_conditions),
-            "budget": definition.budget.model_dump(mode="json"),
-        }
-        proposal = self._generate_with_one_repair(
-            schema=EpisodePlanProposal,
-            prompt_version="sleepcare.plan.v1",
-            context=context,
-            skill_id="plan_episode",
+        context = SleepCarePlanContext(
+            episode_id=self.episode_id,
             episode_type=episode_type,
+            objective=objective,
+            fact_snapshot_id=self.fact_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=self.fact_snapshot.fact_snapshot_hash,
+            source_scope=self.fact_snapshot.source_scope,
+            registry_required_work_products=tuple(
+                sorted(
+                    definition.required_work_products,
+                    key=lambda item: item.value,
+                )
+            ),
+            request_required_work_products=tuple(
+                sorted(required_work_products, key=lambda item: item.value)
+            ),
+            allowed_work_products=tuple(
+                sorted(
+                    definition.allowed_work_products,
+                    key=lambda item: item.value,
+                )
+            ),
+            required_tools=tuple(sorted(definition.required_tools)),
+            allowed_agents=tuple(
+                sorted(definition.allowed_agents, key=lambda item: item.value)
+            ),
+            available_safety_checkpoints=tuple(
+                sorted(definition.conditional_safety_checkpoints)
+            ),
+            request_required_safety_checkpoints=tuple(
+                sorted(required_safety_checkpoints)
+            ),
+            exit_conditions=tuple(sorted(definition.exit_conditions)),
+            budget=definition.budget,
         )
+        role_output = self._plan_with_one_repair(
+            episode_type=episode_type,
+            context=context,
+        )
+        proposal = role_output.proposal
         plan = EpisodePlan(
             plan_id=f"plan:{self.episode_id}:{self.counters.replans + 1}",
             episode_id=self.episode_id,
@@ -221,13 +223,7 @@ class ProductEpisodeRuntime:
         )
         self.plan = plan
         self.episode_state_revision += 1
-        self._record_sleepcare_invocation(
-            kind="plan",
-            prompt_version="sleepcare.plan.v1",
-            context=context,
-            summary=f"planned {episode_type.value}",
-            output=proposal,
-        )
+        self._record_sleepcare_result(role_output.record)
         return plan
 
     def replan(self, *, reason: str) -> EpisodePlan:
@@ -259,39 +255,29 @@ class ProductEpisodeRuntime:
             raise PlanningFailed("cannot evaluate before plan")
         definition = EPISODE_DEFINITIONS[self.plan.episode_type]
         self._check_deadline(definition.budget.soft_deadline_seconds)
-        context = {
-            "episode_id": self.episode_id,
-            "episode_state_revision": self.episode_state_revision,
-            "latest_kind": latest_kind.value,
-            "latest_ref": latest.work_product_ref if latest else None,
-            "failure_code": failure_code,
-            "accepted_work_products": sorted(
-                item.value for item in self.accepted_work_products
+        context = SleepCareEvaluationContext(
+            episode_id=self.episode_id,
+            episode_state_revision=self.episode_state_revision,
+            latest_kind=latest_kind,
+            latest_ref=latest.work_product_ref if latest else None,
+            failure_code=failure_code,
+            accepted_work_products=tuple(
+                sorted(self.accepted_work_products, key=lambda item: item.value)
             ),
-            "required_work_products": [
-                item.value for item in self.plan.required_work_products
-            ],
-            "remaining_agent_calls": (
+            required_work_products=tuple(self.plan.required_work_products),
+            remaining_agent_calls=(
                 definition.budget.agent_call_limit - self.counters.agent_calls
             ),
-            "remaining_replans": (
+            remaining_replans=(
                 definition.budget.replan_limit - self.counters.replans
             ),
-        }
-        result = self._generate_with_one_repair(
-            schema=SleepCareEvaluation,
-            prompt_version="sleepcare.evaluate.v1",
-            context=context,
-            skill_id="evaluate_work_product",
+        )
+        role_output = self._evaluate_with_one_repair(
             episode_type=self.plan.episode_type,
-        )
-        self._record_sleepcare_invocation(
-            kind="evaluate",
-            prompt_version="sleepcare.evaluate.v1",
             context=context,
-            summary=result.summary,
-            output=result,
         )
+        result = role_output.evaluation
+        self._record_sleepcare_result(role_output.record)
         if result.decision == EvaluationDecision.FINISH:
             missing = set(self.plan.required_work_products) - set(
                 self.accepted_work_products
@@ -464,12 +450,14 @@ class ProductEpisodeRuntime:
         cls,
         snapshot: EpisodeRuntimeSnapshot,
         *,
-        sleepcare_model: StructuredAgentModel,
+        sleepcare_agent: SleepCareAgent | None = None,
+        sleepcare_model: StructuredAgentModel | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> "ProductEpisodeRuntime":
         runtime = cls(
             episode_id=snapshot.episode_id,
             fact_snapshot=snapshot.fact_snapshot,
+            sleepcare_agent=sleepcare_agent,
             sleepcare_model=sleepcare_model,
             started_at=snapshot.started_at,
             skill_registry=skill_registry,
@@ -514,91 +502,64 @@ class ProductEpisodeRuntime:
         ):
             raise EpisodeStateConflict("serialized invocation ids are not unique")
 
-    def _generate_with_one_repair(
+    def _plan_with_one_repair(
         self,
         *,
-        schema,
-        prompt_version: str,
-        context,
-        skill_id: str,
-        episode_type,
-    ):
+        episode_type: EpisodeType,
+        context: SleepCarePlanContext,
+    ) -> SleepCarePlanOutput:
         last_error: Exception | None = None
         for attempt in range(2):
             self._consume_sleepcare_model_call()
             try:
-                invocation_id = (
-                    f"sleepcare:{skill_id}:{self.episode_id}:"
-                    f"{len(self.invocation_records) + 1}:{attempt}"
-                )
-                packet = ContextPacket(
-                    context_packet_id=f"context:{invocation_id}",
-                    episode_id=self.episode_id,
-                    invocation_id=invocation_id,
-                    agent_id=AgentId.SLEEP_CARE,
-                    objective=str(context.get("objective", skill_id)),
-                    fact_snapshot_id=self.fact_snapshot.fact_snapshot_id,
-                    fact_snapshot_hash=self.fact_snapshot.fact_snapshot_hash,
-                    episode_state_revision=self.episode_state_revision,
-                    care_context_version=self.fact_snapshot.care_context_version,
-                    source_scope=self.fact_snapshot.source_scope,
-                    authorization_scope=(
-                        self.fact_snapshot.binding.authorization_scope
-                    ),
-                    items=(
-                        TrustedContextItem(
-                            key="runtime_episode_context",
-                            trust_label=TrustLabel.SYSTEM_POLICY,
-                            value={
-                                **context,
-                                "repair_attempt": attempt,
-                                "previous_error": (
-                                    type(last_error).__name__
-                                    if last_error
-                                    else None
-                                ),
-                            },
+                return self.sleepcare_agent.plan(
+                    SleepCarePlanInput(
+                        episode_id=self.episode_id,
+                        episode_type=episode_type,
+                        fact_snapshot=self.fact_snapshot,
+                        episode_state_revision=self.episode_state_revision,
+                        runtime_context=context,
+                        invocation_ordinal=len(self.invocation_records) + 1,
+                        repair_attempt=attempt,
+                        previous_error_type=(
+                            type(last_error).__name__ if last_error else None
                         ),
-                    ),
-                )
-                bundle, lock = self.skill_resolver.resolve(
-                    episode_id=self.episode_id,
-                    episode_type=episode_type,
-                    agent_id=AgentId.SLEEP_CARE,
-                    mandatory_skill_ids=[skill_id],
-                    subject_id=self.fact_snapshot.binding.subject_id,
-                )
-                package = bundle.packages[0]
-                compiled = self.prompt_compiler.compile(
-                    global_policy=(
-                        "Runtime owns Episode state, completion and budgets.",
-                        "SleepCare may propose plans but cannot skip required work.",
-                    ),
-                    profile=self.sleepcare_profile,
-                    bundle=bundle,
-                    context=packet,
-                )
-                self._last_skill_meta = {
-                    "skill_id": skill_id,
-                    "skill_version": package.version,
-                    "skill_package_hash": package.package_hash,
-                    "skill_lock_hash": lock.lock_hash,
-                    "profile_version": self.sleepcare_profile.version,
-                    "profile_hash": self.sleepcare_profile.profile_hash,
-                    "prompt_bundle_hash": compiled.receipt.prompt_bundle_hash,
-                    "context_packet_id": packet.context_packet_id,
-                    "context_hash": stable_hash(packet),
-                }
-                return self.sleepcare_model.generate(
-                    messages=list(compiled.messages),
-                    schema=schema,
-                    prompt_version=f"{prompt_version}:{package.version}",
-                    context_packet_id=packet.context_packet_id,
+                    )
                 )
             except Exception as exc:
                 last_error = exc
         raise PlanningFailed(
-            f"SleepCare {prompt_version} failed after one repair"
+            "SleepCare sleepcare.plan.v1 failed after one repair"
+        ) from last_error
+
+    def _evaluate_with_one_repair(
+        self,
+        *,
+        episode_type: EpisodeType,
+        context: SleepCareEvaluationContext,
+    ) -> SleepCareEvaluationOutput:
+        last_error: Exception | None = None
+        for attempt in range(2):
+            self._consume_sleepcare_model_call()
+            try:
+                return self.sleepcare_agent.evaluate(
+                    SleepCareEvaluationInput(
+                        episode_id=self.episode_id,
+                        episode_type=episode_type,
+                        fact_snapshot=self.fact_snapshot,
+                        episode_state_revision=self.episode_state_revision,
+                        runtime_context=context,
+                        invocation_ordinal=len(self.invocation_records) + 1,
+                        repair_attempt=attempt,
+                        previous_error_type=(
+                            type(last_error).__name__ if last_error else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                last_error = exc
+        raise PlanningFailed(
+            "SleepCare sleepcare.evaluate.v1 failed after one repair"
         ) from last_error
 
     def _consume_sleepcare_model_call(self) -> None:
@@ -610,62 +571,19 @@ class ProductEpisodeRuntime:
             update={"model_calls": self.counters.model_calls + 1}
         )
 
-    def _record_sleepcare_invocation(
-        self,
-        *,
-        kind: str,
-        prompt_version: str,
-        context: dict[str, Any],
-        summary: str,
-        output: StrictContract,
-    ) -> None:
-        now = datetime.now(timezone.utc)
-        invocation_id = (
-            f"sleepcare:{kind}:{self.episode_id}:{len(self.invocation_records) + 1}"
-        )
-        self.invocation_records.append(
-            AgentInvocationRecord(
-                invocation_id=invocation_id,
-                episode_id=self.episode_id,
-                agent_id=AgentId.SLEEP_CARE,
-                agent_version="sleepcare.v1",
-                profile_version=self._last_skill_meta["profile_version"],
-                profile_hash=self._last_skill_meta["profile_hash"],
-                skill_id=self._last_skill_meta["skill_id"],
-                skill_version=self._last_skill_meta["skill_version"],
-                skill_package_hash=self._last_skill_meta["skill_package_hash"],
-                skill_lock_hash=self._last_skill_meta["skill_lock_hash"],
-                prompt_bundle_hash=self._last_skill_meta["prompt_bundle_hash"],
-                schema_version=(
-                    "EpisodePlanProposal.v1"
-                    if kind == "plan"
-                    else "SleepCareEvaluation.v1"
-                ),
-                prompt_version=prompt_version,
-                policy_version="product-safety.v3",
-                context_packet_id=self._last_skill_meta["context_packet_id"],
-                context_hash=self._last_skill_meta["context_hash"],
-                target_hash=stable_hash(
-                    {
-                        "episode_id": self.episode_id,
-                        "kind": kind,
-                        "context": context,
-                        "output": output.model_dump(mode="json"),
-                        "skill_lock_hash": self._last_skill_meta["skill_lock_hash"],
-                    }
-                ),
-                provider=self.sleepcare_model.provider,
-                model_id=self.sleepcare_model.model_id,
-                provider_request_id=getattr(
-                    self.sleepcare_model, "last_provider_request_id", None
-                ),
-                started_at=now,
-                ended_at=now,
-                latency_ms=0,
-                validation_status="runtime_validated",
-                safe_summary=summary[:500],
-            )
-        )
+    def _record_sleepcare_result(self, record: AgentInvocationRecord) -> None:
+        if record.episode_id != self.episode_id:
+            raise EpisodeStateConflict("cross-Episode SleepCare result")
+        if record.agent_id is not AgentId.SLEEP_CARE:
+            raise EpisodeStateConflict("SleepCare port returned another Agent identity")
+        if record.skill_id not in {"plan_episode", "evaluate_work_product"}:
+            raise EpisodeStateConflict("SleepCare port returned an invalid control Skill")
+        if any(
+            item.invocation_id == record.invocation_id
+            for item in self.invocation_records
+        ):
+            raise EpisodeStateConflict("duplicate SleepCare invocation id")
+        self.invocation_records.append(record)
         self.counters = self.counters.model_copy(
             update={"agent_calls": self.counters.agent_calls + 1}
         )

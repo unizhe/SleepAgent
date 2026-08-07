@@ -670,12 +670,14 @@ def _degraded_role_view(
 
 
 def _runner_is_configured(runner: ProductEpisodeRunner) -> bool:
+    from sleepagent.radar_agent.product_agent.agents import ProductAgentRoster
+
+    roster = getattr(runner, "agent_roster", None)
+    if type(roster) is not ProductAgentRoster:
+        return False
     models = [
-        getattr(runner, "sleepcare_model", None),
-        *(
-            getattr(item, "model", None)
-            for item in getattr(runner, "invokers", {}).values()
-        ),
+        roster.sleepcare.planning_model,
+        *(item.model for item in roster),
     ]
     return all(
         model is not None and bool(getattr(model, "is_configured", True))

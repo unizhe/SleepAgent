@@ -52,6 +52,7 @@ from sleepagent.radar_agent.product_agent import (
     SafetyDecision,
     SafetyReviewModelOutput,
     SafetyVerdict,
+    SkillRegistry,
     SleepCareEvaluation,
     SleepCareModelOutput,
     SourceScope,
@@ -62,10 +63,12 @@ from sleepagent.radar_agent.product_agent import (
     WorkProductStatus,
     build_unavailable_entry_decisions,
     default_agent_profiles,
+    default_skill_packages,
     observation_from_runtime,
     stable_hash,
     snapshot_binding_material,
 )
+from sleepagent.radar_agent.product_agent.agents import ProductAgentFactory
 from sleepagent.radar_agent.product_agent.registry import EPISODE_DEFINITIONS
 from sleepagent.radar_agent.questionnaire import (
     HabitAnswerDisposition,
@@ -678,10 +681,18 @@ def runner(
     **model_options,
 ) -> tuple[ProductEpisodeRunner, ScenarioModel]:
     model = ScenarioModel(episode_type, **model_options)
+    skill_registry = SkillRegistry(default_skill_packages())
+    agent_roster = ProductAgentFactory.create(
+        sleepcare_model=model,
+        evidence_reasoning_model=model,
+        care_strategy_model=model,
+        safety_review_model=model,
+        skill_registry=skill_registry,
+    )
     return (
         ProductEpisodeRunner(
-            sleepcare_model=model,
-            agent_models={item: model for item in AgentId},
+            agent_roster=agent_roster,
+            skill_registry=skill_registry,
         ),
         model,
     )
@@ -732,6 +743,46 @@ def request(
         doctor_material=doctor_material,
         external_action=external_action,
         **extra,
+    )
+
+
+def test_concrete_roster_preserves_phase1_audit_identity_golden() -> None:
+    roster_runner, _ = runner(EpisodeType.MORNING_REVIEW)
+    legacy_model = ScenarioModel(EpisodeType.MORNING_REVIEW)
+    legacy_runner = ProductEpisodeRunner(
+        sleepcare_model=legacy_model,
+        agent_models={item: legacy_model for item in AgentId},
+    )
+    episode_request = request(EpisodeType.MORNING_REVIEW)
+
+    roster_result = roster_runner.run(episode_request)
+    legacy_result = legacy_runner.run(episode_request)
+
+    def audit_projection(result):
+        return [
+            {
+                "invocation_id": item.invocation_id,
+                "agent_id": item.agent_id,
+                "agent_version": item.agent_version,
+                "profile_version": item.profile_version,
+                "profile_hash": item.profile_hash,
+                "skill_id": item.skill_id,
+                "skill_version": item.skill_version,
+                "skill_package_hash": item.skill_package_hash,
+                "skill_lock_hash": item.skill_lock_hash,
+                "prompt_bundle_hash": item.prompt_bundle_hash,
+                "context_packet_id": item.context_packet_id,
+                "context_hash": item.context_hash,
+                "target_hash": item.target_hash,
+            }
+            for item in result.agent_invocations
+        ]
+
+    roster_projection = audit_projection(roster_result)
+    assert roster_projection == audit_projection(legacy_result)
+    # Frozen from local Phase 1 commit 241d9be for this exact Episode input.
+    assert stable_hash(roster_projection) == (
+        "00329051d0dc6b633b2546a47b7616d8cd57ddc6062cf1898c79f3acf3494bfd"
     )
 
 

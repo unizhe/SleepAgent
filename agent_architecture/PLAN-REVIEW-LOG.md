@@ -3659,3 +3659,70 @@ registries. The second closed the same alias class at invocation and
 collaboration authorization entry points and added negative tests.
 
 No commit, push, release or remote mutation was made.
+
+### Round 62 — Codex build: Phase 2 concrete four-role boundaries
+
+Date: 2026-08-07
+
+- Followed the approved revised phase order: concrete four-role boundaries were
+  established before any legacy capability deletion or migration. Added
+  `product_agent/agents/` with role-specific modules, typed invocation and
+  control Contracts, an exact immutable roster Factory and a fail-closed
+  implementation manifest.
+- `SleepCareAgent` now owns Communication generation plus typed Episode plan and
+  evaluation judgments. `EvidenceReasoningAgent`, `CareStrategyAgent` and
+  `SafetyReviewAgent` own their Evidence, accepted-Evidence-to-Care and exact
+  hash-bound review inputs respectively. Each role declares its responsibility,
+  success/wait/failure conditions, Skill/Tool/collaboration allowlists, Context
+  visibility and state/side-effect permissions.
+- The shared low-level model invoker is private to each concrete role. A role
+  re-resolves its Skill and lock, recompiles the prompt from the authorized
+  Context/Profile and compares the complete canonical binding before any model
+  call. Prompt, hash, version and cross-role Context tampering therefore fail
+  before provider execution.
+- `ProductEpisodeRunner._invoke_and_accept` now receives a concrete
+  `RuntimeAgentPort`; Agent identity, work-product kind and Skill are derived
+  from that port. Production Factory and all readiness gates require an exact
+  `ProductAgentRoster`. The old public `runner.invokers` and
+  `runner.sleepcare_model` readiness surfaces were removed.
+- Kept deterministic acceptance, Tool execution, collaboration routing,
+  Safety revision sequencing, HITL, budgets, counters and Episode state
+  transitions in Runtime/Policy. `ProductEpisodeRunner` was not split and its
+  lifecycle/state machine was not redesigned.
+- Added direct unit entry points for all four roles, negative Context/prompt
+  boundary tests, exact Factory/configuration tests and concrete-roster end-to-end
+  coverage. A fixed Phase 1 Episode audit projection locks invocation ID,
+  Agent/Profile/Skill identity, Context/target/prompt hashes and versions.
+- Deliberately did not delete or migrate `radar_agent/agents`, `orchestrator` or
+  `dynamic`, and did not migrate Trend/Risk/RAG/Report/Memory capabilities.
+  The non-production deterministic replay composition may still enter through
+  the model-binding compatibility constructor, which immediately materializes
+  the same exact concrete roster; it is not a production Factory or alternate
+  execution path.
+
+### Codex verification
+
+- Role, Factory, architecture, Episode, Invoker, Tooling, Governance,
+  deterministic replay, HITL, Cold Start and namespace group:
+  `109 passed in 1.72s`.
+- Runner, persistence, Memory governance, Habit Profile, worker, provider,
+  acceptance, Product API, authority, SleepDomain bridge and radar run group:
+  `200 passed in 8.84s`.
+- The fixed Phase 1 audit projection hash remains
+  `00329051d0dc6b633b2546a47b7616d8cd57ddc6062cf1898c79f3acf3494bfd`.
+- Product Contract version remains `sleepagent-product-agent.v14`; Product
+  registry manifest hash remains
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`;
+  release identity remains
+  `02d4eff71d5d208288133237e6846da72ba45e984ac081e16544c90e47d344ae`.
+- All changed Python sources compile and `git diff --check` passes. Independent
+  architecture and Runtime reviews found no remaining high-risk bypass after
+  the final readiness and prompt-binding fixes.
+
+Fix rounds used: 2. The first established concrete role delegation and restored
+configuration-probe compatibility. The second removed callable/generic bypass
+surfaces, bound prompts and control Contexts inside concrete roles, made
+readiness exact-roster-only and locked Phase 1 audit identity.
+
+Phase 1 was committed locally as `241d9be`; Phase 2 remains uncommitted. No
+push, release or remote mutation was made.

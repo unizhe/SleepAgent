@@ -9,7 +9,10 @@ from sleepagent.radar_agent.persistence import (
     RadarPersistenceStore,
     connect_postgres_store,
 )
-from sleepagent.radar_agent.product_agent.contracts import AgentId
+from sleepagent.radar_agent.product_agent.agents import (
+    ProductAgentFactory,
+    ProductAgentRoster,
+)
 from sleepagent.radar_agent.product_agent.external_actions import (
     ConfiguredExternalActionExecutor,
 )
@@ -36,6 +39,10 @@ from sleepagent.radar_agent.product_agent.provider import (
     OpenAICompatibleStructuredAgentModel,
 )
 from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunner
+from sleepagent.radar_agent.product_agent.skills import (
+    SkillRegistry,
+    default_skill_packages,
+)
 from sleepagent.radar_agent.questionnaire import HabitQuestionnaireService
 
 
@@ -67,13 +74,17 @@ def build_product_episode_runner_from_env(
         habit_profile_store=habit_profile_store,
         commit_journal=PersistentCommitJournal(persistence),
     )
-    models = {
-        agent_id: OpenAICompatibleStructuredAgentModel()
-        for agent_id in AgentId
-    }
+    skill_registry = SkillRegistry(default_skill_packages())
+    agent_roster = ProductAgentFactory.create(
+        sleepcare_model=OpenAICompatibleStructuredAgentModel(),
+        evidence_reasoning_model=OpenAICompatibleStructuredAgentModel(),
+        care_strategy_model=OpenAICompatibleStructuredAgentModel(),
+        safety_review_model=OpenAICompatibleStructuredAgentModel(),
+        skill_registry=skill_registry,
+    )
     return ProductEpisodeRunner(
-        sleepcare_model=models[AgentId.SLEEP_CARE],
-        agent_models=models,
+        agent_roster=agent_roster,
+        skill_registry=skill_registry,
         habit_runtime=habit_runtime,
         commit_controller=commit_controller,
         result_store=PersistentProductEpisodeResultStore(persistence),
@@ -85,11 +96,17 @@ def build_product_episode_runner_from_env(
 def product_episode_runner_is_configured(
     runner: ProductEpisodeRunner,
 ) -> bool:
+    roster = getattr(runner, "agent_roster", None)
+    if type(roster) is not ProductAgentRoster:
+        return False
     models = [
-        runner.sleepcare_model,
-        *(item.model for item in runner.invokers.values()),
+        roster.sleepcare.planning_model,
+        *(item.model for item in roster),
     ]
-    return all(bool(getattr(model, "is_configured", True)) for model in models)
+    return all(
+        model is not None and bool(getattr(model, "is_configured", True))
+        for model in models
+    )
 
 
 def _persistence_store_from_env() -> RadarPersistenceStore:
