@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,19 +7,26 @@ from backend.main import app
 from sleepagent.radar_agent.api.http import (
     RADAR_AGENT_API_KEY_ENV,
     RADAR_AGENT_DEV_MODE_ENV,
+    RadarTaskCreateRequest,
     reset_radar_api_runtime_for_tests,
 )
+from sleepagent.radar_agent.runtime import (
+    InvalidTaskTransition,
+    RadarAgentTask,
+)
+from sleepagent.radar_agent.persistence import RadarSubject
+from sleepagent.radar_agent.provider import ReplayRadarProvider
 
 
-API_KEY = "dynamic-api-key"
-ACTOR_ID = "dynamic-family-user"
+API_KEY = "runtime-cutover-api-key"
+ACTOR_ID = "cutover-family-user"
 
 
 @pytest.fixture(autouse=True)
 def _runtime(monkeypatch):
     monkeypatch.setenv(RADAR_AGENT_API_KEY_ENV, API_KEY)
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
-    reset_radar_api_runtime_for_tests()
+    return reset_radar_api_runtime_for_tests()
 
 
 def _headers() -> dict[str, str]:
@@ -32,171 +37,136 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _payload() -> dict[str, str]:
-    return {
-        "runtime_kind": "dynamic_goal",
-        "goal_type": "night_review",
-        "target_date": "2026-07-09",
-        "scenario": "normal_night",
-    }
-
-
-def test_dynamic_create_uses_authenticated_role_and_run_is_database_queued() -> None:
+@pytest.mark.parametrize("runtime_kind", ["legacy_fixed", "dynamic_goal"])
+@pytest.mark.parametrize("development", ["true", "false"])
+def test_historical_runtime_kinds_cannot_be_created(
+    runtime_kind: str,
+    development: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, development)
+    runtime = reset_radar_api_runtime_for_tests()
     with TestClient(app) as client:
-        denied = client.post(
+        response = client.post(
             "/radar-agent/tasks",
-            headers={"x-api-key": API_KEY},
-            json=_payload(),
-        )
-        created = client.post(
-            "/radar-agent/tasks",
-            headers={**_headers(), "Idempotency-Key": "dynamic-night-1"},
-            json=_payload(),
-        )
-        task_id = created.json()["task"]["task_id"]
-        queued = client.post(
-            f"/radar-agent/tasks/{task_id}/run", headers=_headers()
-        )
-        deadline = time.monotonic() + 3
-        detail = None
-        while time.monotonic() < deadline:
-            detail = client.get(
-                f"/radar-agent/tasks/{task_id}", headers=_headers()
-            )
-            if detail.json()["task"]["status"] in {
-                "completed",
-                "failed",
-                "waiting_for_confirmation",
-            }:
-                break
-            time.sleep(0.03)
-        trace = client.get(
-            f"/radar-agent/tasks/{task_id}/decision-trace", headers=_headers()
-        )
-        history = client.get(
-            "/radar-agent/tasks?view=history", headers=_headers()
+            headers=_headers(),
+            json={"runtime_kind": runtime_kind},
         )
 
-    assert denied.status_code == 403
-    assert created.status_code == 200
-    assert created.json()["task"]["role"] == "family"
-    assert queued.status_code == 202
-    assert detail is not None
-    assert detail.json()["task"]["status"] == "completed"
-    assert detail.json()["task"]["execution_mode"] == "safe_degraded"
-    assert detail.json()["completion_receipt"]["completion_status"] == "complete"
-    assert trace.status_code == 200
-    assert any(
-        item["event_type"] == "execution.degraded"
-        for item in trace.json()["entries"]
+    assert response.status_code == (422 if development == "true" else 404)
+    with pytest.raises(ValueError, match="product_episode"):
+        RadarTaskCreateRequest(runtime_kind=runtime_kind)
+    assert runtime.store.list_tasks() == []
+    assert not hasattr(runtime, "worker")
+
+
+@pytest.mark.parametrize(
+    ("runtime_kind", "contract_version"),
+    [
+        ("legacy_fixed", "radar-legacy.v1"),
+        ("dynamic_goal", "radar-dynamic.v1"),
+    ],
+)
+def test_task_service_rejects_historical_runtime_creation(
+    runtime_kind: str,
+    contract_version: str,
+) -> None:
+    runtime = reset_radar_api_runtime_for_tests()
+    device = ReplayRadarProvider().list_devices()[0]
+
+    with pytest.raises(InvalidTaskTransition, match="read-only"):
+        runtime.service.create_task(
+            subject_id="historical-subject",
+            radar_device_id=device.radar_device_id,
+            runtime_kind=runtime_kind,
+            runtime_contract_version=contract_version,
+        )
+
+    assert runtime.store.list_tasks() == []
+
+
+@pytest.mark.parametrize(
+    ("runtime_kind", "contract_version"),
+    [
+        ("legacy_fixed", "radar-legacy.v1"),
+        ("dynamic_goal", "radar-dynamic.v1"),
+    ],
+)
+def test_historical_tasks_are_readable_but_all_agent_mutations_fail_closed(
+    runtime_kind: str,
+    contract_version: str,
+) -> None:
+    runtime = reset_radar_api_runtime_for_tests()
+    runtime.store.save_subject(
+        RadarSubject(
+            subject_id="historical-subject",
+            display_name="Historical Subject",
+        )
     )
-    assert [item["task"]["task_id"] for item in history.json()] == [task_id]
+    device = ReplayRadarProvider().list_devices()[0].model_copy(
+        update={"bound_subject_id": "historical-subject"}
+    )
+    runtime.store.save_device(device)
+    task = RadarAgentTask(
+        task_id=f"historical:{runtime_kind}",
+        trace_id=f"trace:{runtime_kind}",
+        subject_id="historical-subject",
+        radar_device_id=device.radar_device_id,
+        role="family",
+        requested_by_user_id=ACTOR_ID,
+        scenario="normal_night",
+        runtime_kind=runtime_kind,
+        runtime_contract_version=contract_version,
+        node_status=(
+            {"legacy-node": "pending"}
+            if runtime_kind == "legacy_fixed"
+            else {}
+        ),
+        goal_payload=(
+            {"goal_type": "night_review"}
+            if runtime_kind == "dynamic_goal"
+            else None
+        ),
+    )
+    runtime.store.save_task(task)
 
-
-def test_creating_or_refreshing_a_task_never_starts_analysis() -> None:
     with TestClient(app) as client:
-        created = client.post(
-            "/radar-agent/tasks",
-            headers={**_headers(), "Idempotency-Key": "created-not-run"},
-            json=_payload(),
+        detail = client.get(
+            f"/radar-agent/tasks/{task.task_id}", headers=_headers()
         )
-        task_id = created.json()["task"]["task_id"]
-        time.sleep(0.15)
-        refreshed = client.get(
-            f"/radar-agent/tasks/{task_id}", headers=_headers()
+        run = client.post(
+            f"/radar-agent/tasks/{task.task_id}/run", headers=_headers()
         )
-
-    assert created.status_code == 200
-    assert refreshed.json()["task"]["status"] == "created"
-    assert refreshed.json()["task"]["current_plan_id"] is None
-    assert refreshed.json()["artifacts"] == []
-
-
-def test_dynamic_compatibility_routes_are_hidden_outside_dev_mode(monkeypatch) -> None:
-    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
-    reset_radar_api_runtime_for_tests()
-    payload = {
-        **_payload(),
-        "scenario": "worsening_trend",
-    }
-    with TestClient(app) as client:
-        rejected = client.post(
-            "/radar-agent/tasks", headers=_headers(), json=payload
-        )
-        missing_bindings = client.post(
-            "/radar-agent/tasks", headers=_headers(), json=_payload()
-        )
-
-    assert rejected.status_code == 404
-    assert missing_bindings.status_code == 404
-
-
-def test_dynamic_doctor_material_confirmation_uses_authenticated_identity() -> None:
-    payload = {
-        **_payload(),
-        "goal_type": "doctor_material",
-    }
-    with TestClient(app) as client:
-        created = client.post(
-            "/radar-agent/tasks", headers=_headers(), json=payload
-        )
-        task_id = created.json()["task"]["task_id"]
-        assert client.post(
-            f"/radar-agent/tasks/{task_id}/run", headers=_headers()
-        ).status_code == 202
-        deadline = time.monotonic() + 3
-        detail = None
-        while time.monotonic() < deadline:
-            detail = client.get(
-                f"/radar-agent/tasks/{task_id}", headers=_headers()
-            ).json()
-            if detail["task"]["status"] == "waiting_for_confirmation":
-                break
-            time.sleep(0.03)
-        pending = next(
-            item for item in detail["confirmations"] if item["status"] == "pending"
-        )
-        resolved = client.post(
-            f"/radar-agent/tasks/{task_id}/confirm",
+        chat = client.post(
+            "/radar-agent/chat",
             headers=_headers(),
             json={
-                "confirmation_id": pending["confirmation_id"],
-                "approved": True,
-                "actor_id": "body-identity-is-ignored",
-                "actor_role": "doctor",
+                "task_id": task.task_id,
+                "message": "历史任务可以继续吗？",
+                "actor_id": ACTOR_ID,
+                "actor_role": "family",
+                "role": "family",
             },
         )
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            detail = client.get(
-                f"/radar-agent/tasks/{task_id}", headers=_headers()
-            ).json()
-            if detail["task"]["status"] == "completed":
-                break
-            time.sleep(0.03)
+        user_input = client.post(
+            f"/radar-agent/tasks/{task.task_id}/user-input",
+            headers=_headers(),
+            json={"request_id": "historical-request", "answer": "no"},
+        )
+        confirmation = client.post(
+            f"/radar-agent/tasks/{task.task_id}/confirm",
+            headers=_headers(),
+            json={
+                "confirmation_id": "historical-confirmation",
+                "approved": True,
+                "actor_id": ACTOR_ID,
+                "actor_role": "family",
+            },
+        )
 
-    assert resolved.status_code == 200
-    assert resolved.json()["resolved_by"] == ACTOR_ID
-    assert detail["task"]["status"] == "completed"
-    doctor_reports = [
-        item for item in detail["artifacts"] if item["artifact_type"] == "role_report:doctor"
-    ]
-    assert len(doctor_reports) == 1
-    exports = [
-        item
-        for item in detail["artifacts"]
-        if item["artifact_type"] == "doctor_material_export"
-    ]
-    assert len(exports) == 1
-    confirmation = next(
-        item
-        for item in detail["confirmations"]
-        if item["confirmation_id"] == pending["confirmation_id"]
-    )
-    assert confirmation["execution_status"] == "completed"
-    assert detail["completion_receipt"]["actions_executed"] == [
-        "export_doctor_material"
-    ]
-    source_hash = doctor_reports[0]["metadata"]["fact_snapshot_sha256"]
-    assert exports[0]["payload"]["fact_snapshot_sha256"] == source_hash
-    assert exports[0]["metadata"]["fact_snapshot_sha256"] == source_hash
+    assert detail.status_code == 200
+    assert detail.json()["task"]["runtime_kind"] == runtime_kind
+    assert {run.status_code, chat.status_code, user_input.status_code, confirmation.status_code} == {409}
+    persisted = runtime.service.get_task(task.task_id)
+    assert persisted.status.value == "created"
+    assert runtime.service.list_events(task.task_id) == []

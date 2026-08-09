@@ -24,11 +24,6 @@ from sleepagent.product_device import (
     LLM_NOT_CONFIGURED_MESSAGE,
     RadarDialogueStatus,
     RadarProductChatRequest,
-    RadarAgentAskRequest,
-    RadarAgentRoleRequest,
-    RadarAgentRun,
-    RadarAgentRunCreateRequest,
-    RadarSleepAgentService,
     RadarPublicAlertEvent,
     RadarPublicDashboardSummary,
     RadarPublicDevice,
@@ -71,36 +66,31 @@ from sleepagent.radar_agent.replay import (
     get_replay_scenario,
     list_replay_scenarios,
 )
-from sleepagent.radar_agent.api.http import (
-    router as radar_agent_router,
-    start_radar_dynamic_worker,
-    stop_radar_dynamic_worker,
-)
+from sleepagent.radar_agent.api.http import router as radar_agent_router
 from sleepagent.radar_agent.product_agent.habit_api import (
     router as habit_profile_router,
 )
 
-LEGACY_DEBUG_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
+DIAGNOSTIC_TRANSPORT_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
 PRODUCT_PROVIDER_MODE_ENV = "SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE"
 DEPLOYMENT_MODE_ENV = "SLEEPAGENT_DEPLOYMENT_MODE"
 
 
-def _legacy_debug_enabled() -> bool:
+def _diagnostic_transport_enabled() -> bool:
     return (
-        os.getenv(LEGACY_DEBUG_ENV, "false").strip().lower() == "true"
+        os.getenv(DIAGNOSTIC_TRANSPORT_ENV, "false").strip().lower() == "true"
         and os.getenv(DEPLOYMENT_MODE_ENV, "development").strip().lower()
         != "production"
     )
 
 
-async def _require_legacy_debug_surface(_request: Request) -> None:
-    if not _legacy_debug_enabled():
+async def _require_diagnostic_transport(_request: Request) -> None:
+    if not _diagnostic_transport_enabled():
         raise HTTPException(status_code=404, detail="Not Found")
 
 
 @asynccontextmanager
 async def _application_lifespan(_app: FastAPI):
-    start_radar_dynamic_worker()
     start_product_induction_worker()
     start_perceptor_push_worker()
     try:
@@ -108,13 +98,12 @@ async def _application_lifespan(_app: FastAPI):
     finally:
         stop_perceptor_push_worker()
         stop_product_induction_worker()
-        stop_radar_dynamic_worker()
 
 
 app = FastAPI(title="SleepAgent", version="0.1.0", lifespan=_application_lifespan)
 app.include_router(
     radar_agent_router,
-    dependencies=[Depends(_require_legacy_debug_surface)],
+    dependencies=[Depends(_require_diagnostic_transport)],
 )
 app.include_router(habit_profile_router)
 DEFAULT_CORS_ORIGINS = (
@@ -122,7 +111,6 @@ DEFAULT_CORS_ORIGINS = (
     "http://localhost:18510",
 )
 _RADAR_PRODUCT_PROVIDER: FakeRadarProductDataProvider | None = None
-_RADAR_AGENT_SERVICE: RadarSleepAgentService | None = None
 _PRODUCT_EPISODE_RUNNER: ProductEpisodeRunner | None = None
 _PRODUCT_INDUCTION_SCHEDULER = ProductInductionScheduler(
     lambda: _PRODUCT_EPISODE_RUNNER,
@@ -184,7 +172,7 @@ app.add_middleware(
 
 
 async def _require_product_radar_auth(request: Request) -> None:
-    await _require_legacy_debug_surface(request)
+    await _require_diagnostic_transport(request)
     expected_token = os.getenv(PRODUCT_RADAR_API_KEY_ENV)
     if not expected_token:
         context = _product_auth_context(request)
@@ -559,89 +547,6 @@ async def radar_product_chat(
     )
 
 
-@app.post("/product/radar/agent-runs", response_model=RadarAgentRun)
-async def create_radar_agent_run(
-    request: RadarAgentRunCreateRequest,
-    http_request: Request,
-    _: None = Depends(_require_product_radar_auth),
-) -> RadarAgentRun:
-    runner = _product_episode_runner()
-    if _product_agent_is_configured(runner):
-        _require_product_actor_binding_configuration()
-    return _radar_sleep_agent_service().create_run(
-        request,
-        idempotency_key=http_request.headers.get("idempotency-key"),
-    )
-
-
-@app.get("/product/radar/agent-runs/{run_id}", response_model=RadarAgentRun)
-async def get_radar_agent_run(
-    run_id: str,
-    _: None = Depends(_require_product_radar_auth),
-) -> RadarAgentRun:
-    try:
-        return _radar_sleep_agent_service().get_run(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
-
-
-@app.get(
-    "/product/radar/agent-runs/{run_id}/events",
-    response_model=list[dict[str, Any]],
-)
-async def get_radar_agent_run_events(
-    run_id: str,
-    _: None = Depends(_require_product_radar_auth),
-) -> list[dict[str, Any]]:
-    try:
-        run = _radar_sleep_agent_service().get_run(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
-    return [event.model_dump(mode="json", by_alias=True) for event in run.events]
-
-
-@app.get(
-    "/product/radar/agent-runs/{run_id}/artifacts",
-    response_model=list[dict[str, Any]],
-)
-async def get_radar_agent_run_artifacts(
-    run_id: str,
-    _: None = Depends(_require_product_radar_auth),
-) -> list[dict[str, Any]]:
-    try:
-        run = _radar_sleep_agent_service().get_run(run_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
-    return [artifact.model_dump(mode="json", by_alias=True) for artifact in run.artifacts]
-
-
-@app.post("/product/radar/agent-runs/{run_id}/role", response_model=RadarAgentRun)
-async def set_radar_agent_run_role(
-    run_id: str,
-    request: RadarAgentRoleRequest,
-    _: None = Depends(_require_product_radar_auth),
-) -> RadarAgentRun:
-    try:
-        return _radar_sleep_agent_service().set_role(run_id, request.role)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
-
-
-@app.post("/product/radar/agent-runs/{run_id}/ask", response_model=RadarAgentRun)
-async def ask_radar_agent_run(
-    run_id: str,
-    request: RadarAgentAskRequest,
-    _: None = Depends(_require_product_radar_auth),
-) -> RadarAgentRun:
-    try:
-        runner = _product_episode_runner()
-        if _product_agent_is_configured(runner):
-            _require_product_actor_binding_configuration()
-        return _radar_sleep_agent_service().ask(run_id, request)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Radar agent run not found.") from exc
-
-
 @app.post("/integrations/perceptor/webhook")
 async def perceptor_webhook(
     request: Request,
@@ -719,7 +624,7 @@ def _radar_product_data_provider(
 ) -> FakeRadarProductDataProvider:
     global _RADAR_PRODUCT_PROVIDER
     if (
-        not _legacy_debug_enabled()
+        not _diagnostic_transport_enabled()
         or os.getenv(PRODUCT_PROVIDER_MODE_ENV, "").strip().lower() != "fake"
     ):
         raise RuntimeError(
@@ -738,19 +643,9 @@ def _radar_product_data_provider(
     return _RADAR_PRODUCT_PROVIDER
 
 
-def _radar_sleep_agent_service() -> RadarSleepAgentService:
-    global _RADAR_AGENT_SERVICE
-    if _RADAR_AGENT_SERVICE is None:
-        _RADAR_AGENT_SERVICE = RadarSleepAgentService(
-            data_provider=_radar_product_data_provider(),
-            episode_runner=_product_episode_runner(),
-        )
-    return _RADAR_AGENT_SERVICE
-
-
 def _status_payload() -> dict[str, Any]:
     if (
-        _legacy_debug_enabled()
+        _diagnostic_transport_enabled()
         and os.getenv(PRODUCT_PROVIDER_MODE_ENV, "").strip().lower() == "fake"
     ):
         _refresh_product_data_freshness_for_status()

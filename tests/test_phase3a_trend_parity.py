@@ -222,6 +222,7 @@ def test_product_tool_executor_dispatches_structured_trend_analysis() -> None:
         context=ProductToolExecutionContext(
             caller="runtime",
             fact_snapshot=_snapshot(summaries=summaries),
+            episode_id="episode-phase3a-trend",
         ),
     )
 

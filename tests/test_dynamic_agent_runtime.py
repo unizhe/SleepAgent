@@ -34,7 +34,12 @@ from sleepagent.radar_agent.llm import CloudLLMSchemaError
 from sleepagent.radar_agent.persistence import RadarPersistenceStore, RadarSubject
 from sleepagent.radar_agent.provider import ReplayRadarProvider
 from sleepagent.radar_agent.replay import get_replay_scenario
-from sleepagent.radar_agent.runtime import RadarNodeStatus, RadarTaskStatus, TaskService
+from sleepagent.radar_agent.runtime import (
+    RadarAgentTask,
+    RadarNodeStatus,
+    RadarTaskStatus,
+    TaskService,
+)
 from sleepagent.radar_agent.schemas import A2AMessage
 
 
@@ -295,15 +300,18 @@ def _runtime(
         )
     )
     store.save_device(device)
-    task = service.create_task(
+    task = RadarAgentTask(
+        task_id="dynamic-oracle-task",
+        trace_id="dynamic-oracle-trace",
         subject_id="subject-1",
         radar_device_id=device.radar_device_id,
         role="family",
-        actor_id="family-1",
+        requested_by_user_id="family-1",
         scenario=scenario,
         runtime_kind="dynamic_goal",
         runtime_contract_version="radar-dynamic.v1",
     )
+    store.save_task(task)
     night = get_replay_scenario(scenario).deterministic_input.night_report.night_of
     kwargs: dict[str, Any] = {"target_date": night}
     if goal_type in {GoalType.TREND_COMPARISON, GoalType.CHANGE_EXPLANATION}:
@@ -931,15 +939,18 @@ def test_grounded_question_reuses_explicit_ledger_without_full_night_rerun() -> 
         for item in service.list_artifacts(baseline_task.task_id)
         if item.artifact_type == "role_report:family"
     )
-    task = service.create_task(
+    task = RadarAgentTask(
+        task_id="dynamic-grounded-oracle-task",
+        trace_id="dynamic-grounded-oracle-trace",
         subject_id=baseline_task.subject_id,
         radar_device_id=baseline_task.radar_device_id,
         role="family",
-        actor_id="family-1",
+        requested_by_user_id="family-1",
         scenario="normal_night",
         runtime_kind="dynamic_goal",
         runtime_contract_version="radar-dynamic.v1",
     )
+    store.save_task(task)
     goal = UserGoal(
         goal_id=f"goal:{task.task_id}",
         task_id=task.task_id,

@@ -51,6 +51,7 @@ def test_agent_cannot_self_attest_risk_facts() -> None:
     context = ProductToolExecutionContext(
         caller=AgentId.SAFETY_REVIEW,
         fact_snapshot=_snapshot(),
+        episode_id="episode-phase3a-handler",
     )
     executor = ProductToolExecutor()
 
@@ -480,6 +481,8 @@ def _execute(
             task_context = packet.get("task_context")
             if isinstance(task_context, dict):
                 episode_id = task_context.get("task_id")
+    if episode_id is None:
+        episode_id = "episode-phase3a-handler"
     return ProductToolExecutor().execute(
         tool_name,
         arguments,

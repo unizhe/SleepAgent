@@ -1,28 +1,34 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.main import app
+import sleepagent.product_device as product_device
+import sleepagent.product_device.agents as retired_product_agents
+import sleepagent.product_device.api as product_device_api
 from sleepagent.product_device import (
     LLM_NOT_CONFIGURED_MESSAGE,
     OpenAICompatibleProviderConfig,
     PRODUCT_DIALOGUE_SCHEMA_VERSION,
-    ProductDialogueAgent,
-    ProductDialogueValidationError,
     RadarAlertEvent,
     RadarAlertSeverity,
     RadarBedPresence,
+    RadarDashboardProjectionTool,
     RadarDevice,
     RadarDeviceStatus,
     RadarDialogueStatus,
-    RadarProductAgent,
     RadarProductDialogueRequest,
     RadarSleepReport,
     RadarSourceMetadata,
     RadarVitalSnapshot,
+)
+from sleepagent.product_device.agents import RadarProductAgent
+from sleepagent.product_device.dialogue import (
+    ProductDialogueAgent,
+    ProductDialogueValidationError,
     build_product_dialogue_messages,
     validate_product_dialogue_json,
 )
@@ -43,7 +49,7 @@ class FakeProductProvider:
         return json.dumps(self.payload, ensure_ascii=False)
 
 
-def test_radar_product_agent_marks_dashboard_data_quality_caveats_and_blocks() -> None:
+def test_dashboard_projection_tool_marks_data_quality_caveats_and_blocks() -> None:
     device = _device(status=RadarDeviceStatus.OFFLINE)
     snapshots = [
         _snapshot(
@@ -71,7 +77,7 @@ def test_radar_product_agent_marks_dashboard_data_quality_caveats_and_blocks() -
     )
     alert = _alert(raw_event_id="alert-001")
 
-    dashboard = RadarProductAgent().build_dashboard_summary(
+    dashboard = RadarDashboardProjectionTool().run(
         device=device,
         recent_snapshots=snapshots,
         latest_sleep_report=report,
@@ -94,6 +100,45 @@ def test_radar_product_agent_marks_dashboard_data_quality_caveats_and_blocks() -
     assert "stale" in dashboard.summary_text.lower()
 
 
+def test_retired_radar_product_agent_delegates_to_dashboard_tool_with_parity() -> None:
+    inputs = {
+        "device": _device(status=RadarDeviceStatus.ONLINE),
+        "recent_snapshots": [
+            _snapshot(
+                measured_at=NOW - timedelta(seconds=30),
+                heart_rate_bpm=64,
+                breath_rate_bpm=15,
+                bed_presence=RadarBedPresence.IN_BED,
+            )
+        ],
+        "latest_sleep_report": _sleep_report(
+            sleep_end_at=NOW - timedelta(hours=7)
+        ),
+        "recent_alerts": [_alert(raw_event_id="alert-parity")],
+        "now": NOW,
+    }
+
+    canonical = RadarDashboardProjectionTool().run(**inputs)
+    retired = RadarProductAgent().run(**inputs)
+
+    assert retired.model_dump(mode="json") == canonical.model_dump(mode="json")
+
+
+def test_product_device_package_and_api_do_not_expose_or_instantiate_old_agents() -> None:
+    for retired_name in (
+        "DeviceCareAgent",
+        "ProductDialogueAgent",
+        "RadarProductAgent",
+        "RadarSleepAgentService",
+    ):
+        assert not hasattr(product_device, retired_name)
+
+    assert not hasattr(retired_product_agents, "DeviceCareAgent")
+    api_source = inspect.getsource(product_device_api)
+    assert "product_device.agents" not in api_source
+    assert "RadarProductAgent(" not in api_source
+
+
 def test_product_dialogue_returns_not_configured_without_mock_answer() -> None:
     dashboard = _healthy_dashboard()
     request = RadarProductDialogueRequest(
@@ -112,7 +157,7 @@ def test_product_dialogue_returns_not_configured_without_mock_answer() -> None:
 
 
 def test_product_dialogue_blocks_current_question_when_quality_blocks_provider_call() -> None:
-    poor_dashboard = RadarProductAgent().build_dashboard_summary(
+    poor_dashboard = RadarDashboardProjectionTool().run(
         device=_device(status=RadarDeviceStatus.OFFLINE),
         recent_snapshots=[
             _snapshot(
@@ -216,6 +261,8 @@ def test_product_dialogue_prompt_builder_is_product_specific() -> None:
 
 
 def test_product_radar_routes_are_registered() -> None:
+    from backend.main import app
+
     route_paths = {route.path for route in app.routes}
 
     assert "/product/radar/devices" in route_paths
@@ -240,7 +287,7 @@ def _valid_product_dialogue_payload() -> dict:
 
 
 def _healthy_dashboard():
-    return RadarProductAgent().build_dashboard_summary(
+    return RadarDashboardProjectionTool().run(
         device=_device(status=RadarDeviceStatus.ONLINE),
         recent_snapshots=[
             _snapshot(

@@ -1,7 +1,7 @@
 from sleepagent.radar_agent.api.routes import (
     RADAR_AGENT_API_PREFIX,
     RADAR_AGENT_ROUTES,
-    DYNAMIC_RADAR_AGENT_ROUTES,
+    PRODUCT_AGENT_TASK_ROUTES,
     RadarAgentRoute,
     full_route_paths,
     all_route_paths,
@@ -31,7 +31,7 @@ def __getattr__(name: str):
 __all__ = [
     "RADAR_AGENT_API_PREFIX",
     "RADAR_AGENT_ROUTES",
-    "DYNAMIC_RADAR_AGENT_ROUTES",
+    "PRODUCT_AGENT_TASK_ROUTES",
     "RadarAgentRoute",
     "full_route_paths",
     "all_route_paths",

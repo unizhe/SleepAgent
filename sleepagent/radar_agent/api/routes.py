@@ -35,8 +35,8 @@ RADAR_AGENT_ROUTES: Final[tuple[RadarAgentRoute, ...]] = (
     RadarAgentRoute(
         "DELETE", "/subjects/{subject_id}/data", "delete authorized subject data"
     ),
-    RadarAgentRoute("POST", "/tasks", "create replay/nightly analysis task"),
-    RadarAgentRoute("POST", "/tasks/{task_id}/run", "start orchestrator"),
+    RadarAgentRoute("POST", "/tasks", "create canonical Product Episode task"),
+    RadarAgentRoute("POST", "/tasks/{task_id}/run", "run ProductEpisodeRunner"),
     RadarAgentRoute("GET", "/tasks/{task_id}", "read task state and artifacts"),
     RadarAgentRoute("GET", "/tasks/{task_id}/events", "read historical events"),
     RadarAgentRoute("GET", "/tasks/{task_id}/stream", "stream task events over SSE"),
@@ -49,8 +49,8 @@ RADAR_AGENT_ROUTES: Final[tuple[RadarAgentRoute, ...]] = (
     RadarAgentRoute("POST", "/chat", "explain an existing task from ledger context"),
 )
 
-DYNAMIC_RADAR_AGENT_ROUTES: Final[tuple[RadarAgentRoute, ...]] = (
-    RadarAgentRoute("GET", "/tasks", "list active or historical goal tasks"),
+PRODUCT_AGENT_TASK_ROUTES: Final[tuple[RadarAgentRoute, ...]] = (
+    RadarAgentRoute("GET", "/tasks", "list active or historical Product Episode tasks"),
     RadarAgentRoute(
         "POST", "/tasks/{task_id}/user-input", "answer a reviewed paused-task question"
     ),
@@ -70,14 +70,14 @@ def full_route_paths() -> tuple[str, ...]:
 def all_route_paths() -> tuple[str, ...]:
     return tuple(
         f"{RADAR_AGENT_API_PREFIX}{route.path}"
-        for route in (*RADAR_AGENT_ROUTES, *DYNAMIC_RADAR_AGENT_ROUTES)
+        for route in (*RADAR_AGENT_ROUTES, *PRODUCT_AGENT_TASK_ROUTES)
     )
 
 
 __all__ = [
     "RADAR_AGENT_API_PREFIX",
     "RADAR_AGENT_ROUTES",
-    "DYNAMIC_RADAR_AGENT_ROUTES",
+    "PRODUCT_AGENT_TASK_ROUTES",
     "RadarAgentRoute",
     "full_route_paths",
     "all_route_paths",

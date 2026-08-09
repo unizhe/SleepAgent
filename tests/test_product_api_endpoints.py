@@ -16,7 +16,6 @@ from sleepagent.product_device import (
     LLM_NOT_CONFIGURED_MESSAGE,
     PRODUCT_RADAR_API_KEY_ENV,
     RadarDialogueStatus,
-    RadarAgentRunStatus,
 )
 from sleepagent.radar_agent.replay import replay_scenario_ids
 from sleepagent.radar_agent.product_agent import (
@@ -36,16 +35,6 @@ def test_application_lifespan_starts_and_stops_product_induction(
     calls: list[str] = []
     monkeypatch.setattr(
         backend_main,
-        "start_radar_dynamic_worker",
-        lambda: calls.append("dynamic:start"),
-    )
-    monkeypatch.setattr(
-        backend_main,
-        "stop_radar_dynamic_worker",
-        lambda: calls.append("dynamic:stop"),
-    )
-    monkeypatch.setattr(
-        backend_main,
         "start_product_induction_worker",
         lambda: calls.append("induction:start"),
     )
@@ -57,16 +46,11 @@ def test_application_lifespan_starts_and_stops_product_induction(
 
     async def exercise_lifespan() -> None:
         async with backend_main._application_lifespan(app):
-            assert calls == ["dynamic:start", "induction:start"]
+            assert calls == ["induction:start"]
 
     asyncio.run(exercise_lifespan())
 
-    assert calls == [
-        "dynamic:start",
-        "induction:start",
-        "induction:stop",
-        "dynamic:stop",
-    ]
+    assert calls == ["induction:start", "induction:stop"]
 
 
 def test_product_radar_api_requires_auth(monkeypatch) -> None:
@@ -178,56 +162,11 @@ def test_product_radar_chat_returns_llm_not_configured_without_source_metadata(
     _assert_no_vendor_identifiers(payload)
 
 
-def test_product_radar_agent_run_returns_demo_metadata_and_llm_config_state(
+def test_retired_product_agent_run_routes_are_not_registered(
     monkeypatch,
 ) -> None:
     _reset_fake_provider(monkeypatch)
-    monkeypatch.setattr(backend_main, "_RADAR_AGENT_SERVICE", None)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-
     response = _request(
-        "POST",
-        "/product/radar/agent-runs",
-        headers={
-            **_api_key_headers(),
-            "Idempotency-Key": "api-demo-key",
-        },
-        json_body={
-            "radar_device_id": DEFAULT_FAKE_RADAR_DEVICE_ID,
-            "question": "昨晚睡得怎么样？",
-            "role": "family",
-            "idempotency_key": "api-demo-key",
-        },
-    )
-
-    assert response["status"] == 200
-    payload = response["json"]
-    assert payload["status"] == RadarAgentRunStatus.FAILED_LLM.value
-    assert payload["data_mode"] == "demo"
-    assert payload["generated_from_demo_data"] is True
-    assert payload["scenario"] == "normal_night"
-    assert payload["scenario_expectations"]["risk_level"] == "info"
-    assert "DEEPSEEK_API_KEY" in payload["error_message"]
-    assert payload["visible_steps"]
-    assert payload["evidence"]
-    _assert_no_vendor_identifiers(payload)
-
-
-def test_product_agent_run_and_followup_use_product_episode_runner(
-    monkeypatch,
-) -> None:
-    _reset_fake_provider(monkeypatch)
-    monkeypatch.setenv("SLEEPAGENT_PRODUCT_ACTOR_ID", "actor-1")
-    monkeypatch.setenv(
-        "SLEEPAGENT_PRODUCT_SUBJECT_ID",
-        DEFAULT_FAKE_RADAR_DEVICE_ID,
-    )
-    monkeypatch.setenv("SLEEPAGENT_PRODUCT_ACTOR_ROLE", "family")
-    runner = _RecordingProductEpisodeRunner()
-    monkeypatch.setattr(backend_main, "_PRODUCT_EPISODE_RUNNER", runner)
-    monkeypatch.setattr(backend_main, "_RADAR_AGENT_SERVICE", None)
-
-    created = _request(
         "POST",
         "/product/radar/agent-runs",
         headers={**_api_key_headers(), "Idempotency-Key": "runner-route"},
@@ -239,33 +178,7 @@ def test_product_agent_run_and_followup_use_product_episode_runner(
         },
     )
 
-    assert created["status"] == 200
-    payload = created["json"]
-    assert payload["status"] == RadarAgentRunStatus.COMPLETED.value
-    assert payload["graph_mode"] == "product_episode_runner"
-    assert len(runner.requests) == 3
-    assert {item.episode_type.value for item in runner.requests} == {
-        "role_material"
-    }
-    assert {item.doctor_material for item in runner.requests} == {False, True}
-    run_id = payload["run_id"]
-
-    followed_up = _request(
-        "POST",
-        f"/product/radar/agent-runs/{run_id}/ask",
-        headers=_api_key_headers(),
-        json_body={
-            "user_message": "那今晚要注意什么？",
-            "role": "family",
-        },
-    )
-
-    assert followed_up["status"] == 200
-    assert len(runner.requests) == 4
-    assert runner.requests[-1].episode_type.value == "grounded_dialogue"
-    assert followed_up["json"]["chat_turns"][-1]["assistant_message"].startswith(
-        "ProductEpisodeRunner"
-    )
+    assert response["status"] == 404
 
 
 def test_product_chat_uses_product_episode_runner_when_provider_is_configured(
@@ -353,7 +266,7 @@ def test_product_radar_replay_scenario_catalog_is_exposed_by_api(monkeypatch) ->
     assert "export_doctor_material" in detail_response["json"]["expected"]["confirmation_candidates"]
 
 
-def test_product_radar_api_uses_requested_replay_scenario(monkeypatch) -> None:
+def test_product_radar_dashboard_uses_requested_replay_scenario(monkeypatch) -> None:
     _reset_fake_provider(monkeypatch)
 
     dashboard_response = _request(
@@ -361,26 +274,9 @@ def test_product_radar_api_uses_requested_replay_scenario(monkeypatch) -> None:
         f"/product/radar/devices/{DEFAULT_FAKE_RADAR_DEVICE_ID}/dashboard?scenario=frequent_out_of_bed",
         headers=_api_key_headers(),
     )
-    run_response = _request(
-        "POST",
-        "/product/radar/agent-runs",
-        headers={**_api_key_headers(), "Idempotency-Key": "scenario-run-key"},
-        json_body={
-            "radar_device_id": DEFAULT_FAKE_RADAR_DEVICE_ID,
-            "question": "昨晚离床多吗？",
-            "role": "family",
-            "scenario": "frequent_out_of_bed",
-            "idempotency_key": "scenario-run-key",
-        },
-    )
-
     assert dashboard_response["status"] == 200
-    assert run_response["status"] == 200
     assert dashboard_response["json"]["latest_sleep_report"]["getup_count"] == 5
     assert dashboard_response["json"]["data_quality"]["invalid_reading_count"] == 6
-    assert run_response["json"]["scenario"] == "frequent_out_of_bed"
-    assert run_response["json"]["scenario_expectations"]["risk_level"] == "watch"
-    assert run_response["json"]["scenario_expectations"]["questionnaire_candidates"]
 
 
 def test_product_radar_refresh_and_realtime_basic_flow_accepts_bearer_auth(

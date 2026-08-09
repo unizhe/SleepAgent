@@ -27,7 +27,12 @@ from sleepagent.radar_agent.orchestrator import (
 from sleepagent.radar_agent.orchestrator import langgraph as graph_module
 from sleepagent.radar_agent.provider import ReplayRadarProvider
 from sleepagent.radar_agent.persistence import RadarPersistenceStore, RadarSubject
-from sleepagent.radar_agent.runtime import RadarNodeStatus, RadarTaskStatus, TaskService
+from sleepagent.radar_agent.runtime import (
+    RadarAgentTask,
+    RadarNodeStatus,
+    RadarTaskStatus,
+    TaskService,
+)
 from sleepagent.radar_agent.schemas import A2AMessage, RadarAgentName, RiskLevel
 
 
@@ -151,11 +156,20 @@ def test_task_service_persists_failed_node_and_retry_resumes_graph() -> None:
         rag_agent=FlakyRAGAgent(),
     )
     service = _task_service(provider)
-    task = service.create_task(
+    task = RadarAgentTask(
+        task_id="legacy-workflow-oracle",
+        trace_id="legacy-workflow-trace",
         subject_id="elder-001",
         radar_device_id=provider.list_devices()[0].radar_device_id,
         scenario="normal_night",
+        runtime_kind="legacy_fixed",
+        runtime_contract_version="radar-legacy.v1",
+        node_status={
+            node.value: RadarNodeStatus.PENDING
+            for node in WORKFLOW_NODE_ORDER
+        },
     )
+    service.store.save_task(task)
     context = _context(task_id=task.task_id, trace_id=task.trace_id)
 
     with pytest.raises(RadarNodeExecutionError):
@@ -168,7 +182,18 @@ def test_task_service_persists_failed_node_and_retry_resumes_graph() -> None:
     assert failed.node_status[WorkflowNodeName.EVIDENCE_LEDGER_REVIEW.value] == RadarNodeStatus.SUCCEEDED
     assert failed.node_status[WorkflowNodeName.RAG_GROUNDING.value] == RadarNodeStatus.FAILED
 
-    service.retry_failed_task(task.task_id)
+    retry_statuses = dict(failed.node_status)
+    retry_statuses[WorkflowNodeName.RAG_GROUNDING.value] = RadarNodeStatus.PENDING
+    service.store.save_task(
+        failed.model_copy(
+            update={
+                "status": RadarTaskStatus.RUNNING,
+                "node_status": retry_statuses,
+                "retry_count": failed.retry_count + 1,
+                "failure": None,
+            }
+        )
+    )
     decision = service.execute(task.task_id, workflow, context)
     recovered = service.get_task(task.task_id)
 

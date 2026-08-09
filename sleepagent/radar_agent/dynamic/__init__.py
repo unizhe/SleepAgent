@@ -1,8 +1,8 @@
-"""Goal-driven radar Agent runtime.
+"""Read-only decoders for historical goal-driven Radar task records.
 
-The fixed 14-node workflow remains available as the legacy runtime.  This
-package contains the persisted contracts and bounded control loop used by the
-dynamic runtime.
+Executable Dynamic Runtime sources remain in this directory only until the
+Phase 3C physical deletion. No application composition imports them; this
+package root exposes persisted DTOs needed to inspect historical records.
 """
 
 from .contracts import (

@@ -9,16 +9,11 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from sleepagent.radar_agent.api.http import (
     RADAR_AGENT_API_KEY_ENV,
-    RADAR_AGENT_LLM_RETRY_ENV,
-    RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV,
-    RADAR_AGENT_RUNTIME_MODE_ENV,
     RADAR_AGENT_DEV_MODE_ENV,
     RadarApiRuntime,
     RadarTaskCreateRequest,
-    _model_router,
     reset_radar_api_runtime_for_tests,
 )
-from sleepagent.radar_agent.dynamic import GoalType
 from sleepagent.radar_agent.product_agent import (
     CommunicationDraft,
     DeterministicCommitController,
@@ -59,9 +54,8 @@ def _headers(*, actor_id: str = ACTOR_ID, role: str = "family") -> dict[str, str
 def _create(client: TestClient, scenario: str = "normal_night", key: str = "night-1"):
     return client.post(
         "/radar-agent/tasks",
-        headers={"x-api-key": API_KEY, "Idempotency-Key": key},
+        headers={**_headers(), "Idempotency-Key": key},
         json={
-            "runtime_kind": "legacy_fixed",
             "scenario": scenario,
             "actor_id": ACTOR_ID,
             "role": "family",
@@ -80,135 +74,9 @@ def test_task_api_requires_auth_and_creation_is_idempotent() -> None:
     assert second.json()["task"]["task_id"] == first.json()["task"]["task_id"]
 
 
-def test_all_seven_replay_scenarios_can_create_tasks() -> None:
-    with TestClient(app) as client:
-        responses = []
-        for scenario in replay_scenario_ids():
-            created = _create(client, scenario=scenario, key=f"scenario:{scenario}")
-            task_id = created.json()["task"]["task_id"]
-            responses.append(
-                client.post(f"/radar-agent/tasks/{task_id}/run", headers=_headers())
-            )
-
-    assert len(responses) == 7
-    assert all(response.status_code == 200 for response in responses)
-    assert [response.json()["risk_level"] for response in responses] == [
-        get_replay_scenario(scenario).expected.risk_level.value
-        for scenario in replay_scenario_ids()
-    ]
-    assert [response.json()["replay_scenario"]["scenario_id"] for response in responses] == list(
-        replay_scenario_ids()
-    )
-
-
-def test_run_history_artifacts_sse_reconnect_and_grounded_chat() -> None:
-    with TestClient(app) as client:
-        created = _create(client, scenario="frequent_out_of_bed")
-        task_id = created.json()["task"]["task_id"]
-        run = client.post(f"/radar-agent/tasks/{task_id}/run", headers=_headers())
-        history = client.get(f"/radar-agent/tasks/{task_id}/events", headers=_headers())
-        detail = client.get(f"/radar-agent/tasks/{task_id}", headers=_headers())
-        ledger_before_chat = next(
-            item["evidence_ledger"]
-            for item in detail.json()["artifacts"]
-            if item["evidence_ledger"] is not None
-        )
-        cursor = history.json()[-3]["sequence"]
-        stream = client.get(
-            f"/radar-agent/tasks/{task_id}/stream",
-            headers={**_headers(), "Last-Event-ID": str(cursor)},
-        )
-        chat = client.post(
-            "/radar-agent/chat",
-            headers=_headers(),
-            json={
-                "task_id": task_id,
-                "message": "昨晚为什么离床变多？",
-                "actor_id": ACTOR_ID,
-                "actor_role": "family",
-                "role": "doctor",
-            },
-        )
-        detail_after_chat = client.get(
-            f"/radar-agent/tasks/{task_id}", headers=_headers()
-        )
-
-    assert run.status_code == 200
-    assert run.json()["task"]["status"] == "completed"
-    assert history.status_code == 200
-    assert [event["sequence"] for event in history.json()] == list(
-        range(1, len(history.json()) + 1)
-    )
-    assert detail.json()["artifacts"]
-    assert any(item["artifact_type"] == "evidence_ledger" for item in detail.json()["artifacts"])
-    assert stream.status_code == 200
-    assert f"id: {cursor}" not in stream.text
-    assert f"id: {cursor + 1}" in stream.text
-    assert chat.status_code == 200
-    assert chat.json()["role"] == "doctor"
-    assert chat.json()["facts_mutated"] is False
-    assert chat.json()["evidence_refs"]
-    assert chat.json()["rag_citation_refs"]
-    ledger_after_chat = next(
-        item["evidence_ledger"]
-        for item in detail_after_chat.json()["artifacts"]
-        if item["evidence_ledger"] is not None
-    )
-    assert ledger_after_chat == ledger_before_chat
-
-
-def test_task_permissions_and_confirmation_role_are_enforced() -> None:
-    with TestClient(app) as client:
-        created = _create(client, scenario="escalate_candidate")
-        task_id = created.json()["task"]["task_id"]
-        run = client.post(f"/radar-agent/tasks/{task_id}/run", headers=_headers())
-        forbidden = client.get(
-            f"/radar-agent/tasks/{task_id}",
-            headers=_headers(actor_id="other-family-user"),
-        )
-        confirmation = run.json()["confirmations"][0]
-        wrong_role = client.post(
-            f"/radar-agent/tasks/{task_id}/confirm",
-            headers={"x-api-key": API_KEY},
-            json={
-                "confirmation_id": confirmation["confirmation_id"],
-                "approved": True,
-                "actor_id": ACTOR_ID,
-                "actor_role": "doctor",
-            },
-        )
-        resolved = client.post(
-            f"/radar-agent/tasks/{task_id}/confirm",
-            headers={"x-api-key": API_KEY},
-            json={
-                "confirmation_id": confirmation["confirmation_id"],
-                "approved": True,
-                "actor_id": ACTOR_ID,
-                "actor_role": "family",
-            },
-        )
-
-    assert forbidden.status_code == 403
-    assert wrong_role.status_code == 403
-    assert resolved.status_code == 200
-    assert resolved.json()["status"] == "approved"
-
-
-def test_radar_llm_timeout_and_retry_are_configurable(monkeypatch) -> None:
-    monkeypatch.setenv(RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV, "12.5")
-    monkeypatch.setenv(RADAR_AGENT_LLM_RETRY_ENV, "2")
-    runtime = RadarApiRuntime()
-
-    router = _model_router(runtime.service, "task-config-probe")
-
-    assert router.client.config.timeout == 12.5
-    assert router.client.config.retry == 2
-
-
-def test_product_runtime_mode_routes_task_and_chat_only_to_product_runner(
+def test_product_routes_task_and_chat_only_to_product_runner(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = RecordingProductRunner()
     reset_radar_api_runtime_for_tests(
@@ -267,10 +135,9 @@ def test_product_runtime_mode_routes_task_and_chat_only_to_product_runner(
     )
 
 
-def test_legacy_radar_agent_routes_are_hidden_outside_dev_mode(
+def test_radar_agent_routes_are_hidden_outside_explicit_dev_transport(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
     runner = RecordingProductRunner()
     runtime = reset_radar_api_runtime_for_tests(product_runner=runner)
@@ -328,7 +195,6 @@ def test_legacy_radar_agent_routes_are_hidden_outside_dev_mode(
 def test_product_confirmation_resumes_frozen_episode_and_records_execution(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = ConfirmationProductRunner()
     reset_radar_api_runtime_for_tests(product_runner=runner)
@@ -396,7 +262,6 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
 def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = UserInputProductRunner()
     reset_radar_api_runtime_for_tests(product_runner=runner)
@@ -444,30 +309,19 @@ def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
     )
 
 
-def test_product_runtime_mode_rejects_legacy_and_dynamic_agent_paths(
+def test_create_contract_rejects_legacy_and_dynamic_agent_paths(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
     runtime = RadarApiRuntime(
         sqlite3.connect(":memory:", check_same_thread=False),
         product_runner=RecordingProductRunner(),
     )
-    assert runtime.worker is None
+    assert not hasattr(runtime, "worker")
 
     for runtime_kind in ("legacy_fixed", "dynamic_goal"):
-        with pytest.raises(ValueError, match="disabled"):
-            runtime.create_task(
-                RadarTaskCreateRequest(
-                    runtime_kind=runtime_kind,
-                    goal_type=(
-                        GoalType.NIGHT_REVIEW
-                        if runtime_kind == "dynamic_goal"
-                        else None
-                    ),
-                ),
-                idempotency_key=f"rejected:{runtime_kind}",
-            )
+        with pytest.raises(ValueError, match="product_episode"):
+            RadarTaskCreateRequest(runtime_kind=runtime_kind)
 
 
 class RecordingProductRunner:

@@ -77,6 +77,7 @@ from sleepagent.radar_agent.questionnaire import (
     HabitQuestionAnswer,
     HabitQuestionTrigger,
 )
+from sleepagent.radar_agent.schemas import RadarNightSummary
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -158,7 +159,18 @@ def snapshot(
         ),
         source_scope=scope,
         canonical_data_version="v1",
-        source_refs=("night:1", "range:1"),
+        source_refs=(
+            "night:1",
+            "range:1",
+            *(
+                tuple(
+                    f"night-summary:radar-1:2026-07-{day:02d}"
+                    for day in range(20, 27)
+                )
+                if kind == SourceScopeKind.THIRTY_DAY
+                else ()
+            ),
+        ),
         created_at=NOW,
     )
 
@@ -743,6 +755,26 @@ def request(
         "care.read_feedback": {},
         "artifact.render": {"content": "draft"},
     }
+    if episode_type == EpisodeType.TREND_REVIEW:
+        inputs["trend.calculate_metrics"] = {
+            "night_summaries": [
+                RadarNightSummary(
+                    radar_device_id="radar-1",
+                    subject_id="subject-1",
+                    night_of=date(2026, 7, day),
+                    timezone_name="Asia/Shanghai",
+                    total_sleep_minutes=360 + (day - 20) * 5,
+                    data_coverage_ratio=0.95,
+                    explainable_metrics={
+                        "calibration_state": "known_uncalibrated"
+                    },
+                    source_report_ref=(
+                        f"night-summary:radar-1:2026-07-{day:02d}"
+                    ),
+                ).model_dump(mode="json")
+                for day in range(20, 27)
+            ]
+        }
     return ProductEpisodeRunRequest(
         episode_id=f"episode-{episode_type.value}",
         episode_type=episode_type,
@@ -1079,6 +1111,10 @@ def test_trend_is_tool_inside_evidence_path() -> None:
     assert "trend.calculate_metrics" in {
         item.tool_name for item in result.tool_receipts
     }
+    assert result.receipt.terminal
+    assert instance.tool_executor.runtime_binding_count(
+        result.receipt.episode_id
+    ) == 0
     assert len({item.agent_id for item in result.envelopes}) == 2
 
 

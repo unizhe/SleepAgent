@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
@@ -14,27 +15,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import Field, model_validator
 
 from sleepagent.product_device import PRODUCT_RADAR_API_KEY_ENV
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    DialogueAgent,
-    EvidencePacket,
-    RAGAgent,
-    RadarDataAgent,
-    ReportAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.boundary import RADAR_AGENT_API_PREFIX
-from sleepagent.radar_agent.dynamic import (
-    CompletionReceipt,
-    GoalType,
-    UserGoal,
-    UserInputRequest,
-    UserInputResponse,
-)
-from sleepagent.radar_agent.dynamic.model import ModelRouterAdapter
-from sleepagent.radar_agent.dynamic.orchestrator import DynamicOrchestratorRuntime
-from sleepagent.radar_agent.dynamic.worker import DynamicTaskWorker
-from sleepagent.radar_agent.orchestrator import RadarLangGraphWorkflow
 from sleepagent.radar_agent.persistence import (
     RadarPersistenceStore,
     RadarSubject,
@@ -53,21 +34,16 @@ from sleepagent.radar_agent.runtime import (
     RadarTaskStatus,
     RoleAccessDenied,
     TaskService,
+    UserInputRequest,
+    UserInputResponse,
 )
 from sleepagent.radar_agent.schemas import (
     EvidenceLedger,
     HumanConfirmationRequest,
     RadarAgentSchema,
     RadarNightSummary,
-    RagContext,
 )
 from sleepagent.radar_agent.questionnaire import QuestionnaireCandidate
-from sleepagent.radar_agent.llm import (
-    CloudLLMClient,
-    CloudLLMConfig,
-    ModelRouter,
-    task_service_llm_audit_sink,
-)
 from sleepagent.radar_agent.product_agent import (
     ActionProposal,
     AgentId as ProductAgentId,
@@ -110,10 +86,18 @@ RADAR_AGENT_LLM_API_KEY_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_API_KEY"
 RADAR_AGENT_LLM_MODEL_ID_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID"
 RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS"
 RADAR_AGENT_LLM_RETRY_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_RETRY"
-RADAR_AGENT_RUNTIME_MODE_ENV = "SLEEPAGENT_RADAR_AGENT_RUNTIME_MODE"
 RADAR_AGENT_DEV_MODE_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
 DEPLOYMENT_MODE_ENV = "SLEEPAGENT_DEPLOYMENT_MODE"
 PRODUCT_EPISODE_CHECKPOINT_ARTIFACT = "_product_episode_checkpoint"
+
+
+class ProductGoalType(str, Enum):
+    NIGHT_REVIEW = "night_review"
+    TREND_COMPARISON = "trend_comparison"
+    CHANGE_EXPLANATION = "change_explanation"
+    DATA_QUALITY_DIAGNOSIS = "data_quality_diagnosis"
+    DOCTOR_MATERIAL = "doctor_material"
+    GROUNDED_QUESTION = "grounded_question"
 
 
 class RadarTaskCreateRequest(RadarAgentSchema):
@@ -127,12 +111,8 @@ class RadarTaskCreateRequest(RadarAgentSchema):
     provider_input: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
     max_retries: int = Field(default=3, ge=0, le=10)
-    runtime_kind: Literal[
-        "legacy_fixed",
-        "dynamic_goal",
-        "product_episode",
-    ] = "product_episode"
-    goal_type: GoalType | None = None
+    runtime_kind: Literal["product_episode"] = "product_episode"
+    goal_type: ProductGoalType | None = None
     target_date: date | None = None
     range_start: date | None = None
     range_end: date | None = None
@@ -145,16 +125,6 @@ class RadarTaskCreateRequest(RadarAgentSchema):
     def scenario_is_supported(self) -> "RadarTaskCreateRequest":
         if self.scenario not in SUPPORTED_REPLAY_SCENARIOS:
             raise ValueError(f"Unsupported replay scenario: {self.scenario}.")
-        if self.runtime_kind == "dynamic_goal" and self.goal_type is None:
-            raise ValueError("dynamic_goal tasks require goal_type")
-        if (
-            self.runtime_kind == "dynamic_goal"
-            and self.scenario != "normal_night"
-            and os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() != "true"
-        ):
-            raise ValueError(
-                "dynamic replay scenario selection is available only in development mode"
-            )
         return self
 
 
@@ -170,7 +140,7 @@ class RadarTaskDetail(RadarAgentSchema):
         max_length=3,
     )
     user_input_requests: list[UserInputRequest] = Field(default_factory=list)
-    completion_receipt: CompletionReceipt | EpisodeReceipt | None = None
+    completion_receipt: dict[str, Any] | EpisodeReceipt | None = None
 
 
 class RadarUserInputAnswerRequest(RadarAgentSchema):
@@ -235,7 +205,7 @@ class RadarApiRuntime:
         if connection is not None:
             if production:
                 raise RuntimeError(
-                    "production legacy Radar runtime cannot use an injected "
+                    "production Radar Agent API cannot use an injected "
                     "SQLite connection"
                 )
             self.store = RadarPersistenceStore.connect_sqlite(connection)
@@ -247,14 +217,14 @@ class RadarApiRuntime:
                 or "/tmp/" in lowered
             ):
                 raise RuntimeError(
-                    "production legacy Radar runtime requires shared "
+                    "production Radar Agent API requires shared "
                     "PostgreSQL storage"
                 )
             self.store = connect_postgres_store(database_url)
         else:
             if production:
                 raise RuntimeError(
-                    "production legacy Radar runtime requires "
+                    "production Radar Agent API requires "
                     f"{RADAR_AGENT_DATABASE_URL_ENV}"
                 )
             sqlite_path = Path(
@@ -286,20 +256,6 @@ class RadarApiRuntime:
             PersistentHumanDecisionRepository(self.store),
             authority_validator=self._validate_human_decision_authority,
         )
-        runtime_mode = os.getenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
-        self.worker: DynamicTaskWorker | None = None
-        if (
-            os.getenv(
-                RADAR_AGENT_DEV_MODE_ENV,
-                "false",
-            ).lower()
-            == "true"
-            and runtime_mode in {"dynamic", "hybrid"}
-        ):
-            self.worker = DynamicTaskWorker(
-                service=self.service,
-                runner_factory=self._dynamic_runner,
-            )
 
     def _validate_human_decision_authority(
         self,
@@ -309,7 +265,7 @@ class RadarApiRuntime:
         role_binding_id: str | None,
         authorization_id: str | None,
     ) -> None:
-        if _dynamic_dev_mode():
+        if _development_mode_enabled():
             if actor_role not in {item.role for item in request.requirements}:
                 raise HumanDecisionError("actor role is not required by this decision")
             return
@@ -373,32 +329,6 @@ class RadarApiRuntime:
         *,
         idempotency_key: str | None,
     ) -> RadarAgentTask:
-        runtime_mode = os.getenv(RADAR_AGENT_RUNTIME_MODE_ENV, "product")
-        if runtime_mode not in {"product", "hybrid", "legacy", "dynamic"}:
-            raise ValueError("unsupported radar runtime mode")
-        if runtime_mode != "product" and not _dynamic_dev_mode():
-            raise ValueError(
-                "legacy/dynamic compatibility runtimes are development-only"
-            )
-        if (
-            runtime_mode == "product"
-            and payload.runtime_kind != "product_episode"
-        ):
-            raise ValueError(
-                "legacy/dynamic Agent runtimes are disabled; "
-                "use runtime_kind=product_episode"
-            )
-        if (
-            runtime_mode != "product"
-            and payload.runtime_kind == "product_episode"
-        ):
-            raise ValueError(
-                "ProductEpisodeRunner is disabled by server configuration"
-            )
-        if runtime_mode == "legacy" and payload.runtime_kind == "dynamic_goal":
-            raise ValueError("dynamic runtime is disabled by server configuration")
-        if runtime_mode == "dynamic" and payload.runtime_kind == "legacy_fixed":
-            raise ValueError("legacy runtime is disabled by server configuration")
         provider = ReplayRadarProvider(scenario=payload.scenario)
         device = provider.get_device(payload.radar_device_id or provider.list_devices()[0].radar_device_id)
         device = device.model_copy(update={"bound_subject_id": payload.subject_id})
@@ -413,16 +343,45 @@ class RadarApiRuntime:
                 )
             )
             self.store.save_device(device)
-            task_service = self.service
-            if (
-                payload.runtime_kind in {"dynamic_goal", "product_episode"}
-                and not _dynamic_dev_mode()
-            ):
-                task_service = TaskService(
+            task_service = (
+                self.service
+                if _development_mode_enabled()
+                else TaskService(
                     self.store,
                     validate_bindings=True,
                     require_authorization=True,
                 )
+            )
+            goal_type = payload.goal_type or ProductGoalType.NIGHT_REVIEW
+            goal_payload = {
+                "goal_type": goal_type.value,
+                "target_date": (
+                    payload.target_date.isoformat()
+                    if payload.target_date
+                    else None
+                ),
+                "range_start": (
+                    payload.range_start.isoformat()
+                    if payload.range_start
+                    else None
+                ),
+                "range_end": (
+                    payload.range_end.isoformat()
+                    if payload.range_end
+                    else None
+                ),
+                "question": payload.question,
+                "source_artifact_id": payload.source_artifact_id,
+                "source_date": (
+                    payload.source_date.isoformat()
+                    if payload.source_date
+                    else None
+                ),
+                "focus": payload.focus,
+                "resolved_timezone_name": device.timezone_name,
+                "requested_role": payload.role,
+                "requested_outputs": [_goal_output(goal_type)],
+            }
             task = task_service.create_task(
                 subject_id=payload.subject_id,
                 radar_device_id=device.radar_device_id,
@@ -434,169 +393,16 @@ class RadarApiRuntime:
                 provider_input={"provider": "replay", **payload.provider_input},
                 idempotency_key=idempotency_key or payload.idempotency_key,
                 max_retries=payload.max_retries,
-                runtime_kind=payload.runtime_kind,
-                runtime_contract_version=(
-                    "radar-dynamic.v1"
-                    if payload.runtime_kind == "dynamic_goal"
-                    else (
-                        "product-episode.v1"
-                        if payload.runtime_kind == "product_episode"
-                        else "radar-legacy.v1"
-                    )
-                ),
+                runtime_kind="product_episode",
+                runtime_contract_version="product-episode.v1",
+                goal_payload=goal_payload,
             )
-            if payload.runtime_kind == "dynamic_goal":
-                goal_type = payload.goal_type
-                assert goal_type is not None
-                goal = UserGoal(
-                    goal_id=f"goal:{task.task_id}",
-                    task_id=task.task_id,
-                    subject_id=task.subject_id,
-                    requesting_actor_id=task.requested_by_user_id or "system",
-                    goal_type=goal_type,
-                    target_date=payload.target_date,
-                    range_start=payload.range_start,
-                    range_end=payload.range_end,
-                    question=payload.question,
-                    source_artifact_id=payload.source_artifact_id,
-                    source_date=payload.source_date,
-                    focus=payload.focus,
-                    resolved_timezone_name=device.timezone_name,
-                    requested_role=payload.role,
-                    requested_outputs=[_goal_output(goal_type)],
-                    allowed_action_scope=[
-                        "read_evidence",
-                        "prepare_artifact",
-                        "request_user_input",
-                        "request_confirmation",
-                    ],
-                )
-                try:
-                    existing_goal = self.store.get_task_goal(task.task_id)
-                except KeyError:
-                    existing_goal = None
-                if existing_goal is not None:
-                    comparable = {"created_at"}
-                    if existing_goal.model_dump(exclude=comparable) != goal.model_dump(exclude=comparable):
-                        raise IdempotencyConflict(
-                            "idempotency key is already bound to a different goal"
-                        )
-                    goal = existing_goal
-                else:
-                    self.store.save_user_goal(goal)
-                task = task.model_copy(update={"goal_payload": goal.model_dump(mode="json")})
-                self.store.save_task(task)
-                # Replay is a dev data adapter only; its scenario label is never passed
-                # to planner or Agent prompts.
-                scenario = get_replay_scenario(payload.scenario)
-                for summary in _replay_trend_summaries(
-                    scenario,
-                    subject_id=task.subject_id,
-                    radar_device_id=task.radar_device_id,
-                ):
-                    self.store.save_night_summary(summary)
-            elif payload.runtime_kind == "product_episode":
-                goal_type = payload.goal_type or GoalType.NIGHT_REVIEW
-                task = task.model_copy(
-                    update={
-                        "goal_payload": {
-                            "goal_type": goal_type.value,
-                            "target_date": (
-                                payload.target_date.isoformat()
-                                if payload.target_date
-                                else None
-                            ),
-                            "range_start": (
-                                payload.range_start.isoformat()
-                                if payload.range_start
-                                else None
-                            ),
-                            "range_end": (
-                                payload.range_end.isoformat()
-                                if payload.range_end
-                                else None
-                            ),
-                            "question": payload.question,
-                            "source_artifact_id": payload.source_artifact_id,
-                            "source_date": (
-                                payload.source_date.isoformat()
-                                if payload.source_date
-                                else None
-                            ),
-                            "focus": payload.focus,
-                            "resolved_timezone_name": device.timezone_name,
-                            "requested_role": payload.role,
-                            "requested_outputs": [_goal_output(goal_type)],
-                        }
-                    }
-                )
-                self.store.save_task(task)
             return task
 
     def run_task(self, task_id: str) -> RadarTaskDetail:
         task = self.service.get_task(task_id)
         _assert_task_runtime_writable(task)
-        if task.runtime_kind == "product_episode":
-            return self._run_product_task(task)
-        if task.runtime_kind == "dynamic_goal":
-            if task.status == RadarTaskStatus.CREATED:
-                self.service.transition_task(
-                    task_id,
-                    RadarTaskStatus.RUNNING,
-                    message="Dynamic task accepted by the durable worker queue.",
-                )
-            elif task.status not in {
-                RadarTaskStatus.RUNNING,
-                RadarTaskStatus.WAITING_FOR_USER_INPUT,
-                RadarTaskStatus.WAITING_FOR_CONFIRMATION,
-                RadarTaskStatus.COMPLETED,
-            }:
-                raise InvalidTaskTransition(
-                    f"task in {task.status.value!r} state cannot be queued"
-                )
-            self._wake_dynamic_worker()
-            return self.detail(task_id)
-        if task.status in {RadarTaskStatus.COMPLETED, RadarTaskStatus.WAITING_FOR_CONFIRMATION}:
-            return self.detail(task_id)
-        if task.status not in {RadarTaskStatus.CREATED, RadarTaskStatus.RUNNING}:
-            raise InvalidTaskTransition(f"task in {task.status.value!r} state cannot be run")
-        provider = ReplayRadarProvider(scenario=task.scenario)
-        orchestrator = RadarLangGraphWorkflow(
-            radar_data_agent=RadarDataAgent(provider),
-            report_agent=ReportAgent(
-                model_router=_model_router(self.service, task.task_id)
-            ),
-        )
-        scenario = get_replay_scenario(task.scenario)
-        context = ContextPacket(
-            context_packet_id=f"context:{task.task_id}:api-run",
-            task_context=TaskContext(
-                task_id=task.task_id,
-                trace_id=task.trace_id,
-                role=task.role,
-                purpose="orchestration",
-                allowed_actions=["run_full_chain"],
-            ),
-            evidence_packet=EvidencePacket(
-                night_summaries=_replay_trend_summaries(
-                    scenario,
-                    subject_id=task.subject_id,
-                    radar_device_id=task.radar_device_id,
-                ),
-                data_quality={
-                    "subject_id": task.subject_id,
-                    "radar_device_id": task.radar_device_id,
-                    "night_of": scenario.deterministic_input.night_report.night_of.isoformat(),
-                    "text_inputs": (
-                        [scenario.deterministic_input.text_input]
-                        if scenario.deterministic_input.text_input
-                        else []
-                    ),
-                }
-            ),
-        )
-        self.service.execute(task_id, orchestrator, context)
-        return self.detail(task_id)
+        return self._run_product_task(task)
 
     def _run_product_task(self, task: RadarAgentTask) -> RadarTaskDetail:
         if task.status == RadarTaskStatus.COMPLETED:
@@ -1321,8 +1127,8 @@ class RadarApiRuntime:
         scenario = get_replay_scenario(task.scenario)
         source = scenario.deterministic_input
         goal = task.goal_payload or {}
-        goal_type = GoalType(
-            goal.get("goal_type", GoalType.NIGHT_REVIEW.value)
+        goal_type = ProductGoalType(
+            goal.get("goal_type", ProductGoalType.NIGHT_REVIEW.value)
         )
         episode_type = (
             EpisodeType.GROUNDED_DIALOGUE
@@ -1347,6 +1153,16 @@ class RadarApiRuntime:
             # live in FactSnapshot-bound MetricReadinessDecision items.
             valid_night_count=0,
         )
+        trend_summaries = _replay_trend_summaries(
+            scenario,
+            subject_id=task.subject_id,
+            radar_device_id=task.radar_device_id,
+        )
+        trend_source_refs = tuple(
+            item.source_report_ref
+            for item in trend_summaries
+            if item.source_report_ref is not None
+        )
         canonical_data = {
             "night_report": source.night_report.model_dump(mode="json"),
             "snapshots": [
@@ -1356,8 +1172,7 @@ class RadarApiRuntime:
                 item.model_dump(mode="json") for item in source.alerts
             ],
             "trend_summary": [
-                item.model_dump(mode="json")
-                for item in source.trend_summary
+                item.model_dump(mode="json") for item in trend_summaries
             ],
             "device_status": source.device_status,
             "anomalies": source.anomalies,
@@ -1372,11 +1187,12 @@ class RadarApiRuntime:
                     f"snapshot:{item.snapshot_id}"
                     for item in source.snapshots
                 ),
+                *trend_source_refs,
             ]
         )
         claim_kind = (
             ClaimKind.LONGITUDINAL_TREND
-            if goal_type == GoalType.TREND_COMPARISON
+            if goal_type == ProductGoalType.TREND_COMPARISON
             else ClaimKind.DESCRIBE_CURRENT_NIGHT
         )
         readiness_decisions = build_unavailable_entry_decisions(
@@ -1439,11 +1255,11 @@ class RadarApiRuntime:
                 "source_refs": list(source_refs),
             },
             "trend.calculate_metrics": {
-                "values": [
-                    item.total_sleep_minutes
-                    for item in source.trend_summary
+                "night_summaries": [
+                    item.model_dump(mode="json")
+                    for item in trend_summaries
                 ],
-                "source_refs": list(source_refs),
+                "source_refs": list(trend_source_refs),
             },
         }
         return ProductEpisodeRunRequest(
@@ -1463,7 +1279,7 @@ class RadarApiRuntime:
             ),
             tool_inputs=tool_inputs,
             personalized=True,
-            doctor_material=goal_type == GoalType.DOCTOR_MATERIAL,
+            doctor_material=goal_type == ProductGoalType.DOCTOR_MATERIAL,
             idempotency_key=task.idempotency_key or task.task_id,
         )
 
@@ -1490,6 +1306,10 @@ class RadarApiRuntime:
             receipt_payload = product_artifacts[-1].payload.get("receipt")
             if receipt_payload:
                 receipt = EpisodeReceipt.model_validate(receipt_payload)
+        elif receipt is not None and hasattr(receipt, "model_dump"):
+            # Historical dynamic receipts remain readable without importing
+            # their executable runtime contracts into the canonical API.
+            receipt = receipt.model_dump(mode="json")
         risk_level = (
             str(ledger.derived_metrics.get("risk_level"))
             if ledger
@@ -1517,7 +1337,12 @@ class RadarApiRuntime:
             ),
             questionnaire_candidates=_workflow_questionnaire_candidates(artifacts),
             user_input_requests=(
-                self.store.list_user_input_requests(task_id)
+                [
+                    UserInputRequest.model_validate(
+                        item.model_dump(mode="python")
+                    )
+                    for item in self.store.list_user_input_requests(task_id)
+                ]
                 if task.runtime_kind
                 in {"dynamic_goal", "product_episode"}
                 else []
@@ -1525,109 +1350,10 @@ class RadarApiRuntime:
             completion_receipt=receipt,
         )
 
-    def _dynamic_runner(self, task: RadarAgentTask) -> DynamicOrchestratorRuntime:
-        provider = ReplayRadarProvider(scenario=task.scenario)
-        service = self.service
-        if not _dynamic_dev_mode():
-            service = TaskService(
-                self.store,
-                validate_bindings=True,
-                require_authorization=True,
-            )
-        return DynamicOrchestratorRuntime(
-            service=service,
-            provider=provider,
-            model=ModelRouterAdapter(_model_router(self.service, task.task_id)),
-        )
-
-    def _wake_dynamic_worker(self) -> None:
-        if self.worker is None:
-            raise InvalidTaskTransition(
-                "dynamic worker is unavailable outside explicit "
-                "development compatibility mode"
-            )
-        self.worker.start()
-        self.worker.wake()
-
     def answer_chat(self, payload: RadarChatRequest) -> RadarChatResponse:
         task = self.service.get_task(payload.task_id)
         _assert_task_runtime_writable(task)
-        if task.runtime_kind == "product_episode":
-            return self._answer_product_chat(task, payload)
-        artifacts = self.service.list_artifacts(payload.task_id)
-        ledger = _latest_ledger(artifacts)
-        if ledger is None:
-            raise InvalidTaskTransition("task has no published Evidence Ledger")
-        rag_result = RAGAgent().run(
-            ContextPacket(
-                task_context=TaskContext(
-                    task_id=task.task_id,
-                    trace_id=task.trace_id,
-                    role=payload.role,
-                    purpose="rag",
-                    allowed_actions=["retrieve_reviewed_seed"],
-                ),
-                evidence_packet=EvidencePacket(
-                    evidence_ledger=ledger,
-                    data_quality={
-                        "rag_query": " ".join(claim.text for claim in ledger.claims),
-                        "rag_roles": [payload.role],
-                    },
-                ),
-            )
-        )
-        rag_context = RagContext.model_validate(rag_result.output_payload.get("rag_context", {}))
-        result = DialogueAgent(
-            model_router=_model_router(self.service, task.task_id)
-        ).run(
-            ContextPacket(
-                context_packet_id=f"context:{task.task_id}:chat",
-                task_context=TaskContext(
-                    task_id=task.task_id,
-                    trace_id=task.trace_id,
-                    role=payload.role,
-                    purpose="chat",
-                    allowed_actions=["answer_from_ledger"],
-                ),
-                evidence_packet=EvidencePacket(
-                    evidence_ledger=ledger,
-                    claim_refs=[claim.claim_id for claim in ledger.claims],
-                    data_quality={
-                        "subject_id": task.subject_id,
-                        "user_question": payload.message,
-                    },
-                ),
-                rag_context=rag_context,
-            )
-        )
-        dialogue = result.output_payload["dialogue"]
-        self.service.emit_event(
-            task.task_id,
-            event_type="chat.answered",
-            message="Grounded task chat answer generated.",
-            payload={"role": payload.role, "evidence_ref_count": len(result.evidence_refs)},
-        )
-        self.service.record_audit(
-            task.task_id,
-            actor=payload.actor_id,
-            action="chat_answered",
-            target_ref=task.task_id,
-            summary="Answer grounded in the task Evidence Ledger and reviewed RAG.",
-            payload={"role": payload.role, "evidence_ref_count": len(result.evidence_refs)},
-        )
-        return RadarChatResponse(
-            task_id=task.task_id,
-            role=payload.role,
-            answer=dialogue["answer"],
-            evidence_refs=list(dialogue["evidence_refs"]),
-            rag_citation_refs=list(rag_context.citation_ids),
-            questionnaire_ids=list(dialogue.get("questionnaire_ids", [])),
-            questionnaire_candidates=list(
-                dialogue.get("questionnaire_candidates", [])
-            ),
-            boundary_action=dialogue.get("boundary_action"),
-            generation_mode=dialogue.get("generation_mode", "template"),
-        )
+        return self._answer_product_chat(task, payload)
 
     def _answer_product_chat(
         self,
@@ -1710,37 +1436,11 @@ def reset_radar_api_runtime_for_tests(
     product_runner: ProductEpisodeRunner | None = None,
 ) -> RadarApiRuntime:
     global _RUNTIME
-    try:
-        if _RUNTIME.worker is not None:
-            _RUNTIME.worker.stop()
-    except (AttributeError, RuntimeError):
-        pass
     _RUNTIME = RadarApiRuntime(
         connection or sqlite3.connect(":memory:", check_same_thread=False),
         product_runner=product_runner,
     )
     return _RUNTIME
-
-
-def start_radar_dynamic_worker() -> None:
-    """Recover durable dynamic jobs when the API process starts."""
-
-    if _dynamic_dev_mode() and os.getenv(
-        RADAR_AGENT_RUNTIME_MODE_ENV,
-        "product",
-    ) in {
-        "dynamic",
-        "hybrid",
-    }:
-        if _RUNTIME.worker is not None:
-            _RUNTIME.worker.start()
-
-
-def stop_radar_dynamic_worker() -> None:
-    """Stop the process-local lease poller during graceful API shutdown."""
-
-    if _RUNTIME.worker is not None:
-        _RUNTIME.worker.stop()
 
 
 def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -1775,8 +1475,8 @@ def _identity(
     resolved_role = actor_role
     _assert_actor(task, resolved_id, resolved_role)
     if (
-        task.runtime_kind in {"dynamic_goal", "product_episode"}
-        and not _dynamic_dev_mode()
+        task.runtime_kind == "product_episode"
+        and not _development_mode_enabled()
     ):
         try:
             _RUNTIME.service.assert_task_access(
@@ -1789,14 +1489,14 @@ def _identity(
     return resolved_id, resolved_role
 
 
-def _dynamic_dev_mode() -> bool:
+def _development_mode_enabled() -> bool:
     return os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
 
 
 def _assert_task_runtime_writable(task: RadarAgentTask) -> None:
-    if task.runtime_kind != "product_episode" and not _dynamic_dev_mode():
+    if task.runtime_kind != "product_episode":
         raise InvalidTaskTransition(
-            "legacy/dynamic task results are read-only outside development mode"
+            f"historical {task.runtime_kind!r} task is read-only"
         )
 
 
@@ -1813,15 +1513,14 @@ async def create_radar_task(
 ) -> RadarTaskDetail:
     _require_api_key(x_api_key)
     try:
-        if payload.runtime_kind in {"dynamic_goal", "product_episode"}:
-            if not x_actor_id or x_actor_role not in {"elder", "family", "doctor"}:
-                raise RoleAccessDenied(
-                    "Agent task creation requires authenticated actor and role headers"
-                )
-            payload = payload.model_copy(
-                update={"actor_id": x_actor_id, "role": x_actor_role}
+        if not x_actor_id or x_actor_role not in {"elder", "family", "doctor"}:
+            raise RoleAccessDenied(
+                "Agent task creation requires authenticated actor and role headers"
             )
-        if payload.runtime_kind == "product_episode" and not _dynamic_dev_mode():
+        payload = payload.model_copy(
+            update={"actor_id": x_actor_id, "role": x_actor_role}
+        )
+        if not _development_mode_enabled():
             role_binding_ids = tuple(
                 item.strip()
                 for item in (x_role_binding_ids or "").split(",")
@@ -1864,13 +1563,7 @@ async def run_radar_task(
     try:
         task = _RUNTIME.service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        detail = _RUNTIME.run_task(task_id)
-        if task.runtime_kind == "dynamic_goal":
-            return JSONResponse(
-                status_code=202,
-                content=detail.model_dump(mode="json"),
-            )
-        return detail
+        return _RUNTIME.run_task(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
     except InvalidTaskTransition as exc:
@@ -1895,10 +1588,7 @@ async def answer_radar_task_user_input(
         if task.status != RadarTaskStatus.WAITING_FOR_USER_INPUT:
             raise InvalidTaskTransition("task is not waiting for user input")
         request = _RUNTIME.store.get_user_input_request(payload.request_id)
-        if request.task_id != task_id or (
-            task.runtime_kind == "dynamic_goal"
-            and task.pending_user_input_request_id != request.request_id
-        ):
+        if request.task_id != task_id:
             raise ValueError("user input request is not active for this task")
         if request.target_role != actor_role:
             raise ValueError("answering role does not match the reviewed request")
@@ -1913,22 +1603,21 @@ async def answer_radar_task_user_input(
                     "question_id": request.question_id,
                 },
             )
-            if task.runtime_kind == "product_episode":
-                current = _RUNTIME.service.get_task(task_id).model_copy(
-                    update={
-                        "completion_status": "partial",
-                        "updated_at": datetime.now(timezone.utc),
-                    }
-                )
-                _RUNTIME.store.save_task(current)
-                _RUNTIME.service.transition_task(
-                    task_id,
-                    RadarTaskStatus.FAILED,
-                    message=(
-                        "Product Episode stopped because the user declined "
-                        "the required fact."
-                    ),
-                )
+            current = _RUNTIME.service.get_task(task_id).model_copy(
+                update={
+                    "completion_status": "partial",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            )
+            _RUNTIME.store.save_task(current)
+            _RUNTIME.service.transition_task(
+                task_id,
+                RadarTaskStatus.FAILED,
+                message=(
+                    "Product Episode stopped because the user declined "
+                    "the required fact."
+                ),
+            )
         else:
             response = UserInputResponse(
                 response_id=f"response:{request.request_id}",
@@ -1948,14 +1637,11 @@ async def answer_radar_task_user_input(
                     "question_id": request.question_id,
                 },
             )
-            if task.runtime_kind == "product_episode":
-                _RUNTIME.resume_product_after_user_input(
-                    task_id,
-                    request=request,
-                    answer=payload.answer or "",
-                )
-        if task.runtime_kind == "dynamic_goal":
-            _RUNTIME._wake_dynamic_worker()
+            _RUNTIME.resume_product_after_user_input(
+                task_id,
+                request=request,
+                answer=payload.answer or "",
+            )
         return JSONResponse(
             status_code=202,
             content={
@@ -2311,21 +1997,10 @@ async def confirm_radar_task(
                 HumanDecisionStatus.PARTIALLY_APPROVED,
             }:
                 return projection
-        elif task.runtime_kind == "dynamic_goal":
-            actor_id, actor_role = _identity(
-                task, actor_id=x_actor_id, actor_role=x_actor_role
-            )
-        else:
-            actor_id, actor_role = payload.actor_id, payload.actor_role
-            _assert_actor(task, actor_id, actor_role)
         resolved = _RUNTIME.service.resolve_confirmation(
             task_id,
             payload.confirmation_id,
-            approved=(
-                decision.status == HumanDecisionStatus.APPROVED
-                if task.runtime_kind == "product_episode"
-                else payload.approved
-            ),
+            approved=decision.status == HumanDecisionStatus.APPROVED,
             actor_id=actor_id,
             actor_role=actor_role,
         )
@@ -2340,8 +2015,6 @@ async def confirm_radar_task(
                 resolved = _RUNTIME.store.get_confirmation(
                     resolved.confirmation_id
                 )
-        elif task.runtime_kind == "dynamic_goal":
-            _RUNTIME._wake_dynamic_worker()
         return resolved
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task or confirmation not found.") from exc
@@ -2381,6 +2054,8 @@ async def revoke_product_human_decision(
             raise InvalidTaskTransition(
                 "control-plane decisions use the release governance endpoint"
             )
+        task = _RUNTIME.service.get_task(task_id)
+        _assert_task_runtime_writable(task)
         role_binding_id = x_role_binding_id or next(
             (
                 item.strip()
@@ -2413,7 +2088,6 @@ async def revoke_product_human_decision(
                 actor_role=x_actor_role,
                 reason=payload.reason,
             )
-        task = _RUNTIME.service.get_task(task_id)
         if task.status == RadarTaskStatus.RUNNING:
             _RUNTIME.resume_product_after_confirmations(task_id)
         return revoked
@@ -2462,41 +2136,41 @@ def _latest_ledger(artifacts: list[RadarArtifactVersion]) -> EvidenceLedger | No
     return latest.evidence_ledger
 
 
-def _goal_output(goal_type: GoalType | None) -> str:
+def _goal_output(goal_type: ProductGoalType | None) -> str:
     mapping = {
-        GoalType.NIGHT_REVIEW: "summary",
-        GoalType.TREND_COMPARISON: "trend",
-        GoalType.CHANGE_EXPLANATION: "explanation",
-        GoalType.DATA_QUALITY_DIAGNOSIS: "quality",
-        GoalType.DOCTOR_MATERIAL: "doctor_material",
-        GoalType.GROUNDED_QUESTION: "answer",
+        ProductGoalType.NIGHT_REVIEW: "summary",
+        ProductGoalType.TREND_COMPARISON: "trend",
+        ProductGoalType.CHANGE_EXPLANATION: "explanation",
+        ProductGoalType.DATA_QUALITY_DIAGNOSIS: "quality",
+        ProductGoalType.DOCTOR_MATERIAL: "doctor_material",
+        ProductGoalType.GROUNDED_QUESTION: "answer",
     }
     if goal_type is None:
-        raise ValueError("dynamic goal type is required")
+        raise ValueError("product goal type is required")
     return mapping[goal_type]
 
 
-def _product_episode_type(goal_type: GoalType) -> EpisodeType:
+def _product_episode_type(goal_type: ProductGoalType) -> EpisodeType:
     return {
-        GoalType.NIGHT_REVIEW: EpisodeType.MORNING_REVIEW,
-        GoalType.TREND_COMPARISON: EpisodeType.TREND_REVIEW,
-        GoalType.CHANGE_EXPLANATION: EpisodeType.GROUNDED_DIALOGUE,
-        GoalType.DATA_QUALITY_DIAGNOSIS: (
+        ProductGoalType.NIGHT_REVIEW: EpisodeType.MORNING_REVIEW,
+        ProductGoalType.TREND_COMPARISON: EpisodeType.TREND_REVIEW,
+        ProductGoalType.CHANGE_EXPLANATION: EpisodeType.GROUNDED_DIALOGUE,
+        ProductGoalType.DATA_QUALITY_DIAGNOSIS: (
             EpisodeType.DATA_QUALITY_RECOVERY
         ),
-        GoalType.DOCTOR_MATERIAL: EpisodeType.ROLE_MATERIAL,
-        GoalType.GROUNDED_QUESTION: EpisodeType.GROUNDED_DIALOGUE,
+        ProductGoalType.DOCTOR_MATERIAL: EpisodeType.ROLE_MATERIAL,
+        ProductGoalType.GROUNDED_QUESTION: EpisodeType.GROUNDED_DIALOGUE,
     }[goal_type]
 
 
-def _product_objective(goal_type: GoalType, question: str) -> str:
+def _product_objective(goal_type: ProductGoalType, question: str) -> str:
     labels = {
-        GoalType.NIGHT_REVIEW: "完成当前夜睡眠复盘",
-        GoalType.TREND_COMPARISON: "解释已授权时间范围内的睡眠趋势",
-        GoalType.CHANGE_EXPLANATION: "回答变化原因问题并保留不确定性",
-        GoalType.DATA_QUALITY_DIAGNOSIS: "解释数据质量并给出恢复提示",
-        GoalType.DOCTOR_MATERIAL: "生成受证据和安全审查约束的医生材料",
-        GoalType.GROUNDED_QUESTION: "回答基于当前授权证据的问题",
+        ProductGoalType.NIGHT_REVIEW: "完成当前夜睡眠复盘",
+        ProductGoalType.TREND_COMPARISON: "解释已授权时间范围内的睡眠趋势",
+        ProductGoalType.CHANGE_EXPLANATION: "回答变化原因问题并保留不确定性",
+        ProductGoalType.DATA_QUALITY_DIAGNOSIS: "解释数据质量并给出恢复提示",
+        ProductGoalType.DOCTOR_MATERIAL: "生成受证据和安全审查约束的医生材料",
+        ProductGoalType.GROUNDED_QUESTION: "回答基于当前授权证据的问题",
     }
     return f"{labels[goal_type]}：{question}"
 
@@ -2541,27 +2215,6 @@ def _workflow_questionnaire_candidates(
         QuestionnaireCandidate.model_validate(item)
         for item in latest.payload.get("questionnaire_candidates", [])
     ]
-
-
-def _model_router(service: TaskService, task_id: str) -> ModelRouter:
-    audit_sink = task_service_llm_audit_sink(service, task_id=task_id)
-    configured_key = os.getenv(RADAR_AGENT_LLM_API_KEY_ENV)
-    if configured_key and configured_key.strip().startswith("<"):
-        configured_key = None
-    client = CloudLLMClient(
-        CloudLLMConfig(
-            base_url=os.getenv(
-                RADAR_AGENT_LLM_BASE_URL_ENV,
-                "https://api.deepseek.com/v1",
-            ),
-            api_key=configured_key,
-            model_id=os.getenv(RADAR_AGENT_LLM_MODEL_ID_ENV, "deepseek-chat"),
-            timeout=float(os.getenv(RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV, "30")),
-            retry=int(os.getenv(RADAR_AGENT_LLM_RETRY_ENV, "1")),
-        ),
-        audit_sink=audit_sink,
-    )
-    return ModelRouter(client, audit_sink=audit_sink)
 
 
 def _replay_trend_summaries(
@@ -2641,7 +2294,6 @@ __all__ = [
     "RADAR_AGENT_DATABASE_URL_ENV",
     "RADAR_AGENT_LLM_RETRY_ENV",
     "RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV",
-    "RADAR_AGENT_RUNTIME_MODE_ENV",
     "RADAR_AGENT_DEV_MODE_ENV",
     "RADAR_AGENT_SQLITE_PATH_ENV",
     "RadarApiRuntime",
@@ -2649,8 +2301,6 @@ __all__ = [
     "RadarChatResponse",
     "RadarTaskCreateRequest",
     "RadarTaskDetail",
-    "start_radar_dynamic_worker",
-    "stop_radar_dynamic_worker",
     "reset_radar_api_runtime_for_tests",
     "router",
 ]

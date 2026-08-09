@@ -28,7 +28,6 @@ typecheck = [
 
 [project.scripts]
 radar-agent = "sleepagent.radar_agent.cli:main"
-dynamic-agent-acceptance = "sleepagent.radar_agent.dynamic.acceptance:main"
 real-perceptor-acceptance = "sleepagent.integrations.perceptor.acceptance_cli:main"
 
 [tool.setuptools.packages.find]

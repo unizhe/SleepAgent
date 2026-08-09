@@ -35,40 +35,22 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
-    args = build_parser().parse_args(argv)
+    build_parser().parse_args(argv)
     out = stdout or sys.stdout
-    err = stderr or sys.stderr
-    api_key = os.getenv(LLM_API_KEY_ENV, "").strip()
-    if not api_key or api_key.startswith("<"):
-        print(
-            f"UNAVAILABLE: {LLM_API_KEY_ENV} is not configured; no intelligent-mode claim was made.",
-            file=out,
-        )
-        return EXIT_UNAVAILABLE
-    if os.getenv(DEV_MODE_ENV, "false").lower() != "true":
-        print(
-            f"UNAVAILABLE: set {DEV_MODE_ENV}=true to use the staging replay data adapter.",
-            file=out,
-        )
-        return EXIT_UNAVAILABLE
-
-    try:
-        receipt = run_real_model_acceptance()
-        _assert_release_proof(receipt)
-    except Exception as exc:
-        print(f"REJECTED: {exc.__class__.__name__}: {exc}", file=err)
-        return EXIT_REJECTED
-
-    output = Path(args.output)
-    output.write_text(
-        json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
+    del stderr
+    print(
+        "UNAVAILABLE: the dynamic Agent acceptance runtime is retired; "
+        "use canonical Product Episode acceptance tests.",
+        file=out,
     )
-    print(f"ACCEPTED: sanitized receipt written to {output}", file=out)
-    return EXIT_ACCEPTED
+    return EXIT_UNAVAILABLE
 
 
 def run_real_model_acceptance() -> dict[str, Any]:
+    raise RuntimeError(
+        "dynamic Agent execution is retired; use ProductEpisodeRunner"
+    )
+    # Retained below only as Phase 3C deletion source; unreachable in 3B.
     # Importing here keeps ordinary unit tests and degraded deployments independent
     # from the API adapter and prevents this staging runner from becoming a runtime
     # dependency of the Orchestrator.

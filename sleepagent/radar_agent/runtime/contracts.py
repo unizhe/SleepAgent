@@ -15,6 +15,11 @@ from sleepagent.radar_agent.schemas import (
 )
 
 
+CANONICAL_AGENT_RUNTIME_KIND = "product_episode"
+CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION = "product-episode.v1"
+HISTORICAL_AGENT_RUNTIME_KINDS = frozenset({"legacy_fixed", "dynamic_goal"})
+
+
 class RadarTaskStatus(str, Enum):
     CREATED = "created"
     RUNNING = "running"
@@ -69,8 +74,8 @@ class RadarAgentTask(RadarAgentSchema):
         "legacy_fixed",
         "dynamic_goal",
         "product_episode",
-    ] = "legacy_fixed"
-    runtime_contract_version: str = "radar-legacy.v1"
+    ] = CANONICAL_AGENT_RUNTIME_KIND
+    runtime_contract_version: str = CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION
     execution_mode: Literal[
         "intelligent",
         "safe_degraded",
@@ -136,6 +141,42 @@ class RadarAgentTask(RadarAgentSchema):
         return self
 
 
+class UserInputRequest(RadarAgentSchema):
+    """Runtime-neutral persisted request used by a canonical Product Episode."""
+
+    request_id: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    question_id: str = Field(..., min_length=1)
+    question_version: str = Field(..., min_length=1)
+    question_text: str = Field(..., min_length=1, max_length=500)
+    question_type: Literal[
+        "observable_fact", "simple_context", "symptom_self_report"
+    ]
+    target_role: Literal["elder", "family", "doctor", "system"]
+    answer_options: list[str] = Field(default_factory=list)
+    why_needed: str = Field(..., min_length=1, max_length=500)
+    decision_scope: str = Field(..., min_length=1, max_length=500)
+    blocks_task: bool = True
+    status: Literal["pending", "answered", "declined", "cancelled"] = "pending"
+    asked_by_agent_invocation_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime | None = None
+    cooldown_until: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class UserInputResponse(RadarAgentSchema):
+    """Runtime-neutral persisted answer accepted by a Product Episode."""
+
+    response_id: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1, max_length=1000)
+    answered_by_user_id: str = Field(..., min_length=1)
+    answered_by_role: Literal["elder", "family", "doctor", "system"]
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class RadarArtifactVersion(RadarAgentSchema):
     artifact_version_id: str = Field(..., min_length=1)
     task_id: str = Field(..., min_length=1)
@@ -151,7 +192,7 @@ class RadarArtifactVersion(RadarAgentSchema):
 
 
 class WorkflowRuntime(Protocol):
-    """Lifecycle layer between API/CLI and OrchestratorAgent."""
+    """Lifecycle layer between transports and the canonical Product Episode."""
 
     def create_task(
         self,

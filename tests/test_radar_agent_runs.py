@@ -5,7 +5,7 @@ from typing import Any
 from pathlib import Path
 
 from backend.main import app
-from sleepagent.product_device import (
+from sleepagent.product_device.radar_agent import (
     FakeRadarProductDataProvider,
     InMemoryRadarAgentRunStore,
     RadarAgentRole,
@@ -203,12 +203,7 @@ def test_radar_agent_validator_rejects_unknown_evidence() -> None:
 def test_radar_agent_routes_are_registered() -> None:
     route_paths = {route.path for route in app.routes}
 
-    assert "/product/radar/agent-runs" in route_paths
-    assert "/product/radar/agent-runs/{run_id}" in route_paths
-    assert "/product/radar/agent-runs/{run_id}/events" in route_paths
-    assert "/product/radar/agent-runs/{run_id}/artifacts" in route_paths
-    assert "/product/radar/agent-runs/{run_id}/role" in route_paths
-    assert "/product/radar/agent-runs/{run_id}/ask" in route_paths
+    assert not any(path.startswith("/product/radar/agent-runs") for path in route_paths)
 
 
 def test_product_service_has_no_selectable_single_model_runtime() -> None:

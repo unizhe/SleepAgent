@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from pydantic import Field
 
 from sleepagent.observability import log_event, record_pull
-from sleepagent.product_device.agents import RadarProductAgent
+from sleepagent.product_device.dashboard_tool import RadarDashboardProjectionTool
 from sleepagent.product_device.schemas import (
     ProductDeviceSchema,
     RadarAlertEvent,
@@ -218,7 +218,7 @@ class FakeRadarProductDataProvider:
         return self._devices[radar_device_id]
 
     def build_dashboard(self, radar_device_id: str) -> RadarDashboardSummary:
-        dashboard = RadarProductAgent().build_dashboard_summary(
+        dashboard = RadarDashboardProjectionTool().run(
             device=self.get_device(radar_device_id),
             recent_snapshots=self.get_recent_snapshots(radar_device_id),
             latest_sleep_report=self.get_latest_sleep_report(radar_device_id),

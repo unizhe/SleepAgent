@@ -255,6 +255,7 @@ def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() ->
             fact_snapshot=_snapshot(
                 binding_subject="tenant-live::subject::elder-phase3a"
             ),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 
@@ -271,6 +272,7 @@ def test_agent_cannot_promote_caller_supplied_generic_radar_payload() -> None:
         context=ProductToolExecutionContext(
             caller=AgentId.EVIDENCE_REASONING,
             fact_snapshot=_snapshot(),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 
@@ -288,6 +290,7 @@ def test_agent_cannot_submit_even_well_formed_canonical_radar_facts() -> None:
         context=ProductToolExecutionContext(
             caller=AgentId.EVIDENCE_REASONING,
             fact_snapshot=_snapshot(),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 
@@ -335,6 +338,7 @@ def test_product_quality_tool_preserves_pinned_fail_closed_assessment() -> None:
         context=ProductToolExecutionContext(
             caller="runtime",
             fact_snapshot=_snapshot(),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 
@@ -362,6 +366,7 @@ def test_agent_cannot_self_attest_pinned_quality_policy() -> None:
         context=ProductToolExecutionContext(
             caller=AgentId.EVIDENCE_REASONING,
             fact_snapshot=_snapshot(),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 
@@ -393,6 +398,7 @@ def test_product_device_status_tool_uses_typed_canonical_projection() -> None:
         context=ProductToolExecutionContext(
             caller="runtime",
             fact_snapshot=_snapshot(),
+            episode_id="episode-phase3a-radar-data",
         ),
     )
 

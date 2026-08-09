@@ -3795,3 +3795,63 @@ views for data-quality recovery without widening generated-material permissions.
 
 Phase 3A remains uncommitted. No push, release or remote mutation was made, and
 execution is paused before Phase 3B as required.
+
+### Round 64 — Codex build: Phase 3B canonical Runtime cutover
+
+Date: 2026-08-09
+
+- Committed the accepted Phase 3A scope locally as `2400c94` with message
+  `refactor(agent): migrate legacy capabilities to canonical boundaries`; no
+  unrelated dirty-worktree file was included and nothing was pushed.
+- Made `product_episode/product-episode.v1` the only creatable Agent Runtime at
+  both API Contract and `TaskService` boundaries. API run, chat, user-input,
+  confirmation and revocation paths now fail closed for historical Runtime
+  kinds; legacy/dynamic task rows, events, traces and receipts remain readable.
+- Removed API and CLI Runtime selectors. CLI demo/goal/retry/resume paths now
+  delegate through `RadarApiRuntime` to `ProductEpisodeRunner`; historical
+  retry, rerun and answer operations are rejected rather than converted.
+- Removed Dynamic worker construction, wake-up and application lifecycle hooks,
+  and retired both the Dynamic acceptance console entry and module execution.
+  `backend.main` now has one modular composition root with no legacy switch;
+  non-Agent health/status surfaces remain available.
+- Replaced the `product_device` Dashboard Agent construction with the
+  deterministic `RadarDashboardProjectionTool`. The package root and API no
+  longer import, instantiate or export old Product-device Agent identities.
+- Added static anti-backflow tests: canonical Product code cannot import legacy
+  Agent/Orchestrator/Dynamic packages, and `skill_methods/` cannot be imported by
+  production Runtime, Agent or Registry code. No production composition surface
+  constructs an old worker, fixed Orchestrator or Product-device Agent.
+- Closed the Phase 3A tails: live Trend inputs are structured night summaries
+  with exact FactSnapshot source refs; untyped/content-hash-only Artifact input
+  fails closed; transient Tool outputs are Episode-scoped, lock-protected and
+  released in `finally` after terminal Episode persistence.
+- Kept migrations, historical tables and old implementation directories intact.
+  `TaskService.execute` remains solely as a characterization oracle with zero
+  production callers, and persistence still imports historical Dynamic DTO
+  decoders. Both are explicit Phase 3C deletion/migration items.
+
+### Codex verification
+
+- Phase 3A parity, Product Tool/Runner and static boundary group:
+  `204 passed in 4.94s`.
+- API, CLI, backend, product-device, worker and acceptance cutover group:
+  `97 passed in 11.60s`.
+- Direct canonical creation, composition and four-role manifest/Factory group:
+  `70 passed in 9.50s`.
+- Full repository regression after the final fixes:
+  `1094 passed, 5 skipped in 55.20s`.
+- All Python sources under `sleepagent` and `backend` compile, `git diff --check`
+  passes, and independent entry-reachability plus boundary reviews found no
+  Phase 3B blocker.
+- Product Contract remains `sleepagent-product-agent.v14`; the exact four-role
+  manifest hash remains
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`.
+
+Fix rounds used: 2. The first cut over all executable composition surfaces and
+closed Tool-cache/content-binding tails. The second aligned characterization
+fixtures with Episode binding, added direct `TaskService` rejection coverage,
+and removed stale compatibility naming/documentation.
+
+Phase 3B remains uncommitted. No push, release, database rewrite, migration
+deletion or Phase 3C source deletion was performed; execution is paused for
+Phase 3B acceptance.

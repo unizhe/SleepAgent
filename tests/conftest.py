@@ -178,9 +178,8 @@ class LightweightASGITestClient:
 def pytest_configure() -> None:
     import fastapi.testclient
 
-    # Legacy and dynamic runtimes are test-only compatibility surfaces. The
-    # application default is the four-role product runtime.
-    os.environ.setdefault("SLEEPAGENT_RADAR_AGENT_RUNTIME_MODE", "hybrid")
+    # The diagnostic app may expose deterministic non-production adapters, but
+    # every Agent task route is canonical Product Episode only.
     os.environ.setdefault("SLEEPAGENT_RADAR_AGENT_DEV_MODE", "true")
     os.environ.setdefault("SLEEPAGENT_DEPLOYMENT_MODE", "test")
     os.environ.setdefault("SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE", "fake")

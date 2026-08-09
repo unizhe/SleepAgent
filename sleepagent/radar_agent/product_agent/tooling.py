@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
-from statistics import mean
+from threading import RLock
 from typing import Any, Callable, Literal
 
 from pydantic import Field
@@ -119,8 +119,9 @@ class ProductToolExecutor:
     def __init__(self, handlers: dict[str, ToolHandler] | None = None) -> None:
         self.handlers = ExistingCapabilityToolHandlers().handlers()
         self._runtime_bound_outputs: dict[
-            tuple[str, str, str], dict[str, Any]
+            tuple[str, str, str, str], dict[str, Any]
         ] = {}
+        self._runtime_bound_lock = RLock()
         for tool_name, handler in (handlers or {}).items():
             self.register_handler(tool_name, handler)
 
@@ -165,6 +166,10 @@ class ProductToolExecutor:
                 isinstance(context.caller, AgentId)
                 and tool_name in _RUNTIME_BOUND_SELECTOR_TOOLS
             ):
+                if not context.episode_id:
+                    raise ProductToolError(
+                        "Agent Tool selector requires an Episode binding"
+                    )
                 if set(arguments) != {"bound_tool_invocation_id"}:
                     raise PermissionError(
                         "Agent Tool requests require one runtime-bound selector"
@@ -175,11 +180,13 @@ class ProductToolExecutor:
                         "bound_tool_invocation_id must be a string"
                     )
                 cache_key = (
+                    context.episode_id,
                     context.fact_snapshot.fact_snapshot_hash,
                     tool_name,
                     bound_invocation_id,
                 )
-                cached = self._runtime_bound_outputs.get(cache_key)
+                with self._runtime_bound_lock:
+                    cached = self._runtime_bound_outputs.get(cache_key)
                 if cached is None:
                     raise ProductToolError(
                         "runtime has not bound this Tool output to FactSnapshot"
@@ -217,18 +224,44 @@ class ProductToolExecutor:
             and context.caller == "runtime"
             and tool_name in _RUNTIME_BOUND_SELECTOR_TOOLS
         ):
+            if not context.episode_id:
+                raise ProductToolError(
+                    "runtime Tool binding requires an Episode id"
+                )
             cache_key = (
+                context.episode_id,
                 context.fact_snapshot.fact_snapshot_hash,
                 tool_name,
                 receipt.tool_invocation_id,
             )
-            self._runtime_bound_outputs[cache_key] = deepcopy(receipt.output)
+            with self._runtime_bound_lock:
+                self._runtime_bound_outputs[cache_key] = deepcopy(receipt.output)
         item = (
             context_item_from_tool_receipt(receipt)
             if outcome == InvocationOutcome.SUCCEEDED
             else None
         )
         return ProductToolResult(receipt=receipt, context_item=item)
+
+    def release_episode(self, episode_id: str) -> None:
+        """Release transient Tool outputs after an Episode becomes terminal."""
+
+        if not episode_id:
+            raise ValueError("episode_id is required")
+        with self._runtime_bound_lock:
+            keys = [
+                key for key in self._runtime_bound_outputs if key[0] == episode_id
+            ]
+            for key in keys:
+                del self._runtime_bound_outputs[key]
+
+    def runtime_binding_count(self, episode_id: str) -> int:
+        """Expose a bounded diagnostic for cache lifecycle tests."""
+
+        with self._runtime_bound_lock:
+            return sum(
+                1 for key in self._runtime_bound_outputs if key[0] == episode_id
+            )
 
 
 class ExistingCapabilityToolHandlers:
@@ -293,72 +326,52 @@ class ExistingCapabilityToolHandlers:
             raise PermissionError(
                 "trend facts must be injected by runtime"
             )
-        if "night_summaries" in arguments:
-            raw_summaries = arguments["night_summaries"]
-            if not isinstance(raw_summaries, list):
-                raise ValueError("night_summaries must be a list")
-            summaries = [
-                item
-                if isinstance(item, RadarNightSummary)
-                else RadarNightSummary.model_validate(item)
-                for item in raw_summaries
-            ]
-            binding_subject = context.fact_snapshot.binding.subject_id
-            authorized_refs = set(context.fact_snapshot.source_refs)
-            scope = context.fact_snapshot.source_scope
-            for summary in summaries:
-                if not _subject_matches_snapshot(
-                    canonical_subject=summary.subject_id or "",
-                    binding_subject=binding_subject,
-                ):
-                    raise ValueError(
-                        "night summary subject does not match FactSnapshot"
-                    )
-                if (
-                    scope.date_start is None
-                    or scope.date_end is None
-                    or not scope.date_start <= summary.night_of <= scope.date_end
-                ):
-                    raise ValueError(
-                        "night summary falls outside FactSnapshot source scope"
-                    )
-                summary_ref = summary.source_report_ref or (
-                    f"night-summary:{summary.radar_device_id}:"
-                    f"{summary.night_of.isoformat()}"
+        if "night_summaries" not in arguments:
+            raise ValueError(
+                "trend calculation requires structured night_summaries"
+            )
+        raw_summaries = arguments["night_summaries"]
+        if not isinstance(raw_summaries, list):
+            raise ValueError("night_summaries must be a list")
+        summaries = [
+            item
+            if isinstance(item, RadarNightSummary)
+            else RadarNightSummary.model_validate(item)
+            for item in raw_summaries
+        ]
+        binding_subject = context.fact_snapshot.binding.subject_id
+        authorized_refs = set(context.fact_snapshot.source_refs)
+        scope = context.fact_snapshot.source_scope
+        for summary in summaries:
+            if not _subject_matches_snapshot(
+                canonical_subject=summary.subject_id or "",
+                binding_subject=binding_subject,
+            ):
+                raise ValueError(
+                    "night summary subject does not match FactSnapshot"
                 )
-                if summary_ref not in authorized_refs:
-                    raise ValueError(
-                        "night summary source is absent from FactSnapshot"
-                    )
-            output = TrendAnalysisTool().analyze(summaries).model_dump(mode="json")
-            all_refs = list(output.get("source_refs", []))
-            output["analysis_source_refs"] = all_refs
-            output["source_ref_count"] = len(all_refs)
-            output["source_refs"] = all_refs[:50]
-            return output
-        values = arguments.get("values", [])
-        scalar_refs = [str(item) for item in arguments.get("source_refs", [])]
-        if not set(scalar_refs).issubset(
-            set(context.fact_snapshot.source_refs)
-        ):
-            raise ValueError("trend refs exceed FactSnapshot scope")
-        if not isinstance(values, list) or not all(
-            isinstance(item, (int, float)) for item in values
-        ):
-            raise ValueError("trend values must be numeric")
-        if not values:
-            return {
-                "count": 0,
-                "mean": None,
-                "change": None,
-                "source_refs": scalar_refs,
-            }
-        return {
-            "count": len(values),
-            "mean": mean(values),
-            "change": values[-1] - values[0] if len(values) > 1 else 0,
-            "source_refs": scalar_refs,
-        }
+            if (
+                scope.date_start is None
+                or scope.date_end is None
+                or not scope.date_start <= summary.night_of <= scope.date_end
+            ):
+                raise ValueError(
+                    "night summary falls outside FactSnapshot source scope"
+                )
+            summary_ref = summary.source_report_ref or (
+                f"night-summary:{summary.radar_device_id}:"
+                f"{summary.night_of.isoformat()}"
+            )
+            if summary_ref not in authorized_refs:
+                raise ValueError(
+                    "night summary source is absent from FactSnapshot"
+                )
+        output = TrendAnalysisTool().analyze(summaries).model_dump(mode="json")
+        all_refs = list(output.get("source_refs", []))
+        output["analysis_source_refs"] = all_refs
+        output["source_ref_count"] = len(all_refs)
+        output["source_refs"] = all_refs[:50]
+        return output
     @staticmethod
     def _urgent(
         arguments: dict[str, Any], context: ProductToolExecutionContext
@@ -652,13 +665,9 @@ class ExistingCapabilityToolHandlers:
             return ArtifactRenderingTool().prepare_product_basis(
                 request
             ).model_dump(mode="json")
-        return {
-            "artifact_bytes_hash": stable_hash(arguments.get("content", "")),
-            "rendered": True,
-            "committed": False,
-            "compatibility_mode": "content_hash_only",
-            "source_refs": [],
-        }
+        raise ValueError(
+            "artifact.render requires a FactSnapshot-bound typed request"
+        )
 
     @staticmethod
     def _memory_compare(

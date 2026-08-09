@@ -15,6 +15,7 @@ from sleepagent.radar_agent.replay import (
 from sleepagent.radar_agent.runtime import (
     InvalidTaskTransition,
     RadarTaskStatus,
+    UserInputResponse,
     build_developer_trace,
 )
 
@@ -150,7 +151,6 @@ def _run_demo(
 
     task = runtime.create_task(
         RadarTaskCreateRequest(
-            runtime_kind="legacy_fixed",
             scenario=scenario_id,
             provider_input={"cli": True},
         ),
@@ -178,6 +178,11 @@ def _inspect_task(
     stdout: TextIO,
 ) -> int:
     selected_task_id = task_id
+    task = runtime.service.get_task(task_id)
+    if (retry or rerun) and task.runtime_kind != "product_episode":
+        raise InvalidTaskTransition(
+            f"historical {task.runtime_kind!r} task is read-only"
+        )
     if retry:
         runtime.service.retry_failed_task(task_id)
         try:
@@ -196,8 +201,10 @@ def _inspect_task(
             _write_trace(trace, output_format=output_format, stdout=stdout)
             return EXIT_TASK_FAILED
     trace = build_developer_trace(runtime.service, selected_task_id)
-    if decision_trace and trace["task"].get("runtime_kind") != "dynamic_goal":
-        trace["decision_trace_note"] = "legacy_fixed task has no dynamic decision trace"
+    if decision_trace and trace["task"].get("runtime_kind") == "product_episode":
+        trace["decision_trace_note"] = (
+            "canonical Product Episode decisions are recorded in Agent/tool events"
+        )
     _write_trace(trace, output_format=output_format, stdout=stdout)
     return _exit_for_trace(trace)
 
@@ -206,7 +213,6 @@ def _run_goal(runtime: Any, *, args: Any, stdout: TextIO) -> int:
     from sleepagent.radar_agent.api.http import RadarTaskCreateRequest
 
     payload = RadarTaskCreateRequest(
-        runtime_kind="dynamic_goal",
         goal_type=args.goal_type,
         target_date=args.date,
         range_start=args.start,
@@ -221,21 +227,18 @@ def _run_goal(runtime: Any, *, args: Any, stdout: TextIO) -> int:
         provider_input={"cli": True},
     )
     task = runtime.create_task(payload, idempotency_key=None)
-    runtime.service.transition_task(
-        task.task_id,
-        RadarTaskStatus.RUNNING,
-        message="Dynamic CLI goal accepted by the durable worker queue.",
-    )
-    runtime.worker.run_once()
+    runtime.run_task(task.task_id)
     trace = build_developer_trace(runtime.service, task.task_id)
     _write_trace(trace, output_format=args.format, stdout=stdout)
     return _exit_for_trace(trace)
 
 
 def _answer_input(runtime: Any, *, args: Any, stdout: TextIO) -> int:
-    from sleepagent.radar_agent.dynamic import UserInputResponse
-
     task = runtime.service.get_task(args.task_id)
+    if task.runtime_kind != "product_episode":
+        raise InvalidTaskTransition(
+            f"historical {task.runtime_kind!r} task is read-only"
+        )
     request = runtime.store.get_user_input_request(args.request_id)
     if request.task_id != task.task_id:
         raise InvalidTaskTransition("user input request belongs to another task")
@@ -249,7 +252,11 @@ def _answer_input(runtime: Any, *, args: Any, stdout: TextIO) -> int:
             answered_by_role=args.role,
         )
     )
-    runtime.worker.run_once()
+    runtime.resume_product_after_user_input(
+        task.task_id,
+        request=request,
+        answer=args.answer,
+    )
     trace = build_developer_trace(runtime.service, task.task_id)
     _write_trace(trace, output_format=args.format, stdout=stdout)
     return _exit_for_trace(trace)

@@ -16,7 +16,13 @@ from sleepagent.radar_agent.cli import (
     EXIT_TASK_FAILED,
     main,
 )
-from sleepagent.radar_agent.runtime import RadarTaskStatus, build_developer_trace
+from sleepagent.radar_agent.runtime import (
+    RadarAgentTask,
+    RadarTaskStatus,
+    build_developer_trace,
+)
+from sleepagent.radar_agent.persistence import RadarSubject
+from sleepagent.radar_agent.provider import ReplayRadarProvider
 from sleepagent.radar_agent.schemas import A2AMessage
 
 
@@ -40,8 +46,15 @@ def test_run_demo_json_executes_shared_runtime_and_emits_trace() -> None:
     assert payload["schema_version"] == "developer-trace.v1"
     assert payload["task"]["trace_id"] == persisted.trace_id
     assert payload["task"]["status"] == "completed"
-    assert any(event["event_type"] == "claim.created" for event in payload["events"])
-    assert {item["generation_mode"] for item in payload["llm"]} == {"fallback"}
+    assert payload["task"]["runtime_kind"] == "product_episode"
+    assert any(
+        event["event_type"] == "tool.completed"
+        for event in payload["events"]
+    )
+    assert any(
+        item["artifact_type"] == "product_episode_result"
+        for item in payload["artifacts"]
+    )
     assert all("content" not in artifact for artifact in payload["artifacts"])
 
 
@@ -59,8 +72,7 @@ def test_run_demo_jsonl_and_pretty_expose_summary_views_only() -> None:
     task_id = lines[0]["task_id"]
     assert lines[0]["type"] == "trace"
     assert {line["type"] for line in lines} >= {
-        "trace", "event", "claim", "a2a", "llm", "questionnaire",
-        "confirmation", "artifact"
+        "trace", "event", "artifact"
     }
 
     runtime.service.forward_a2a_message(
@@ -105,10 +117,26 @@ def test_inspect_task_exit_codes_are_stable() -> None:
         stderr=stderr,
     ) == EXIT_NOT_FOUND
 
-    task = runtime.create_task(
-        RadarTaskCreateRequest(runtime_kind="legacy_fixed"),
-        idempotency_key=None,
+    runtime.store.save_subject(
+        RadarSubject(
+            subject_id="historical-subject",
+            display_name="Historical Subject",
+        )
     )
+    device = ReplayRadarProvider().list_devices()[0].model_copy(
+        update={"bound_subject_id": "historical-subject"}
+    )
+    runtime.store.save_device(device)
+    task = RadarAgentTask(
+        task_id="historical-cli-task",
+        trace_id="historical-cli-trace",
+        subject_id="historical-subject",
+        radar_device_id=device.radar_device_id,
+        runtime_kind="legacy_fixed",
+        runtime_contract_version="radar-legacy.v1",
+        node_status={"legacy-node": "pending"},
+    )
+    runtime.store.save_task(task)
     assert main(
         ["inspect-task", task.task_id, "--retry"],
         runtime=runtime,
@@ -120,7 +148,6 @@ def test_failed_task_can_retry_in_place_and_rerun_as_child() -> None:
     runtime = _runtime()
     original = runtime.create_task(
         RadarTaskCreateRequest(
-            runtime_kind="legacy_fixed",
             scenario="normal_night",
         ),
         idempotency_key=None,
@@ -152,7 +179,6 @@ def test_failed_task_can_retry_in_place_and_rerun_as_child() -> None:
 
     failed_for_rerun = runtime.create_task(
         RadarTaskCreateRequest(
-            runtime_kind="legacy_fixed",
             scenario="normal_night",
         ),
         idempotency_key=None,
@@ -178,7 +204,7 @@ def test_failed_task_can_retry_in_place_and_rerun_as_child() -> None:
 def test_trace_filters_secrets_raw_payloads_and_report_bodies() -> None:
     runtime = _runtime()
     task = runtime.create_task(
-        RadarTaskCreateRequest(runtime_kind="legacy_fixed"),
+        RadarTaskCreateRequest(),
         idempotency_key=None,
     )
     runtime.service.emit_event(
@@ -204,7 +230,7 @@ def test_trace_filters_secrets_raw_payloads_and_report_bodies() -> None:
     assert "[redacted]" in serialized
 
 
-def test_run_goal_executes_dynamic_runtime_and_prints_real_capability_trace(
+def test_run_goal_executes_canonical_product_episode(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
@@ -229,14 +255,16 @@ def test_run_goal_executes_dynamic_runtime_and_prints_real_capability_trace(
 
     payload = json.loads(stdout.getvalue())
     assert exit_code == EXIT_OK
-    assert payload["task"]["runtime_kind"] == "dynamic_goal"
-    assert payload["task"]["execution_mode"] == "safe_degraded"
-    assert payload["dynamic"]["plans"]
-    assert payload["dynamic"]["tool_invocations"]
-    assert payload["dynamic"]["agent_invocations"] == []
+    assert payload["task"]["runtime_kind"] == "product_episode"
+    assert payload["task"]["runtime_contract_version"] == "product-episode.v1"
+    assert any(
+        item["artifact_type"] == "product_episode_result"
+        for item in payload["artifacts"]
+    )
+    assert not payload.get("dynamic")
 
 
-def test_inspect_dynamic_decision_trace_jsonl_exposes_causal_runtime_sections(
+def test_inspect_product_decision_trace_has_no_dynamic_runtime_sections(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
@@ -271,9 +299,7 @@ def test_inspect_dynamic_decision_trace_jsonl_exposes_causal_runtime_sections(
     types = {
         json.loads(line)["type"] for line in trace_out.getvalue().splitlines()
     }
-    assert {
-        "dynamic_plan",
-        "dynamic_tool_invocation",
-        "dynamic_budget",
-        "dynamic_completion_receipt",
-    } <= types
+    assert "trace" in types
+    assert "event" in types
+    assert "artifact" in types
+    assert not any(item.startswith("dynamic_") for item in types)

@@ -1121,6 +1121,7 @@ class ProductEpisodeRunner:
                             context=ProductToolExecutionContext(
                                 caller="runtime",
                                 fact_snapshot=request.fact_snapshot,
+                                episode_id=request.episode_id,
                                 authorization_scope=(
                                     request.fact_snapshot.binding.authorization_scope
                                 ),
@@ -1166,6 +1167,7 @@ class ProductEpisodeRunner:
                         context=ProductToolExecutionContext(
                             caller="runtime",
                             fact_snapshot=request.fact_snapshot,
+                            episode_id=request.episode_id,
                             authorization_scope=(
                                 request.fact_snapshot.binding.authorization_scope
                             ),
@@ -2451,6 +2453,7 @@ class ProductEpisodeRunner:
             context=ProductToolExecutionContext(
                 caller="runtime",
                 fact_snapshot=request.fact_snapshot,
+                episode_id=request.episode_id,
                 authorization_scope=request.fact_snapshot.binding.authorization_scope,
             ),
         )
@@ -2470,6 +2473,7 @@ class ProductEpisodeRunner:
                     context=ProductToolExecutionContext(
                         caller="runtime",
                         fact_snapshot=request.fact_snapshot,
+                        episode_id=request.episode_id,
                         authorization_scope=(
                             request.fact_snapshot.binding.authorization_scope
                         ),
@@ -2600,7 +2604,9 @@ class ProductEpisodeRunner:
                 tool_name,
                 request.tool_inputs.get(tool_name, {}),
                 context=ProductToolExecutionContext(
-                    caller="runtime", fact_snapshot=request.fact_snapshot
+                    caller="runtime",
+                    fact_snapshot=request.fact_snapshot,
+                    episode_id=request.episode_id,
                 ),
             )
             receipts.append(result.receipt)
@@ -2655,7 +2661,9 @@ class ProductEpisodeRunner:
                 tool_name,
                 request.tool_inputs.get(tool_name, {}),
                 context=ProductToolExecutionContext(
-                    caller="runtime", fact_snapshot=request.fact_snapshot
+                    caller="runtime",
+                    fact_snapshot=request.fact_snapshot,
+                    episode_id=request.episode_id,
                 ),
             )
             receipts.append(result.receipt)
@@ -3089,10 +3097,15 @@ class ProductEpisodeRunner:
                     }
                 )
         if result.receipt.terminal:
-            self.result_store.append_terminal_bundle(
-                result,
-                subject_id=subject_id,
-            )
+            try:
+                self.result_store.append_terminal_bundle(
+                    result,
+                    subject_id=subject_id,
+                )
+            finally:
+                self.tool_executor.release_episode(
+                    result.receipt.episode_id
+                )
         else:
             self.result_store.append_nonterminal(
                 result,

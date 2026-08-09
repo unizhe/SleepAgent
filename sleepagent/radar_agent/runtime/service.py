@@ -7,14 +7,8 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from sleepagent.radar_agent.agents import ContextPacket
 from sleepagent.radar_agent.a2a import A2AEventBus, InMemoryA2AMailbox
 from sleepagent.radar_agent.confirmation import canonical_action, confirmation_rule
-from sleepagent.radar_agent.orchestrator import (
-    WORKFLOW_NODE_ORDER,
-    OrchestratorAgent,
-    OrchestratorDecision,
-)
 from sleepagent.radar_agent.persistence.models import (
     RadarAuditLogEntry,
     RadarDataAuthorization,
@@ -33,6 +27,8 @@ from sleepagent.radar_agent.schemas import (
 )
 
 from .contracts import (
+    CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION,
+    CANONICAL_AGENT_RUNTIME_KIND,
     RadarAgentTask,
     RadarArtifactVersion,
     RadarNodeStatus,
@@ -109,7 +105,7 @@ _NODE_TRANSITIONS: dict[RadarNodeStatus, set[RadarNodeStatus]] = {
 
 
 class TaskService:
-    """Persistent lifecycle owner around the single-task OrchestratorAgent."""
+    """Persistent lifecycle owner for canonical Product Episode tasks."""
 
     def __init__(
         self,
@@ -141,10 +137,19 @@ class TaskService:
         idempotency_key: str | None = None,
         max_retries: int = 3,
         parent_task_id: str | None = None,
-        runtime_kind: str = "legacy_fixed",
-        runtime_contract_version: str = "radar-legacy.v1",
+        runtime_kind: str = CANONICAL_AGENT_RUNTIME_KIND,
+        runtime_contract_version: str = CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION,
         goal_payload: dict[str, Any] | None = None,
     ) -> RadarAgentTask:
+        if (
+            runtime_kind != CANONICAL_AGENT_RUNTIME_KIND
+            or runtime_contract_version
+            != CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION
+        ):
+            raise InvalidTaskTransition(
+                "historical Agent runtimes are read-only; new tasks must use "
+                "product_episode/product-episode.v1"
+            )
         with self._lock:
             requested_bindings = list(role_binding_ids or [])
             requested_input = dict(provider_input or {})
@@ -223,11 +228,7 @@ class TaskService:
                 runtime_kind=runtime_kind,
                 runtime_contract_version=runtime_contract_version,
                 goal_payload=goal_payload,
-                node_status=(
-                    {node.value: RadarNodeStatus.PENDING for node in WORKFLOW_NODE_ORDER}
-                    if runtime_kind == "legacy_fixed"
-                    else {}
-                ),
+                node_status={},
                 max_retries=max_retries,
                 idempotency_key=idempotency_key,
                 parent_task_id=parent_task_id,
@@ -519,6 +520,13 @@ class TaskService:
     def get_task(self, task_id: str) -> RadarAgentTask:
         return self.store.get_task(task_id)
 
+    @staticmethod
+    def _require_canonical_runtime(task: RadarAgentTask) -> None:
+        if task.runtime_kind != CANONICAL_AGENT_RUNTIME_KIND:
+            raise InvalidTaskTransition(
+                f"historical {task.runtime_kind!r} task is read-only"
+            )
+
     def list_events(self, task_id: str, *, after_sequence: int = 0) -> list[RadarTaskEvent]:
         self.get_task(task_id)
         return self.store.list_task_events(task_id, after_sequence=after_sequence)
@@ -786,6 +794,7 @@ class TaskService:
     def retry_failed_task(self, task_id: str) -> RadarAgentTask:
         with self._lock:
             task = self.get_task(task_id)
+            self._require_canonical_runtime(task)
             if task.status != RadarTaskStatus.FAILED or task.failure is None:
                 raise InvalidTaskTransition("only a failed task can be retried")
             if not task.failure.retryable:
@@ -822,6 +831,7 @@ class TaskService:
         idempotency_key: str | None = None,
     ) -> RadarAgentTask:
         original = self.get_task(task_id)
+        self._require_canonical_runtime(original)
         if original.status != RadarTaskStatus.FAILED:
             raise InvalidTaskTransition("only a failed task can be rerun")
         rerun = self.create_task(
@@ -836,6 +846,9 @@ class TaskService:
             idempotency_key=idempotency_key,
             max_retries=original.max_retries,
             parent_task_id=original.task_id,
+            runtime_kind=original.runtime_kind,
+            runtime_contract_version=original.runtime_contract_version,
+            goal_payload=original.goal_payload,
         )
         self._audit(rerun, "failed_task_rerun_created", original.task_id, "Created a fresh rerun task.")
         return rerun
@@ -845,6 +858,8 @@ class TaskService:
         with self._lock:
             tasks = self.store.list_tasks(statuses={RadarTaskStatus.RUNNING})
             for task in tasks:
+                if task.runtime_kind != CANONICAL_AGENT_RUNTIME_KIND:
+                    continue
                 statuses = {
                     node: (RadarNodeStatus.PENDING if status == RadarNodeStatus.RUNNING else status)
                     for node, status in task.node_status.items()
@@ -1445,10 +1460,13 @@ class TaskService:
     def execute(
         self,
         task_id: str,
-        orchestrator: OrchestratorAgent,
-        context: ContextPacket,
-    ) -> OrchestratorDecision:
+        orchestrator: Any,
+        context: Any,
+    ) -> Any:
         task = self.get_task(task_id)
+        # Characterization oracle only. Production/API/CLI have no caller for
+        # this method after the Phase 3B cutover; Phase 3C deletes it with the
+        # fixed Orchestrator source.
         if context.task_context.task_id != task_id:
             raise ValueError("context task_id does not match lifecycle task")
         if self._require_authorization:
@@ -1699,7 +1717,7 @@ class TaskService:
     def _sync_orchestrator_nodes(
         self,
         task_id: str,
-        orchestrator: OrchestratorAgent,
+        orchestrator: Any,
         *,
         include_failed: bool = False,
     ) -> None:

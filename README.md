@@ -14,14 +14,14 @@ SleepAgent 是面向居家老人、家属和医生协同场景的睡眠健康观
 
 唯一生产 Agent roster 由 `SleepCareAgent`、`EvidenceReasoningAgent`、`CareStrategyAgent` 和条件触发的 `SafetyReviewAgent` 构成。它是封闭集合，不提供第五 Agent、旧身份 alias 或历史名称路由。Agent 是有独立目标、状态、权限、反馈闭环和审计身份的责任主体；计算、检索、模型推理、渲染、存储、权限检查与外部执行属于 Tool、Service 或确定性 Policy。
 
-`product_agent` 已具备四角色 Contract、治理门和 Episode 主链；具体角色边界与旧运行时清理按架构收口阶段完成。验收完成前，旧固定/Dynamic 源码只属于待迁移残留，不是受支持的生产、开发 fallback 或备用架构：
+`product_agent` 已具备四角色 Contract、治理门和 Episode 主链。旧固定/Dynamic 源码仅作为 Phase 3C 删除前的历史实现来源，已经没有生产或开发执行入口：
 
-- `sleepagent/radar_agent/` 提供雷达数据、证据、确认、持久化和 API 基础；其中旧 Agent/runtime 身份等待迁移后删除。
+- `sleepagent/radar_agent/` 提供雷达数据、证据、确认、持久化和 API 基础；旧 Agent/runtime 能力迁移已完成，源码等待 Phase 3C 删除。
 - `sleepagent/radar_agent/product_agent/` 是唯一 Agent namespace，承载四角色合同、Episode、治理、工具与 runner 内核，不应复制为平行实现。
 - 渐进式 Habit Profile 作为 Questionnaire、类型化 Profile Store、Evidence adapter 和 Commit Controller 能力融入该内核，不新增 Agent；旧自由文本 Memory 和 family-only legacy writer 不是 Habit Profile 写入路径。
 - `sleepagent/product_device/` 只提供设备数据与产品适配 API，不得拥有独立 Agent 身份或 alias。
 - `sleepagent/integrations/perceptor/` 提供供应商 client、签名、统一 push/pull 规范化和真实验收合同；旧本地 webhook SQLite 仅用于显式诊断与一次性导入。
-- `backend/main.py` 只挂载当前雷达、产品兼容、健康状态和 Perceptor webhook 入口。
+- `backend/main.py` 保留健康状态、canonical Product Episode 诊断与非 Agent 数据入口，不再启动或路由旧 Agent Runtime。
 - `frontend/` 是唯一保留的 Next.js 用户界面。
 
 `sleepagent/radar_agent/` 中的旧角色只可作为能力迁移来源；禁止新增调用方，并将在收口阶段删除其可执行入口和身份。
@@ -55,14 +55,14 @@ SLEEPAGENT_RADAR_AGENT_AUTHORIZATION_ID=<active-data-authorization-id>
 SLEEPAGENT_RADAR_AGENT_ROLE_BINDING_IDS=<comma-separated-role-binding-ids>
 SLEEPAGENT_RADAR_AGENT_SQLITE_PATH=/tmp/sleepagent_radar_agent.sqlite3
 SLEEPAGENT_API_BASE_URL=http://127.0.0.1:18000
-SLEEPAGENT_RADAR_AGENT_RUNTIME_MODE=product
 SLEEPAGENT_RADAR_AGENT_DEV_MODE=true
 SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE=fake
 SLEEPAGENT_PRODUCT_RADAR_NAMESPACE=replay:local-product-demo
 ```
 
-配置真实模型后，`/product/radar/chat`、`/product/radar/agent-runs`
-及其追问都只调用同一个四角色 `ProductEpisodeRunner`。缺少上述
+配置真实模型后，`/product/radar/chat` 与诊断面的
+`/radar-agent/tasks` 创建、运行和续跑都只调用同一个四角色
+`ProductEpisodeRunner`。缺少上述
 actor/role/subject 服务端绑定时会返回 503，不会退回旧单模型决策链。
 固定绑定只适用于受控单对象部署；多用户环境必须由可信身份网关按会话提供。
 Product 任务若需要补充事实或确认 Memory、Care、通知、分享、导出目标，
@@ -109,8 +109,8 @@ npm run dev
 
 - `/api/v1/*`：独立 Sleep API 应用中唯一受支持的外部睡眠域 API。
 - `/radar-agent/*` 与 `/product/radar/*`：当前仅在非生产环境显式开启
-  `SLEEPAGENT_RADAR_AGENT_DEV_MODE=true` 后可见的迁移/诊断面；架构收口后只允许
-  Product Episode 诊断，不保留 `legacy_fixed`、`dynamic_goal` 或旧 Agent 执行入口。
+  `SLEEPAGENT_RADAR_AGENT_DEV_MODE=true` 后可见的迁移/诊断面；只允许 Product
+  Episode 诊断，不保留 `legacy_fixed`、`dynamic_goal` 或旧 Agent 执行入口。
   Fake provider 还必须显式配置 `SLEEPAGENT_PRODUCT_RADAR_PROVIDER_MODE=fake`。
 - `/product/habit-profile/*`：可选轻建档、当前回答、老人整体确认、查看、更正和遗忘；默认主动建档关闭。
 - `/integrations/perceptor/webhook`：唯一正式供应商 webhook 写入入口。
