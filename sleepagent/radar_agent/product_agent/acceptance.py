@@ -24,7 +24,7 @@ from sleepagent.radar_agent.product_agent.registry import (
     REGISTRY_VERSION,
     product_agent_manifest,
 )
-from sleepagent.radar_agent.product_agent.runner import (
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
     PRODUCT_EPISODE_RESULT_SCHEMA_VERSION,
     PRODUCT_EPISODE_RUNNER_VERSION,
     ProductEpisodeRunResult,

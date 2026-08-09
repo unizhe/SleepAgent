@@ -3916,3 +3916,153 @@ before the full regression and package proof were repeated.
 Phase 3C remains uncommitted. No push, release, database rewrite or migration
 deletion was performed, unrelated dirty-worktree changes remain untouched, and
 execution is paused before any `ProductEpisodeRunner` decomposition.
+
+### Round 66 — Codex build: Phase B one composition root and lower-level runtime contracts
+
+Date: 2026-08-09
+
+Spec: `agent_architecture/PRODUCT-RUNTIME-CLEANUP-PLAN.md`, Phase B only.
+Phase A was accepted before this build. Phase C was not started.
+
+### Implemented
+
+- Added lower-level `runtime_contracts.py` and `runtime_ports.py` modules for
+  Product runtime DTOs, continuation commands and dependency protocols. The
+  Persistence and Habit layers no longer depend on the concrete Runner or Tool
+  implementations.
+- Made every `ProductEpisodeRunner` dependency explicit and removed its hidden
+  model, store, handler, publisher and policy construction. Its `run` method and
+  lifecycle semantics remain byte-for-byte AST equivalent to the accepted
+  Phase A baseline.
+- Rebuilt `runtime_factory.py` around one complete `ProductRuntimeBundle` that
+  owns the Runner, stores, policies, Tool executor and all identity-sensitive
+  collaborators. It is the sole production construction site for
+  `ProductEpisodeRunner`.
+- Routed the HTTP API, Habit API, legacy backend adapter, CLI, PostgreSQL worker
+  and deterministic test adapter through the same bundle factory. Resume paths
+  now use distinct typed commands for fact re-execution and frozen-confirmation
+  commit.
+- Added architecture gates for sole construction, required dependencies,
+  bundle identity, lower-layer imports and adapter delegation; updated affected
+  tests to request canonical bundles or pass explicit fakes.
+
+### Codex verification
+
+- Focused Phase B architecture, factory, Runner, API, Habit, worker, CLI,
+  golden and memory suite: `154 passed in 14.32s`.
+- Full working-tree regression: `982 passed, 5 skipped in 54.74s`.
+- A fresh CPython 3.11 clone of the exact Phase B candidate collected `987`
+  tests and completed with `982 passed, 5 skipped in 61.59s`.
+- Hash-locked development install, isolated wheel build/install/import audit,
+  console entry points, migration/package-content audit, `compileall`, fixed
+  memory-clock proof, frontend `npm ci`/typecheck/production build and Docker
+  Compose validation all pass.
+- The proof checkout finished with an empty `git status`, and
+  `git diff --check` passes. The four-role manifest hash remains
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`;
+  the release-identity hash remains
+  `5ec670c523f5ace95c7ac6c7a11563a5ad2e5dc20b4e4a03a138f68bc554f3ec`.
+
+Fix rounds used: 2. The first completed dependency inversion and composition
+root convergence. The second removed the remaining implicit test construction,
+aligned adapter identity graphs and strengthened the static architecture gates.
+An independent final audit found no Phase B blocker.
+
+Phase B remains uncommitted. No push, release or Phase C work was performed,
+and execution is paused for user acceptance.
+
+### Round 67 — Codex build: Phase C real Tool owners, Skill shadow removal and public API
+
+Date: 2026-08-09
+
+Spec: `agent_architecture/PRODUCT-RUNTIME-CLEANUP-PLAN.md`, Phase C only.
+Phase B was accepted before this build. Phase D was not started.
+
+### Implemented
+
+- Reconciled the production registry to 33 typed Tools with concrete owners:
+  25 read capabilities owned by Product runtime Services/domain boundaries, two
+  runtime-only questionnaire writes, and six Commit Controller Tools. Added the
+  typed `ProductRuntimeReadService`; no production registration uses an echo or
+  `_passthrough` handler.
+- Deleted the capability-free `evidence.read_ledger`, `care.read_feedback`,
+  `questionnaire.select`, `artifact.read`, `memory.compare`,
+  `coordination.read_schedule`, `confirmation.validate` and
+  `state.commit_evidence` registrations and allowlist references. Tool imports
+  remain directed toward Service/domain/integration owners, never concrete
+  Agents.
+- Removed all five `skill_methods/` source files and retained one callable,
+  versioned `SkillPackage` runtime. The four Agent profiles are version 2.0.0;
+  the 14 affected Skills and six authoritative read receipts were versioned
+  with their changed semantics. Stale ignored bytecode for the removed shadow
+  was moved recoverably to `/tmp/sleepagent-phase-c-stale-skill-methods-cache-20260809`.
+- Replaced package-root namespace growth with an exact 25-symbol public API for
+  the four concrete Agents, roster/factory, Runner and essential contracts.
+  Internal stores, repositories, controllers, policies and compatibility DTOs
+  now require direct owner-module imports. `runtime_factory` remains the sole
+  Product composition root and `ProductEpisodeRunner` remains the facade.
+- Hardened questionnaire Tool execution uncovered by adversarial review:
+  semantic deterministic selection IDs and request hashes reject payload
+  collisions; capture, consumed and suppression state persist atomically in a
+  versioned envelope; answer references are selection- and subject-scoped; only
+  successful questionnaire Tool results are cached; terminal Episode results
+  are persisted before cache release; and both durable and same-process replay
+  re-check answer and safety expiry before disclosure. Required selection
+  failures degrade safely, while optional failures preserve the core Episode
+  and report `PARTIAL`.
+- Modelled authenticated elder `NEVER_ASK` as direct data-subject withdrawal,
+  with server-derived command provenance and subject/actor/role binding. It is
+  not represented as an HDS ActionProposal, and family-originated selection
+  cannot create that withdrawal. The frontend change-set contract is now the
+  exact `{decision_id, idempotency_key}` shape with stable client idempotency.
+- Regenerated the v23/v24 current acceptance material from the current
+  initializers and added byte-parity plus receipt-hash checks. These remain
+  synthetic unsigned materials; the release verifier correctly remains
+  `eligible: false` and no real-world acceptance or release claim was created.
+
+### Codex verification
+
+- Focused Phase C, Habit and acceptance suite: `228 passed in 13.31s`.
+  Independent package/identity boundary suite: `79 passed`.
+- Full working-tree regression: `998 passed, 5 skipped in 61.91s`. The final
+  clean Git candidate repeated it as `998 passed, 5 skipped in 62.31s`.
+- A fresh CPython 3.11 environment installed `requirements/dev.lock` with
+  `pip --require-hashes` and repeated the clean-candidate suite as
+  `998 passed, 5 skipped in 64.17s`.
+- The clean wheel contains 207 entries, zero `skill_methods`, zero
+  `_passthrough` implementations and zero retired `state.commit_evidence`
+  references. Its isolated install exposes the exact 25-symbol public API after
+  reload and only the intended four console entry points.
+- `python -m compileall`, `git diff --check`, Docker Compose configuration,
+  frontend `npm ci`, typecheck and the six-page Next.js production build all
+  pass. The clean proof checkout had an empty `git status` before this log-only
+  update.
+- Product Contract is `sleepagent-product-agent.v14`; Registry is v13 with
+  manifest hash
+  `2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3`;
+  release identity is
+  `7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`.
+  All 66 synthetic receipt hashes recompute, v23/v24 material is generator
+  byte-exact, and the v24 archive hash is
+  `500269b5c6fe8f544ae0d4b93f4173c66832e24758e764e1845da892d53faade`.
+
+### Explicit P1 follow-up outside the frozen Phase C gate
+
+- Same-Episode concurrent runs are not serialized; one run's
+  `release_episode()` may clear cache entries still in use by another run.
+- Complete questionnaire capture envelopes are retained in JSONB without a
+  bounded retention/deletion/anonymization policy, and answer-ref lookup still
+  scans consumed rows. Expiry now blocks disclosure but does not physically
+  delete retained data.
+- Legacy Habit questionnaire/suppression tables lack namespace/data-mode/RLS
+  scoping and are not mounted by the new scoped backend. Multi-tenant isolation
+  is therefore not claimed for that legacy path.
+
+Fix rounds used: 2. The first replaced fake/local Tool behavior, removed the
+Skill shadow and locked the public boundary. The second closed provenance,
+idempotency, expiry/replay and fail-safe gaps, then reconciled acceptance
+materials and package identity. Independent final review found no Phase C P0
+blocker and explicitly retained the three P1 items above.
+
+Phase C remains uncommitted. No push, release, production mutation or Phase D
+work was performed, and execution is paused for user acceptance.

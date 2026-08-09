@@ -18,7 +18,7 @@ from sleepagent.radar_agent.product_agent.registry import (
 )
 
 
-SKILL_FOUNDATION_VERSION = "sleepagent-product-skill-foundation.v5"
+SKILL_FOUNDATION_VERSION = "sleepagent-product-skill-foundation.v6"
 
 
 class SkillLifecycle(str, Enum):
@@ -397,7 +397,7 @@ def default_agent_profiles() -> dict[AgentId, AgentProfile]:
     return {
         agent_id: AgentProfile.create(
             profile_id=f"profile:{agent_id.value}",
-            version="1.0.0",
+            version="2.0.0",
             agent_id=agent_id,
             responsibility=responsibility,
             allowed_context_labels=(
@@ -461,19 +461,17 @@ def default_skill_packages() -> list[SkillPackage]:
         "plan_episode": ("policy.read",),
         "evaluate_work_product": ("policy.read",),
         "answer_grounded_question": ("knowledge.retrieve_reviewed",),
-        "draft_user_material": ("artifact.read", "artifact.render"),
-        "draft_doctor_material": ("artifact.read", "artifact.render"),
+        "draft_user_material": ("artifact.render",),
+        "draft_doctor_material": ("artifact.render",),
         "propose_memory_change": (
             "memory.read",
             "memory.review_candidates",
             "memory.prepare_candidate",
-            "memory.compare",
         ),
         "select_memory_context": (
             "memory.read",
             "memory.review_candidates",
             "memory.prepare_candidate",
-            "memory.compare",
         ),
         "interpret_scoped_evidence": (
             "radar.get_night_evidence",
@@ -481,7 +479,6 @@ def default_skill_packages() -> list[SkillPackage]:
             "radar.assess_data_quality",
             "radar.get_device_status",
             "knowledge.retrieve_reviewed",
-            "evidence.read_ledger",
             "memory.read",
             "memory.resolve_source",
             "profile.read",
@@ -489,7 +486,6 @@ def default_skill_packages() -> list[SkillPackage]:
             "reasoning.resolve_event_context",
         ),
         "synthesize_evidence_conflict": (
-            "evidence.read_ledger",
             "memory.read",
             "memory.resolve_source",
             "knowledge.retrieve_reviewed",
@@ -500,7 +496,6 @@ def default_skill_packages() -> list[SkillPackage]:
             "radar.get_range_evidence",
             "radar.assess_data_quality",
             "trend.calculate_metrics",
-            "evidence.read_ledger",
             "memory.read",
             "memory.resolve_source",
             "profile.read",
@@ -511,18 +506,15 @@ def default_skill_packages() -> list[SkillPackage]:
             "care.read_catalog",
             "care.read_constraints",
             "coordination.read_policy",
-            "coordination.read_schedule",
             "device.read_delivery_policy",
             "knowledge.retrieve_reviewed",
         ),
         "assess_followup_outcome": (
             "care.read_state",
-            "care.read_feedback",
             "care.read_constraints",
         ),
         "draft_coordination_candidate": (
             "coordination.read_policy",
-            "coordination.read_schedule",
         ),
         "review_claim_and_boundary": (
             "policy.read",
@@ -532,15 +524,32 @@ def default_skill_packages() -> list[SkillPackage]:
         "review_action_and_publication": (
             "policy.read",
             "risk.classify_signal",
-            "confirmation.validate",
             "care.read_catalog",
             "care.read_constraints",
         ),
     }
+    tool_contract_v2 = frozenset(
+        {
+            "plan_episode",
+            "evaluate_work_product",
+            "draft_user_material",
+            "draft_doctor_material",
+            "propose_memory_change",
+            "select_memory_context",
+            "interpret_scoped_evidence",
+            "synthesize_evidence_conflict",
+            "interpret_longitudinal_pattern",
+            "propose_single_care_action",
+            "assess_followup_outcome",
+            "draft_coordination_candidate",
+            "review_claim_and_boundary",
+            "review_action_and_publication",
+        }
+    )
     return [
         SkillPackage.create(
             skill_id=skill_id,
-            version="1.0.0",
+            version="2.0.0" if skill_id in tool_contract_v2 else "1.0.0",
             owner_agent=owner,
             lifecycle=SkillLifecycle.APPROVED,
             champion=True,

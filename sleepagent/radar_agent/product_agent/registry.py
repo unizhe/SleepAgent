@@ -16,7 +16,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
 )
 
 
-REGISTRY_VERSION = "sleepagent-product-registry.v9"
+REGISTRY_VERSION = "sleepagent-product-registry.v13"
 
 
 class InvocationPolicyError(ValueError):
@@ -47,6 +47,7 @@ class ToolDefinition:
     effect: ToolEffect
     owner: str
     confirmation_required: bool = False
+    version: str = "v1"
 
 
 @dataclass(frozen=True)
@@ -109,19 +110,30 @@ TOOL_DEFINITIONS: Mapping[str, ToolDefinition] = MappingProxyType({
         ),
         ToolDefinition("baseline.read", ToolEffect.READ_ONLY, "trend"),
         ToolDefinition("knowledge.retrieve_reviewed", ToolEffect.READ_ONLY, "knowledge"),
-        ToolDefinition("evidence.read_ledger", ToolEffect.READ_ONLY, "ledger"),
-        ToolDefinition("care.read_state", ToolEffect.READ_ONLY, "care_state"),
-        ToolDefinition("care.read_catalog", ToolEffect.READ_ONLY, "care_catalog"),
-        ToolDefinition("care.read_constraints", ToolEffect.READ_ONLY, "care_catalog"),
-        ToolDefinition("care.read_feedback", ToolEffect.READ_ONLY, "care_state"),
-        ToolDefinition("questionnaire.select", ToolEffect.READ_ONLY, "questionnaire"),
         ToolDefinition(
-            "questionnaire.select_profile", ToolEffect.READ_ONLY, "questionnaire"
+            "care.read_state", ToolEffect.READ_ONLY, "care_state", version="v2"
         ),
         ToolDefinition(
-            "questionnaire.capture_profile", ToolEffect.READ_ONLY, "questionnaire"
+            "care.read_catalog", ToolEffect.READ_ONLY, "care_catalog", version="v2"
         ),
-        ToolDefinition("artifact.read", ToolEffect.READ_ONLY, "artifact"),
+        ToolDefinition(
+            "care.read_constraints",
+            ToolEffect.READ_ONLY,
+            "care_catalog",
+            version="v2",
+        ),
+        ToolDefinition(
+            "questionnaire.select_profile",
+            ToolEffect.STATE_WRITE,
+            "questionnaire",
+            version="v2",
+        ),
+        ToolDefinition(
+            "questionnaire.capture_profile",
+            ToolEffect.STATE_WRITE,
+            "questionnaire",
+            version="v2",
+        ),
         ToolDefinition("artifact.render", ToolEffect.READ_ONLY, "artifact"),
         ToolDefinition("memory.read", ToolEffect.READ_ONLY, "memory"),
         ToolDefinition(
@@ -139,19 +151,25 @@ TOOL_DEFINITIONS: Mapping[str, ToolDefinition] = MappingProxyType({
             ToolEffect.READ_ONLY,
             "memory",
         ),
-        ToolDefinition("memory.compare", ToolEffect.READ_ONLY, "memory"),
         ToolDefinition("profile.read", ToolEffect.READ_ONLY, "memory"),
         ToolDefinition(
             "profile.build_change_set", ToolEffect.READ_ONLY, "memory"
         ),
-        ToolDefinition("coordination.read_policy", ToolEffect.READ_ONLY, "coordination"),
-        ToolDefinition("coordination.read_schedule", ToolEffect.READ_ONLY, "coordination"),
         ToolDefinition(
-            "device.read_delivery_policy", ToolEffect.READ_ONLY, "device"
+            "coordination.read_policy",
+            ToolEffect.READ_ONLY,
+            "coordination",
+            version="v2",
         ),
-        ToolDefinition("policy.read", ToolEffect.READ_ONLY, "policy"),
-        ToolDefinition("confirmation.validate", ToolEffect.READ_ONLY, "confirmation"),
-        ToolDefinition("state.commit_evidence", ToolEffect.STATE_WRITE, "commit_controller"),
+        ToolDefinition(
+            "device.read_delivery_policy",
+            ToolEffect.READ_ONLY,
+            "device",
+            version="v2",
+        ),
+        ToolDefinition(
+            "policy.read", ToolEffect.READ_ONLY, "policy", version="v2"
+        ),
         ToolDefinition(
             "state.commit_care", ToolEffect.STATE_WRITE, "commit_controller", True
         ),
@@ -243,17 +261,11 @@ TOOL_INVOCATION_ALLOWLIST: Mapping[
     AgentId.SLEEP_CARE: frozenset(
         {
             "policy.read",
-            "confirmation.validate",
             "knowledge.retrieve_reviewed",
-            "questionnaire.select",
-            "questionnaire.select_profile",
-            "questionnaire.capture_profile",
-            "artifact.read",
             "artifact.render",
             "memory.read",
             "memory.review_candidates",
             "memory.prepare_candidate",
-            "memory.compare",
             "profile.read",
             "profile.build_change_set",
         }
@@ -266,7 +278,6 @@ TOOL_INVOCATION_ALLOWLIST: Mapping[
             "radar.get_device_status",
             "trend.calculate_metrics",
             "knowledge.retrieve_reviewed",
-            "evidence.read_ledger",
             "memory.read",
             "memory.resolve_source",
             "profile.read",
@@ -279,9 +290,7 @@ TOOL_INVOCATION_ALLOWLIST: Mapping[
             "care.read_state",
             "care.read_catalog",
             "care.read_constraints",
-            "care.read_feedback",
             "coordination.read_policy",
-            "coordination.read_schedule",
             "device.read_delivery_policy",
             "knowledge.retrieve_reviewed",
         }
@@ -290,7 +299,6 @@ TOOL_INVOCATION_ALLOWLIST: Mapping[
         {
             "policy.read",
             "risk.classify_signal",
-            "confirmation.validate",
             "care.read_catalog",
             "care.read_constraints",
         }
@@ -298,8 +306,15 @@ TOOL_INVOCATION_ALLOWLIST: Mapping[
 })
 
 
+RUNTIME_INTERACTION_TOOLS = frozenset(
+    {
+        "questionnaire.select_profile",
+        "questionnaire.capture_profile",
+    }
+)
 COMMIT_CONTROLLER_TOOLS = frozenset(
-    name for name, item in TOOL_DEFINITIONS.items() if item.effect != ToolEffect.READ_ONLY
+    name for name, item in TOOL_DEFINITIONS.items()
+    if item.owner == "commit_controller"
 )
 _COMMON_TOOLS = frozenset(
     {"runtime.build_fact_snapshot", "risk.match_urgent_boundary", "policy.read"}
@@ -411,7 +426,7 @@ EPISODE_DEFINITIONS: Mapping[EpisodeType, EpisodeDefinition] = MappingProxyType(
             EpisodeType.CARE_FOLLOWUP,
             required={_PLAN, _EVIDENCE, _CARE, _COMMUNICATION},
             allowed={_PLAN, _EVIDENCE, _CARE, _SAFETY, _COMMUNICATION},
-            tools={"care.read_state", "care.read_feedback"},
+            tools={"care.read_state"},
             safety={"care_candidate_safety", "external_action_safety"},
             exits={
                 "followup_published",
@@ -475,6 +490,28 @@ def validate_product_agent_registry() -> None:
         for agent_id, definition in AGENT_DEFINITIONS.items()
     ):
         raise RosterPolicyError("Agent definition identity mismatch")
+    if any(
+        TOOL_DEFINITIONS[name].effect is not ToolEffect.STATE_WRITE
+        or TOOL_DEFINITIONS[name].owner != "questionnaire"
+        or TOOL_DEFINITIONS[name].confirmation_required
+        for name in RUNTIME_INTERACTION_TOOLS
+    ):
+        raise RosterPolicyError("runtime interaction Tool contract mismatch")
+    if any(
+        TOOL_DEFINITIONS[name].effect is ToolEffect.READ_ONLY
+        or TOOL_DEFINITIONS[name].owner != "commit_controller"
+        for name in COMMIT_CONTROLLER_TOOLS
+    ):
+        raise RosterPolicyError("Commit Controller Tool contract mismatch")
+    non_read_tools = {
+        name
+        for name, definition in TOOL_DEFINITIONS.items()
+        if definition.effect is not ToolEffect.READ_ONLY
+    }
+    if non_read_tools != set(RUNTIME_INTERACTION_TOOLS) | set(
+        COMMIT_CONTROLLER_TOOLS
+    ):
+        raise RosterPolicyError("state-changing Tool owner set is incomplete")
 
     tool_allowlist_keys = tuple(TOOL_INVOCATION_ALLOWLIST)
     if tool_allowlist_keys != PRODUCT_AGENT_ROSTER or not all(
@@ -597,7 +634,10 @@ def authorize_tool_invocation(caller: AgentId | str, tool_name: str) -> None:
             raise InvocationPolicyError(f"commit controller cannot execute {tool_name}")
         return
     if caller == "runtime":
-        if definition.effect != ToolEffect.READ_ONLY:
+        if (
+            definition.effect != ToolEffect.READ_ONLY
+            and tool_name not in RUNTIME_INTERACTION_TOOLS
+        ):
             raise InvocationPolicyError("runtime cannot execute state-changing tools")
         return
     if not isinstance(caller, AgentId):
@@ -678,6 +718,23 @@ def product_agent_manifest() -> dict[str, object]:
         "tool_invocation_allowlist": {
             key.value: sorted(values) for key, values in TOOL_INVOCATION_ALLOWLIST.items()
         },
+        "tool_definitions": {
+            key: {
+                "effect": value.effect.value,
+                "owner": value.owner,
+                "confirmation_required": value.confirmation_required,
+                "version": value.version,
+            }
+            for key, value in TOOL_DEFINITIONS.items()
+        },
+        "commit_controller_tools": sorted(COMMIT_CONTROLLER_TOOLS),
+        "runtime_interaction_tools": sorted(RUNTIME_INTERACTION_TOOLS),
+        "collaboration_allowlist": {
+            f"{sender.value}->{receiver.value}": sorted(
+                request_type.value for request_type in request_types
+            )
+            for (sender, receiver), request_types in COLLABORATION_ALLOWLIST.items()
+        },
         "episodes": {
             key.value: {
                 "required_work_products": sorted(
@@ -705,6 +762,7 @@ __all__ = [
     "COMMIT_CONTROLLER_TOOLS",
     "EPISODE_DEFINITIONS",
     "REGISTRY_VERSION",
+    "RUNTIME_INTERACTION_TOOLS",
     "RosterPolicyError",
     "TOOL_DEFINITIONS",
     "TOOL_INVOCATION_ALLOWLIST",

@@ -33,9 +33,12 @@ from sleepagent.radar_agent.product_agent.contracts import (
     stable_hash,
 )
 from sleepagent.radar_agent.product_agent.registry import authorize_tool_invocation
+from sleepagent.radar_agent.product_agent.hitl import (
+    HumanDecisionError,
+    VerifiedApprovalCapability,
+)
 from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileChangeSet,
-    HabitProfileConfirmation,
     HabitProfileStore,
     InMemoryHabitProfileStore,
 )
@@ -58,7 +61,7 @@ from sleepagent.radar_agent.product_agent.cold_start import (
 )
 
 
-GOVERNANCE_VERSION = "sleepagent-product-governance.v19"
+GOVERNANCE_VERSION = "sleepagent-product-governance.v20"
 PRODUCT_SAFETY_POLICY_VERSION = "product-safety.v3"
 
 
@@ -166,6 +169,14 @@ class CareActionCatalog:
         self._items = {
             (item.care_action_id, item.version): item for item in definitions
         }
+
+    def list_definitions(self) -> tuple[CareActionDefinition, ...]:
+        """Return the reviewed catalog as an immutable, detached snapshot."""
+
+        return tuple(
+            self._items[key].model_copy(deep=True)
+            for key in sorted(self._items)
+        )
 
     def validate(
         self,
@@ -882,66 +893,6 @@ def require_safety_approval(
         raise AcceptanceError(f"Safety did not approve target: {payload.verdict.value}")
 
 
-class ConfirmationToken(StrictContract):
-    token_id: str
-    candidate_id: str
-    candidate_hash: str = Field(..., min_length=64, max_length=64)
-    actor_id: str
-    actor_role: str
-    subject_id: str
-    action_scope: str
-    expires_at: datetime
-    decision_id: str | None = None
-    policy_version: str | None = None
-    fact_snapshot_hash: str | None = Field(
-        default=None,
-        min_length=64,
-        max_length=64,
-    )
-    authorization_id: str | None = None
-    role_binding_id: str | None = None
-    grant_hash: str | None = Field(default=None, min_length=64, max_length=64)
-
-    def validate_candidate(
-        self,
-        *,
-        candidate_id: str,
-        candidate_hash: str,
-        actor_id: str,
-        actor_role: str,
-        subject_id: str,
-        action_scope: str,
-        fact_snapshot_hash: str | None = None,
-        now: datetime | None = None,
-    ) -> None:
-        expected = (
-            self.candidate_id,
-            self.candidate_hash,
-            self.actor_id,
-            self.actor_role,
-            self.subject_id,
-            self.action_scope,
-        )
-        actual = (
-            candidate_id,
-            candidate_hash,
-            actor_id,
-            actor_role,
-            subject_id,
-            action_scope,
-        )
-        if expected != actual:
-            raise ConfirmationError("confirmation is not bound to current candidate")
-        if self.expires_at <= (now or datetime.now(timezone.utc)):
-            raise ConfirmationError("confirmation expired")
-        if (
-            self.fact_snapshot_hash is not None
-            and fact_snapshot_hash is not None
-            and self.fact_snapshot_hash != fact_snapshot_hash
-        ):
-            raise ConfirmationError("confirmation FactSnapshot is stale")
-
-
 class CareContextState(StrictContract):
     subject_id: str
     version: int = Field(default=0, ge=0)
@@ -989,6 +940,7 @@ class CommitJournalEntry(StrictContract):
     tool_name: str = Field(..., min_length=1)
     input_hash: str = Field(..., min_length=64, max_length=64)
     fact_snapshot_hash: str = Field(..., min_length=64, max_length=64)
+    authority_refs: tuple[str, ...] = ()
     state: Literal["pending", "final"]
     receipt: ToolReceipt | None = None
     created_at: datetime
@@ -1060,9 +1012,16 @@ class InMemoryCareContextStore:
 
 
 class InMemoryMemoryContextStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        control_clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._items: dict[str, MemoryContextState] = {}
         self.lock = RLock()
+        self._control_clock = control_clock or (
+            lambda: datetime.now(timezone.utc)
+        )
 
     def get(self, subject_id: str) -> MemoryContextState:
         return self._items.get(
@@ -1127,7 +1086,10 @@ class InMemoryMemoryContextStore:
                 "expire": MemoryItemStatus.EXPIRED,
                 "forget": MemoryItemStatus.FORGOTTEN,
             }[candidate.operation]
-            recorded_at = datetime.now(timezone.utc)
+            recorded_at = self._control_clock()
+            if recorded_at.tzinfo is None or recorded_at.utcoffset() is None:
+                raise ValueError("Memory control clock must return aware time")
+            recorded_at = recorded_at.astimezone(timezone.utc)
             governed = GovernedMemoryItemV2(
                 memory_id=candidate.candidate_id,
                 subject_id=candidate.subject_id,
@@ -1189,27 +1151,23 @@ class DeterministicCommitController:
         self,
         *,
         action: CareActionCandidate,
-        token: ConfirmationToken,
-        actor_id: str,
         subject_id: str,
         expected_version: int,
         fact_snapshot: FactSnapshot,
         idempotency_key: str,
+        approval_capability: VerifiedApprovalCapability,
     ) -> ToolReceipt:
         if not action.activatable:
             raise ConfirmationError("non-catalog Care candidate cannot be activated")
-        if actor_id != fact_snapshot.binding.actor_id:
-            raise ConfirmationError("Care requester actor mismatch")
-        if token.actor_role != "elder":
-            raise ConfirmationError("only the elder owner may activate Care")
-        token.validate_candidate(
-            candidate_id=action.candidate_id,
-            candidate_hash=action.candidate_hash,
-            actor_id=token.actor_id,
-            actor_role=token.actor_role,
+        self._validate_approval_capability(
+            approval_capability,
+            target_id=action.candidate_id,
+            target_hash=action.candidate_hash,
             subject_id=subject_id,
             action_scope="activate_care",
-            fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
+            fact_snapshot=fact_snapshot,
+            idempotency_key=idempotency_key,
+            elder_required=True,
         )
         return self._commit(
             tool_name="state.commit_care",
@@ -1219,6 +1177,7 @@ class DeterministicCommitController:
             mutate=lambda: self._activate(
                 subject_id, expected_version, action.model_dump(mode="json")
             ),
+            approval_capability=approval_capability,
         )
 
     def transition_care(
@@ -1226,12 +1185,11 @@ class DeterministicCommitController:
         *,
         strategy: CareStrategy,
         strategy_target_hash: str,
-        token: ConfirmationToken,
-        actor_id: str,
         subject_id: str,
         expected_version: int,
         fact_snapshot: FactSnapshot,
         idempotency_key: str,
+        approval_capability: VerifiedApprovalCapability,
     ) -> ToolReceipt:
         if strategy.disposition not in {
             "adjust",
@@ -1240,18 +1198,15 @@ class DeterministicCommitController:
             "end",
         }:
             raise ConfirmationError("unsupported Care transition")
-        if actor_id != fact_snapshot.binding.actor_id:
-            raise ConfirmationError("Care requester actor mismatch")
-        if token.actor_role != "elder":
-            raise ConfirmationError("only the elder owner may transition Care")
-        token.validate_candidate(
-            candidate_id=strategy.strategy_id,
-            candidate_hash=strategy_target_hash,
-            actor_id=token.actor_id,
-            actor_role=token.actor_role,
+        self._validate_approval_capability(
+            approval_capability,
+            target_id=strategy.strategy_id,
+            target_hash=strategy_target_hash,
             subject_id=subject_id,
             action_scope="transition_care",
-            fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
+            fact_snapshot=fact_snapshot,
+            idempotency_key=idempotency_key,
+            elder_required=True,
         )
         return self._commit(
             tool_name="state.commit_care",
@@ -1266,6 +1221,7 @@ class DeterministicCommitController:
                 expected_version=expected_version,
                 strategy=strategy,
             ),
+            approval_capability=approval_capability,
         )
 
     def _transition_care_state(
@@ -1328,7 +1284,7 @@ class DeterministicCommitController:
             [ExternalActionExecutionRequest],
             ExternalActionExecutionResult,
         ],
-        token: ConfirmationToken,
+        approval_capability: VerifiedApprovalCapability,
         actor_id: str,
         subject_id: str,
         action_scope: str,
@@ -1342,16 +1298,15 @@ class DeterministicCommitController:
             raise ConfirmationError("external action actor mismatch")
         if subject_id != snapshot.binding.subject_id:
             raise ConfirmationError("external action subject mismatch")
-        if token.actor_role != "elder":
-            raise ConfirmationError("only the elder owner may approve external sharing")
-        token.validate_candidate(
-            candidate_id=target_id,
-            candidate_hash=target_hash,
-            actor_id=token.actor_id,
-            actor_role=token.actor_role,
+        self._validate_approval_capability(
+            approval_capability,
+            target_id=target_id,
+            target_hash=target_hash,
             subject_id=subject_id,
             action_scope=action_scope,
-            fact_snapshot_hash=snapshot.fact_snapshot_hash,
+            fact_snapshot=snapshot,
+            idempotency_key=idempotency_key,
+            elder_required=True,
         )
         commit_payload = {
             "tool_name": tool_name,
@@ -1382,6 +1337,7 @@ class DeterministicCommitController:
                     payload=target,
                 )
             ).model_dump(mode="json"),
+            approval_capability=approval_capability,
         )
 
     def commit_memory(
@@ -1391,30 +1347,20 @@ class DeterministicCommitController:
         expected_version: int,
         fact_snapshot: FactSnapshot,
         idempotency_key: str,
-        token: ConfirmationToken | None = None,
+        approval_capability: VerifiedApprovalCapability,
     ) -> ToolReceipt:
         if candidate.subject_id != fact_snapshot.binding.subject_id:
             raise ConfirmationError("Memory candidate subject mismatch")
-        confirmed = not candidate.confirmation_required
-        if candidate.confirmation_required:
-            if token is None:
-                raise ConfirmationError("Memory candidate requires confirmation")
-            if token.actor_role != "elder":
-                raise ConfirmationError("only the elder owner may change Memory")
-            token.validate_candidate(
-                candidate_id=candidate.candidate_id,
-                candidate_hash=str(candidate.candidate_hash),
-                actor_id=token.actor_id,
-                actor_role=token.actor_role,
-                subject_id=fact_snapshot.binding.subject_id,
-                action_scope="commit_memory",
-                fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
-            )
-            confirmed = True
-        elif fact_snapshot.binding.role != "elder":
-            raise ConfirmationError(
-                "automatic Memory changes require an authenticated elder context"
-            )
+        self._validate_approval_capability(
+            approval_capability,
+            target_id=candidate.candidate_id,
+            target_hash=str(candidate.candidate_hash),
+            subject_id=fact_snapshot.binding.subject_id,
+            action_scope="commit_memory",
+            fact_snapshot=fact_snapshot,
+            idempotency_key=idempotency_key,
+            elder_required=True,
+        )
         return self._commit(
             tool_name="state.commit_memory",
             idempotency_key=idempotency_key,
@@ -1423,21 +1369,18 @@ class DeterministicCommitController:
             mutate=lambda: self.memory_store.apply(
                 candidate,
                 expected_version=expected_version,
-                confirmed=confirmed,
+                confirmed=True,
                 fact_snapshot=fact_snapshot,
-                confirmation_ref=(
-                    token.token_id
-                    if token is not None
-                    else f"explicit-authorization:{candidate.candidate_id}"
-                ),
+                confirmation_ref=approval_capability.grant.grant_id,
             ).model_dump(mode="json"),
+            approval_capability=approval_capability,
         )
 
     def commit_habit_profile(
         self,
         *,
         change_set: HabitProfileChangeSet,
-        confirmation: HabitProfileConfirmation,
+        approval_capability: VerifiedApprovalCapability,
         fact_snapshot: FactSnapshot,
         idempotency_key: str,
         now: datetime | None = None,
@@ -1445,21 +1388,27 @@ class DeterministicCommitController:
         """Commit the elder-confirmed manifest atomically through one writer."""
 
         committed_at = now or datetime.now(timezone.utc)
-        payload = {
-            "change_set": change_set.model_dump(mode="json"),
-            "confirmation": confirmation.model_dump(mode="json"),
-        }
+        payload = {"change_set": change_set.model_dump(mode="json")}
         if change_set.fact_snapshot_hash != fact_snapshot.fact_snapshot_hash:
             raise ConfirmationError("Habit change set FactSnapshot mismatch")
         if change_set.subject_id != fact_snapshot.binding.subject_id:
             raise ConfirmationError("Habit change set subject mismatch")
         if fact_snapshot.binding.role != "elder":
             raise ConfirmationError("only the authenticated elder may confirm Profile")
-        if confirmation.actor_id != fact_snapshot.binding.actor_id:
-            raise ConfirmationError("Habit confirmation actor mismatch")
         if change_set.expected_memory_version != fact_snapshot.memory_context_version:
             raise StaleStateError("Habit change set memory version is stale")
-        confirmation.validate_for(change_set, now=committed_at)
+        self._validate_approval_capability(
+            approval_capability,
+            target_id=change_set.change_set_id,
+            target_hash=change_set.manifest_hash,
+            subject_id=change_set.subject_id,
+            action_scope=change_set.action_scope,
+            fact_snapshot=fact_snapshot,
+            idempotency_key=idempotency_key,
+            elder_required=True,
+            approver_must_match_snapshot=True,
+            now=committed_at,
+        )
         return self._commit(
             tool_name="state.commit_habit_profile",
             idempotency_key=idempotency_key,
@@ -1467,11 +1416,65 @@ class DeterministicCommitController:
             payload=payload,
             mutate=lambda: self.habit_profile_store.commit(
                 change_set,
-                confirmation,
+                approval_capability,
                 idempotency_key=idempotency_key,
                 now=committed_at,
             ).model_dump(mode="json"),
+            approval_capability=approval_capability,
         )
+
+    @staticmethod
+    def _validate_approval_capability(
+        approval_capability: VerifiedApprovalCapability,
+        *,
+        target_id: str,
+        target_hash: str,
+        subject_id: str,
+        action_scope: str,
+        fact_snapshot: FactSnapshot,
+        idempotency_key: str,
+        elder_required: bool,
+        approver_must_match_snapshot: bool = False,
+        now: datetime | None = None,
+    ) -> None:
+        if type(approval_capability) is not VerifiedApprovalCapability:
+            raise ConfirmationError(
+                "commit requires an authority-verified approval capability"
+            )
+        grant = approval_capability.grant
+        if elder_required and grant.approver_role != "elder":
+            raise ConfirmationError("only the elder owner may approve this commit")
+        if approver_must_match_snapshot and (
+            grant.approver_actor_id != fact_snapshot.binding.actor_id
+            or grant.approver_role != fact_snapshot.binding.role
+        ):
+            raise ConfirmationError(
+                "approval actor does not match the authenticated FactSnapshot"
+            )
+        try:
+            approval_capability.validate_exact_binding(
+                decision_id=grant.decision_id,
+                proposal_id=grant.proposal_id,
+                actor_id=grant.approver_actor_id,
+                actor_role=grant.approver_role,
+                subject_id=subject_id,
+                target_id=target_id,
+                target_hash=target_hash,
+                action_scope=action_scope,
+                fact_snapshot_id=fact_snapshot.fact_snapshot_id,
+                fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
+                # HDS validated the then-current policy before the atomic
+                # APPROVED -> EXECUTING transition.  Commits and crash
+                # recovery must remain bound to that persisted grant rather
+                # than reopening authority against a later deployment policy.
+                policy_version=grant.policy_version,
+                idempotency_key=idempotency_key,
+                now=now,
+            )
+        except HumanDecisionError as exc:
+            raise ConfirmationError(
+                "approval capability is stale or bound to another commit"
+            ) from exc
 
     def _activate(
         self, subject_id: str, expected_version: int, action: dict[str, Any]
@@ -1506,9 +1509,26 @@ class DeterministicCommitController:
         snapshot: FactSnapshot,
         payload: dict[str, Any],
         mutate: Callable[[], dict[str, Any]],
+        approval_capability: VerifiedApprovalCapability,
     ) -> ToolReceipt:
         authorize_tool_invocation("commit_controller", tool_name)
-        input_hash = stable_hash(payload)
+        grant = approval_capability.grant
+        authority_refs = (
+            f"human-decision:{grant.decision_id}",
+            f"approval-grant:{grant.grant_id}:{grant.grant_hash}",
+        )
+        input_hash = stable_hash(
+            {
+                "operation": payload,
+                "authority": {
+                    "decision_id": grant.decision_id,
+                    "proposal_id": grant.proposal_id,
+                    "grant_id": grant.grant_id,
+                    "grant_hash": grant.grant_hash,
+                    "approving_records_hash": grant.approving_records_hash,
+                },
+            }
+        )
         with self._lock:
             prior = self.commit_journal.get(idempotency_key)
             if prior is not None:
@@ -1524,6 +1544,7 @@ class DeterministicCommitController:
                 tool_name=tool_name,
                 input_hash=input_hash,
                 fact_snapshot_hash=snapshot.fact_snapshot_hash,
+                authority_refs=authority_refs,
                 state="pending",
                 created_at=reserved_at,
                 updated_at=reserved_at,
@@ -1562,6 +1583,7 @@ class DeterministicCommitController:
                 outcome=outcome,
                 observed_at=datetime.now(timezone.utc),
                 output=output,
+                source_refs=list(authority_refs),
                 idempotency_key=idempotency_key,
                 error_code=error_code,
             )
@@ -1637,6 +1659,7 @@ class DeterministicCommitController:
             outcome=InvocationOutcome.UNKNOWN,
             observed_at=entry.updated_at,
             output={},
+            source_refs=list(entry.authority_refs),
             idempotency_key=entry.idempotency_key,
             error_code=error_code,
         )
@@ -1744,7 +1767,6 @@ __all__ = [
     "CommitJournal",
     "CommitJournalEntry",
     "ConfirmationError",
-    "ConfirmationToken",
     "DeterministicCommitController",
     "InMemoryCareContextStore",
     "InMemoryCommitJournal",

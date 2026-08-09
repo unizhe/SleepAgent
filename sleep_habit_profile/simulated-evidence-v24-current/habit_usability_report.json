@@ -1,0 +1,84 @@
+{
+  "evidence_kind": "simulated",
+  "report_id": "habit-usability:simulated-v24-current",
+  "conducted_at": "2026-07-26T08:00:00Z",
+  "interaction_only_not_medical_validation": true,
+  "observations": [
+    {
+      "participant_ref": "participant:simulated-60-01",
+      "age_band": "60-69",
+      "understood_personalization_purpose": true,
+      "understood_questions_are_skippable": true,
+      "understood_separate_persistence_confirmation": true,
+      "skip_attempt_succeeded": true,
+      "questions_presented": 2,
+      "erroneous_confirmation": false,
+      "interruption_rating": 2,
+      "notes": "Synthetic usability interaction for pipeline regression; no real participant was observed."
+    },
+    {
+      "participant_ref": "participant:simulated-60-02",
+      "age_band": "60-69",
+      "understood_personalization_purpose": true,
+      "understood_questions_are_skippable": true,
+      "understood_separate_persistence_confirmation": true,
+      "skip_attempt_succeeded": true,
+      "questions_presented": 3,
+      "erroneous_confirmation": false,
+      "interruption_rating": 2,
+      "notes": "Synthetic usability interaction for pipeline regression; no real participant was observed."
+    },
+    {
+      "participant_ref": "participant:simulated-70-01",
+      "age_band": "70-79",
+      "understood_personalization_purpose": true,
+      "understood_questions_are_skippable": true,
+      "understood_separate_persistence_confirmation": true,
+      "skip_attempt_succeeded": true,
+      "questions_presented": 2,
+      "erroneous_confirmation": false,
+      "interruption_rating": 1,
+      "notes": "Synthetic usability interaction for pipeline regression; no real participant was observed."
+    },
+    {
+      "participant_ref": "participant:simulated-70-02",
+      "age_band": "70-79",
+      "understood_personalization_purpose": true,
+      "understood_questions_are_skippable": true,
+      "understood_separate_persistence_confirmation": true,
+      "skip_attempt_succeeded": true,
+      "questions_presented": 3,
+      "erroneous_confirmation": false,
+      "interruption_rating": 3,
+      "notes": "Synthetic usability interaction for pipeline regression; no real participant was observed."
+    },
+    {
+      "participant_ref": "participant:simulated-80-01",
+      "age_band": "80+",
+      "understood_personalization_purpose": true,
+      "understood_questions_are_skippable": true,
+      "understood_separate_persistence_confirmation": true,
+      "skip_attempt_succeeded": true,
+      "questions_presented": 2,
+      "erroneous_confirmation": false,
+      "interruption_rating": 2,
+      "notes": "Synthetic usability interaction for pipeline regression; no real participant was observed."
+    }
+  ],
+  "reviewer_ref": "facilitator:simulated-usability-v24-current",
+  "attestation": {
+    "protocol_version": "sleep-habit-usability.v1",
+    "facilitator_ref": "facilitator:simulated-usability-v24-current",
+    "observed_participant_refs": [
+      "participant:simulated-60-01",
+      "participant:simulated-60-02",
+      "participant:simulated-70-01",
+      "participant:simulated-70-02",
+      "participant:simulated-80-01"
+    ],
+    "participant_interactions_observed": true,
+    "synthetic_data_used": true,
+    "signed_at": "2026-07-26T08:00:00Z",
+    "signature_reference": "signature:simulated-usability-v24-current-not-real"
+  }
+}

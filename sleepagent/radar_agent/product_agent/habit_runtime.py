@@ -7,15 +7,13 @@ from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileCandidateBuilder,
     HabitProfileChangeSet,
     HabitProfileStore,
-    InMemoryHabitProfileStore,
-    InMemoryObjectiveBaselineStore,
     ObjectiveBaselineStore,
 )
 from sleepagent.radar_agent.product_agent.contracts import OnlineReasoningEvent
 from sleepagent.radar_agent.product_agent.online_reasoning import (
     resolve_event_context,
 )
-from sleepagent.radar_agent.product_agent.tooling import (
+from sleepagent.radar_agent.product_agent.runtime_ports import (
     ProductToolExecutionContext,
     ToolHandler,
 )
@@ -28,7 +26,7 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-HABIT_RUNTIME_VERSION = "sleepagent-habit-runtime.v2"
+HABIT_RUNTIME_VERSION = "sleepagent-habit-runtime.v3"
 
 
 class HabitProfileRuntimeService:
@@ -37,15 +35,13 @@ class HabitProfileRuntimeService:
     def __init__(
         self,
         *,
-        questionnaire: HabitQuestionnaireService | None = None,
-        store: HabitProfileStore | None = None,
-        baseline_store: ObjectiveBaselineStore | None = None,
+        questionnaire: HabitQuestionnaireService,
+        store: HabitProfileStore,
+        baseline_store: ObjectiveBaselineStore,
     ) -> None:
-        self.questionnaire = questionnaire or HabitQuestionnaireService()
-        self.store = store or InMemoryHabitProfileStore()
-        self.baseline_store = (
-            baseline_store or InMemoryObjectiveBaselineStore()
-        )
+        self.questionnaire = questionnaire
+        self.store = store
+        self.baseline_store = baseline_store
         self.candidate_builder = HabitProfileCandidateBuilder(
             DEFAULT_HABIT_CONCEPTS
         )
@@ -67,7 +63,10 @@ class HabitProfileRuntimeService:
     ) -> dict[str, Any]:
         request = HabitQuestionSelectionRequest.model_validate(arguments["request"])
         self._require_binding(
-            context, subject_id=request.subject_id, actor_id=request.actor_id
+            context,
+            subject_id=request.subject_id,
+            actor_id=request.actor_id,
+            role=request.role,
         )
         expected_plan = (
             context.episode_id,
@@ -101,7 +100,10 @@ class HabitProfileRuntimeService:
             arguments["selection"]
         )
         self._require_binding(
-            context, subject_id=receipt.subject_id, actor_id=receipt.actor_id
+            context,
+            subject_id=receipt.subject_id,
+            actor_id=receipt.actor_id,
+            role=receipt.role,
         )
         if context.episode_id != receipt.episode_id:
             raise ValueError("Habit selection cannot be replayed across Episodes")
@@ -115,9 +117,6 @@ class HabitProfileRuntimeService:
             subject_id=receipt.subject_id,
             actor_id=receipt.actor_id,
             role=receipt.role,
-            suppression_confirmation_ref=arguments.get(
-                "suppression_confirmation_ref"
-            ),
             now=_optional_now(arguments),
         )
         refs = [item.answer_ref for item in capture.answers]
@@ -260,6 +259,7 @@ class HabitProfileRuntimeService:
         *,
         subject_id: str,
         actor_id: str,
+        role: str | None = None,
         require_actor: bool = True,
     ) -> None:
         binding = context.fact_snapshot.binding
@@ -267,6 +267,8 @@ class HabitProfileRuntimeService:
             raise PermissionError("Habit capability crosses authenticated subject")
         if require_actor and actor_id != binding.actor_id:
             raise PermissionError("Habit capability crosses authenticated actor")
+        if role is not None and role != binding.role:
+            raise PermissionError("Habit capability crosses authenticated role")
 
 
 def _optional_now(arguments: dict[str, Any]) -> datetime | None:

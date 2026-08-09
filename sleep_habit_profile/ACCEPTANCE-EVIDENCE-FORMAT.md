@@ -40,7 +40,7 @@ python -m sleepagent.radar_agent.product_agent.acceptance_materials \
   --manifest agent_architecture/ACCEPTANCE-MANIFEST.json
 ```
 
-This produces five synthetic target-age interactions, ten current-catalog
+This produces five synthetic target-age interactions, 22 current-catalog
 review rows and all 68 provider observation slots. Synthetic request IDs and
 receipt hashes are deterministic test shapes; no provider call is made. The
 result must remain `evidence_kind: simulated` and is expected to fail the
@@ -118,7 +118,7 @@ content. Obtain the current catalog identity from code rather than copying an
 old document:
 
 ```bash
-python -c "from sleepagent.radar_agent.product_agent import current_habit_catalog_hash; print(current_habit_catalog_hash())"
+python -c "from sleepagent.radar_agent.product_agent.acceptance import current_habit_catalog_hash; print(current_habit_catalog_hash())"
 ```
 
 The report must contain:

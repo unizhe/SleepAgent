@@ -88,25 +88,22 @@ export async function requestHabitForget({
 }
 
 export async function confirmHabitChangeSet({
-  pending,
-  confirmationId,
+  decisionId,
   idempotencyKey,
 }: {
-  pending: HabitPendingChangeSet;
-  confirmationId: string;
+  decisionId: string;
   idempotencyKey: string;
 }): Promise<HabitCommitResponse> {
-  const changes = pending.change_set;
   const response = await request<HabitCommitResponse>("/confirm", {
     method: "POST",
     body: JSON.stringify({
-      confirmation_id: confirmationId,
-      change_set_id: changes.change_set_id,
-      change_set_version: changes.version,
-      manifest_hash: changes.manifest_hash,
+      decision_id: decisionId,
       idempotency_key: idempotencyKey,
     }),
   });
+  if (response.decision_id !== decisionId) {
+    throw new Error("长期保存确认与当前决定不匹配，请重新查看后再确认。");
+  }
   if (response.tool_receipt.outcome !== "succeeded") {
     throw new Error(
       `长期保存未完成（${response.tool_receipt.error_code ?? "状态未知"}），请重新查看后再确认。`,

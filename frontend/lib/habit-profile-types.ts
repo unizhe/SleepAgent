@@ -47,6 +47,7 @@ export type HabitProfile = {
 };
 
 export type HabitPendingChangeSet = {
+  decision_id: string;
   change_set: {
     change_set_id: string;
     version: number;
@@ -89,6 +90,7 @@ export type HabitAnswerSubmit = {
 
 export type HabitCommitResponse = {
   application_version: string;
+  decision_id: string;
   tool_receipt: {
     outcome: "succeeded" | "unknown" | "failed";
     error_code?: string | null;

@@ -1,0 +1,1398 @@
+{
+  "evidence_kind": "simulated",
+  "review_report_id": "habit-domain-review:simulated-v24-current",
+  "review_type": "catalog_wording_options_ttl_persistence",
+  "reviewed_at": "2026-07-26T08:00:00Z",
+  "catalog": {
+    "catalog_id": "habit-question-catalog",
+    "catalog_version": "1.0.0",
+    "catalog_hash": "d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903",
+    "content_version": "sleep-habit-concepts.zh-CN.v1",
+    "concept_count": 22
+  },
+  "reviewers": [
+    {
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "display_name": "模拟睡眠医学审核员 A（非真人）",
+      "professional_role": "simulated sleep-medicine reviewer",
+      "qualification": "synthetic qualification; not a real license",
+      "organization_ref": "organization:simulated-sleep-center",
+      "conflict_of_interest": "synthetic fixture; no real declaration"
+    },
+    {
+      "reviewer_ref": "reviewer:simulated-geriatric-ux-v24-current",
+      "display_name": "模拟老年可用性审核员 B（非真人）",
+      "professional_role": "simulated geriatric usability reviewer",
+      "qualification": "synthetic qualification; not a real credential",
+      "organization_ref": "organization:simulated-geriatric-lab",
+      "conflict_of_interest": "synthetic fixture; no real declaration"
+    }
+  ],
+  "scope": {
+    "wording": true,
+    "options": true,
+    "ttl": true,
+    "persistence_eligibility": true,
+    "source_semantics": true,
+    "safety_escalation_boundary": true
+  },
+  "concept_reviews": [
+    {
+      "concept_id": "habit.primary_goal",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.primary_goal"
+    },
+    {
+      "concept_id": "habit.schedule_constraint",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.schedule_constraint"
+    },
+    {
+      "concept_id": "habit.nap_pattern",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.nap_pattern"
+    },
+    {
+      "concept_id": "habit.nap_duration_minutes",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.nap_duration_minutes"
+    },
+    {
+      "concept_id": "habit.pre_sleep_behavior",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.pre_sleep_behavior"
+    },
+    {
+      "concept_id": "habit.environment_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.environment_preference"
+    },
+    {
+      "concept_id": "habit.stimulant_timing",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.stimulant_timing"
+    },
+    {
+      "concept_id": "habit.sleep_satisfaction_recent",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 14,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.sleep_satisfaction_recent"
+    },
+    {
+      "concept_id": "habit.observed_snoring",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.observed_snoring"
+    },
+    {
+      "concept_id": "habit.night_toileting_pattern",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.night_toileting_pattern"
+    },
+    {
+      "concept_id": "habit.night_out_of_bed_frequency",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.night_out_of_bed_frequency"
+    },
+    {
+      "concept_id": "habit.night_out_of_bed_time_window",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.night_out_of_bed_time_window"
+    },
+    {
+      "concept_id": "habit.night_out_of_bed_duration_minutes",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.night_out_of_bed_duration_minutes"
+    },
+    {
+      "concept_id": "habit.night_activity_assistance_need",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 90,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.night_activity_assistance_need"
+    },
+    {
+      "concept_id": "habit.observed_night_leaving",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 30,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.observed_night_leaving"
+    },
+    {
+      "concept_id": "habit.delivery_timing_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.delivery_timing_preference"
+    },
+    {
+      "concept_id": "habit.delivery_modality_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.delivery_modality_preference"
+    },
+    {
+      "concept_id": "habit.interruption_burden",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.interruption_burden"
+    },
+    {
+      "concept_id": "habit.family_notification_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.family_notification_preference"
+    },
+    {
+      "concept_id": "habit.quiet_hours",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.quiet_hours"
+    },
+    {
+      "concept_id": "habit.voice_volume_preference",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 180,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": true
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.voice_volume_preference"
+    },
+    {
+      "concept_id": "habit.device_position_last_night",
+      "version": "1.0.0",
+      "content_version": "sleep-habit-concepts.zh-CN.v1",
+      "valid_for_days": 1,
+      "domain_review_status": "approved",
+      "reviewer_ref": "reviewer:simulated-sleep-medicine-v24-current",
+      "wording_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated wording approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "options_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated answer options approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "ttl_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated TTL approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "persistence_eligibility_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated persistence eligibility approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": false
+      },
+      "safety_review": {
+        "decision": "approved",
+        "reviewer_refs": [
+          "reviewer:simulated-sleep-medicine-v24-current",
+          "reviewer:simulated-geriatric-ux-v24-current"
+        ],
+        "finding": "Simulated safety boundary approval for schema and audit pipeline regression only.",
+        "required_changes": [],
+        "eligible": null
+      },
+      "final_decision": "approved",
+      "reviewed_at": "2026-07-26T08:00:00Z",
+      "approval_record_ref": "approval:simulated-v24-current:habit.device_position_last_night"
+    }
+  ],
+  "overall_decision": "approved",
+  "overall_findings": [
+    "Synthetic approval exercises the complete review schema only."
+  ],
+  "changes_requested": [],
+  "approval_reference": "approval:simulated-v24-current-bundle-not-real",
+  "signoff": {
+    "status": "approved",
+    "signed_at": "2026-07-26T08:00:00Z",
+    "signed_by": [
+      "reviewer:simulated-sleep-medicine-v24-current",
+      "reviewer:simulated-geriatric-ux-v24-current"
+    ],
+    "signature_reference": "signature:simulated-v24-current-not-real"
+  }
+}

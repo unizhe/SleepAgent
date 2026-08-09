@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 import json
 import sqlite3
-from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -193,32 +192,6 @@ def test_historical_idempotency_key_cannot_create_or_alias_a_canonical_task() ->
             artifact_type="test",
             payload={},
         ),
-        lambda service, task_id: service.request_confirmation(task_id, None),
-        lambda service, task_id: service.resolve_confirmation(
-            task_id,
-            "confirmation-history",
-            approved=True,
-            actor_id="actor",
-            actor_role="family",
-        ),
-        lambda service, task_id: service.expire_confirmations(
-            task_id,
-            before=datetime.now(timezone.utc),
-        ),
-        lambda service, task_id: service.revoke_confirmation(
-            task_id,
-            "confirmation-history",
-            actor_id="actor",
-            actor_role="family",
-            reason="test",
-        ),
-        lambda service, task_id: service.complete_confirmation_action(
-            task_id,
-            "confirmation-history",
-            actor_id="actor",
-            actor_role="family",
-            execution_ref="execution-history",
-        ),
         lambda service, task_id: service.record_audit(
             task_id,
             actor="actor",
@@ -233,11 +206,6 @@ def test_historical_idempotency_key_cannot_create_or_alias_a_canonical_task() ->
         "retry-task",
         "rerun-task",
         "save-artifact",
-        "request-confirmation",
-        "resolve-confirmation",
-        "expire-confirmation",
-        "revoke-confirmation",
-        "complete-confirmation",
         "record-audit",
     ],
 )

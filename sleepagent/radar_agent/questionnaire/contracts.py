@@ -231,6 +231,15 @@ class HabitQuestionCandidate(RadarAgentSchema):
 class HabitQuestionSelectionReceipt(RadarAgentSchema):
     selection_id: str
     selection_hash: str = Field(..., min_length=64, max_length=64)
+    request_hash: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        description=(
+            "Semantic selection-command hash; None is accepted only for "
+            "legacy persisted receipts."
+        ),
+    )
     request_id: str
     episode_id: str
     subject_id: str
@@ -257,6 +266,22 @@ class HabitQuestionAnswer(RadarAgentSchema):
     day_type: Literal["all_days", "weekday", "weekend", "variable"] = "all_days"
     sleep_day_rule: Literal["wake_date", "bed_date"] = "wake_date"
     observation_opportunity: ObservationOpportunity | None = None
+    question_opt_out_acknowledged: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def bind_question_opt_out_acknowledgement(
+        self,
+    ) -> "HabitQuestionAnswer":
+        if self.disposition == HabitAnswerDisposition.NEVER_ASK:
+            if self.question_opt_out_acknowledged is not True:
+                raise ValueError(
+                    "never-ask requires explicit typed opt-out acknowledgement"
+                )
+        elif self.question_opt_out_acknowledged is not None:
+            raise ValueError(
+                "question opt-out acknowledgement requires never-ask"
+            )
+        return self
 
 
 class CapturedHabitAnswer(RadarAgentSchema):
@@ -312,7 +337,7 @@ class QuestionSuppression(RadarAgentSchema):
     subject_id: str = Field(..., min_length=1)
     concept_id: str = Field(..., pattern=r"^habit\.[a-z0-9_]+$")
     scope: Literal["profile_question"]
-    confirmation_ref: str = Field(..., min_length=1)
+    withdrawal_command_ref: str = Field(..., min_length=1)
     expires_at: datetime
 
 

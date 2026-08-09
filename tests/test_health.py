@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from backend.main import app
+from backend.legacy_main import app
 from sleepagent.observability import STATE
 
 

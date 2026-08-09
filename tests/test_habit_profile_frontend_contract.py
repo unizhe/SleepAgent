@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "frontend/components/habit/HabitProfileWorkspace.tsx"
 CLIENT = ROOT / "frontend/lib/habit-profile-api.ts"
+TYPES = ROOT / "frontend/lib/habit-profile-types.ts"
 BFF = ROOT / "frontend/app/api/radar/[...path]/route.ts"
 PAGE = ROOT / "frontend/app/habit-profile/page.tsx"
 RADAR = ROOT / "frontend/components/radar/DynamicRadarWorkspace.tsx"
@@ -27,6 +28,7 @@ def test_habit_profile_is_discoverable_but_never_starts_automatically() -> None:
 def test_habit_ui_separates_current_use_from_exact_persistence_confirmation() -> None:
     workspace = WORKSPACE.read_text(encoding="utf-8")
     client = CLIENT.read_text(encoding="utf-8")
+    types = TYPES.read_text(encoding="utf-8")
 
     for copy in (
         "您可以随时跳过",
@@ -40,9 +42,24 @@ def test_habit_ui_separates_current_use_from_exact_persistence_confirmation() ->
         "不生成睡眠健康分、固定类型或诊断",
     ):
         assert copy in workspace
-    assert "change_set_id: changes.change_set_id" in client
-    assert "change_set_version: changes.version" in client
-    assert "manifest_hash: changes.manifest_hash" in client
+    confirm_client = client[
+        client.index("export async function confirmHabitChangeSet") :
+        client.index("export async function pruneHabitChangeSet")
+    ]
+    assert "decision_id: decisionId" in confirm_client
+    assert "idempotency_key: idempotencyKey" in confirm_client
+    for legacy_field in (
+        "confirmation_id",
+        "change_set_id",
+        "change_set_version",
+        "manifest_hash",
+    ):
+        assert legacy_field not in confirm_client
+    assert "decisionId: pending.decision_id" in workspace
+    assert "idempotencyKey: `habit-confirm:${pending.decision_id}`" in workspace
+    assert "confirmationId" not in workspace
+    assert types.count("decision_id: string;") >= 2
+    assert "response.decision_id !== decisionId" in confirm_client
     assert 'response.tool_receipt.outcome !== "succeeded"' in client
 
 

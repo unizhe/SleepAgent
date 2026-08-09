@@ -4,29 +4,39 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     AuthenticatedBinding,
-    BaselineMaturity,
-    DeterministicCommitController,
     EvidenceSemantic,
     EvidenceSourceKind,
     FactSnapshot,
+    InvocationOutcome,
+    MemoryChangeCandidate,
+    SourceScope,
+    SourceScopeKind,
+)
+from sleepagent.radar_agent.product_agent.governance import (
+    DeterministicCommitController,
+    InMemoryMemoryContextStore,
+)
+from sleepagent.radar_agent.product_agent.habit_profile import (
+    BaselineMaturity,
     HabitChangeOperation,
     HabitEffectiveStatus,
     HabitProfileCandidateBuilder,
     HabitProfileChangeCandidate,
     HabitProfileChangeSet,
-    HabitProfileConfirmation,
     InMemoryHabitProfileStore,
-    InMemoryMemoryContextStore,
-    InvocationOutcome,
-    MemoryChangeCandidate,
     ObjectiveBaselineArtifact,
-    SourceScope,
-    SourceScopeKind,
     evidence_claim_from_captured_answer,
     evidence_claim_from_profile_fact,
+)
+from sleepagent.radar_agent.product_agent.hitl import (
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionService,
+    VerifiedApprovalCapability,
 )
 from sleepagent.radar_agent.questionnaire import (
     DEFAULT_HABIT_CONCEPTS,
@@ -52,6 +62,7 @@ def snapshot(
     *,
     role: str = "elder",
     actor_id: str = "elder-1",
+    subject_id: str = "elder-1",
     memory_version: int = 0,
     authorization_scope: tuple[str, ...] = (),
 ) -> FactSnapshot:
@@ -59,7 +70,7 @@ def snapshot(
         fact_snapshot_id=f"snap:{role}:{memory_version}",
         binding=AuthenticatedBinding(
             actor_id=actor_id,
-            subject_id="elder-1",
+            subject_id=subject_id,
             role=role,
             authorization_scope=authorization_scope,
         ),
@@ -82,14 +93,19 @@ def selection_request(
     episode_id: str = "episode-1",
     role: str = "elder",
     actor_id: str = "elder-1",
+    subject_id: str = "elder-1",
     concepts: tuple[str, ...] = ("habit.nap_pattern",),
     trigger: HabitQuestionTrigger = HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
     remaining: int = 3,
+    request_id: str | None = None,
 ) -> HabitQuestionSelectionRequest:
     return HabitQuestionSelectionRequest(
-        request_id=f"request:{episode_id}:{role}",
+        request_id=(
+            request_id
+            or f"request:{episode_id}:{role}:{trigger.value}:{','.join(concepts)}"
+        ),
         episode_id=episode_id,
-        subject_id="elder-1",
+        subject_id=subject_id,
         actor_id=actor_id,
         role=role,
         plan_id=f"plan:{episode_id}:1",
@@ -177,22 +193,57 @@ def change_set(
     )
 
 
-def confirmation(
+def approval_capability(
     changes: HabitProfileChangeSet,
     *,
-    confirmation_id: str,
+    snapshot_value: FactSnapshot,
+    idempotency_key: str,
     actor_id: str = "elder-1",
-) -> HabitProfileConfirmation:
-    return HabitProfileConfirmation(
-        confirmation_id=confirmation_id,
+) -> VerifiedApprovalCapability:
+    decisions = HumanDecisionService()
+    proposal = ActionProposal(
+        proposal_id=f"habit-test-proposal:{changes.change_set_id}:{idempotency_key}",
+        episode_id=f"habit-test-episode:{changes.change_set_id}",
+        subject_id=changes.subject_id,
+        proposer_actor_id=snapshot_value.binding.actor_id,
+        action_kind="habit_profile",
+        action_scope=changes.action_scope,
+        target_id=changes.change_set_id,
+        target_hash=changes.manifest_hash,
+        fact_snapshot_id=snapshot_value.fact_snapshot_id,
+        fact_snapshot_hash=snapshot_value.fact_snapshot_hash,
+        payload={"change_set": changes.model_dump(mode="json")},
+        explanation=DecisionExplanation(
+            what_will_change="Commit the exact Habit Profile manifest.",
+            why_now="The elder confirmed this profile change.",
+            who_will_receive_or_be_affected=changes.subject_id,
+            duration_or_frequency="Until replaced, expired, or forgotten.",
+            how_to_revoke="Cancel before execution or forget after commit.",
+        ),
+        created_at=changes.created_at,
+        expires_at=changes.confirmation_expires_at,
+    )
+    decision = decisions.create(proposal)
+    decisions.decide(
+        decision.decision_id,
         actor_id=actor_id,
         actor_role="elder",
-        subject_id="elder-1",
-        action_scope="write_habit_profile",
-        change_set_id=changes.change_set_id,
-        change_set_version=changes.version,
-        manifest_hash=changes.manifest_hash,
-        expires_at=NOW + timedelta(hours=1),
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=changes.manifest_hash,
+        now=changes.created_at + timedelta(microseconds=1),
+    )
+    return decisions.acquire_verified_capability(
+        decision.decision_id,
+        expected_proposal_id=proposal.proposal_id,
+        expected_subject_id=changes.subject_id,
+        expected_target_id=changes.change_set_id,
+        expected_target_hash=changes.manifest_hash,
+        expected_action_scope=changes.action_scope,
+        expected_fact_snapshot_id=snapshot_value.fact_snapshot_id,
+        expected_fact_snapshot_hash=snapshot_value.fact_snapshot_hash,
+        expected_policy_version=proposal.policy_version,
+        idempotency_key=idempotency_key,
+        now=changes.created_at + timedelta(microseconds=2),
     )
 
 
@@ -220,6 +271,16 @@ def test_selection_is_reviewed_plan_bound_neutral_and_episode_budgeted() -> None
     assert first.plan_step_id == "progressive-habit-question"
     assert all(item.options for item in first.candidates)
     assert all(item.trigger == HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION for item in first.candidates)
+    replay = service.select(
+        selection_request(
+            concepts=("habit.primary_goal", "habit.schedule_constraint")
+        ),
+        now=NOW + timedelta(seconds=30),
+    )
+    assert replay == first
+    assert service.remaining_budget(
+        episode_id="episode-1", subject_id="elder-1"
+    ) == 1
     second = service.select(
         selection_request(
             concepts=("habit.nap_pattern",),
@@ -288,7 +349,7 @@ def test_capture_rejects_forgery_invalid_values_replay_and_cross_episode() -> No
             now=NOW + timedelta(minutes=1),
         )
     valid = bad.model_copy(update={"value": "偶尔午睡"})
-    service.capture(
+    captured = service.capture(
         receipt,
         [valid],
         episode_id="episode-1",
@@ -297,7 +358,27 @@ def test_capture_rejects_forgery_invalid_values_replay_and_cross_episode() -> No
         role="elder",
         now=NOW + timedelta(minutes=1),
     )
-    with pytest.raises(ValueError, match="already consumed"):
+    replay = service.capture(
+        receipt,
+        [valid],
+        episode_id="episode-1",
+        subject_id="elder-1",
+        actor_id="elder-1",
+        role="elder",
+        now=NOW + timedelta(minutes=2),
+    )
+    assert replay == captured
+    with pytest.raises(ValueError, match="payload conflict"):
+        service.capture(
+            receipt,
+            [valid.model_copy(update={"value": "多数天午睡"})],
+            episode_id="episode-1",
+            subject_id="elder-1",
+            actor_id="elder-1",
+            role="elder",
+            now=NOW + timedelta(minutes=2),
+        )
+    with pytest.raises(ValueError, match="answer authority expired"):
         service.capture(
             receipt,
             [valid],
@@ -305,6 +386,73 @@ def test_capture_rejects_forgery_invalid_values_replay_and_cross_episode() -> No
             subject_id="elder-1",
             actor_id="elder-1",
             role="elder",
+            now=captured.answers[0].episode_valid_until,
+        )
+    for changed_binding in (
+        {"episode_id": "other-episode"},
+        {"subject_id": "other-subject"},
+        {"actor_id": "other-actor"},
+        {"role": "family"},
+    ):
+        binding = {
+            "episode_id": "episode-1",
+            "subject_id": "elder-1",
+            "actor_id": "elder-1",
+            "role": "elder",
+            **changed_binding,
+        }
+        with pytest.raises(ValueError, match="binding"):
+            service.capture(
+                receipt,
+                [valid],
+                now=NOW + timedelta(minutes=2),
+                **binding,
+            )
+
+
+def test_captured_answer_authority_is_selection_and_subject_scoped() -> None:
+    service = HabitQuestionnaireService()
+
+    def capture_for(subject_id: str) -> CapturedHabitAnswer:
+        selection = service.select(
+            selection_request(
+                episode_id="shared-episode-label",
+                actor_id=f"actor:{subject_id}",
+                subject_id=subject_id,
+                request_id=f"request:{subject_id}",
+            ),
+            now=NOW,
+        )
+        return service.capture(
+            selection,
+            (
+                HabitQuestionAnswer(
+                    concept_id="habit.nap_pattern",
+                    concept_version="1.0.0",
+                    disposition=HabitAnswerDisposition.ANSWERED,
+                    value="偶尔午睡",
+                ),
+            ),
+            episode_id=selection.episode_id,
+            subject_id=selection.subject_id,
+            actor_id=selection.actor_id,
+            role=selection.role,
+            now=NOW + timedelta(minutes=1),
+        ).answers[0]
+
+    first = capture_for("subject-a")
+    second = capture_for("subject-b")
+
+    assert first.answer_ref != second.answer_ref
+    assert service.get_captured_answer(
+        first.answer_ref,
+        subject_id="subject-a",
+        now=NOW + timedelta(minutes=2),
+    ) == first
+    with pytest.raises(KeyError, match="unavailable"):
+        service.get_captured_answer(
+            first.answer_ref,
+            subject_id="subject-b",
             now=NOW + timedelta(minutes=2),
         )
 
@@ -406,13 +554,13 @@ def test_nonanswers_do_not_form_facts_and_never_ask_is_minimal_suppression() -> 
                 concept_id="habit.nap_pattern",
                 concept_version="1.0.0",
                 disposition=HabitAnswerDisposition.NEVER_ASK,
+                question_opt_out_acknowledged=True,
             )
         ],
         episode_id="episode-1",
         subject_id="elder-1",
         actor_id="elder-1",
         role="elder",
-        suppression_confirmation_ref="confirmation:suppress",
         now=NOW + timedelta(minutes=1),
     )
     assert not result.answers[0].profile_candidate_eligible
@@ -427,6 +575,47 @@ def test_nonanswers_do_not_form_facts_and_never_ask_is_minimal_suppression() -> 
     with pytest.raises(ValueError, match="eligible"):
         HabitProfileCandidateBuilder(DEFAULT_HABIT_CONCEPTS).from_captured(
             result.answers[0]
+        )
+
+
+def test_question_opt_out_requires_typed_acknowledgement_and_elder_authority() -> None:
+    with pytest.raises(ValueError, match="typed opt-out acknowledgement"):
+        HabitQuestionAnswer(
+            concept_id="habit.nap_pattern",
+            concept_version="1.0.0",
+            disposition=HabitAnswerDisposition.NEVER_ASK,
+        )
+
+    service = HabitQuestionnaireService()
+    selection = service.select(
+        selection_request(
+            episode_id="family-opt-out",
+            role="family",
+            actor_id="family-1",
+            concepts=("habit.nap_pattern",),
+        ),
+        now=NOW,
+    )
+    assert all(
+        HabitAnswerDisposition.NEVER_ASK not in candidate.allowed_dispositions
+        for candidate in selection.candidates
+    )
+    with pytest.raises(PermissionError, match="only the elder"):
+        service.capture(
+            selection,
+            (
+                HabitQuestionAnswer(
+                    concept_id="habit.nap_pattern",
+                    concept_version="1.0.0",
+                    disposition=HabitAnswerDisposition.NEVER_ASK,
+                    question_opt_out_acknowledged=True,
+                ),
+            ),
+            episode_id=selection.episode_id,
+            subject_id=selection.subject_id,
+            actor_id=selection.actor_id,
+            role=selection.role,
+            now=NOW + timedelta(minutes=1),
         )
 
 
@@ -450,6 +639,7 @@ def test_never_ask_is_not_partially_saved_when_capture_fails() -> None:
                     concept_id="habit.nap_pattern",
                     concept_version="1.0.0",
                     disposition=HabitAnswerDisposition.NEVER_ASK,
+                    question_opt_out_acknowledged=True,
                 ),
                 HabitQuestionAnswer(
                     concept_id="habit.sleep_satisfaction_recent",
@@ -462,7 +652,6 @@ def test_never_ask_is_not_partially_saved_when_capture_fails() -> None:
             subject_id="elder-1",
             actor_id="elder-1",
             role="elder",
-            suppression_confirmation_ref="confirmation:suppress",
             now=NOW + timedelta(minutes=1),
         )
 
@@ -577,9 +766,14 @@ def test_current_answer_is_typed_evidence_but_not_memory_until_commit() -> None:
     snap = snapshot()
     changes = change_set((answer,), snapshot_value=snap, change_set_id="changes-1")
     controller = DeterministicCommitController(habit_profile_store=store)
+    capability = approval_capability(
+        changes,
+        snapshot_value=snap,
+        idempotency_key="habit-idem-1",
+    )
     result = controller.commit_habit_profile(
         change_set=changes,
-        confirmation=confirmation(changes, confirmation_id="confirm-1"),
+        approval_capability=capability,
         fact_snapshot=snap,
         idempotency_key="habit-idem-1",
         now=NOW + timedelta(minutes=2),
@@ -588,7 +782,7 @@ def test_current_answer_is_typed_evidence_but_not_memory_until_commit() -> None:
     assert len(store.get("elder-1").facts) == 1
     replay = controller.commit_habit_profile(
         change_set=changes,
-        confirmation=confirmation(changes, confirmation_id="confirm-1"),
+        approval_capability=capability,
         fact_snapshot=snap,
         idempotency_key="habit-idem-1",
         now=NOW + timedelta(minutes=3),
@@ -615,9 +809,18 @@ def test_manifest_rebuild_and_atomic_failure_prevent_partial_commit() -> None:
         created_at=NOW + timedelta(minutes=1),
     )
     assert reduced.manifest_hash != original.manifest_hash
-    with pytest.raises(ValueError, match="binding"):
-        confirmation(original, confirmation_id="confirm-old").validate_for(
-            reduced, now=NOW + timedelta(minutes=2)
+    original_capability = approval_capability(
+        original,
+        snapshot_value=snap,
+        idempotency_key="reduced-manifest-mismatch",
+    )
+    with pytest.raises(ValueError, match="stale or bound"):
+        DeterministicCommitController().commit_habit_profile(
+            change_set=reduced,
+            approval_capability=original_capability,
+            fact_snapshot=snap,
+            idempotency_key="reduced-manifest-mismatch",
+            now=NOW + timedelta(minutes=2),
         )
 
     invalid = HabitProfileChangeCandidate.create(
@@ -639,10 +842,15 @@ def test_manifest_rebuild_and_atomic_failure_prevent_partial_commit() -> None:
         created_at=NOW,
     )
     store = InMemoryHabitProfileStore()
+    atomic_capability = approval_capability(
+        atomic,
+        snapshot_value=snap,
+        idempotency_key="atomic-invalid",
+    )
     with pytest.raises(ValueError, match="does not exist"):
         store.commit(
             atomic,
-            confirmation(atomic, confirmation_id="confirm-invalid"),
+            atomic_capability,
             idempotency_key="atomic-invalid",
             now=NOW + timedelta(minutes=2),
         )
@@ -653,16 +861,25 @@ def test_only_elder_exact_manifest_can_confirm_profile() -> None:
     answer = capture_one(HabitQuestionnaireService())
     snap = snapshot(role="family", actor_id="family-1")
     changes = change_set((answer,), snapshot_value=snap, change_set_id="elder-owned")
+    capability = approval_capability(
+        changes,
+        snapshot_value=snap,
+        idempotency_key="family-write",
+        actor_id="family-1",
+    )
     with pytest.raises(ValueError, match="authenticated elder"):
         DeterministicCommitController().commit_habit_profile(
             change_set=changes,
-            confirmation=confirmation(
-                changes,
-                confirmation_id="family-confirm",
-                actor_id="family-1",
-            ),
+            approval_capability=capability,
             fact_snapshot=snap,
             idempotency_key="family-write",
+            now=NOW + timedelta(minutes=1),
+        )
+    with pytest.raises(TypeError, match="verified approval capability"):
+        InMemoryHabitProfileStore().commit(
+            changes,
+            {"decision_id": "fabricated"},  # type: ignore[arg-type]
+            idempotency_key="fabricated-raw-approval",
             now=NOW + timedelta(minutes=1),
         )
 
@@ -703,11 +920,16 @@ def test_overlapping_sources_dispute_but_nonoverlapping_change_does_not() -> Non
     elder = capture_one(HabitQuestionnaireService(), episode_id="elder-answer")
     first_snap = snapshot(memory_version=0)
     first = change_set((elder,), snapshot_value=first_snap, change_set_id="first")
+    first_capability = approval_capability(
+        first,
+        snapshot_value=first_snap,
+        idempotency_key="first",
+    )
     store.commit(
         first,
-        confirmation(first, confirmation_id="confirm-first"),
+        first_capability,
         idempotency_key="first",
-        now=NOW,
+        now=first_capability.grant.issued_at,
     )
 
     family = capture_one(
@@ -723,9 +945,14 @@ def test_overlapping_sources_dispute_but_nonoverlapping_change_does_not() -> Non
     )
     second_snap = snapshot(memory_version=1)
     second = change_set((family,), snapshot_value=second_snap, change_set_id="second")
+    second_capability = approval_capability(
+        second,
+        snapshot_value=second_snap,
+        idempotency_key="second",
+    )
     store.commit(
         second,
-        confirmation(second, confirmation_id="confirm-second"),
+        second_capability,
         idempotency_key="second",
         now=NOW + timedelta(minutes=1),
     )
@@ -753,9 +980,14 @@ def test_overlapping_sources_dispute_but_nonoverlapping_change_does_not() -> Non
     )
     third_snap = snapshot(memory_version=2)
     third = change_set((later,), snapshot_value=third_snap, change_set_id="third")
+    third_capability = approval_capability(
+        third,
+        snapshot_value=third_snap,
+        idempotency_key="third",
+    )
     store.commit(
         third,
-        confirmation(third, confirmation_id="confirm-third"),
+        third_capability,
         idempotency_key="third",
         now=NOW + timedelta(minutes=3),
     )
@@ -770,11 +1002,16 @@ def test_stale_version_and_expiry_are_deterministic_and_not_current() -> None:
     snap = snapshot()
     changes = change_set((answer,), snapshot_value=snap, change_set_id="stale")
     store = InMemoryHabitProfileStore()
+    capability = approval_capability(
+        changes,
+        snapshot_value=snap,
+        idempotency_key="stale",
+    )
     store.commit(
         changes,
-        confirmation(changes, confirmation_id="confirm-stale"),
+        capability,
         idempotency_key="stale",
-        now=NOW,
+        now=capability.grant.issued_at,
     )
     result = store.read(
         subject_id="elder-1",
@@ -812,11 +1049,16 @@ def test_forget_removes_personalization_but_retains_truthful_audit_notice() -> N
     first_snap = snapshot()
     create = change_set((answer,), snapshot_value=first_snap, change_set_id="create")
     store = InMemoryHabitProfileStore()
+    create_capability = approval_capability(
+        create,
+        snapshot_value=first_snap,
+        idempotency_key="create",
+    )
     store.commit(
         create,
-        confirmation(create, confirmation_id="confirm-create"),
+        create_capability,
         idempotency_key="create",
-        now=NOW,
+        now=create_capability.grant.issued_at,
     )
     fact_id = store.get("elder-1").facts[0].fact_id
     forget_candidate = HabitProfileChangeCandidate.create(
@@ -838,9 +1080,14 @@ def test_forget_removes_personalization_but_retains_truthful_audit_notice() -> N
         confirmation_expires_at=NOW + timedelta(hours=1),
         created_at=NOW,
     )
+    forget_capability = approval_capability(
+        forget,
+        snapshot_value=second_snap,
+        idempotency_key="forget",
+    )
     store.commit(
         forget,
-        confirmation(forget, confirmation_id="confirm-forget"),
+        forget_capability,
         idempotency_key="forget",
         now=NOW + timedelta(minutes=1),
     )
@@ -873,11 +1120,16 @@ def test_minimal_role_reads_and_observer_origin_survive_confirmation() -> None:
     snap = snapshot()
     changes = change_set((family,), snapshot_value=snap, change_set_id="observer")
     store = InMemoryHabitProfileStore()
+    capability = approval_capability(
+        changes,
+        snapshot_value=snap,
+        idempotency_key="observer",
+    )
     store.commit(
         changes,
-        confirmation(changes, confirmation_id="confirm-observer"),
+        capability,
         idempotency_key="observer",
-        now=NOW,
+        now=capability.grant.issued_at,
     )
     elder_read = store.read(
         subject_id="elder-1",

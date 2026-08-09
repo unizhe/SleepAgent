@@ -5,10 +5,6 @@ from datetime import date
 import pytest
 
 from sleepagent.radar_agent.product_agent.contracts import AgentId
-from sleepagent.radar_agent.product_agent.skill_methods.role_material import (
-    RoleMaterialExpressionDraft,
-    SleepCareRoleMaterialSkill,
-)
 from sleepagent.radar_agent.product_agent.tools.artifact_rendering import (
     ArtifactRenderRequest,
     ArtifactRenderingTool,
@@ -267,82 +263,6 @@ def test_artifact_render_rejects_risk_downgrade_below_claim_floor() -> None:
             evidence_ledger=ledger,
             audience_role="family",
         )
-
-
-@pytest.mark.parametrize(
-    ("field", "replacement"),
-    (
-        ("claim_ids", ["claim:invented"]),
-        ("evidence_refs", ["source:invented"]),
-        ("risk_level", RiskLevel.INFO),
-        ("caveats", ["caveat removed"]),
-    ),
-)
-def test_sleepcare_role_material_expression_fails_closed_on_fact_drift(
-    field: str,
-    replacement: object,
-) -> None:
-    context = _context()
-    rendered = ArtifactRenderingTool().render(
-        ArtifactRenderRequest(
-            context=context,
-            evidence_ledger=_ledger(context),
-            audience_role="doctor",
-        )
-    )
-    artifact = rendered.artifact
-    draft = RoleMaterialExpressionDraft.from_artifact(
-        artifact,
-        tone="clinical",
-    ).model_copy(update={field: replacement})
-
-    skill = SleepCareRoleMaterialSkill(audience_role="doctor")
-    assert skill.owner is AgentId.SLEEP_CARE
-    assert skill.skill_id == "draft_doctor_material"
-    with pytest.raises(ValueError, match="cannot modify"):
-        skill.draft(rendered, draft)
-
-
-def test_sleepcare_role_material_expression_changes_only_role_presentation() -> None:
-    context = _context()
-    rendered = ArtifactRenderingTool().render(
-        ArtifactRenderRequest(
-            context=context,
-            evidence_ledger=_ledger(context),
-            audience_role="family",
-        )
-    )
-    artifact = rendered.artifact
-    skill = SleepCareRoleMaterialSkill(audience_role="family")
-
-    expressed = skill.draft(
-        rendered,
-        RoleMaterialExpressionDraft.from_artifact(artifact, tone="warm"),
-    )
-
-    assert skill.owner is AgentId.SLEEP_CARE
-    assert skill.skill_id == "draft_user_material"
-    assert expressed.title != artifact.title
-    assert expressed.content != artifact.content
-    for field in (
-        "source_ledger_id",
-        "risk_level",
-        "claim_ids",
-        "facts",
-        "evidence_refs",
-        "source_refs",
-        "trend_highlights",
-        "anomaly_highlights",
-        "confirmation_actions",
-        "data_quality",
-        "questionnaire_entries",
-        "structured_summary",
-        "caveats",
-        "safety_notices",
-    ):
-        assert getattr(expressed, field) == getattr(artifact, field)
-    assert all(claim.text in expressed.content for claim in artifact.facts)
-    assert all(item in expressed.content for item in artifact.safety_notices)
 
 
 def _ledger(context: ContextPacket) -> EvidenceLedger:

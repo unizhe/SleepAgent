@@ -158,14 +158,14 @@ Skill 选择必须服从下表；“mandatory”指该 Agent 一旦被本 Episod
 
 | Existing Skill | Habit responsibility | 可请求的确定性 Tool 子集 | 明确禁止 |
 | --- | --- | --- | --- |
-| `ask_minimal_clarification` | 只在显式用户目的或已注册的 Evidence/Care gap 下请求、呈现和接收一个最小问题 | `questionnaire.select_profile`, `questionnaire.capture_profile` | 自由发明 concept、以完整度驱动追问、解释原始回答、写 Profile |
+| `ask_minimal_clarification` | 只在显式用户目的或已注册的 Evidence/Care gap 下治理一个最小问题的呈现和接收 | 无 Agent Tool 请求；`questionnaire.select_profile`、`questionnaire.capture_profile` 是 deterministic runtime-only interaction commands | 自由发明 concept、以完整度驱动追问、解释原始回答、写 Profile |
 | `select_memory_context` | 在显式画像复核中选择最小相关 typed Profile slice | `profile.read` 及已有 Memory query/compare | 扩大角色 scope、把 ObjectiveBaseline 当 Memory、整库读取 |
 | `propose_memory_change` | 对 profile-eligible、来源有效的候选建立 create/replace/expire/forget change set 和确认摘要 | `profile.read`, `profile.build_change_set` 及已有 compare | 执行确认、提交、把家属报告升级为老人自述 |
 | `interpret_scoped_evidence` | 解释当前回答、观察报告、最小 Profile、ObjectiveBaseline 和在线事件的关系 | 已有 Evidence reads、`reasoning.resolve_event_context`, `profile.read`, `baseline.read` | 因果宣称、Care 选行动、Profile 写入 |
 | `synthesize_evidence_conflict` / `interpret_longitudinal_pattern` | 保留并解释主观/家属/Profile/客观来源的实际冲突和变化 | Evidence/Knowledge/Memory reads、`profile.read`, `baseline.read` | 为“整理档案”静默选真或覆盖 |
 | `propose_single_care_action` / `assess_followup_outcome` | 只从已验收 Evidence 使用目标、约束、偏好和负担，并形成目录内 delivery；需要补问时生成有限 `C-*` gap | 既有 Care/coordination 只读 Tool与 `device.read_delivery_policy` | 读取原始 Questionnaire capture、直接读写 Profile、绕过安静时段/家属通知 Policy |
 
-Questionnaire selection/capture 可以由 runtime 在相应 plan-step 边界确定性执行，但语义上仍受 `ask_minimal_clarification` 的单 owner、适用条件和 Scorecard 约束。Habit Profile 的变更 Skill 不调用 `confirmation.validate` 或 `state.commit_habit_profile`：画像确认/提交由确定性 runtime 与 Commit Controller 完成。既有 Safety 发布审查 Skill 可以为其独立审查目的只读校验 confirmation，但不会因此获得 Profile 写权限；`state.commit_habit_profile` 始终只属于 Commit Controller。
+Questionnaire selection/capture 可以由 runtime 在相应 plan-step 边界确定性执行，但语义上仍受 `ask_minimal_clarification` 的单 owner、适用条件和 Scorecard 约束。Phase C 已删除无真实 owner 的 caller-facing confirmation validation Tool；Habit Profile 的变更 Skill 不调用确认 Tool 或 `state.commit_habit_profile`。画像确认由确定性 runtime 通过 typed HDS verifier 重新读取并 acquire 持久化 authority，提交仅由 Commit Controller 完成。Safety 只消费绑定精确 target 的 authority facts，不因此获得 Profile 写权限；`state.commit_habit_profile` 始终只属于 Commit Controller。
 
 Foundation 实现必须让 Skill Package 声明、Agent/Profile Tool allowlist、runtime 可见性和 Tool receipt 路由共同满足上表；仅在 runner 中硬编码调用而 Skill Package 不声明职责，或只在 Skill 文案中声明而底层 allowlist 不允许，均不算工程完成。本段冻结职责与权限，不表示当前代码已经完成该增量。
 

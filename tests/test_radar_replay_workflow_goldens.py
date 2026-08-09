@@ -9,6 +9,10 @@ import pytest
 
 from sleepagent.radar_agent.api.http import RadarApiRuntime
 from sleepagent.radar_agent.cli import EXIT_OK, main as cli_main
+from sleepagent.radar_agent.persistence import RadarPersistenceStore
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    build_product_runtime_bundle_from_env,
+)
 from sleepagent.radar_agent.replay import (
     ReplayWorkflowGolden,
     get_replay_scenario,
@@ -54,8 +58,13 @@ def test_frontend_reads_runtime_questionnaires_instead_of_expected_catalog() -> 
 def test_each_replay_demo_cli_uses_canonical_product_episode(
     golden: ReplayWorkflowGolden,
 ) -> None:
-    runtime = RadarApiRuntime(
+    persistence = RadarPersistenceStore.connect_sqlite(
         sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    runtime = RadarApiRuntime(
+        product_runtime=build_product_runtime_bundle_from_env(
+            persistence_store=persistence,
+        )
     )
     stdout = io.StringIO()
 

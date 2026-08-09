@@ -1,0 +1,16 @@
+# Development/test dependencies extend the exact production input. The lock is
+# generated on CPython 3.11.x with pip==24.0 and pip-tools==7.4.1:
+#   python -m piptools compile --generate-hashes --resolver=backtracking \
+#     --strip-extras --allow-unsafe \
+#     --no-emit-index-url --no-emit-trusted-host \
+#     --output-file=requirements/dev.lock requirements/dev.in
+
+-r production.in
+
+build==1.5.0
+mypy>=2.3,<2.4
+pip==24.0
+pip-tools==7.4.1
+pytest>=8.3,<10
+setuptools==80.9.0
+wheel==0.45.1

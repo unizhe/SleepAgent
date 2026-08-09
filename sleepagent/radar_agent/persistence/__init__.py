@@ -34,6 +34,15 @@ from sleepagent.radar_agent.persistence.vector_store import (
     VectorStore,
     validate_vector_document,
 )
+from sleepagent.radar_agent.persistence.uow import (
+    AuthorityResolutionScope,
+    PoolConfiguration,
+    PostgresUnitOfWork,
+    PsycopgPoolProvider,
+    UnitOfWorkFactory,
+    UowScope,
+    WorkerClaimScope,
+)
 
 __all__ = [
     "MIGRATION_VERSION",
@@ -45,6 +54,9 @@ __all__ = [
     "HistoricalTaskRecord",
     "ObjectBlobReference",
     "ObjectStore",
+    "PoolConfiguration",
+    "PostgresUnitOfWork",
+    "PsycopgPoolProvider",
     "RADAR_AGENT_POSTGRES_MIGRATION_SQL",
     "RADAR_AGENT_POSTGRES_MIGRATIONS",
     "RadarAlertRecord",
@@ -58,6 +70,10 @@ __all__ = [
     "RawRadarVectorWriteError",
     "VectorDocument",
     "VectorStore",
+    "AuthorityResolutionScope",
+    "UnitOfWorkFactory",
+    "UowScope",
+    "WorkerClaimScope",
     "apply_sqlite_migration",
     "connect_postgres_store",
     "split_sql_statements",

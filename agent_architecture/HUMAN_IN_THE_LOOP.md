@@ -1,6 +1,6 @@
 # SleepAgent Human in the Loop 设计
 
-状态：已实现（runtime governance v1）
+状态：已实现（runtime governance v2）
 
 策略版本：`sleepagent-hitl-policy.v1`
 
@@ -18,6 +18,15 @@ Agent 协同层、L2 数据与记忆层以及右侧治理控制面的确定性�
 - SafetyReviewAgent 负责模型内容安全，不能代替老人同意、权限校验或真实医生审核。
 - 急症规则和权限越界属于硬阻断，界面中不存在“仍然继续”的按钮。
 
+本协议的 authority 范围是由 Agent 或系统提出、需要人批准后才可执行的
+`ActionProposal`。已认证数据主体对问题的直接回答、拒答，以及带独立 typed
+acknowledgement 的“以后不要再问”撤回命令不是 proposal，不能被 HDS 延迟或拒绝。
+Questionnaire 只能原子保存选择/回答 receipt 和最小提问抑制状态，不能借此写入
+Habit Profile、Memory、Care State 或执行外部动作。提问抑制仅允许已认证老人本人，
+命令引用由服务端绑定 selection、canonical `never_ask` payload 和 actor/subject 后派生；
+不接受 caller 提供的 confirmation/token 字符串。凡是需要“批准”的长期画像、记忆、
+Care 或外部动作，HDS 仍是唯一 authority。
+
 ```mermaid
 flowchart LR
     U[老人 / 家属 / 医生] --> SC[SleepCareAgent]
@@ -31,8 +40,9 @@ flowchart LR
     DP -->|R2/R3| INBOX[Human Decision Inbox]
     DP -->|R4| BLOCK[确定性硬阻断]
     INBOX --> D[HumanDecisionRecord]
-    D --> G[一次性 ApprovalGrant]
-    G --> CC[Commit Controller<br/>执行前重新授权]
+    D --> HDS[HumanDecisionService<br/>原子 acquire / CAS]
+    HDS --> C[不可序列化 VerifiedApprovalCapability]
+    C --> CC[Commit Controller<br/>精确绑定校验]
     CC --> STATE[(画像 / Care State / Memory)]
     CC --> EXT[通知 / 分享 / 导出网关]
     CC --> AUDIT[(追加式审计事件)]
@@ -43,6 +53,7 @@ flowchart LR
 | 操作 | 默认风险 | 决策者 | 系统行为 |
 |---|---:|---|---|
 | 普通解释、只读趋势 | R0 | 无需人工 | 自动完成 |
+| 老人直接拒答/撤回后续提问 | 非 proposal | 老人本人 | typed acknowledgement 后直接记录最小抑制状态；可到期/撤回 |
 | 低影响建议、预览 | R1 | 无需人工 | 完成并告知 |
 | 长期记忆、习惯画像、Care 行动 | R2 | 老人 | 单次精确确认 |
 | 通知、分享、导出 | R3 | 老人 | 单次精确确认 |
@@ -68,7 +79,9 @@ flowchart LR
 - 人可读的“改什么、为什么、影响谁、持续多久、如何撤回、精确变更”
 
 人工决定记录 actor、role、role binding、authorization、目标 hash、策略版本和时间。
-满足全部要求后才可生成一次性 `ApprovalGrant`。
+满足全部要求后，HDS 才可原子地将决策从 `approved` 转为
+`executing`，保存完整绑定的惰性 `ApprovalGrant`，并签发仅当前进程可用、
+不可序列化的 `VerifiedApprovalCapability`。原始 grant 不能直接驱动写操作。
 
 ```mermaid
 stateDiagram-v2
@@ -83,7 +96,7 @@ stateDiagram-v2
     Pending --> Revoked
     PartiallyApproved --> Revoked
     Approved --> Revoked: 执行前
-    Approved --> Executing: Commit Controller 消费 grant
+    Approved --> Executing: HDS acquire / CAS
     Executing --> Committed
     Executing --> ExecutionFailed
     Executing --> OutcomeUnknown
@@ -99,8 +112,10 @@ stateDiagram-v2
 
 1. 从检查点读取冻结结果，确认 Episode、FactSnapshot 和 registry 未变化。
 2. 读取权威 `HumanDecisionRequest`，重新检查有效期、角色绑定和数据授权。
-3. 为每个批准目标签发一次性 grant；拒绝/撤回目标只记录为 decline。
-4. 调用 `commit_frozen_confirmations`，仅执行 Commit Controller 阶段。
+3. 按显式 `decision_id + proposal_id` 读取每个目标；由 HDS 原子 acquire
+   并签发验证能力，拒绝/撤回结果仅来自权威决策状态。
+4. 调用 `commit_frozen_confirmations`，仅用已验证能力执行 Commit Controller
+   阶段。
 5. 不调用 Agent、不重新规划、不重新生成目标、不重复发布沟通文本。
 6. 成功后将人工决定标记为 `committed` 并关联执行回执。
 

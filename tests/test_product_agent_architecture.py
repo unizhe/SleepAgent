@@ -6,13 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.radar_agent.product_agent import (
-    AGENT_DEFINITIONS,
-    AGENT_INVOCATION_ALLOWLIST,
-    COMMIT_CONTROLLER_TOOLS,
-    EPISODE_DEFINITIONS,
+from sleepagent.radar_agent.product_agent.contracts import (
     PRODUCT_AGENT_ROSTER,
-    TOOL_INVOCATION_ALLOWLIST,
     AgentEnvelope,
     AgentId,
     AuthenticatedBinding,
@@ -20,14 +15,11 @@ from sleepagent.radar_agent.product_agent import (
     CommunicationDraft,
     ContextPacket,
     EpisodePlan,
-    EpisodePlanPolicyError,
     EpisodeType,
     EvidenceClaim,
     EvidencePacket,
     EvidenceSemantic,
     EvidenceSourceKind,
-    InvocationPolicyError,
-    PromptCompiler,
     SafetyDecision,
     SafetyVerdict,
     SourceScope,
@@ -36,28 +28,38 @@ from sleepagent.radar_agent.product_agent import (
     TrustedContextItem,
     WorkProductKind,
     WorkProductStatus,
+    CrossAgentRequestType,
+    stable_hash,
+)
+from sleepagent.radar_agent.product_agent.registry import (
+    AGENT_DEFINITIONS,
+    AGENT_INVOCATION_ALLOWLIST,
+    COLLABORATION_ALLOWLIST,
+    COMMIT_CONTROLLER_TOOLS,
+    EPISODE_DEFINITIONS,
+    TOOL_INVOCATION_ALLOWLIST,
+    EpisodePlanPolicyError,
+    InvocationPolicyError,
     authorize_agent_invocation,
     authorize_collaboration,
     authorize_tool_invocation,
-    default_agent_profiles,
-    default_skill_packages,
     product_agent_manifest,
+    validate_episode_plan,
+    validate_product_agent_registry,
+)
+from sleepagent.radar_agent.product_agent.skills import (
+    PromptCompiler,
     SkillLifecycle,
     SkillPackage,
     SkillReleaseStage,
     SkillRegistry,
     SkillResolver,
-    stable_hash,
-    validate_episode_plan,
+    default_agent_profiles,
+    default_skill_packages,
 )
 from sleepagent.radar_agent.boundary import (
     CANONICAL_SUBPACKAGES,
     PRODUCTION_AGENT_NAMESPACE,
-)
-from sleepagent.radar_agent.product_agent.contracts import CrossAgentRequestType
-from sleepagent.radar_agent.product_agent.registry import (
-    COLLABORATION_ALLOWLIST,
-    validate_product_agent_registry,
 )
 
 
@@ -490,6 +492,24 @@ def test_skill_foundation_has_18_packages_owned_only_by_four_agents() -> None:
     assert owners["draft_coordination_candidate"] == AgentId.CARE_STRATEGY
     assert owners["draft_doctor_material"] == AgentId.SLEEP_CARE
     assert owners["propose_memory_change"] == AgentId.SLEEP_CARE
+    assert {
+        item.skill_id for item in packages if item.version == "2.0.0"
+    } == {
+        "plan_episode",
+        "evaluate_work_product",
+        "draft_user_material",
+        "draft_doctor_material",
+        "propose_memory_change",
+        "select_memory_context",
+        "interpret_scoped_evidence",
+        "synthesize_evidence_conflict",
+        "interpret_longitudinal_pattern",
+        "propose_single_care_action",
+        "assess_followup_outcome",
+        "draft_coordination_candidate",
+        "review_claim_and_boundary",
+        "review_action_and_publication",
+    }
 
 
 def test_skill_package_cannot_expand_agent_tool_capability() -> None:
@@ -516,7 +536,7 @@ def test_skill_resolver_locks_exact_approved_champion() -> None:
         agent_id=AgentId.EVIDENCE_REASONING,
         mandatory_skill_ids=["interpret_scoped_evidence"],
     )
-    assert bundle.packages[0].version == "1.0.0"
+    assert bundle.packages[0].version == "2.0.0"
     assert bundle.packages[0].package_hash in lock.package_locks[0]
     assert lock.registry_hash == registry.snapshot().registry_hash
 
@@ -568,7 +588,7 @@ def test_skill_resolver_assigns_only_explicit_subject_canary() -> None:
     )
     canary_values.update(
         {
-            "version": "1.0.1",
+            "version": "2.0.1",
             "champion": False,
             "release_stage": SkillReleaseStage.CANARY,
             "canary_subject_ids": ("subject-canary",),
@@ -594,8 +614,8 @@ def test_skill_resolver_assigns_only_explicit_subject_canary() -> None:
         subject_id="subject-other",
     )
 
-    assert canary_bundle.packages[0].version == "1.0.1"
-    assert champion_bundle.packages[0].version == "1.0.0"
+    assert canary_bundle.packages[0].version == "2.0.1"
+    assert champion_bundle.packages[0].version == "2.0.0"
 
 
 def test_prompt_compiler_keeps_untrusted_context_after_policy_and_skills() -> None:

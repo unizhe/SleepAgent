@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app
+from backend.legacy_main import app
 from sleepagent.radar_agent.api.http import (
     RADAR_AGENT_API_KEY_ENV,
     RADAR_AGENT_DEV_MODE_ENV,
@@ -14,20 +14,31 @@ from sleepagent.radar_agent.api.http import (
     RadarTaskCreateRequest,
     reset_radar_api_runtime_for_tests,
 )
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.contracts import (
     CommunicationDraft,
-    DeterministicCommitController,
     EpisodeReceipt,
     EpisodeStatus,
     ExecutionMode,
+    stable_hash,
+)
+from sleepagent.radar_agent.product_agent.governance import (
+    DeterministicCommitController,
+)
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
+    CommitFrozenConfirmedAction,
     PendingConfirmationTarget,
     PendingUserInputTarget,
     ProductEpisodeRunResult,
-    stable_hash,
+)
+from sleepagent.radar_agent.product_agent.hitl import HumanDecisionStatus
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    ProductRuntimeBundle,
+    build_product_runtime_bundle_from_env,
 )
 from sleepagent.radar_agent.replay import get_replay_scenario, replay_scenario_ids
 from sleepagent.radar_agent.persistence import (
     RadarDataAuthorization,
+    RadarPersistenceStore,
     RadarSubject,
     RadarUserRoleBinding,
 )
@@ -63,6 +74,37 @@ def _create(client: TestClient, scenario: str = "normal_night", key: str = "nigh
     )
 
 
+class _RecordingRuntimeBundleAdapter:
+    """Keep the canonical graph while replacing its API-facing runner only."""
+
+    def __init__(
+        self,
+        bundle: ProductRuntimeBundle,
+        runner: RecordingProductRunner,
+    ) -> None:
+        self._bundle = bundle
+        self.runner = runner
+        runner.commit_controller = bundle.commit_controller
+        runner.human_decisions = bundle.human_decisions
+
+    def __getattr__(self, name: str):
+        return getattr(self._bundle, name)
+
+
+def _product_runtime_with_runner(
+    runner: RecordingProductRunner,
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> _RecordingRuntimeBundleAdapter:
+    persistence = RadarPersistenceStore.connect_sqlite(
+        connection or sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    bundle = build_product_runtime_bundle_from_env(
+        persistence_store=persistence,
+    )
+    return _RecordingRuntimeBundleAdapter(bundle, runner)
+
+
 def test_task_api_requires_auth_and_creation_is_idempotent() -> None:
     with TestClient(app) as client:
         assert client.post("/radar-agent/tasks", json={}).status_code == 401
@@ -80,7 +122,7 @@ def test_product_routes_task_and_chat_only_to_product_runner(
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = RecordingProductRunner()
     reset_radar_api_runtime_for_tests(
-        product_runner=runner,
+        product_runtime=_product_runtime_with_runner(runner),
     )
     with TestClient(app) as client:
         created = client.post(
@@ -140,7 +182,9 @@ def test_radar_agent_routes_are_hidden_outside_explicit_dev_transport(
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
     runner = RecordingProductRunner()
-    runtime = reset_radar_api_runtime_for_tests(product_runner=runner)
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
     runtime.store.save_subject(
         RadarSubject(
             subject_id="subject-product-api",
@@ -197,7 +241,9 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = ConfirmationProductRunner()
-    reset_radar_api_runtime_for_tests(product_runner=runner)
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
     with TestClient(app) as client:
         created = client.post(
             "/radar-agent/tasks",
@@ -215,6 +261,9 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
             f"/radar-agent/tasks/{task_id}/run",
             headers=_headers(),
         )
+        checkpoint = runtime._latest_product_checkpoint(task_id)
+        [checkpoint_target] = checkpoint.payload["pending_confirmations"]
+        [frozen_target] = checkpoint.payload["result"]["pending_confirmations"]
         pending = first.json()["confirmations"][0]
         family_denied = client.post(
             f"/radar-agent/tasks/{task_id}/confirm",
@@ -245,6 +294,11 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
     assert first.json()["task"]["status"] == "waiting_for_confirmation"
     assert first.json()["decisions"][0]["risk_level"] == "R2"
     assert first.json()["decisions"][0]["requirements"][0]["role"] == "elder"
+    assert "active_grant" not in first.json()["decisions"][0]
+    assert checkpoint_target["decision_id"]
+    assert checkpoint_target["proposal_id"]
+    assert checkpoint_target == frozen_target
+    assert pending["decision_id"] == checkpoint_target["decision_id"]
     assert family_denied.status_code == 409
     assert all(
         item["artifact_type"] != "_product_episode_checkpoint"
@@ -255,6 +309,7 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
     assert resolved.json()["execution_status"] == "completed"
     assert detail.json()["task"]["status"] == "completed"
     assert detail.json()["decisions"][0]["status"] == "committed"
+    assert "active_grant" not in detail.json()["decisions"][0]
     assert len(runner.requests) == 1
     assert runner.confirmation_commits == 1
 
@@ -264,7 +319,9 @@ def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
     runner = UserInputProductRunner()
-    reset_radar_api_runtime_for_tests(product_runner=runner)
+    reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
     with TestClient(app) as client:
         created = client.post(
             "/radar-agent/tasks",
@@ -313,9 +370,12 @@ def test_create_contract_rejects_legacy_and_dynamic_agent_paths(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
     runtime = RadarApiRuntime(
-        sqlite3.connect(":memory:", check_same_thread=False),
-        product_runner=RecordingProductRunner(),
+        product_runtime=_product_runtime_with_runner(
+            RecordingProductRunner(),
+            connection=connection,
+        ),
     )
     assert not hasattr(runtime, "worker")
 
@@ -369,41 +429,34 @@ class ConfirmationProductRunner(RecordingProductRunner):
 
     def run(self, request) -> ProductEpisodeRunResult:
         self.requests.append(request)
-        confirmed = request.care_confirmation is not None
         receipt = EpisodeReceipt(
             episode_id=request.episode_id,
             episode_type=request.episode_type,
-            receipt_revision=2 if confirmed else 1,
-            terminal=confirmed,
+            receipt_revision=1,
+            terminal=False,
             execution_mode=ExecutionMode.INTELLIGENT,
-            status=(
-                EpisodeStatus.COMPLETE
-                if confirmed
-                else EpisodeStatus.WAITING_CONFIRMATION
-            ),
-            goal_achieved=confirmed,
+            status=EpisodeStatus.WAITING_CONFIRMATION,
+            goal_achieved=False,
             fact_snapshot_id=request.fact_snapshot.fact_snapshot_id,
             fact_snapshot_hash=request.fact_snapshot.fact_snapshot_hash,
             source_scope=request.fact_snapshot.source_scope,
             final_episode_state_revision=1,
             trace_ref=f"trace:{request.episode_id}",
         )
-        pending = []
-        if not confirmed:
-            pending = [
-                PendingConfirmationTarget(
-                    confirmation_id="runner-care-confirmation",
-                    target_kind="care",
-                    candidate_id=self.candidate_id,
-                    candidate_hash=self.target_hash,
-                    actor_id=request.fact_snapshot.binding.actor_id,
-                    subject_id=request.fact_snapshot.binding.subject_id,
-                    action_scope="activate_care",
-                    reason="确认建立这个低负担照护行动。",
-                    expires_at=datetime.now(timezone.utc)
-                    + timedelta(minutes=20),
-                )
-            ]
+        pending = [
+            PendingConfirmationTarget(
+                confirmation_id="runner-care-confirmation",
+                target_kind="care",
+                candidate_id=self.candidate_id,
+                candidate_hash=self.target_hash,
+                actor_id=request.fact_snapshot.binding.actor_id,
+                subject_id=request.fact_snapshot.binding.subject_id,
+                action_scope="activate_care",
+                reason="确认建立这个低负担照护行动。",
+                expires_at=datetime.now(timezone.utc)
+                + timedelta(minutes=20),
+            )
+        ]
         return ProductEpisodeRunResult(
             registry_hash=stable_hash("confirmation-product-runner"),
             receipt=receipt,
@@ -414,27 +467,38 @@ class ConfirmationProductRunner(RecordingProductRunner):
                 context_notice="确认只对当前候选及其 hash 有效。",
             ),
             publication_delivered=True,
-            committed_care_candidate_id=(
-                self.candidate_id if confirmed else None
-            ),
             pending_confirmations=pending,
         )
 
     def commit_frozen_confirmations(
         self,
-        *,
-        request,
-        frozen_result,
-        confirmations,
-        declined_confirmation_ids=(),
+        command: CommitFrozenConfirmedAction,
     ) -> ProductEpisodeRunResult:
+        request = command.request
+        frozen_result = command.frozen_result
         self.confirmation_commits = getattr(self, "confirmation_commits", 0) + 1
         assert request.fact_snapshot.fact_snapshot_hash == (
             frozen_result.receipt.fact_snapshot_hash
         )
-        assert set(confirmations) == {"runner-care-confirmation"}
-        token = confirmations["runner-care-confirmation"]
-        assert token.candidate_hash == self.target_hash
+        [target] = frozen_result.pending_confirmations
+        assert target.candidate_hash == self.target_hash
+        assert target.decision_id is not None
+        assert target.proposal_id is not None
+        decision = self.human_decisions.get(target.decision_id)
+        proposal = decision.proposal
+        assert proposal.proposal_id == target.proposal_id
+        capability = self.human_decisions.acquire_verified_capability(
+            decision.decision_id,
+            expected_proposal_id=proposal.proposal_id,
+            expected_subject_id=proposal.subject_id,
+            expected_target_id=proposal.target_id,
+            expected_target_hash=proposal.target_hash,
+            expected_action_scope=proposal.action_scope,
+            expected_fact_snapshot_id=proposal.fact_snapshot_id,
+            expected_fact_snapshot_hash=proposal.fact_snapshot_hash,
+            expected_policy_version=proposal.policy_version,
+            idempotency_key=f"api-test:{decision.decision_id}",
+        )
         receipt = frozen_result.receipt.model_copy(
             update={
                 "receipt_revision": frozen_result.receipt.receipt_revision + 1,
@@ -443,16 +507,19 @@ class ConfirmationProductRunner(RecordingProductRunner):
                 "goal_achieved": True,
             }
         )
-        return frozen_result.model_copy(
+        committed = frozen_result.model_copy(
             update={
                 "receipt": receipt,
                 "committed_care_candidate_id": self.candidate_id,
                 "pending_confirmations": [],
-                "declined_confirmation_ids": list(
-                    declined_confirmation_ids
-                ),
             }
         )
+        self.human_decisions.record_execution_result(
+            capability,
+            status=HumanDecisionStatus.COMMITTED,
+            receipt_ref=committed.receipt.trace_ref,
+        )
+        return committed
 
 
 class UserInputProductRunner(RecordingProductRunner):

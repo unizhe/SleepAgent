@@ -9,15 +9,12 @@ from zipfile import ZipFile
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.acceptance import (
     ACCEPTANCE_MANIFEST_VERSION,
     AcceptanceEvidenceKind,
     AcceptanceManifest,
     AcceptanceObservation,
     AcceptanceScenario,
-    AgentId,
-    EpisodeStatus,
-    ExecutionMode,
     ExternalActionAcceptanceReceipt,
     HardViolation,
     HabitConceptDomainReview,
@@ -31,25 +28,61 @@ from sleepagent.radar_agent.product_agent import (
     HabitUsabilityObservation,
     HabitUsabilityReport,
     ProviderRunReceipt,
-    PRODUCT_EPISODE_API_ADAPTER_VERSION,
     ProductAgentReleaseVerifier,
-    PRODUCT_EXTERNAL_ACTION_VERSION,
-    PRODUCT_STATE_PERSISTENCE_VERSION,
     ReleaseGateError,
     RuntimeRunReceipt,
     StatePersistenceAcceptanceReceipt,
     current_acceptance_release_identity,
     current_habit_catalog_hash,
-    product_agent_manifest,
+)
+from sleepagent.radar_agent.product_agent.contracts import (
+    AgentId,
+    EpisodeStatus,
+    ExecutionMode,
     stable_hash,
+)
+from sleepagent.radar_agent.product_agent.external_actions import (
+    PRODUCT_EXTERNAL_ACTION_VERSION,
+)
+from sleepagent.radar_agent.product_agent.product_persistence import (
+    PRODUCT_STATE_PERSISTENCE_VERSION,
+)
+from sleepagent.radar_agent.product_agent.registry import product_agent_manifest
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    PRODUCT_EPISODE_API_ADAPTER_VERSION,
 )
 from sleepagent.radar_agent.questionnaire import DEFAULT_HABIT_CONCEPTS
 from sleepagent.radar_agent.product_agent.acceptance_materials import (
     audit_acceptance_material_archive,
     audit_acceptance_materials,
+    build_acceptance_material_archive,
     initialize_acceptance_materials,
     initialize_simulated_acceptance_materials,
 )
+
+
+REPOSITORY = Path(__file__).parents[1]
+
+
+def _build_fixture_archive(
+    tmp_path: Path,
+    *,
+    material_root: Path,
+    archive_root: str,
+    expected_sha256: str,
+) -> Path:
+    archive = tmp_path / f"{archive_root}.zip"
+    result = build_acceptance_material_archive(
+        material_root,
+        archive,
+        archive_root=archive_root,
+    )
+
+    assert result.archive_path == str(archive)
+    assert result.archive_root == archive_root
+    assert result.sha256 == expected_sha256
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected_sha256
+    return archive
 
 
 def empty_manifest() -> AcceptanceManifest:
@@ -832,25 +865,30 @@ def test_current_complete_simulated_fixture_is_structurally_valid_but_ineligible
     }
 
 
-def test_checked_in_v18_simulation_coverage_inventory_matches_artifacts() -> None:
-    repository = Path(__file__).parents[1]
+def test_checked_in_v18_simulation_coverage_inventory_matches_artifacts(
+    tmp_path: Path,
+) -> None:
     inventory = json.loads(
         (
-            repository
+            REPOSITORY
             / "sleep_habit_profile"
             / "SIMULATION-COVERAGE-v18.json"
         ).read_text()
     )
-    material_root = repository / inventory["material_root"]
+    material_root = REPOSITORY / inventory["material_root"]
     coverage = inventory["coverage"]
 
     for filename, expected_hash in inventory["canonical_file_sha256"].items():
         assert hashlib.sha256(
             (material_root / filename).read_bytes()
         ).hexdigest() == expected_hash
-    archive = repository / inventory["archive"]["path"]
-    assert hashlib.sha256(archive.read_bytes()).hexdigest() == (
-        inventory["archive"]["sha256"]
+    archive_metadata = inventory["archive"]
+    assert archive_metadata["distribution"] == "generated_not_committed"
+    _build_fixture_archive(
+        tmp_path,
+        material_root=material_root,
+        archive_root=archive_metadata["archive_root"],
+        expected_sha256=archive_metadata["sha256"],
     )
     assert inventory["purpose"] == "development_test_only"
     assert not inventory["production_release_eligible"]
@@ -881,10 +919,121 @@ def test_simulated_fixture_initializer_refuses_overwrite(tmp_path: Path) -> None
         )
 
 
-def test_v15_complete_simulated_archive_is_a_bounded_historical_fixture() -> None:
-    archive = (
-        Path(__file__).parents[1]
-        / "sleepagent-v15-complete-simulated-evidence.zip"
+def test_acceptance_archive_builder_is_byte_stable(tmp_path: Path) -> None:
+    root = tmp_path / "simulated-acceptance"
+    initialize_simulated_acceptance_materials(
+        root,
+        manifest=empty_manifest(),
+    )
+
+    first = build_acceptance_material_archive(
+        root,
+        tmp_path / "first.zip",
+        archive_root="sleepagent-current-simulated-evidence",
+    )
+    second = build_acceptance_material_archive(
+        root,
+        tmp_path / "second.zip",
+        archive_root="sleepagent-current-simulated-evidence",
+    )
+
+    assert first.sha256 == second.sha256
+    assert (tmp_path / "first.zip").read_bytes() == (
+        tmp_path / "second.zip"
+    ).read_bytes()
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        build_acceptance_material_archive(
+            root,
+            tmp_path / "first.zip",
+            archive_root="sleepagent-current-simulated-evidence",
+        )
+
+
+def test_v24_current_simulation_inventory_binds_22_concept_catalog(
+    tmp_path: Path,
+) -> None:
+    inventory = json.loads(
+        (
+            REPOSITORY
+            / "sleep_habit_profile"
+            / "SIMULATION-COVERAGE-v24.json"
+        ).read_text()
+    )
+    material_root = REPOSITORY / inventory["material_root"]
+    for filename, expected_hash in inventory["canonical_file_sha256"].items():
+        assert hashlib.sha256(
+            (material_root / filename).read_bytes()
+        ).hexdigest() == expected_hash
+    archive_metadata = inventory["archive"]
+    assert archive_metadata["distribution"] == "generated_not_committed"
+    archive = _build_fixture_archive(
+        tmp_path,
+        material_root=material_root,
+        archive_root=archive_metadata["archive_root"],
+        expected_sha256=archive_metadata["sha256"],
+    )
+
+    report = audit_acceptance_material_archive(
+        archive,
+        manifest=empty_manifest(),
+    )
+    codes = {item.code for item in report.findings}
+    assert inventory["release_identity_hash"] == (
+        current_acceptance_release_identity().identity_hash
+    )
+    assert inventory["habit_catalog_hash"] == current_habit_catalog_hash()
+    assert inventory["coverage"]["reviewed_habit_concepts"] == len(
+        DEFAULT_HABIT_CONCEPTS
+    )
+    assert report.domain_concepts == len(DEFAULT_HABIT_CONCEPTS)
+    assert report.usable_as_simulation_fixture
+    assert not report.release_evidence_eligible
+    assert codes == {
+        "usability.simulated",
+        "domain.simulated",
+        "release.gate_failed",
+    }
+
+
+def test_v24_current_simulation_fixture_matches_current_initializer(
+    tmp_path: Path,
+) -> None:
+    generated = tmp_path / "generated-current-fixture"
+    initialize_simulated_acceptance_materials(
+        generated,
+        manifest=empty_manifest(),
+    )
+    checked_in = (
+        REPOSITORY
+        / "sleep_habit_profile"
+        / "simulated-evidence-v24-current"
+    )
+
+    for filename in (
+        "habit_usability_report.json",
+        "habit_domain_review.json",
+        "provider_observations.json",
+        "README.md",
+    ):
+        assert (generated / filename).read_bytes() == (
+            checked_in / filename
+        ).read_bytes()
+
+
+def test_v15_template_archive_is_a_bounded_historical_fixture(
+    tmp_path: Path,
+) -> None:
+    archive = _build_fixture_archive(
+        tmp_path,
+        material_root=(
+            REPOSITORY
+            / "sleep_habit_profile"
+            / "simulated-evidence-v15-20260726-132754"
+        ),
+        archive_root="sleepagent-v15-historical-template",
+        expected_sha256=(
+            "fce3eeefff4f255c240089c9588676045b2b1f1ed1ea67f0e70598ebeaae92d9"
+        ),
     )
 
     report = audit_acceptance_material_archive(
@@ -893,38 +1042,48 @@ def test_v15_complete_simulated_archive_is_a_bounded_historical_fixture() -> Non
     )
     codes = {item.code for item in report.findings}
 
-    assert hashlib.sha256(archive.read_bytes()).hexdigest() == (
-        "72281080cc693c694e956ec80443327d0f2ecb3d53dcef105699db5429a4383c"
-    )
     assert report.material_root == str(archive)
-    assert report.usability_observations == 5
-    assert report.domain_concepts == len(DEFAULT_HABIT_CONCEPTS)
+    assert report.usability_observations == 3
+    assert report.domain_concepts == 10
     assert report.provider_observations == 68
     assert report.usable_as_simulation_fixture
     assert not report.release_evidence_eligible
     assert codes == {
         "usability.simulated",
         "domain.simulated",
+        "domain.catalog_drift",
         "provider.release_identity_mismatch",
         "release.gate_failed",
     }
 
 
-def test_simulated_receipt_and_synthetic_attestation_are_honestly_parseable() -> None:
-    archive = (
-        Path(__file__).parents[1]
-        / "sleepagent-v15-complete-simulated-evidence.zip"
+def test_v18_simulated_receipt_and_attestation_are_honestly_parseable(
+    tmp_path: Path,
+) -> None:
+    inventory = json.loads(
+        (
+            REPOSITORY
+            / "sleep_habit_profile"
+            / "SIMULATION-COVERAGE-v18.json"
+        ).read_text()
+    )
+    archive_metadata = inventory["archive"]
+    archive = _build_fixture_archive(
+        tmp_path,
+        material_root=REPOSITORY / inventory["material_root"],
+        archive_root=archive_metadata["archive_root"],
+        expected_sha256=archive_metadata["sha256"],
     )
     with ZipFile(archive) as bundle:
         usability_raw = json.loads(
             bundle.read(
-                "sleepagent-v15-complete-simulated-evidence/"
+                "sleepagent-v18-complete-simulated-evidence/"
                 "habit_usability_report.json"
             )
         )
         provider_raw = json.loads(
             bundle.read(
-                "sleepagent-v15-complete-simulated-evidence/"
+                "sleepagent-v18-complete-simulated-evidence/"
                 "provider_observations.json"
             )
         )

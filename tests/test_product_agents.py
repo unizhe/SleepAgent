@@ -93,7 +93,7 @@ def test_product_device_package_and_api_do_not_expose_or_instantiate_old_agents(
 
 
 def test_product_radar_routes_are_registered() -> None:
-    from backend.main import app
+    from backend.legacy_main import app
 
     route_paths = {route.path for route in app.routes}
 

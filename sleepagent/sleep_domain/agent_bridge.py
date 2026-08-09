@@ -27,10 +27,12 @@ from sleepagent.radar_agent.product_agent.cold_start import (
     ClaimKind,
     build_unavailable_entry_decisions,
 )
-from sleepagent.radar_agent.product_agent.runner import (
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
-    ProductEpisodeRunner,
+)
+from sleepagent.radar_agent.product_agent.runtime_ports import (
+    ProductEpisodeRunnerPort,
 )
 from sleepagent.sleep_domain.contracts import (
     AgentAnalysisTrigger,
@@ -58,7 +60,6 @@ from sleepagent.sleep_domain.repository import (
     SleepDomainRepository,
 )
 
-
 PRODUCT_AGENT_OPERATION_PREFIX = "product_agent_analysis:"
 DEFAULT_AGENT_LEASE = timedelta(minutes=10)
 MODEL_UNAVAILABLE_CODE = "MODEL_UNAVAILABLE"
@@ -80,7 +81,7 @@ class NightEpisodeAgentBridge:
         *,
         repository: SleepDomainRepository,
         data_provider: PersistentProductDataProvider,
-        episode_runner: ProductEpisodeRunner,
+        episode_runner: ProductEpisodeRunnerPort,
         lease_duration: timedelta = DEFAULT_AGENT_LEASE,
     ) -> None:
         if lease_duration <= timedelta(0):
@@ -669,7 +670,7 @@ def _degraded_role_view(
     )
 
 
-def _runner_is_configured(runner: ProductEpisodeRunner) -> bool:
+def _runner_is_configured(runner: ProductEpisodeRunnerPort) -> bool:
     from sleepagent.radar_agent.product_agent.agents import ProductAgentRoster
 
     roster = getattr(runner, "agent_roster", None)

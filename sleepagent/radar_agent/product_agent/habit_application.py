@@ -10,10 +10,12 @@ from sleepagent.radar_agent.product_agent.contracts import (
     AuthenticatedBinding,
     EvidenceClaim,
     FactSnapshot,
+    InvocationOutcome,
     SourceScope,
     SourceScopeKind,
     StrictContract,
     ToolReceipt,
+    stable_hash,
 )
 from sleepagent.radar_agent.product_agent.governance import (
     DeterministicCommitController,
@@ -23,12 +25,19 @@ from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileChangeCandidate,
     HabitProfileChangeSet,
     HabitProfileCommitReceipt,
-    HabitProfileConfirmation,
     HabitProfileReadResult,
     evidence_claim_from_captured_answer,
 )
 from sleepagent.radar_agent.product_agent.habit_runtime import (
     HabitProfileRuntimeService,
+)
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionService,
+    HumanDecisionStatus,
 )
 from sleepagent.radar_agent.questionnaire import (
     CapturedHabitAnswer,
@@ -41,7 +50,8 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-HABIT_APPLICATION_VERSION = "sleepagent-habit-application.v5"
+HABIT_APPLICATION_VERSION = "sleepagent-habit-application.v7"
+HABIT_PENDING_PAYLOAD_VERSION = "sleepagent-habit-pending.v2"
 
 
 class HabitInteractionStartRequest(StrictContract):
@@ -81,20 +91,37 @@ class HabitInteractionStartResponse(StrictContract):
 class HabitAnswerSubmitRequest(StrictContract):
     selection: HabitQuestionSelectionReceipt
     answers: tuple[HabitQuestionAnswer, ...]
-    suppression_confirmation_ref: str | None = None
     replace_fact_id_by_concept: dict[str, str] = Field(default_factory=dict)
 
 
 class HabitPendingChangeSet(StrictContract):
+    decision_id: str = Field(..., min_length=1)
     change_set: HabitProfileChangeSet
     confirmation_summary: tuple[dict[str, object], ...]
 
 
 class HabitPendingChangeSetRecord(StrictContract):
+    decision_id: str = Field(..., min_length=1)
     change_set: HabitProfileChangeSet
     fact_snapshot: FactSnapshot
-    state: Literal["pending", "superseded", "committed"] = "pending"
+    state: Literal[
+        "pending",
+        "superseded",
+        "committed",
+        "execution_failed",
+        "outcome_unknown",
+    ] = "pending"
+    execution_idempotency_key: str | None = None
     updated_at: datetime
+
+
+class _PersistentHabitPendingPayload(StrictContract):
+    schema_version: Literal["sleepagent-habit-pending.v2"] = (
+        HABIT_PENDING_PAYLOAD_VERSION
+    )
+    decision_id: str = Field(..., min_length=1)
+    change_set: HabitProfileChangeSet
+    execution_idempotency_key: str | None = None
 
 
 class HabitPendingChangeSetStore(Protocol):
@@ -143,22 +170,43 @@ class PersistentHabitPendingChangeSetStore:
             _created_at,
             updated_at,
         ) = self._store.get_pending_habit_change_set_row(change_set_id)
+        try:
+            payload = _PersistentHabitPendingPayload.model_validate_json(
+                payload_json
+            )
+        except ValueError as exc:
+            # Rows created before Habit/HITL unification have no authoritative
+            # decision binding and therefore cannot be confirmed.
+            raise KeyError(
+                f"Habit change set requires a new decision: {change_set_id}"
+            ) from exc
         return HabitPendingChangeSetRecord(
-            change_set=HabitProfileChangeSet.model_validate_json(payload_json),
+            decision_id=payload.decision_id,
+            change_set=payload.change_set,
             fact_snapshot=FactSnapshot.model_validate_json(snapshot_json),
             state=state,
-            updated_at=datetime.fromisoformat(updated_at),
+            execution_idempotency_key=payload.execution_idempotency_key,
+            updated_at=(
+                updated_at
+                if isinstance(updated_at, datetime)
+                else datetime.fromisoformat(updated_at)
+            ),
         )
 
     def save(
         self, record: HabitPendingChangeSetRecord
     ) -> HabitPendingChangeSetRecord:
         changes = record.change_set
+        payload = _PersistentHabitPendingPayload(
+            decision_id=record.decision_id,
+            change_set=changes,
+            execution_idempotency_key=record.execution_idempotency_key,
+        )
         self._store.save_pending_habit_change_set(
             change_set_id=changes.change_set_id,
             subject_id=changes.subject_id,
             state=record.state,
-            payload_json=changes.model_dump_json(),
+            payload_json=payload.model_dump_json(),
             snapshot_json=record.fact_snapshot.model_dump_json(),
             expires_at=changes.confirmation_expires_at,
             created_at=changes.created_at,
@@ -188,11 +236,8 @@ class HabitForgetRequest(StrictContract):
 
 
 class HabitChangeSetConfirmRequest(StrictContract):
-    confirmation_id: str
-    change_set_id: str
-    change_set_version: int = Field(..., ge=1)
-    manifest_hash: str = Field(..., min_length=64, max_length=64)
-    idempotency_key: str
+    decision_id: str = Field(..., min_length=1)
+    idempotency_key: str = Field(..., min_length=1)
 
 
 class HabitChangeSetPruneRequest(StrictContract):
@@ -202,6 +247,7 @@ class HabitChangeSetPruneRequest(StrictContract):
 
 class HabitCommitResponse(StrictContract):
     application_version: str = HABIT_APPLICATION_VERSION
+    decision_id: str
     tool_receipt: ToolReceipt
     profile_receipt: HabitProfileCommitReceipt | None = None
 
@@ -212,17 +258,17 @@ class HabitProfileApplicationService:
     def __init__(
         self,
         *,
-        runtime: HabitProfileRuntimeService | None = None,
-        commit_controller: DeterministicCommitController | None = None,
-        pending_store: HabitPendingChangeSetStore | None = None,
+        human_decisions: HumanDecisionService,
+        runtime: HabitProfileRuntimeService,
+        commit_controller: DeterministicCommitController,
+        pending_store: HabitPendingChangeSetStore,
     ) -> None:
-        self.runtime = runtime or HabitProfileRuntimeService()
-        self.commit_controller = commit_controller or DeterministicCommitController(
-            habit_profile_store=self.runtime.store
-        )
+        self.runtime = runtime
+        self.human_decisions = human_decisions
+        self.commit_controller = commit_controller
         if self.commit_controller.habit_profile_store is not self.runtime.store:
             raise ValueError("Habit application requires one shared Profile authority")
-        self.pending_store = pending_store or InMemoryHabitPendingChangeSetStore()
+        self.pending_store = pending_store
         self._lock = RLock()
 
     def start(
@@ -273,8 +319,17 @@ class HabitProfileApplicationService:
                     for concept_id in existing.stale_concept_ids
                 }
             )
+        interaction_hash = stable_hash(
+            {
+                "request": request.model_dump(mode="json"),
+                "binding": binding.model_dump(mode="json"),
+            }
+        )
         selection_request = HabitQuestionSelectionRequest(
-            request_id=f"habit-api-request:{request.episode_id}",
+            request_id=(
+                f"habit-api-request:{request.episode_id}:"
+                f"{interaction_hash}"
+            ),
             episode_id=request.episode_id,
             subject_id=binding.subject_id,
             actor_id=binding.actor_id,
@@ -331,7 +386,6 @@ class HabitProfileApplicationService:
             subject_id=binding.subject_id,
             actor_id=binding.actor_id,
             role=binding.role,
-            suppression_confirmation_ref=request.suppression_confirmation_ref,
             now=captured_at,
         )
         evidence = tuple(
@@ -458,7 +512,11 @@ class HabitProfileApplicationService:
             confirmation_expires_at=built_at + timedelta(minutes=30),
             created_at=built_at,
         )
-        return self._remember_pending(changes, snapshot)
+        return self._remember_pending(
+            changes,
+            snapshot,
+            episode_id=request.episode_id,
+        )
 
     def confirm(
         self,
@@ -470,56 +528,158 @@ class HabitProfileApplicationService:
         committed_at = now or datetime.now(timezone.utc)
         self._require_elder(binding)
         with self._lock:
+            decision = self.human_decisions.get(request.decision_id)
+            proposal = decision.proposal
+            if (
+                proposal.subject_id != binding.subject_id
+                or proposal.proposer_actor_id != binding.actor_id
+            ):
+                raise PermissionError("Habit decision authentication changed")
             try:
-                record = self.pending_store.get(request.change_set_id)
+                record = self.pending_store.get(proposal.target_id)
             except KeyError as exc:
                 raise KeyError("Habit change set is unavailable") from exc
             changes, snapshot = record.change_set, record.fact_snapshot
-            if record.state == "superseded":
+            self._validate_decision_binding(
+                decision_id=request.decision_id,
+                proposal=proposal,
+                record=record,
+            )
+            if snapshot.binding != binding:
+                raise PermissionError("Habit decision authentication changed")
+
+            if record.state == "committed":
+                if (
+                    decision.status != HumanDecisionStatus.COMMITTED
+                    or record.execution_idempotency_key
+                    != request.idempotency_key
+                ):
+                    raise ValueError("Habit commit replay binding mismatch")
+                receipt = self.commit_controller.get_commit_receipt(
+                    request.idempotency_key
+                )
+                if receipt is None:
+                    raise ValueError("Habit commit receipt is unavailable")
+                return self._commit_response(
+                    decision_id=request.decision_id,
+                    receipt=receipt,
+                    record=record,
+                )
+            if record.state != "pending":
                 raise ValueError(
-                    "Habit change set was superseded and requires new confirmation"
+                    f"Habit change set is {record.state.replace('_', ' ')}"
+                )
+
+            if decision.status == HumanDecisionStatus.PENDING:
+                decision = self.human_decisions.decide(
+                    request.decision_id,
+                    actor_id=binding.actor_id,
+                    actor_role="elder",
+                    choice=HumanDecisionChoice.APPROVE,
+                    target_hash=changes.manifest_hash,
+                    reason="Authenticated elder confirmed the exact Habit manifest.",
+                    now=committed_at,
+                )
+            if decision.status not in {
+                HumanDecisionStatus.APPROVED,
+                HumanDecisionStatus.EXECUTING,
+                HumanDecisionStatus.COMMITTED,
+            }:
+                raise ValueError(
+                    f"Habit decision is {decision.status.value}"
                 )
             if (
-                changes.version,
-                changes.manifest_hash,
-            ) != (
-                request.change_set_version,
-                request.manifest_hash,
+                record.execution_idempotency_key is not None
+                and record.execution_idempotency_key
+                != request.idempotency_key
             ):
-                raise ValueError("Habit confirmation manifest/version mismatch")
-            if snapshot.binding != binding:
-                raise PermissionError("Habit confirmation authentication changed")
-            confirmation = HabitProfileConfirmation(
-                confirmation_id=request.confirmation_id,
-                actor_id=binding.actor_id,
-                actor_role="elder",
-                subject_id=binding.subject_id,
-                action_scope="write_habit_profile",
-                change_set_id=changes.change_set_id,
-                change_set_version=changes.version,
-                manifest_hash=changes.manifest_hash,
-                expires_at=changes.confirmation_expires_at,
-            )
-            receipt = self.commit_controller.commit_habit_profile(
-                change_set=changes,
-                confirmation=confirmation,
-                fact_snapshot=snapshot,
+                raise ValueError("Habit decision execution binding mismatch")
+            if decision.status in {
+                HumanDecisionStatus.EXECUTING,
+                HumanDecisionStatus.COMMITTED,
+            } and (
+                decision.active_grant is None
+                or decision.active_grant.idempotency_key
+                != request.idempotency_key
+            ):
+                raise ValueError("Habit decision execution binding mismatch")
+
+            capability = self.human_decisions.acquire_verified_capability(
+                request.decision_id,
+                expected_proposal_id=proposal.proposal_id,
+                expected_subject_id=changes.subject_id,
+                expected_target_id=changes.change_set_id,
+                expected_target_hash=changes.manifest_hash,
+                expected_action_scope=changes.action_scope,
+                expected_fact_snapshot_id=snapshot.fact_snapshot_id,
+                expected_fact_snapshot_hash=snapshot.fact_snapshot_hash,
+                expected_policy_version=proposal.policy_version,
                 idempotency_key=request.idempotency_key,
                 now=committed_at,
             )
-            profile_receipt = (
-                HabitProfileCommitReceipt.model_validate(receipt.output)
-                if receipt.output
-                else None
+            execution_at = max(committed_at, capability.grant.issued_at)
+            record = self.pending_store.save(
+                record.model_copy(
+                    update={
+                        "execution_idempotency_key": request.idempotency_key,
+                        "updated_at": execution_at,
+                    }
+                )
+            )
+            try:
+                receipt = self.commit_controller.commit_habit_profile(
+                    change_set=changes,
+                    approval_capability=capability,
+                    fact_snapshot=snapshot,
+                    idempotency_key=request.idempotency_key,
+                    now=execution_at,
+                )
+            except Exception as exc:
+                self.human_decisions.record_execution_result(
+                    capability,
+                    status=HumanDecisionStatus.EXECUTION_FAILED,
+                    failure_reason=str(exc)[:1200],
+                    now=execution_at,
+                )
+                self.pending_store.save(
+                    record.model_copy(
+                        update={
+                            "state": "execution_failed",
+                            "updated_at": execution_at,
+                        }
+                    )
+                )
+                raise
+
+            if receipt.outcome == InvocationOutcome.SUCCEEDED:
+                authority_status = HumanDecisionStatus.COMMITTED
+                pending_state = "committed"
+            elif receipt.outcome == InvocationOutcome.UNKNOWN:
+                authority_status = HumanDecisionStatus.OUTCOME_UNKNOWN
+                pending_state = "outcome_unknown"
+            else:
+                authority_status = HumanDecisionStatus.EXECUTION_FAILED
+                pending_state = "execution_failed"
+            self.human_decisions.record_execution_result(
+                capability,
+                status=authority_status,
+                receipt_ref=receipt.tool_invocation_id,
+                failure_reason=(
+                    receipt.error_code
+                    if authority_status != HumanDecisionStatus.COMMITTED
+                    else None
+                ),
+                now=receipt.observed_at,
             )
             self.pending_store.save(
                 record.model_copy(
-                    update={"state": "committed", "updated_at": committed_at}
+                    update={"state": pending_state, "updated_at": receipt.observed_at}
                 )
             )
-            return HabitCommitResponse(
-                tool_receipt=receipt,
-                profile_receipt=profile_receipt,
+            return self._commit_response(
+                decision_id=request.decision_id,
+                receipt=receipt,
+                record=record,
             )
 
     def prune_change_set(
@@ -537,12 +697,18 @@ class HabitProfileApplicationService:
             except KeyError as exc:
                 raise KeyError("Habit change set is unavailable") from exc
             changes, snapshot = record.change_set, record.fact_snapshot
-            if record.state == "superseded":
-                raise ValueError("Habit change set was already superseded")
-            if record.state == "committed":
-                raise ValueError("Habit change set was already committed")
+            if record.state != "pending":
+                raise ValueError(
+                    f"Habit change set is {record.state.replace('_', ' ')}"
+                )
             if snapshot.binding != binding:
                 raise PermissionError("Habit change-set authentication changed")
+            decision = self.human_decisions.get(record.decision_id)
+            self._validate_decision_binding(
+                decision_id=record.decision_id,
+                proposal=decision.proposal,
+                record=record,
+            )
             requested = set(request.candidate_ids_to_remove)
             known = {item.candidate_id for item in changes.candidates}
             if not requested.issubset(known):
@@ -554,12 +720,22 @@ class HabitProfileApplicationService:
                 ),
                 created_at=revised_at,
             )
+            self.human_decisions.revoke(
+                record.decision_id,
+                actor_id=binding.actor_id,
+                actor_role="elder",
+                now=revised_at,
+            )
             self.pending_store.save(
                 record.model_copy(
                     update={"state": "superseded", "updated_at": revised_at}
                 )
             )
-            return self._remember_pending(revised, snapshot)
+            return self._remember_pending(
+                revised,
+                snapshot,
+                episode_id=decision.proposal.episode_id,
+            )
 
     def _build_pending(
         self,
@@ -603,18 +779,39 @@ class HabitProfileApplicationService:
             confirmation_expires_at=now + timedelta(minutes=30),
             created_at=now,
         )
-        return self._remember_pending(changes, snapshot)
+        return self._remember_pending(
+            changes,
+            snapshot,
+            episode_id=episode_id,
+        )
 
     def _remember_pending(
         self,
         changes: HabitProfileChangeSet,
         snapshot: FactSnapshot,
+        *,
+        episode_id: str,
     ) -> HabitPendingChangeSet:
         with self._lock:
             try:
                 prior = self.pending_store.get(changes.change_set_id)
             except KeyError:
                 prior = None
+            if (
+                prior is not None
+                and prior.change_set.manifest_hash == changes.manifest_hash
+            ):
+                if prior.state != "pending":
+                    raise ValueError(
+                        f"Habit change set is {prior.state.replace('_', ' ')}"
+                    )
+                decision = self.human_decisions.get(prior.decision_id)
+                self._validate_decision_binding(
+                    decision_id=prior.decision_id,
+                    proposal=decision.proposal,
+                    record=prior,
+                )
+                return self._pending_response(prior)
             if (
                 prior is not None
                 and prior.change_set.manifest_hash != changes.manifest_hash
@@ -624,31 +821,179 @@ class HabitProfileApplicationService:
                 values["change_set_id"] = (
                     f"{changes.change_set_id}:{changes.manifest_hash[:12]}"
                 )
-                changes = HabitProfileChangeSet.create(
-                    **values
+                changes = HabitProfileChangeSet.create(**values)
+            decision = self.human_decisions.create(
+                ActionProposal(
+                    proposal_id=(
+                        f"habit-proposal:{changes.change_set_id}:"
+                        f"{changes.manifest_hash[:16]}"
+                    ),
+                    episode_id=episode_id,
+                    subject_id=changes.subject_id,
+                    proposer_actor_id=snapshot.binding.actor_id,
+                    action_kind="habit_profile",
+                    action_scope=changes.action_scope,
+                    target_id=changes.change_set_id,
+                    target_hash=changes.manifest_hash,
+                    fact_snapshot_id=snapshot.fact_snapshot_id,
+                    fact_snapshot_hash=snapshot.fact_snapshot_hash,
+                    policy_version=HITL_POLICY_VERSION,
+                    payload={
+                        "change_set": changes.model_dump(mode="json"),
+                    },
+                    explanation=DecisionExplanation(
+                        what_will_change=(
+                            "The reviewed Habit Profile manifest will be written "
+                            "to the elder's confirmed profile."
+                        ),
+                        why_now=(
+                            "The elder requested a profile update based on the "
+                            "answers shown in this review."
+                        ),
+                        who_will_receive_or_be_affected=changes.subject_id,
+                        duration_or_frequency=(
+                            "The profile remains active until it expires, is "
+                            "replaced, or is forgotten."
+                        ),
+                        how_to_revoke=(
+                            "Cancel this pending decision or use the Habit forget "
+                            "flow after commit."
+                        ),
+                        exact_changes=[
+                            f"{item.operation.value}:{item.concept_id}:"
+                            f"{item.candidate_id}"
+                            for item in changes.candidates
+                        ],
+                    ),
+                    created_at=changes.created_at,
+                    expires_at=changes.confirmation_expires_at,
+                    metadata={
+                        "change_set_version": changes.version,
+                        "candidate_count": len(changes.candidates),
+                    },
                 )
-            self.pending_store.save(
+            )
+            record = self.pending_store.save(
                 HabitPendingChangeSetRecord(
+                    decision_id=decision.decision_id,
                     change_set=changes,
                     fact_snapshot=snapshot,
                     state="pending",
                     updated_at=changes.created_at,
                 )
             )
+        return self._pending_response(record)
+
+    @staticmethod
+    def _confirmation_summary(
+        changes: HabitProfileChangeSet,
+    ) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "candidate_id": item.candidate_id,
+                "operation": item.operation.value,
+                "concept_id": item.concept_id,
+                "value": item.value,
+                "origin_semantic": item.origin_semantic,
+                "observation_date_start": item.observation_date_start,
+                "observation_date_end": item.observation_date_end,
+            }
+            for item in changes.candidates
+        )
+
+    @classmethod
+    def _pending_response(
+        cls,
+        record: HabitPendingChangeSetRecord,
+    ) -> HabitPendingChangeSet:
         return HabitPendingChangeSet(
-            change_set=changes,
-            confirmation_summary=tuple(
-                {
-                    "candidate_id": item.candidate_id,
-                    "operation": item.operation.value,
-                    "concept_id": item.concept_id,
-                    "value": item.value,
-                    "origin_semantic": item.origin_semantic,
-                    "observation_date_start": item.observation_date_start,
-                    "observation_date_end": item.observation_date_end,
-                }
-                for item in changes.candidates
-            ),
+            decision_id=record.decision_id,
+            change_set=record.change_set,
+            confirmation_summary=cls._confirmation_summary(record.change_set),
+        )
+
+    @staticmethod
+    def _validate_decision_binding(
+        *,
+        decision_id: str,
+        proposal: ActionProposal,
+        record: HabitPendingChangeSetRecord,
+    ) -> None:
+        changes = record.change_set
+        snapshot = record.fact_snapshot
+        expected = (
+            record.decision_id,
+            None,
+            snapshot.binding.actor_id,
+            "habit_profile",
+            changes.subject_id,
+            changes.change_set_id,
+            changes.manifest_hash,
+            changes.action_scope,
+            snapshot.fact_snapshot_id,
+            snapshot.fact_snapshot_hash,
+            changes.created_at,
+            changes.confirmation_expires_at,
+            changes.model_dump(mode="json"),
+        )
+        actual = (
+            decision_id,
+            proposal.task_id,
+            proposal.proposer_actor_id,
+            proposal.action_kind,
+            proposal.subject_id,
+            proposal.target_id,
+            proposal.target_hash,
+            proposal.action_scope,
+            proposal.fact_snapshot_id,
+            proposal.fact_snapshot_hash,
+            proposal.created_at,
+            proposal.expires_at,
+            proposal.payload.get("change_set"),
+        )
+        if expected != actual:
+            raise ValueError("Habit decision/change-set binding mismatch")
+        if changes.fact_snapshot_hash != snapshot.fact_snapshot_hash:
+            raise ValueError("Habit change set FactSnapshot mismatch")
+
+    @staticmethod
+    def _commit_response(
+        *,
+        decision_id: str,
+        receipt: ToolReceipt,
+        record: HabitPendingChangeSetRecord,
+    ) -> HabitCommitResponse:
+        snapshot = record.fact_snapshot
+        changes = record.change_set
+        if (
+            receipt.tool_name != "state.commit_habit_profile"
+            or receipt.idempotency_key != record.execution_idempotency_key
+            or receipt.fact_snapshot_id != snapshot.fact_snapshot_id
+            or receipt.fact_snapshot_hash != snapshot.fact_snapshot_hash
+            or f"human-decision:{decision_id}" not in receipt.source_refs
+        ):
+            raise ValueError("Habit commit receipt binding mismatch")
+        profile_receipt = (
+            HabitProfileCommitReceipt.model_validate(receipt.output)
+            if receipt.output
+            else None
+        )
+        if profile_receipt is not None and (
+            profile_receipt.change_set_id,
+            profile_receipt.manifest_hash,
+            profile_receipt.subject_id,
+            profile_receipt.idempotency_key,
+        ) != (
+            changes.change_set_id,
+            changes.manifest_hash,
+            changes.subject_id,
+            record.execution_idempotency_key,
+        ):
+            raise ValueError("Habit Profile receipt binding mismatch")
+        return HabitCommitResponse(
+            decision_id=decision_id,
+            tool_receipt=receipt,
+            profile_receipt=profile_receipt,
         )
 
     def _snapshot(

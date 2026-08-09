@@ -4,21 +4,25 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.agents.sleepcare import (
+    EpisodePlanProposal,
+    EvaluationDecision,
+    SleepCareEvaluation,
+)
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     AuthenticatedBinding,
-    EpisodePlanProposal,
-    EpisodeStateConflict,
     EpisodeStatus,
     EpisodeType,
-    EvaluationDecision,
     FactSnapshot,
-    ProductEpisodeRuntime,
-    ResumeRequiresReplan,
-    SleepCareEvaluation,
     SourceScope,
     SourceScopeKind,
     WorkProductKind,
+)
+from sleepagent.radar_agent.product_agent.episode import (
+    EpisodeStateConflict,
+    ProductEpisodeRuntime,
+    ResumeRequiresReplan,
 )
 from sleepagent.radar_agent.product_agent.governance import AcceptedWorkProduct
 

@@ -4,7 +4,7 @@ import inspect
 
 from fastapi import Request
 
-from backend.main import app, perceptor_webhook
+from backend.legacy_main import app, perceptor_webhook
 
 
 WEBHOOK_PATH = "/integrations/perceptor/webhook"

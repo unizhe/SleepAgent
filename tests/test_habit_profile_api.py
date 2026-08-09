@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import json
 import sqlite3
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.main import app
+from backend.legacy_main import app
+import sleepagent.radar_agent.product_agent.habit_api as habit_api_module
+import sleepagent.radar_agent.product_agent.habit_application as habit_application_module
+from sleepagent.radar_agent.product_agent.contracts import AuthenticatedBinding
 from sleepagent.radar_agent.product_agent.habit_api import (
     PRODUCT_API_KEY_ENV,
     reset_habit_profile_api_for_tests,
+)
+from sleepagent.radar_agent.product_agent.habit_application import (
+    HabitChangeSetConfirmRequest,
+)
+from sleepagent.radar_agent.product_agent.hitl import (
+    HumanDecisionChoice,
+    HumanDecisionError,
+    HumanDecisionStatus,
 )
 
 
@@ -99,19 +112,14 @@ def confirm(
     client: TestClient,
     pending: dict,
     *,
-    confirmation_id: str,
     idempotency_key: str,
     request_headers: dict[str, str] | None = None,
 ):
-    changes = pending["change_set"]
     return client.post(
         "/product/habit-profile/confirm",
         headers=request_headers or headers(),
         json={
-            "confirmation_id": confirmation_id,
-            "change_set_id": changes["change_set_id"],
-            "change_set_version": changes["version"],
-            "manifest_hash": changes["manifest_hash"],
+            "decision_id": pending["decision_id"],
             "idempotency_key": idempotency_key,
         },
     )
@@ -162,16 +170,14 @@ def test_elder_optional_intake_confirm_read_and_forget_flow() -> None:
         committed = confirm(
             client,
             pending,
-            confirmation_id="habit-api-confirm",
             idempotency_key="habit-api-commit",
         )
         replay = confirm(
             client,
             pending,
-            confirmation_id="habit-api-confirm",
             idempotency_key="habit-api-commit",
         )
-        assert committed.status_code == 200
+        assert committed.status_code == 200, committed.json()
         assert committed.json()["tool_receipt"]["outcome"] == "succeeded"
         assert replay.json() == committed.json()
 
@@ -195,7 +201,6 @@ def test_elder_optional_intake_confirm_read_and_forget_flow() -> None:
         forgotten = confirm(
             client,
             forget.json(),
-            confirmation_id="habit-api-forget-confirm",
             idempotency_key="habit-api-forget",
         )
         assert forgotten.status_code == 200
@@ -223,12 +228,36 @@ def test_pending_habit_change_set_survives_application_restart() -> None:
         committed = confirm(
             client,
             pending,
-            confirmation_id="habit-pending-restart-confirm",
             idempotency_key="habit-pending-restart-commit",
         )
 
     assert committed.status_code == 200
     assert committed.json()["tool_receipt"]["outcome"] == "succeeded"
+    pending_payload = json.loads(
+        connection.execute(
+            """
+            SELECT payload_json
+            FROM product_pending_habit_change_sets
+            WHERE change_set_id = ?
+            """,
+            (pending["change_set"]["change_set_id"],),
+        ).fetchone()[0]
+    )
+    decision_payload = json.loads(
+        connection.execute(
+            """
+            SELECT decision_json
+            FROM product_human_decisions
+            WHERE decision_id = ?
+            """,
+            (pending["decision_id"],),
+        ).fetchone()[0]
+    )
+    assert pending_payload["decision_id"] == pending["decision_id"]
+    assert decision_payload["status"] == "committed"
+    assert decision_payload["proposal"]["target_id"] == (
+        pending["change_set"]["change_set_id"]
+    )
 
 
 def test_confirmed_profile_survives_api_runtime_restart(tmp_path) -> None:
@@ -247,7 +276,6 @@ def test_confirmed_profile_survives_api_runtime_restart(tmp_path) -> None:
         committed = confirm(
             client,
             pending,
-            confirmation_id="habit-persistent-confirm",
             idempotency_key="habit-persistent-commit",
         )
     assert committed.status_code == 200
@@ -256,15 +284,161 @@ def test_confirmed_profile_survives_api_runtime_restart(tmp_path) -> None:
     second_connection = sqlite3.connect(database, check_same_thread=False)
     reset_habit_profile_api_for_tests(second_connection)
     with TestClient(app) as client:
+        replayed = confirm(
+            client,
+            pending,
+            idempotency_key="habit-persistent-commit",
+        )
         profile = client.get(
             "/product/habit-profile?purpose=profile_review",
             headers=headers(),
         )
 
+    assert replayed.status_code == 200
+    assert replayed.json() == committed.json()
     assert profile.status_code == 200
     assert profile.json()["memory_version"] == 1
     assert len(profile.json()["facts"]) == 1
     assert profile.json()["facts"][0]["concept_id"] == "habit.primary_goal"
+
+
+def test_executing_habit_decision_reacquires_after_restart_and_expiry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "habit-executing-recovery.sqlite3"
+    first_connection = sqlite3.connect(database, check_same_thread=False)
+    reset_habit_profile_api_for_tests(first_connection)
+    with TestClient(app) as client:
+        offered = start(
+            client,
+            episode_id="habit-executing-recovery",
+            concepts=("habit.primary_goal",),
+        ).json()
+        pending = submit_answer(client, offered["selection"]).json()[
+            "pending_change_set"
+        ]
+
+    first_application = habit_api_module._APPLICATION
+    change_set_id = pending["change_set"]["change_set_id"]
+    record = first_application.pending_store.get(change_set_id)
+    decision = first_application.human_decisions.decide(
+        pending["decision_id"],
+        actor_id="elder-actor",
+        actor_role="elder",
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=record.change_set.manifest_hash,
+        now=record.change_set.created_at + timedelta(seconds=1),
+    )
+    proposal = decision.proposal
+    idempotency_key = "habit-executing-recovery-commit"
+    capability = first_application.human_decisions.acquire_verified_capability(
+        decision.decision_id,
+        expected_proposal_id=proposal.proposal_id,
+        expected_subject_id=proposal.subject_id,
+        expected_target_id=proposal.target_id,
+        expected_target_hash=proposal.target_hash,
+        expected_action_scope=proposal.action_scope,
+        expected_fact_snapshot_id=proposal.fact_snapshot_id,
+        expected_fact_snapshot_hash=proposal.fact_snapshot_hash,
+        expected_policy_version=proposal.policy_version,
+        idempotency_key=idempotency_key,
+        now=record.change_set.created_at + timedelta(seconds=2),
+    )
+    first_application.pending_store.save(
+        record.model_copy(
+            update={
+                "execution_idempotency_key": idempotency_key,
+                "updated_at": capability.grant.issued_at,
+            }
+        )
+    )
+    assert (
+        first_application.human_decisions.get(decision.decision_id).status
+        == HumanDecisionStatus.EXECUTING
+    )
+    first_connection.close()
+
+    second_connection = sqlite3.connect(database, check_same_thread=False)
+    reset_habit_profile_api_for_tests(second_connection)
+    restarted = habit_api_module._APPLICATION
+    monkeypatch.setattr(
+        habit_application_module,
+        "HITL_POLICY_VERSION",
+        "sleepagent-hitl-policy.future-deployment",
+    )
+    binding = AuthenticatedBinding(
+        actor_id="elder-actor",
+        role="elder",
+        subject_id="elder-subject",
+        authorization_scope=(),
+    )
+    recovered_at = record.change_set.confirmation_expires_at + timedelta(days=1)
+
+    with pytest.raises(ValueError, match="execution binding mismatch"):
+        restarted.confirm(
+            HabitChangeSetConfirmRequest(
+                decision_id=decision.decision_id,
+                idempotency_key="different-recovery-key",
+            ),
+            binding=binding,
+            now=recovered_at,
+        )
+
+    committed = restarted.confirm(
+        HabitChangeSetConfirmRequest(
+            decision_id=decision.decision_id,
+            idempotency_key=idempotency_key,
+        ),
+        binding=binding,
+        now=recovered_at,
+    )
+
+    assert committed.tool_receipt.outcome.value == "succeeded"
+    assert committed.profile_receipt is not None
+    assert committed.profile_receipt.memory_version_after == 1
+    assert (
+        restarted.human_decisions.get(decision.decision_id).status
+        == HumanDecisionStatus.COMMITTED
+    )
+    assert restarted.runtime.store.get("elder-subject").version == 1
+
+
+def test_unacquired_expired_habit_decision_remains_fail_closed() -> None:
+    with TestClient(app) as client:
+        offered = start(
+            client,
+            episode_id="habit-unacquired-expiry",
+            concepts=("habit.primary_goal",),
+        ).json()
+        pending = submit_answer(client, offered["selection"]).json()[
+            "pending_change_set"
+        ]
+
+    application = habit_api_module._APPLICATION
+    record = application.pending_store.get(
+        pending["change_set"]["change_set_id"]
+    )
+    binding = AuthenticatedBinding(
+        actor_id="elder-actor",
+        role="elder",
+        subject_id="elder-subject",
+        authorization_scope=(),
+    )
+    with pytest.raises(HumanDecisionError, match="expired"):
+        application.confirm(
+            HabitChangeSetConfirmRequest(
+                decision_id=pending["decision_id"],
+                idempotency_key="expired-before-acquisition",
+            ),
+            binding=binding,
+            now=record.change_set.confirmation_expires_at + timedelta(seconds=1),
+        )
+
+    assert (
+        application.human_decisions.get(pending["decision_id"]).status
+        == HumanDecisionStatus.EXPIRED
+    )
 
 
 def test_confirmed_never_ask_survives_api_runtime_restart(tmp_path) -> None:
@@ -287,13 +461,16 @@ def test_confirmed_never_ask_survives_api_runtime_restart(tmp_path) -> None:
                         "concept_id": "habit.nap_pattern",
                         "concept_version": "1.0.0",
                         "disposition": "never_ask",
+                        "question_opt_out_acknowledged": True,
                     }
                 ],
-                "suppression_confirmation_ref": "confirmation:never-ask-nap",
             },
         )
     assert suppressed.status_code == 200
     assert len(suppressed.json()["capture"]["suppressions"]) == 1
+    assert suppressed.json()["capture"]["suppressions"][0][
+        "withdrawal_command_ref"
+    ].startswith("habit-withdrawal:")
     first_connection.close()
 
     second_connection = sqlite3.connect(database, check_same_thread=False)
@@ -307,6 +484,33 @@ def test_confirmed_never_ask_survives_api_runtime_restart(tmp_path) -> None:
 
     assert later.status_code == 200
     assert later.json()["selection"]["candidates"] == []
+
+
+def test_habit_answer_api_rejects_raw_suppression_confirmation_tokens() -> None:
+    with TestClient(app) as client:
+        selection = start(
+            client,
+            episode_id="reject-raw-suppression-token",
+            concepts=("habit.nap_pattern",),
+        ).json()["selection"]
+        response = client.post(
+            "/product/habit-profile/interactions/answers",
+            headers=headers(),
+            json={
+                "selection": selection,
+                "answers": [
+                    {
+                        "concept_id": "habit.nap_pattern",
+                        "concept_version": "1.0.0",
+                        "disposition": "never_ask",
+                        "question_opt_out_acknowledged": True,
+                    }
+                ],
+                "suppression_confirmation_ref": "caller-controlled-token",
+            },
+        )
+
+    assert response.status_code == 422
 
 
 def test_episode_budget_and_cross_episode_cooldown_survive_restart(
@@ -336,6 +540,14 @@ def test_episode_budget_and_cross_episode_cooldown_survive_restart(
     second_connection = sqlite3.connect(database, check_same_thread=False)
     reset_habit_profile_api_for_tests(second_connection)
     with TestClient(app) as client:
+        replayed = start(
+            client,
+            episode_id="durable-budget",
+            concepts=(
+                "habit.primary_goal",
+                "habit.schedule_constraint",
+            ),
+        )
         remaining = start(
             client,
             episode_id="durable-budget",
@@ -349,6 +561,8 @@ def test_episode_budget_and_cross_episode_cooldown_survive_restart(
             episode_id="durable-cooldown-after-restart",
             concepts=("habit.nap_pattern",),
         )
+    assert replayed.status_code == 200
+    assert replayed.json()["selection"] == first.json()["selection"]
     assert remaining.status_code == 200
     assert len(remaining.json()["selection"]["candidates"]) == 1
     assert cooled_down.status_code == 200
@@ -391,8 +605,8 @@ def test_selection_receipt_consumption_survives_restart(tmp_path) -> None:
     reset_habit_profile_api_for_tests(third_connection)
     with TestClient(app) as client:
         replay = submit_answer(client, selection)
-    assert replay.status_code == 409
-    assert "already consumed" in replay.json()["detail"]
+    assert replay.status_code == 200
+    assert replay.json()["capture"] == captured.json()["capture"]
 
 
 def test_skip_does_not_create_change_set_or_reduce_service() -> None:
@@ -418,7 +632,7 @@ def test_skip_does_not_create_change_set_or_reduce_service() -> None:
     assert profile.json()["facts"] == []
 
 
-def test_manifest_tampering_and_family_confirmation_are_rejected() -> None:
+def test_fabricated_decision_and_family_confirmation_are_rejected() -> None:
     with TestClient(app) as client:
         offered = start(
             client,
@@ -428,22 +642,17 @@ def test_manifest_tampering_and_family_confirmation_are_rejected() -> None:
         pending = submit_answer(client, offered["selection"]).json()[
             "pending_change_set"
         ]
-        changes = pending["change_set"]
-        tampered = client.post(
+        fabricated = client.post(
             "/product/habit-profile/confirm",
             headers=headers(),
             json={
-                "confirmation_id": "tampered",
-                "change_set_id": changes["change_set_id"],
-                "change_set_version": changes["version"],
-                "manifest_hash": "f" * 64,
-                "idempotency_key": "tampered",
+                "decision_id": "decision-fabricated",
+                "idempotency_key": "fabricated",
             },
         )
         family = confirm(
             client,
             pending,
-            confirmation_id="family-cannot-confirm",
             idempotency_key="family-cannot-confirm",
             request_headers=headers(
                 role="family",
@@ -452,7 +661,7 @@ def test_manifest_tampering_and_family_confirmation_are_rejected() -> None:
             ),
         )
 
-    assert tampered.status_code == 409
+    assert fabricated.status_code == 404
     assert family.status_code == 403
 
 
@@ -478,13 +687,11 @@ def test_elder_can_remove_one_candidate_and_old_manifest_is_revoked() -> None:
         old_confirmation = confirm(
             client,
             pending,
-            confirmation_id="old-pruned-confirmation",
             idempotency_key="old-pruned-confirmation",
         )
         new_confirmation = confirm(
             client,
             revised.json(),
-            confirmation_id="new-pruned-confirmation",
             idempotency_key="new-pruned-confirmation",
         )
         profile = client.get(
@@ -547,7 +754,6 @@ def test_family_observation_stays_current_until_elder_proposes_and_confirms() ->
         committed = confirm(
             client,
             proposed.json(),
-            confirmation_id="elder-observer-confirm",
             idempotency_key="elder-observer-commit",
         )
         assert committed.status_code == 200
@@ -596,7 +802,6 @@ def test_profile_review_can_replace_one_exact_fact_after_new_confirmation() -> N
         assert confirm(
             client,
             pending,
-            confirmation_id="create-before-correction",
             idempotency_key="create-before-correction",
         ).status_code == 200
         original = client.get(
@@ -643,7 +848,6 @@ def test_profile_review_can_replace_one_exact_fact_after_new_confirmation() -> N
         assert confirm(
             client,
             replacement,
-            confirmation_id="confirm-correction",
             idempotency_key="confirm-correction",
         ).status_code == 200
         profile = client.get(

@@ -733,33 +733,144 @@ class RadarPersistenceStore:
             RadarArtifactVersion,
         )
 
-    def save_confirmation(
+    def save_hds_confirmation_projection(
         self,
         request: HumanConfirmationRequest,
     ) -> HumanConfirmationRequest:
-        self._execute(
-            """
-            INSERT INTO radar_human_confirmations (
-              confirmation_id, task_id, action_type, requested_role, status,
-              confirmation_json, created_at, resolved_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(confirmation_id) DO UPDATE SET
-              status = excluded.status,
-              confirmation_json = excluded.confirmation_json,
-              resolved_at = excluded.resolved_at
-            """,
-            (
-                request.confirmation_id,
-                request.task_id,
-                request.action_type,
-                request.requested_role,
-                request.status,
-                _dump_json(request),
-                _dump_datetime(request.created_at),
-                _dump_optional_datetime(request.resolved_at),
-            ),
+        """Persist an HDS-derived compatibility view without owning its lifecycle."""
+
+        request = HumanConfirmationRequest.model_validate(
+            request.model_dump(mode="python")
         )
-        return request
+        with self._lock:
+            authority_row = self.connection.execute(
+                self._sql(
+                    """
+                    SELECT task_id, status, decision_json, updated_at
+                    FROM product_human_decisions
+                    WHERE decision_id = ?
+                    """
+                ),
+                (request.decision_id,),
+            ).fetchone()
+            if authority_row is None:
+                raise ValueError(
+                    "confirmation projection requires an authoritative decision"
+                )
+            authority_json = _database_json_text(authority_row[2])
+            _validate_hds_confirmation_projection(
+                request,
+                authority_task_id=authority_row[0],
+                authority_status=authority_row[1],
+                authority_json=authority_json,
+            )
+            existing_row = self.connection.execute(
+                self._sql(
+                    """
+                    SELECT confirmation_json
+                    FROM radar_human_confirmations
+                    WHERE confirmation_id = ?
+                    """
+                ),
+                (request.confirmation_id,),
+            ).fetchone()
+            serialized = request.model_dump_json()
+            if existing_row is None:
+                cursor = self.connection.execute(
+                    self._sql(
+                        """
+                        INSERT INTO radar_human_confirmations (
+                          confirmation_id, task_id, action_type, requested_role,
+                          status, confirmation_json, created_at, resolved_at
+                        )
+                        SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                        WHERE EXISTS (
+                          SELECT 1 FROM product_human_decisions
+                          WHERE decision_id = ? AND status = ? AND updated_at = ?
+                        )
+                        ON CONFLICT(confirmation_id) DO NOTHING
+                        """
+                    ),
+                    (
+                        request.confirmation_id,
+                        request.task_id,
+                        request.action_type,
+                        request.requested_role,
+                        request.status,
+                        serialized,
+                        _dump_datetime(request.created_at),
+                        _dump_optional_datetime(request.resolved_at),
+                        request.decision_id,
+                        authority_row[1],
+                        authority_row[3],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    self.connection.rollback()
+                    raise ValueError("confirmation projection changed concurrently")
+                self.connection.commit()
+                return request.model_copy(deep=True)
+
+            existing_json = _database_json_text(existing_row[0])
+            existing = HumanConfirmationRequest.model_validate_json(existing_json)
+            _validate_projection_advance(existing, request)
+            if existing == request:
+                authority_unchanged = self.connection.execute(
+                    self._sql(
+                        """
+                        SELECT 1 FROM product_human_decisions
+                        WHERE decision_id = ? AND status = ? AND updated_at = ?
+                        """
+                    ),
+                    (
+                        request.decision_id,
+                        authority_row[1],
+                        authority_row[3],
+                    ),
+                ).fetchone()
+                if authority_unchanged is None:
+                    self.connection.rollback()
+                    raise ValueError("confirmation projection changed concurrently")
+                return existing.model_copy(deep=True)
+            confirmation_json_match = (
+                "confirmation_json = CAST(? AS JSONB)"
+                if self.dialect == "postgres"
+                else "confirmation_json = ?"
+            )
+            cursor = self.connection.execute(
+                self._sql(
+                    f"""
+                    UPDATE radar_human_confirmations
+                    SET task_id = ?, action_type = ?, requested_role = ?,
+                        status = ?, confirmation_json = ?, resolved_at = ?
+                    WHERE confirmation_id = ? AND status = ?
+                      AND {confirmation_json_match}
+                      AND EXISTS (
+                        SELECT 1 FROM product_human_decisions
+                        WHERE decision_id = ? AND status = ? AND updated_at = ?
+                      )
+                    """
+                ),
+                (
+                    request.task_id,
+                    request.action_type,
+                    request.requested_role,
+                    request.status,
+                    serialized,
+                    _dump_optional_datetime(request.resolved_at),
+                    request.confirmation_id,
+                    existing.status,
+                    existing_json,
+                    request.decision_id,
+                    authority_row[1],
+                    authority_row[3],
+                ),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                raise ValueError("confirmation projection changed concurrently")
+            self.connection.commit()
+            return request.model_copy(deep=True)
 
     def get_confirmation(self, confirmation_id: str) -> HumanConfirmationRequest:
         return self._get_json_model(
@@ -779,7 +890,7 @@ class RadarPersistenceStore:
             HumanConfirmationRequest,
         )
 
-    def save_product_human_decision(
+    def create_product_human_decision(
         self,
         *,
         decision_id: str,
@@ -791,31 +902,76 @@ class RadarPersistenceStore:
         decision_json: str,
         created_at: datetime,
         updated_at: datetime,
-    ) -> None:
-        self._execute(
-            """
-            INSERT INTO product_human_decisions (
-              decision_id, task_id, episode_id, subject_id, status, target_hash,
-              decision_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(decision_id) DO UPDATE SET
-              status = excluded.status,
-              target_hash = excluded.target_hash,
-              decision_json = excluded.decision_json,
-              updated_at = excluded.updated_at
-            """,
-            (
-                decision_id,
-                task_id,
-                episode_id,
-                subject_id,
-                status,
-                target_hash,
-                decision_json,
-                _dump_datetime(created_at),
-                _dump_datetime(updated_at),
-            ),
-        )
+    ) -> bool:
+        """Insert one decision authority row without overwriting an existing one."""
+
+        with self._lock:
+            cursor = self.connection.execute(
+                self._sql(
+                    """
+                    INSERT INTO product_human_decisions (
+                      decision_id, task_id, episode_id, subject_id, status, target_hash,
+                      decision_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(decision_id) DO NOTHING
+                    """
+                ),
+                (
+                    decision_id,
+                    task_id,
+                    episode_id,
+                    subject_id,
+                    status,
+                    target_hash,
+                    decision_json,
+                    _dump_datetime(created_at),
+                    _dump_datetime(updated_at),
+                ),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
+
+    def compare_and_set_product_human_decision(
+        self,
+        *,
+        decision_id: str,
+        expected_status: str,
+        expected_updated_at: datetime,
+        task_id: str | None,
+        episode_id: str,
+        subject_id: str,
+        status: str,
+        target_hash: str,
+        decision_json: str,
+        updated_at: datetime,
+    ) -> bool:
+        """Atomically replace one decision when its authority state is unchanged."""
+
+        with self._lock:
+            cursor = self.connection.execute(
+                self._sql(
+                    """
+                    UPDATE product_human_decisions
+                    SET task_id = ?, episode_id = ?, subject_id = ?, status = ?,
+                        target_hash = ?, decision_json = ?, updated_at = ?
+                    WHERE decision_id = ? AND status = ? AND updated_at = ?
+                    """
+                ),
+                (
+                    task_id,
+                    episode_id,
+                    subject_id,
+                    status,
+                    target_hash,
+                    decision_json,
+                    _dump_datetime(updated_at),
+                    decision_id,
+                    expected_status,
+                    _dump_datetime(expected_updated_at),
+                ),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
 
     def get_product_human_decision_json(self, decision_id: str) -> str:
         row = self._fetchone(
@@ -2801,6 +2957,111 @@ def _database_json_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _validate_hds_confirmation_projection(
+    projection: HumanConfirmationRequest,
+    *,
+    authority_task_id: Any,
+    authority_status: Any,
+    authority_json: str,
+) -> None:
+    try:
+        authority = json.loads(authority_json)
+        proposal = authority["proposal"]
+        json_status = str(authority["status"])
+        authority_revision = int(authority["revision"])
+        expected_action = (
+            f"product_{proposal['action_kind']}:{proposal['action_scope']}"
+        )
+        expected_evidence = [proposal["target_id"], proposal["target_hash"]]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("authoritative human decision is malformed") from exc
+    if str(authority_status) != json_status:
+        raise ValueError("authoritative human decision status is inconsistent")
+    projected_status = {
+        "pending": "pending",
+        "partially_approved": "pending",
+        "approved": "approved",
+        "executing": "approved",
+        "committed": "approved",
+        "execution_failed": "approved",
+        "outcome_unknown": "approved",
+        "rejected": "rejected",
+        "hard_blocked": "rejected",
+        "expired": "expired",
+        "revoked": "revoked",
+        "superseded": "revoked",
+    }.get(json_status)
+    if projected_status is None:
+        raise ValueError("authoritative human decision status is unsupported")
+    projected_execution = {
+        "committed": "completed",
+        "execution_failed": "failed",
+        "outcome_unknown": "failed",
+    }.get(json_status, "not_started")
+    if (
+        authority.get("decision_id") != projection.decision_id
+        or authority_task_id != projection.task_id
+        or proposal.get("task_id") != projection.task_id
+    ):
+        raise ValueError("confirmation projection decision/task binding mismatch")
+    if projection.decision_revision != authority_revision:
+        raise ValueError("confirmation projection decision revision mismatch")
+    if projection.status != projected_status:
+        raise ValueError("confirmation projection status is not HDS-derived")
+    if (
+        projection.action_type != expected_action
+        or projection.evidence_refs != expected_evidence
+    ):
+        raise ValueError("confirmation projection target binding mismatch")
+    if projection.execution_status != projected_execution:
+        raise ValueError("confirmation projection execution status mismatch")
+    if projection.execution_ref != authority.get("execution_receipt_ref"):
+        raise ValueError("confirmation projection execution receipt mismatch")
+
+
+def _validate_projection_advance(
+    existing: HumanConfirmationRequest,
+    candidate: HumanConfirmationRequest,
+) -> None:
+    if (
+        existing.confirmation_id != candidate.confirmation_id
+        or existing.decision_id != candidate.decision_id
+        or existing.task_id != candidate.task_id
+        or existing.action_type != candidate.action_type
+        or existing.requested_role != candidate.requested_role
+        or existing.allowed_roles != candidate.allowed_roles
+        or existing.reason != candidate.reason
+        or existing.evidence_refs != candidate.evidence_refs
+        or existing.confirmation_kind != candidate.confirmation_kind
+        or existing.blocks_daily_flow != candidate.blocks_daily_flow
+        or existing.idempotency_key != candidate.idempotency_key
+        or existing.created_at != candidate.created_at
+    ):
+        raise ValueError("confirmation projection identity cannot be rebound")
+    if candidate.decision_revision < existing.decision_revision:
+        raise ValueError("confirmation projection revision cannot regress")
+    if candidate.decision_revision == existing.decision_revision:
+        if candidate != existing:
+            raise ValueError("confirmation projection revision already has other data")
+        return
+    allowed_status = {
+        "pending": {"pending", "approved", "rejected", "expired", "revoked"},
+        "approved": {"approved", "expired", "revoked"},
+        "rejected": {"rejected"},
+        "expired": {"expired"},
+        "revoked": {"revoked"},
+    }
+    if candidate.status not in allowed_status[existing.status]:
+        raise ValueError("confirmation projection status cannot regress")
+    allowed_execution = {
+        "not_started": {"not_started", "completed", "failed"},
+        "completed": {"completed"},
+        "failed": {"failed"},
+    }
+    if candidate.execution_status not in allowed_execution[existing.execution_status]:
+        raise ValueError("confirmation projection execution status cannot regress")
 
 
 def _dump_datetime(value: datetime) -> str:

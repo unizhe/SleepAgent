@@ -9,6 +9,7 @@ env/
 .env
 .env.*
 !.env.example
+!.env.test.example
 
 .pytest_cache/
 .mypy_cache/
@@ -53,6 +54,7 @@ frontend/tsconfig.tsbuildinfo
 .env
 .env.*
 !.env.example
+!.env.test.example
 *.key
 *.pem
 *.docx
@@ -70,6 +72,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.egg-info/
+/build/
+/dist/
 .venv/
 venv/
 

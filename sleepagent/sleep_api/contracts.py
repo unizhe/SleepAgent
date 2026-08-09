@@ -140,7 +140,24 @@ class NightEpisodeSummary(PublicApiModel):
     )
     night_episode_id: str
     subject_id: str
-    local_sleep_date: date
+    local_sleep_date: date = Field(
+        ...,
+        json_schema_extra={"deprecated": True},
+        description=(
+            "Deprecated compatibility date; use episode_local_date and "
+            "assignment_basis for wake-date semantics."
+        ),
+    )
+    episode_local_date: date | None = None
+    assignment_basis: Literal[
+        "observed_wake", "vendor_wake_date", "deadline_fallback"
+    ] | None = None
+    bed_local_date: date | None = None
+    wake_local_date: date | None = None
+    date_confidence: Literal[
+        "observed", "vendor_asserted", "estimated"
+    ] | None = None
+    assignment_estimated: bool | None = None
     timezone_name: str
     collection_start_at: datetime
     collection_end_at: datetime | None
@@ -164,6 +181,16 @@ class NightEpisodeRevisionSnapshot(PublicApiModel):
     revision_cause: str
     data_sufficiency: str
     quality_flags: tuple[str, ...]
+    episode_local_date: date | None = None
+    assignment_basis: Literal[
+        "observed_wake", "vendor_wake_date", "deadline_fallback"
+    ] | None = None
+    bed_local_date: date | None = None
+    wake_local_date: date | None = None
+    date_confidence: Literal[
+        "observed", "vendor_asserted", "estimated"
+    ] | None = None
+    assignment_estimated: bool | None = None
     created_at: datetime
 
 

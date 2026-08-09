@@ -6,7 +6,6 @@ import os
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
@@ -19,7 +18,6 @@ from sleepagent.radar_agent.boundary import RADAR_AGENT_API_PREFIX
 from sleepagent.radar_agent.persistence import (
     RadarPersistenceStore,
     RadarSubject,
-    connect_postgres_store,
 )
 from sleepagent.radar_agent.persistence.history import (
     HistoricalRecord,
@@ -48,36 +46,46 @@ from sleepagent.radar_agent.schemas import (
     RadarAgentSchema,
     RadarNightSummary,
 )
-from sleepagent.radar_agent.product_agent import (
-    ActionProposal,
+from sleepagent.radar_agent.product_agent.cold_start import (
+    ClaimKind,
+    build_unavailable_entry_decisions,
+    snapshot_binding_material,
+)
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId as ProductAgentId,
     AuthenticatedBinding,
-    ClaimKind,
-    ConfirmationToken,
-    DecisionExplanation,
     EpisodeReceipt,
     EpisodeStatus,
     EpisodeType,
     FactSnapshot,
-    HITL_POLICY_VERSION,
-    HumanDecisionChoice,
-    HumanDecisionError,
-    HumanDecisionRequest,
-    HumanDecisionService,
-    HumanDecisionStatus,
-    PendingConfirmationTarget,
-    PersistentHumanDecisionRepository,
-    ProductEpisodeRunRequest,
-    ProductEpisodeRunResult,
-    ProductEpisodeRunner,
-    ProductUserFactResponse,
     SourceScope,
     SourceScopeKind,
-    build_unavailable_entry_decisions,
-    build_product_episode_runner_from_env,
-    product_episode_runner_is_configured,
     stable_hash,
-    snapshot_binding_material,
+)
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    ActionProposal,
+    ApprovalRequirement,
+    DecisionExplanation,
+    DecisionRoute,
+    HumanDecisionChoice,
+    HumanDecisionRecord,
+    HumanDecisionRequest,
+    HumanDecisionStatus,
+    HumanRiskLevel,
+)
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
+    CommitFrozenConfirmedAction,
+    PendingConfirmationTarget,
+    ProductEpisodeRunRequest,
+    ProductEpisodeRunResult,
+    ProductUserFactResponse,
+    ReexecuteWithAddedFact,
+)
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    ProductRuntimeBundle,
+    build_product_runtime_bundle_from_env,
+    product_episode_runner_is_configured,
 )
 
 
@@ -91,7 +99,6 @@ RADAR_AGENT_LLM_MODEL_ID_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID"
 RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS"
 RADAR_AGENT_LLM_RETRY_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_RETRY"
 RADAR_AGENT_DEV_MODE_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
-DEPLOYMENT_MODE_ENV = "SLEEPAGENT_DEPLOYMENT_MODE"
 PRODUCT_EPISODE_CHECKPOINT_ARTIFACT = "_product_episode_checkpoint"
 
 
@@ -132,13 +139,41 @@ class RadarTaskCreateRequest(RadarAgentSchema):
         return self
 
 
+class HumanDecisionPublicView(RadarAgentSchema):
+    """Wire-safe HDS view that deliberately excludes the persisted grant."""
+
+    decision_id: str
+    proposal: ActionProposal
+    risk_level: HumanRiskLevel
+    route: DecisionRoute
+    requirements: list[ApprovalRequirement] = Field(default_factory=list)
+    status: HumanDecisionStatus
+    decisions: list[HumanDecisionRecord] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None = None
+    execution_receipt_ref: str | None = None
+    failure_reason: str | None = None
+    superseded_by: str | None = None
+    revision: int = Field(..., ge=0)
+
+    @classmethod
+    def from_authority(
+        cls,
+        decision: HumanDecisionRequest,
+    ) -> "HumanDecisionPublicView":
+        return cls.model_validate(
+            decision.model_dump(mode="python", exclude={"active_grant"})
+        )
+
+
 class RadarTaskDetail(RadarAgentSchema):
     task: RadarAgentTask | HistoricalTaskRecord
     risk_level: str | None = None
     replay_scenario: ReplayScenario | None = None
     artifacts: list[RadarArtifactVersion] = Field(default_factory=list)
     confirmations: list[HumanConfirmationRequest] = Field(default_factory=list)
-    decisions: list[HumanDecisionRequest] = Field(default_factory=list)
+    decisions: list[HumanDecisionPublicView] = Field(default_factory=list)
     questionnaire_candidates: list[dict[str, Any]] = Field(
         default_factory=list,
         max_length=3,
@@ -197,50 +232,14 @@ class RadarApiRuntime:
 
     def __init__(
         self,
-        connection: sqlite3.Connection | None = None,
         *,
-        product_runner: ProductEpisodeRunner | None = None,
+        product_runtime: ProductRuntimeBundle,
     ) -> None:
-        database_url = os.getenv(RADAR_AGENT_DATABASE_URL_ENV)
-        production = (
-            os.getenv(DEPLOYMENT_MODE_ENV, "development").strip().lower()
-            == "production"
-        )
-        if connection is not None:
-            if production:
-                raise RuntimeError(
-                    "production Radar Agent API cannot use an injected "
-                    "SQLite connection"
-                )
-            self.store = RadarPersistenceStore.connect_sqlite(connection)
-        elif database_url:
-            lowered = database_url.strip().lower()
-            if production and (
-                lowered.startswith("sqlite")
-                or ":memory:" in lowered
-                or "/tmp/" in lowered
-            ):
-                raise RuntimeError(
-                    "production Radar Agent API requires shared "
-                    "PostgreSQL storage"
-                )
-            self.store = connect_postgres_store(database_url)
-        else:
-            if production:
-                raise RuntimeError(
-                    "production Radar Agent API requires "
-                    f"{RADAR_AGENT_DATABASE_URL_ENV}"
-                )
-            sqlite_path = Path(
-                os.getenv(
-                    RADAR_AGENT_SQLITE_PATH_ENV,
-                    DEFAULT_RADAR_AGENT_SQLITE_PATH,
-                )
+        if product_runtime.persistence_store is None:
+            raise ValueError(
+                "Radar API requires a persistent Product runtime bundle"
             )
-            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-            self.store = RadarPersistenceStore.connect_sqlite(
-                sqlite3.connect(sqlite_path, check_same_thread=False)
-            )
+        self.store = product_runtime.persistence_store
         # API-key authentication and per-task ownership are enforced at the HTTP
         # boundary. Domain deployments can pre-provision authorization records and
         # replace this runtime without changing the routes.
@@ -250,82 +249,9 @@ class RadarApiRuntime:
             require_authorization=False,
         )
         self._lock = RLock()
-        self.product_runner = (
-            product_runner
-            or build_product_episode_runner_from_env(
-                persistence_store=self.store,
-            )
-        )
-        self.human_decisions = HumanDecisionService(
-            PersistentHumanDecisionRepository(self.store),
-            authority_validator=self._validate_human_decision_authority,
-        )
-
-    def _validate_human_decision_authority(
-        self,
-        request: HumanDecisionRequest,
-        actor_id: str,
-        actor_role: str,
-        role_binding_id: str | None,
-        authorization_id: str | None,
-    ) -> None:
-        if _development_mode_enabled():
-            if actor_role not in {item.role for item in request.requirements}:
-                raise HumanDecisionError("actor role is not required by this decision")
-            return
-        if role_binding_id is None:
-            raise HumanDecisionError("a role binding is required for this decision")
-        bindings = {
-            item.role_binding_id: item
-            for item in self.store.list_role_bindings(
-                request.proposal.subject_id
-            )
-        }
-        binding = bindings.get(role_binding_id)
-        if binding is None or (
-            binding.user_id != actor_id
-            or binding.role != actor_role
-            or binding.subject_id != request.proposal.subject_id
-        ):
-            raise HumanDecisionError("role binding does not authorize this actor")
-        if (
-            request.proposal.action_kind == "external_action"
-            and actor_role == "doctor"
-        ):
-            required_permission = "read_doctor_material"
-            required_scope = "process_supplementary_document"
-        elif request.proposal.action_kind == "external_action":
-            required_permission = "export_data"
-            required_scope = "export_data"
-        else:
-            required_permission = "process_health_data"
-            required_scope = "process_radar_summary"
-        if required_permission not in binding.permissions:
-            raise HumanDecisionError(
-                f"role binding lacks {required_permission!r} permission"
-            )
-        effective_authorization_id = (
-            authorization_id or request.proposal.authorization_id
-        )
-        if effective_authorization_id is None:
-            raise HumanDecisionError("an active data authorization is required")
-        authorization = self.store.get_data_authorization(
-            effective_authorization_id
-        )
-        now = datetime.now(timezone.utc)
-        if (
-            authorization.subject_id != request.proposal.subject_id
-            or authorization.status != "active"
-            or (
-                authorization.expires_at is not None
-                and authorization.expires_at <= now
-            )
-        ):
-            raise HumanDecisionError("data authorization is inactive or mismatched")
-        if required_scope not in authorization.scopes:
-            raise HumanDecisionError(
-                f"data authorization lacks {required_scope!r} scope"
-            )
+        self.product_runtime = product_runtime
+        self.human_decisions = self.product_runtime.human_decisions
+        self.product_runner = self.product_runtime.runner
 
     def create_task(
         self,
@@ -499,6 +425,11 @@ class RadarApiRuntime:
                     "source_refs": receipt.source_refs,
                 },
             )
+        result = self._register_product_interactions(
+            task=task,
+            request=episode_request,
+            result=result,
+        )
         self.service.save_payload_artifact(
             task.task_id,
             artifact_id=f"product-episode:{task.task_id}",
@@ -591,11 +522,6 @@ class RadarApiRuntime:
                 f"{result.receipt.status.value}."
             ),
         )
-        self._register_product_interactions(
-            task=task,
-            request=episode_request,
-            result=result,
-        )
         self._complete_product_confirmation_actions(
             task=task,
             result=result,
@@ -610,6 +536,13 @@ class RadarApiRuntime:
         request: ProductEpisodeRunRequest,
         result: ProductEpisodeRunResult,
     ) -> None:
+        if any(
+            target.decision_id is None or target.proposal_id is None
+            for target in result.pending_confirmations
+        ):
+            raise InvalidTaskTransition(
+                "Product checkpoint requires explicit HDS decision bindings"
+            )
         self.service.save_payload_artifact(
             task.task_id,
             artifact_id=f"product-checkpoint:{task.task_id}",
@@ -657,7 +590,8 @@ class RadarApiRuntime:
         task: RadarAgentTask,
         request: ProductEpisodeRunRequest,
         result: ProductEpisodeRunResult,
-    ) -> None:
+    ) -> ProductEpisodeRunResult:
+        bound_targets: list[PendingConfirmationTarget] = []
         for target in result.pending_confirmations:
             decision = self._ensure_product_human_decision(
                 task=task,
@@ -665,37 +599,33 @@ class RadarApiRuntime:
                 result=result,
                 target=target,
             )
-            confirmation_id = _product_confirmation_id(
-                task.task_id,
-                target,
+            if target.decision_id not in {None, decision.decision_id} or (
+                target.proposal_id
+                not in {None, decision.proposal.proposal_id}
+            ):
+                raise InvalidTaskTransition(
+                    "Product confirmation carries a conflicting HDS binding"
+                )
+            bound_target = target.model_copy(
+                update={
+                    "decision_id": decision.decision_id,
+                    "proposal_id": decision.proposal.proposal_id,
+                }
             )
-            self.service.request_confirmation(
-                task.task_id,
-                HumanConfirmationRequest(
-                    confirmation_id=confirmation_id,
+            bound_targets.append(bound_target)
+            self.store.save_hds_confirmation_projection(
+                self._project_human_decision(
                     task_id=task.task_id,
-                    action_type=(
-                        f"product_{target.target_kind}:"
-                        f"{target.action_scope}"
-                    ),
-                    requested_role="elder",
-                    allowed_roles=[
-                        item.role
-                        for item in decision.requirements
-                        if item.role in {"elder", "family", "doctor", "system"}
-                    ],
-                    reason=target.reason,
-                    evidence_refs=[
-                        target.candidate_id,
-                        target.candidate_hash,
-                    ],
-                    idempotency_key=confirmation_id,
-                    created_at=datetime.now(timezone.utc),
-                ),
+                    target=bound_target,
+                    decision=decision,
+                )
             )
+        bound_result = result.model_copy(
+            update={"pending_confirmations": bound_targets}
+        )
         pending = result.pending_user_input
         if pending is None:
-            return
+            return bound_result
         request_id = _product_user_input_id(
             task.task_id,
             pending.request_id,
@@ -709,7 +639,7 @@ class RadarApiRuntime:
                 raise InvalidTaskTransition(
                     "Product Agent repeated a resolved user-input request"
                 )
-            return
+            return bound_result
         self.store.save_user_input_request(
             UserInputRequest(
                 request_id=request_id,
@@ -735,6 +665,7 @@ class RadarApiRuntime:
                 "decision_scope": pending.decision_scope,
             },
         )
+        return bound_result
 
     def _ensure_product_human_decision(
         self,
@@ -744,15 +675,35 @@ class RadarApiRuntime:
         result: ProductEpisodeRunResult,
         target: PendingConfirmationTarget,
     ) -> HumanDecisionRequest:
+        if target.decision_id is not None:
+            return self._bound_human_decision(
+                task_id=task.task_id,
+                target=target,
+                request=request,
+            )
+        expected_proposal_id = f"proposal:{target.confirmation_id}"
         existing = [
             item
-            for item in self.human_decisions.repository.list(task_id=task.task_id)
-            if item.proposal.target_hash == target.candidate_hash
+            for item in self.human_decisions.list(task_id=task.task_id)
+            if item.proposal.proposal_id == expected_proposal_id
+            and item.proposal.episode_id == request.episode_id
+            and item.proposal.subject_id == target.subject_id
+            and item.proposal.target_hash == target.candidate_hash
             and item.proposal.target_id == target.candidate_id
             and item.proposal.action_scope == target.action_scope
+            and item.proposal.fact_snapshot_id
+            == request.fact_snapshot.fact_snapshot_id
+            and item.proposal.fact_snapshot_hash
+            == request.fact_snapshot.fact_snapshot_hash
+            and item.proposal.policy_version == HITL_POLICY_VERSION
+            and item.proposal.expires_at == target.expires_at
         ]
         if existing:
-            return existing[-1]
+            if len(existing) != 1:
+                raise InvalidTaskTransition(
+                    "Product confirmation has ambiguous HDS authority"
+                )
+            return existing[0]
         payload: dict[str, Any] = {
             "candidate_id": target.candidate_id,
             "candidate_hash": target.candidate_hash,
@@ -804,7 +755,7 @@ class RadarApiRuntime:
                     f"对外操作：{result.external_action_target.tool_name}"
                 )
         proposal = ActionProposal(
-            proposal_id=f"proposal:{target.confirmation_id}",
+            proposal_id=expected_proposal_id,
             task_id=task.task_id,
             episode_id=request.episode_id,
             subject_id=target.subject_id,
@@ -813,6 +764,7 @@ class RadarApiRuntime:
             action_scope=target.action_scope,
             target_id=target.candidate_id,
             target_hash=target.candidate_hash,
+            fact_snapshot_id=request.fact_snapshot.fact_snapshot_id,
             fact_snapshot_hash=request.fact_snapshot.fact_snapshot_hash,
             policy_version=HITL_POLICY_VERSION,
             payload=payload,
@@ -864,6 +816,121 @@ class RadarApiRuntime:
         )
         return decision
 
+    def _bound_human_decision(
+        self,
+        *,
+        task_id: str,
+        target: PendingConfirmationTarget,
+        request: ProductEpisodeRunRequest | None = None,
+    ) -> HumanDecisionRequest:
+        if target.decision_id is None or target.proposal_id is None:
+            raise InvalidTaskTransition(
+                "Product confirmation is missing its explicit HDS binding"
+            )
+        try:
+            decision = self.human_decisions.get(target.decision_id)
+        except KeyError as exc:
+            raise InvalidTaskTransition(
+                "Product confirmation references an unknown HDS decision"
+            ) from exc
+        proposal = decision.proposal
+        if (
+            proposal.proposal_id != target.proposal_id
+            or proposal.task_id != task_id
+            or proposal.subject_id != target.subject_id
+            or proposal.proposer_actor_id != target.actor_id
+            or proposal.target_id != target.candidate_id
+            or proposal.target_hash != target.candidate_hash
+            or proposal.action_scope != target.action_scope
+            or proposal.expires_at != target.expires_at
+        ):
+            raise InvalidTaskTransition(
+                "Product confirmation HDS binding does not match its target"
+            )
+        if request is not None and (
+            proposal.episode_id != request.episode_id
+            or proposal.fact_snapshot_id
+            != request.fact_snapshot.fact_snapshot_id
+            or proposal.fact_snapshot_hash
+            != request.fact_snapshot.fact_snapshot_hash
+        ):
+            raise InvalidTaskTransition(
+                "Product confirmation HDS binding does not match its Episode"
+            )
+        return decision
+
+    @staticmethod
+    def _project_human_decision(
+        *,
+        task_id: str,
+        target: PendingConfirmationTarget,
+        decision: HumanDecisionRequest,
+    ) -> HumanConfirmationRequest:
+        """Build the legacy task view from the sole HDS authority record."""
+
+        status = {
+            HumanDecisionStatus.PENDING: "pending",
+            HumanDecisionStatus.PARTIALLY_APPROVED: "pending",
+            HumanDecisionStatus.APPROVED: "approved",
+            HumanDecisionStatus.EXECUTING: "approved",
+            HumanDecisionStatus.COMMITTED: "approved",
+            HumanDecisionStatus.EXECUTION_FAILED: "approved",
+            HumanDecisionStatus.OUTCOME_UNKNOWN: "approved",
+            HumanDecisionStatus.REJECTED: "rejected",
+            HumanDecisionStatus.HARD_BLOCKED: "rejected",
+            HumanDecisionStatus.EXPIRED: "expired",
+            HumanDecisionStatus.REVOKED: "revoked",
+            HumanDecisionStatus.SUPERSEDED: "revoked",
+        }[decision.status]
+        resolved_by = (
+            decision.decisions[-1].actor_id
+            if decision.decisions
+            else "human-decision-service"
+        )
+        execution_status = (
+            "completed"
+            if decision.status == HumanDecisionStatus.COMMITTED
+            else (
+                "failed"
+                if decision.status
+                in {
+                    HumanDecisionStatus.EXECUTION_FAILED,
+                    HumanDecisionStatus.OUTCOME_UNKNOWN,
+                }
+                else "not_started"
+            )
+        )
+        confirmation_id = _product_confirmation_id(task_id, target)
+        return HumanConfirmationRequest(
+            confirmation_id=confirmation_id,
+            decision_id=decision.decision_id,
+            decision_revision=decision.revision,
+            task_id=task_id,
+            action_type=f"product_{target.target_kind}:{target.action_scope}",
+            requested_role="elder",
+            allowed_roles=[
+                item.role
+                for item in decision.requirements
+                if item.role in {"elder", "family", "doctor", "system"}
+            ],
+            reason=target.reason,
+            evidence_refs=[target.candidate_id, target.candidate_hash],
+            status=status,
+            idempotency_key=confirmation_id,
+            created_at=decision.created_at,
+            resolved_at=(decision.resolved_at if status != "pending" else None),
+            resolved_by=(resolved_by if status in {"approved", "rejected", "expired"} else None),
+            revoked_at=(decision.resolved_at if status == "revoked" else None),
+            revoked_by=(resolved_by if status == "revoked" else None),
+            execution_status=execution_status,
+            execution_ref=decision.execution_receipt_ref,
+            executed_at=(
+                decision.updated_at
+                if execution_status in {"completed", "failed"}
+                else None
+            ),
+        )
+
     def resume_product_after_confirmations(
         self,
         task_id: str,
@@ -871,10 +938,14 @@ class RadarApiRuntime:
         task = self.service.get_task(task_id)
         if (
             not isinstance(task, RadarAgentTask)
-            or task.status != RadarTaskStatus.RUNNING
+            or task.status
+            not in {
+                RadarTaskStatus.WAITING_FOR_CONFIRMATION,
+                RadarTaskStatus.RUNNING,
+            }
         ):
             raise InvalidTaskTransition(
-                "product confirmation resume requires a running task"
+                "product confirmation resume requires a waiting task"
             )
         checkpoint = self._latest_product_checkpoint(task_id)
         request = ProductEpisodeRunRequest.model_validate(
@@ -894,30 +965,16 @@ class RadarApiRuntime:
                 [],
             )
         ]
-        decisions = self.human_decisions.repository.list(task_id=task_id)
-        by_target = {
-            (
-                item.proposal.target_id,
-                item.proposal.target_hash,
-                item.proposal.action_scope,
-            ): item
-            for item in decisions
-        }
-        tokens: dict[str, ConfirmationToken] = {}
-        declined_confirmation_ids: set[str] = set()
-        executing_decision_ids: list[str] = []
-        for target in targets:
-            decision = by_target.get(
-                (
-                    target.candidate_id,
-                    target.candidate_hash,
-                    target.action_scope,
-                )
+        if targets != frozen_result.pending_confirmations:
+            raise InvalidTaskTransition(
+                "checkpoint confirmation bindings disagree with the frozen result"
             )
-            if decision is None:
-                raise InvalidTaskTransition(
-                    "frozen target has no authoritative human decision"
-                )
+        for target in targets:
+            decision = self._bound_human_decision(
+                task_id=task_id,
+                target=target,
+                request=request,
+            )
             decision = self.human_decisions.expire(decision.decision_id)
             if decision.status in {
                 HumanDecisionStatus.PENDING,
@@ -926,57 +983,35 @@ class RadarApiRuntime:
                 raise InvalidTaskTransition(
                     "product task still has pending human decisions"
                 )
-            if decision.status in {
+            if decision.status not in {
+                HumanDecisionStatus.APPROVED,
+                HumanDecisionStatus.EXECUTING,
+                HumanDecisionStatus.COMMITTED,
+                HumanDecisionStatus.EXECUTION_FAILED,
+                HumanDecisionStatus.OUTCOME_UNKNOWN,
                 HumanDecisionStatus.REJECTED,
                 HumanDecisionStatus.REVOKED,
                 HumanDecisionStatus.EXPIRED,
                 HumanDecisionStatus.SUPERSEDED,
+                HumanDecisionStatus.HARD_BLOCKED,
             }:
-                declined_confirmation_ids.add(target.confirmation_id)
-                continue
-            grant = self.human_decisions.approval_grant(
-                decision.decision_id
-            )
-            token = ConfirmationToken(
-                token_id=grant.grant_id,
-                candidate_id=target.candidate_id,
-                candidate_hash=target.candidate_hash,
-                actor_id=grant.approver_actor_id,
-                actor_role=grant.approver_role,
-                subject_id=target.subject_id,
-                action_scope=target.action_scope,
-                expires_at=target.expires_at,
-                decision_id=grant.decision_id,
-                policy_version=grant.policy_version,
-                fact_snapshot_hash=grant.fact_snapshot_hash,
-                authorization_id=grant.authorization_id,
-                role_binding_id=grant.role_binding_id,
-                grant_hash=grant.grant_hash,
-            )
-            tokens[target.confirmation_id] = token
-            executing_decision_ids.append(decision.decision_id)
-        try:
-            for decision_id in executing_decision_ids:
-                self.human_decisions.mark_execution(
-                    decision_id,
-                    status=HumanDecisionStatus.EXECUTING,
+                raise InvalidTaskTransition(
+                    "product task has a non-terminal human decision"
                 )
-            result = self.product_runner.commit_frozen_confirmations(
+        if task.status == RadarTaskStatus.WAITING_FOR_CONFIRMATION:
+            self.service.transition_task(
+                task_id,
+                RadarTaskStatus.RUNNING,
+                message="Authoritative human decisions are ready for commit.",
+            )
+            task = self.service.get_task(task_id)
+            assert isinstance(task, RadarAgentTask)
+        result = self.product_runner.commit_frozen_confirmations(
+            CommitFrozenConfirmedAction(
                 request=request,
                 frozen_result=frozen_result,
-                confirmations=tokens,
-                declined_confirmation_ids=tuple(
-                    sorted(declined_confirmation_ids)
-                ),
             )
-        except Exception as exc:
-            for decision_id in executing_decision_ids:
-                self.human_decisions.mark_execution(
-                    decision_id,
-                    status=HumanDecisionStatus.EXECUTION_FAILED,
-                    failure_reason=type(exc).__name__,
-                )
-            raise
+        )
         return self._execute_product_task(
             task,
             request,
@@ -1002,16 +1037,12 @@ class RadarApiRuntime:
         episode_request = ProductEpisodeRunRequest.model_validate(
             checkpoint.payload["request"]
         )
-        responses = {
-            item.request_id: item
-            for item in episode_request.user_fact_responses
-        }
         role = task.role
         if role == "system":
             raise InvalidTaskTransition(
                 "system role cannot supply a personal user fact"
             )
-        responses[request.question_id] = ProductUserFactResponse(
+        added_fact = ProductUserFactResponse(
             request_id=request.question_id,
             answer=answer,
             actor_id=task.requested_by_user_id or "system",
@@ -1019,13 +1050,17 @@ class RadarApiRuntime:
             subject_id=task.subject_id,
             observed_at=datetime.now(timezone.utc),
         )
-        resumed = episode_request.model_copy(
-            update={
-                "user_fact_responses": tuple(
-                    responses[key] for key in sorted(responses)
-                )
-            }
-        )
+        if "result" not in checkpoint.payload:
+            raise InvalidTaskTransition(
+                "persisted checkpoint has no frozen Product Episode result"
+            )
+        resumed = ReexecuteWithAddedFact(
+            request=episode_request,
+            frozen_result=ProductEpisodeRunResult.model_validate(
+                checkpoint.payload["result"]
+            ),
+            added_fact=added_fact,
+        ).reexecution_request()
         self.service.transition_task(
             task_id,
             RadarTaskStatus.RUNNING,
@@ -1043,80 +1078,32 @@ class RadarApiRuntime:
         result: ProductEpisodeRunResult,
         targets: list[PendingConfirmationTarget],
     ) -> None:
-        if not (
-            result.committed_memory_candidate_ids
-            or result.committed_habit_change_set_id
-            or result.committed_care_candidate_id
-            or result.external_action_receipt_id
-        ):
-            return
-        committed_memory = set(result.committed_memory_candidate_ids)
         for target in targets:
-            execution_ref: str | None = None
-            delivery_status: str | None = None
+            decision = self._bound_human_decision(
+                task_id=task.task_id,
+                target=target,
+            )
+            projection = self._project_human_decision(
+                task_id=task.task_id,
+                target=target,
+                decision=decision,
+            )
             if (
-                target.target_kind == "memory"
-                and target.candidate_id in committed_memory
-            ):
-                execution_ref = (
-                    f"{result.receipt.trace_ref}:memory:"
-                    f"{target.candidate_id}"
-                )
-            elif (
-                target.target_kind == "habit_profile"
-                and target.candidate_id
-                == result.committed_habit_change_set_id
-            ):
-                execution_ref = (
-                    f"{result.receipt.trace_ref}:habit-profile:"
-                    f"{target.candidate_id}"
-                )
-            elif (
-                target.target_kind == "care"
-                and target.candidate_id
-                == result.committed_care_candidate_id
-            ):
-                execution_ref = (
-                    f"{result.receipt.trace_ref}:care:"
-                    f"{target.candidate_id}"
-                )
-            elif (
                 target.target_kind == "external_action"
-                and result.external_action_receipt_id
+                and decision.status == HumanDecisionStatus.COMMITTED
             ):
-                execution_ref = result.external_action_receipt_id
-                delivery_status = (
-                    result.external_action_delivery_status or "pending"
+                delivery_status = result.external_action_delivery_status or "pending"
+                projection = projection.model_copy(
+                    update={
+                        "delivery_status": delivery_status,
+                        "delivered_at": (
+                            decision.updated_at
+                            if delivery_status == "delivered"
+                            else None
+                        ),
+                    }
                 )
-            if execution_ref is None:
-                continue
-            matching_decisions = [
-                item
-                for item in self.human_decisions.repository.list(
-                    task_id=task.task_id
-                )
-                if item.proposal.target_id == target.candidate_id
-                and item.proposal.target_hash == target.candidate_hash
-                and item.proposal.action_scope == target.action_scope
-            ]
-            if matching_decisions:
-                self.human_decisions.mark_execution(
-                    matching_decisions[-1].decision_id,
-                    status=HumanDecisionStatus.COMMITTED,
-                    receipt_ref=execution_ref,
-                )
-            confirmation_id = _product_confirmation_id(
-                task.task_id,
-                target,
-            )
-            self.service.complete_confirmation_action(
-                task.task_id,
-                confirmation_id,
-                actor_id="ProductEpisodeRunner",
-                actor_role="system",
-                execution_ref=execution_ref,
-                delivery_status=delivery_status,
-            )
+            self.store.save_hds_confirmation_projection(projection)
 
     def _product_request_for_task(
         self,
@@ -1218,10 +1205,10 @@ class RadarApiRuntime:
             ),
             source_scope=scope,
             canonical_data_version=stable_hash(canonical_data),
-            care_context_version=self.product_runner.commit_controller.care_store.get(
+            care_context_version=self.product_runtime.stores.care_context.get(
                 task.subject_id
             ).version,
-            memory_context_version=self.product_runner.commit_controller.memory_store.get(
+            memory_context_version=self.product_runtime.stores.memory_context.get(
                 task.subject_id
             ).version,
             source_refs=source_refs,
@@ -1333,7 +1320,10 @@ class RadarApiRuntime:
             ),
             artifacts=artifacts,
             confirmations=self.service.list_confirmations(task_id),
-            decisions=self.human_decisions.repository.list(task_id=task_id),
+            decisions=[
+                HumanDecisionPublicView.from_authority(item)
+                for item in self.human_decisions.list(task_id=task_id)
+            ],
             questionnaire_candidates=_workflow_questionnaire_candidates(artifacts),
             user_input_requests=[
                 UserInputRequest.model_validate(item.model_dump(mode="python"))
@@ -1418,20 +1408,41 @@ class RadarApiRuntime:
         )
 
 
-_RUNTIME = RadarApiRuntime()
+_RUNTIME = RadarApiRuntime(
+    product_runtime=build_product_runtime_bundle_from_env()
+)
 router = APIRouter(prefix=RADAR_AGENT_API_PREFIX, tags=["radar-agent"])
+
+
+def get_radar_api_runtime() -> RadarApiRuntime:
+    return _RUNTIME
 
 
 def reset_radar_api_runtime_for_tests(
     connection: sqlite3.Connection | None = None,
     *,
-    product_runner: ProductEpisodeRunner | None = None,
+    product_runtime: ProductRuntimeBundle | None = None,
 ) -> RadarApiRuntime:
     global _RUNTIME
-    _RUNTIME = RadarApiRuntime(
-        connection or sqlite3.connect(":memory:", check_same_thread=False),
-        product_runner=product_runner,
+    if product_runtime is not None and connection is not None:
+        raise ValueError(
+            "an injected Product runtime owns the API persistence store"
+        )
+    resolved_runtime = product_runtime
+    if resolved_runtime is None:
+        persistence = RadarPersistenceStore.connect_sqlite(
+            connection
+            or sqlite3.connect(":memory:", check_same_thread=False)
+        )
+        resolved_runtime = build_product_runtime_bundle_from_env(
+            persistence_store=persistence,
+        )
+    _RUNTIME = RadarApiRuntime(product_runtime=resolved_runtime)
+    from sleepagent.radar_agent.product_agent.habit_api import (
+        configure_habit_profile_runtime,
     )
+
+    configure_habit_profile_runtime(_RUNTIME.product_runtime)
     return _RUNTIME
 
 
@@ -1875,23 +1886,36 @@ async def confirm_radar_task(
             )
         actor_id, actor_role = x_actor_id, x_actor_role
         projection = _RUNTIME.store.get_confirmation(payload.confirmation_id)
-        if len(projection.evidence_refs) < 2:
+        if projection.task_id != task_id:
             raise InvalidTaskTransition(
-                "product confirmation lacks an exact target binding"
+                "product confirmation belongs to another task"
             )
-        target_id, target_hash = projection.evidence_refs[:2]
-        matching = [
-            item
-            for item in _RUNTIME.human_decisions.repository.list(task_id=task_id)
-            if item.proposal.target_id == target_id
-            and item.proposal.target_hash == target_hash
+        checkpoint = _RUNTIME._latest_product_checkpoint(task_id)
+        targets = [
+            PendingConfirmationTarget.model_validate(item)
+            for item in checkpoint.payload.get("pending_confirmations", [])
         ]
-        if len(matching) != 1:
+        matching_targets = [
+            item
+            for item in targets
+            if _product_confirmation_id(task_id, item)
+            == payload.confirmation_id
+        ]
+        if len(matching_targets) != 1:
             raise InvalidTaskTransition(
-                "product confirmation has no unique authoritative decision"
+                "product confirmation has no unique frozen target"
+            )
+        target = matching_targets[0]
+        authority = _RUNTIME._bound_human_decision(
+            task_id=task_id,
+            target=target,
+        )
+        if authority.decision_id != projection.decision_id:
+            raise InvalidTaskTransition(
+                "task projection does not match its authoritative decision"
             )
         decision = _RUNTIME.human_decisions.decide(
-            matching[0].decision_id,
+            authority.decision_id,
             actor_id=actor_id,
             actor_role=actor_role,
             choice=(
@@ -1899,7 +1923,7 @@ async def confirm_radar_task(
                 if payload.approved
                 else HumanDecisionChoice.REJECT
             ),
-            target_hash=target_hash,
+            target_hash=authority.proposal.target_hash,
             reason=payload.reason,
             role_binding_id=(
                 x_role_binding_id
@@ -1914,24 +1938,22 @@ async def confirm_radar_task(
             ),
             authorization_id=x_authorization_id,
         )
-        if decision.status in {
-            HumanDecisionStatus.PENDING,
-            HumanDecisionStatus.PARTIALLY_APPROVED,
-        }:
-            return projection
-        resolved = _RUNTIME.service.resolve_confirmation(
-            task_id,
-            payload.confirmation_id,
-            approved=decision.status == HumanDecisionStatus.APPROVED,
-            actor_id=actor_id,
-            actor_role=actor_role,
+        resolved = _RUNTIME._project_human_decision(
+            task_id=task_id,
+            target=target,
+            decision=decision,
         )
-        pending = [
+        _RUNTIME.store.save_hds_confirmation_projection(resolved)
+        pending_decisions = [
             item
-            for item in _RUNTIME.service.list_confirmations(task_id)
-            if item.status == "pending" and item.blocks_daily_flow
+            for item in _RUNTIME.human_decisions.list(task_id=task_id)
+            if item.status
+            in {
+                HumanDecisionStatus.PENDING,
+                HumanDecisionStatus.PARTIALLY_APPROVED,
+            }
         ]
-        if not pending:
+        if not pending_decisions:
             _RUNTIME.resume_product_after_confirmations(task_id)
             resolved = _RUNTIME.store.get_confirmation(resolved.confirmation_id)
         return resolved
@@ -1967,7 +1989,7 @@ async def revoke_product_human_decision(
             raise RoleAccessDenied(
                 "decision revocation requires authenticated actor and role headers"
             )
-        decision = _RUNTIME.human_decisions.repository.get(decision_id)
+        decision = _RUNTIME.human_decisions.get(decision_id)
         task_id = decision.proposal.task_id
         if task_id is None:
             raise InvalidTaskTransition(
@@ -1992,22 +2014,57 @@ async def revoke_product_human_decision(
         )
         projections = [
             item
-            for item in _RUNTIME.service.list_confirmations(task_id)
-            if item.evidence_refs[:2]
-            == [
-                decision.proposal.target_id,
-                decision.proposal.target_hash,
-            ]
+            for item in _RUNTIME.store.list_confirmations(task_id)
+            if item.decision_id == decision_id
         ]
-        if projections and projections[-1].execution_status != "completed":
-            _RUNTIME.service.revoke_confirmation(
-                task_id,
-                projections[-1].confirmation_id,
-                actor_id=x_actor_id,
-                actor_role=x_actor_role,
-                reason=payload.reason,
+        if len(projections) != 1:
+            raise InvalidTaskTransition(
+                "decision has no unique task confirmation projection"
             )
-        if task.status == RadarTaskStatus.RUNNING:
+        checkpoint = _RUNTIME._latest_product_checkpoint(task_id)
+        targets = [
+            PendingConfirmationTarget.model_validate(item)
+            for item in checkpoint.payload.get("pending_confirmations", [])
+        ]
+        matching_targets = [
+            item
+            for item in targets
+            if _product_confirmation_id(task_id, item)
+            == projections[0].confirmation_id
+        ]
+        if len(matching_targets) != 1:
+            raise InvalidTaskTransition(
+                "decision projection has no unique frozen target"
+            )
+        bound_target = matching_targets[0]
+        if bound_target.decision_id != decision_id:
+            raise InvalidTaskTransition(
+                "decision projection does not match the frozen HDS binding"
+            )
+        _RUNTIME._bound_human_decision(
+            task_id=task_id,
+            target=bound_target,
+        )
+        _RUNTIME.store.save_hds_confirmation_projection(
+            _RUNTIME._project_human_decision(
+                task_id=task_id,
+                target=bound_target,
+                decision=revoked,
+            )
+        )
+        pending_decisions = [
+            item
+            for item in _RUNTIME.human_decisions.list(task_id=task_id)
+            if item.status
+            in {
+                HumanDecisionStatus.PENDING,
+                HumanDecisionStatus.PARTIALLY_APPROVED,
+            }
+        ]
+        if (
+            not pending_decisions
+            and task.status == RadarTaskStatus.WAITING_FOR_CONFIRMATION
+        ):
             _RUNTIME.resume_product_after_confirmations(task_id)
         return revoked
     except KeyError as exc:
@@ -2284,11 +2341,13 @@ __all__ = [
     "RADAR_AGENT_LLM_TIMEOUT_SECONDS_ENV",
     "RADAR_AGENT_DEV_MODE_ENV",
     "RADAR_AGENT_SQLITE_PATH_ENV",
+    "HumanDecisionPublicView",
     "RadarApiRuntime",
     "RadarChatRequest",
     "RadarChatResponse",
     "RadarTaskCreateRequest",
     "RadarTaskDetail",
+    "get_radar_api_runtime",
     "reset_radar_api_runtime_for_tests",
     "router",
 ]

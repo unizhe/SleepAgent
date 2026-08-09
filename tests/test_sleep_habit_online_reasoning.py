@@ -4,27 +4,33 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
-    AcceptanceError,
-    BaselineMaturity,
+from sleepagent.radar_agent.product_agent.contracts import (
     CareActionCandidate,
-    CareActionCatalog,
     CareDeliveryDecision,
     CareDeliveryModality,
     CareDeliveryTiming,
     CurrentContextRisk,
-    InMemoryObjectiveBaselineStore,
     InterruptionBurden,
     LongitudinalTrend,
     MultifactorSafetyInput,
     MultiSourceConsistency,
-    NightOutOfBedBaselineValue,
-    ObjectiveBaselineArtifact,
     OnlineDataQuality,
     OnlineEventType,
     OnlineReasoningEvent,
     OnlineRiskLevel,
     RelativeBaselineDeviation,
+)
+from sleepagent.radar_agent.product_agent.governance import (
+    AcceptanceError,
+    CareActionCatalog,
+)
+from sleepagent.radar_agent.product_agent.habit_profile import (
+    BaselineMaturity,
+    InMemoryObjectiveBaselineStore,
+    NightOutOfBedBaselineValue,
+    ObjectiveBaselineArtifact,
+)
+from sleepagent.radar_agent.product_agent.online_reasoning import (
     fuse_multifactor_safety,
     resolve_event_context,
 )

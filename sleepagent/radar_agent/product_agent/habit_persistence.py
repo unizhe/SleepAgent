@@ -1,25 +1,30 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from sleepagent.radar_agent.persistence import RadarPersistenceStore
+from sleepagent.radar_agent.product_agent.hitl import VerifiedApprovalCapability
 from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileCommitReceipt,
-    HabitProfileConfirmation,
     HabitProfileChangeSet,
     HabitProfileState,
     InMemoryHabitProfileStore,
     habit_commit_payload_hash,
+    validate_habit_approval_capability,
 )
 from sleepagent.radar_agent.questionnaire import (
+    CapturedHabitAnswer,
     HabitConceptDefinition,
+    HabitQuestionCapture,
     HabitQuestionSelectionReceipt,
     QuestionSuppression,
 )
 
 
-HABIT_PERSISTENCE_VERSION = "sleepagent-habit-persistence.v3"
+HABIT_PERSISTENCE_VERSION = "sleepagent-habit-persistence.v5"
+_CAPTURE_RECORD_SCHEMA_VERSION = "sleepagent-habit-capture-record.v1"
 
 
 class PersistentHabitQuestionnaireStateStore:
@@ -239,7 +244,7 @@ class PersistentHabitQuestionnaireStateStore:
             ).fetchone()
         if row is None:
             return None
-        receipt = _model_from_database(HabitQuestionSelectionReceipt, row[4])
+        receipt, _, _ = _decode_questionnaire_record(row[4])
         if (
             receipt.selection_id,
             receipt.episode_id,
@@ -260,15 +265,79 @@ class PersistentHabitQuestionnaireStateStore:
             raise ValueError("Habit selection persisted index mismatch")
         return receipt, bool(row[5])
 
+    def get_capture(
+        self,
+        selection_id: str,
+    ) -> tuple[HabitQuestionCapture, str] | None:
+        with self.persistence.transaction_lock:
+            row = self.connection.execute(
+                self._sql(
+                    """
+                    SELECT receipt_json, consumed
+                    FROM product_habit_question_selections
+                    WHERE selection_id = ?
+                    """
+                ),
+                (selection_id,),
+            ).fetchone()
+        if row is None or not bool(row[1]):
+            return None
+        selection, capture, input_hash = _decode_questionnaire_record(row[0])
+        if selection.selection_id != selection_id:
+            raise ValueError("Habit selection persisted index mismatch")
+        if capture is None or input_hash is None:
+            return None
+        if capture.selection_id != selection_id:
+            raise ValueError("Habit capture persisted index mismatch")
+        return capture, input_hash
+
+    def get_captured_answer(
+        self,
+        answer_ref: str,
+        *,
+        subject_id: str,
+    ) -> CapturedHabitAnswer | None:
+        with self.persistence.transaction_lock:
+            rows = self.connection.execute(
+                self._sql(
+                    """
+                    SELECT receipt_json
+                    FROM product_habit_question_selections
+                    WHERE consumed = ?
+                    ORDER BY selection_id
+                    """
+                ),
+                (True,),
+            ).fetchall()
+        matches: list[CapturedHabitAnswer] = []
+        for row in rows:
+            _, capture, _ = _decode_questionnaire_record(row[0])
+            if capture is None:
+                continue
+            matches.extend(
+                item
+                for item in capture.answers
+                if item.answer_ref == answer_ref
+                and item.subject_id == subject_id
+            )
+        if len(matches) > 1:
+            raise ValueError("duplicate persisted Habit answer authority")
+        return None if not matches else matches[0]
+
     def finalize_capture(
         self,
         receipt: HabitQuestionSelectionReceipt,
-        suppressions: Iterable[QuestionSuppression],
+        capture: HabitQuestionCapture,
         *,
+        capture_input_hash: str,
         now: datetime | None = None,
-    ) -> None:
-        staged = tuple(suppressions)
+    ) -> HabitQuestionCapture:
+        staged = tuple(capture.suppressions)
         captured_at = now or datetime.now(timezone.utc)
+        if capture.selection_id != receipt.selection_id:
+            raise ValueError("Habit capture selection binding mismatch")
+        if len(capture_input_hash) != 64:
+            raise ValueError("Habit capture input hash is invalid")
         if receipt.expires_at <= captured_at:
             raise ValueError("Habit selection receipt expired")
         candidate_ids = {
@@ -307,16 +376,30 @@ class PersistentHabitQuestionnaireStateStore:
                     ),
                     (receipt.selection_id,),
                 ).fetchone()
-                if row is None or _model_from_database(
-                    HabitQuestionSelectionReceipt, row[0]
-                ) != receipt:
+                if row is None:
+                    raise ValueError(
+                        "Habit selection receipt is forged or unknown"
+                    )
+                (
+                    stored_selection,
+                    stored_capture,
+                    stored_input_hash,
+                ) = _decode_questionnaire_record(row[0])
+                if stored_selection != receipt:
                     raise ValueError(
                         "Habit selection receipt is forged or unknown"
                     )
                 if bool(row[1]):
-                    raise ValueError(
-                        "Habit selection receipt was already consumed"
-                    )
+                    if stored_capture is None or stored_input_hash is None:
+                        raise ValueError(
+                            "Habit selection receipt was already consumed"
+                        )
+                    if stored_input_hash != capture_input_hash:
+                        raise ValueError(
+                            "Habit capture idempotency payload conflict"
+                        )
+                    self.connection.commit()
+                    return stored_capture
                 for item in staged:
                     cursor.execute(
                         self._sql(
@@ -336,7 +419,10 @@ class PersistentHabitQuestionnaireStateStore:
                             item.subject_id,
                             item.concept_id,
                             item.scope,
-                            item.confirmation_ref,
+                            # The physical v004 column keeps its legacy name;
+                            # it now stores only the server-derived, typed
+                            # data-subject withdrawal command reference.
+                            item.withdrawal_command_ref,
                             item.expires_at.isoformat(),
                             item.model_dump_json(),
                             captured_at.isoformat(),
@@ -346,17 +432,27 @@ class PersistentHabitQuestionnaireStateStore:
                     self._sql(
                         """
                         UPDATE product_habit_question_selections
-                        SET consumed = ?
+                        SET receipt_json = ?, consumed = ?
                         WHERE selection_id = ? AND consumed = ?
                         """
                     ),
-                    (True, receipt.selection_id, False),
+                    (
+                        _encode_questionnaire_capture_record(
+                            receipt,
+                            capture,
+                            capture_input_hash=capture_input_hash,
+                        ),
+                        True,
+                        receipt.selection_id,
+                        False,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise ValueError(
                         "Habit selection receipt was already consumed"
                     )
                 self.connection.commit()
+                return capture.model_copy(deep=True)
             except Exception:
                 self.connection.rollback()
                 raise
@@ -385,13 +481,13 @@ class PersistentHabitQuestionnaireStateStore:
             ).fetchall()
         active: list[QuestionSuppression] = []
         for row in rows:
-            item = _model_from_database(QuestionSuppression, row[4])
+            item = _question_suppression_from_database(row[4])
             indexed_expiry = _database_datetime(row[3])
             if (
                 item.subject_id,
                 item.concept_id,
                 item.scope,
-                item.confirmation_ref,
+                item.withdrawal_command_ref,
                 item.expires_at,
             ) != (
                 subject_id,
@@ -457,14 +553,18 @@ class PersistentHabitProfileStore(InMemoryHabitProfileStore):
     def commit(
         self,
         change_set: HabitProfileChangeSet,
-        confirmation: HabitProfileConfirmation,
+        approval_capability: VerifiedApprovalCapability,
         *,
         idempotency_key: str,
         now: datetime | None = None,
     ) -> HabitProfileCommitReceipt:
         committed_at = now or datetime.now(timezone.utc)
         self._validate_change_set_integrity(change_set)
-        payload_hash = habit_commit_payload_hash(change_set, confirmation)
+        payload_hash = habit_commit_payload_hash(
+            change_set,
+            approval_capability,
+        )
+        approval_grant = approval_capability.grant
         with self.persistence.transaction_lock:
             cursor = self.connection.cursor()
             try:
@@ -558,7 +658,12 @@ class PersistentHabitProfileStore(InMemoryHabitProfileStore):
                     self.connection.commit()
                     return receipt.model_copy(deep=True)
 
-                confirmation.validate_for(change_set, now=committed_at)
+                approval_grant = validate_habit_approval_capability(
+                    change_set,
+                    approval_capability,
+                    idempotency_key=idempotency_key,
+                    now=committed_at,
+                )
                 consumed = cursor.execute(
                     self._sql(
                         """
@@ -567,11 +672,11 @@ class PersistentHabitProfileStore(InMemoryHabitProfileStore):
                         WHERE confirmation_id = ?
                         """
                     ),
-                    (confirmation.confirmation_id,),
+                    (approval_grant.grant_id,),
                 ).fetchone()
                 if consumed is not None:
                     raise ValueError(
-                        "Habit Profile confirmation already consumed"
+                        "Habit Profile approval grant already consumed"
                     )
                 if state.version != change_set.expected_memory_version:
                     raise ValueError("stale Habit Profile memory version")
@@ -582,7 +687,7 @@ class PersistentHabitProfileStore(InMemoryHabitProfileStore):
                 )
                 receipt = worker.commit(
                     change_set,
-                    confirmation,
+                    approval_capability,
                     idempotency_key=idempotency_key,
                     now=committed_at,
                 )
@@ -619,7 +724,9 @@ class PersistentHabitProfileStore(InMemoryHabitProfileStore):
                     (
                         idempotency_key,
                         payload_hash,
-                        confirmation.confirmation_id,
+                        # Legacy column name retained for storage compatibility;
+                        # the value is a non-authoritative audit reference.
+                        approval_grant.grant_id,
                         change_set.subject_id,
                         receipt.model_dump_json(),
                         committed_at.isoformat(),
@@ -641,6 +748,73 @@ def _model_from_database(model: type[Any], value: Any) -> Any:
     if isinstance(value, (str, bytes, bytearray)):
         return model.model_validate_json(value)
     return model.model_validate(value)
+
+
+def _decode_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, (str, bytes, bytearray)):
+        decoded = json.loads(value)
+    else:
+        decoded = value
+    if not isinstance(decoded, dict):
+        raise ValueError("Habit questionnaire persistence payload is invalid")
+    return decoded
+
+
+def _question_suppression_from_database(value: Any) -> QuestionSuppression:
+    payload = _decode_json_object(value)
+    if (
+        "confirmation_ref" in payload
+        and "withdrawal_command_ref" not in payload
+    ):
+        payload["withdrawal_command_ref"] = payload.pop("confirmation_ref")
+    return QuestionSuppression.model_validate(payload)
+
+
+def _decode_questionnaire_record(
+    value: Any,
+) -> tuple[
+    HabitQuestionSelectionReceipt,
+    HabitQuestionCapture | None,
+    str | None,
+]:
+    payload = _decode_json_object(value)
+    if payload.get("schema_version") != _CAPTURE_RECORD_SCHEMA_VERSION:
+        return HabitQuestionSelectionReceipt.model_validate(payload), None, None
+    expected_keys = {
+        "schema_version",
+        "selection",
+        "capture",
+        "capture_input_hash",
+    }
+    if set(payload) != expected_keys:
+        raise ValueError("Habit capture persistence envelope is invalid")
+    input_hash = payload["capture_input_hash"]
+    if not isinstance(input_hash, str) or len(input_hash) != 64:
+        raise ValueError("Habit capture persisted input hash is invalid")
+    selection = HabitQuestionSelectionReceipt.model_validate(
+        payload["selection"]
+    )
+    capture = HabitQuestionCapture.model_validate(payload["capture"])
+    return selection, capture, input_hash
+
+
+def _encode_questionnaire_capture_record(
+    selection: HabitQuestionSelectionReceipt,
+    capture: HabitQuestionCapture,
+    *,
+    capture_input_hash: str,
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": _CAPTURE_RECORD_SCHEMA_VERSION,
+            "selection": selection.model_dump(mode="json"),
+            "capture": capture.model_dump(mode="json"),
+            "capture_input_hash": capture_input_hash,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _database_datetime(value: Any) -> datetime:

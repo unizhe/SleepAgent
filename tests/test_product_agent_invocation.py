@@ -4,15 +4,13 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     ContextPacket,
     EvidenceClaim,
     EvidencePacket,
     EvidenceSemantic,
     EvidenceSourceKind,
-    InvocationPolicyError,
-    ProductAgentInvoker,
     SourceScope,
     SourceScopeKind,
     ToolRequest,
@@ -23,7 +21,9 @@ from sleepagent.radar_agent.product_agent import (
 )
 from sleepagent.radar_agent.product_agent.invocation import (
     EvidenceReasoningModelOutput,
+    ProductAgentInvoker,
 )
+from sleepagent.radar_agent.product_agent.registry import InvocationPolicyError
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)

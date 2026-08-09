@@ -138,8 +138,9 @@ list.
   separates the most live alternatives; ties use catalog order.
 - `unknown`, skip and prefer-not-to-answer consume the current question but do
   not create a fact.
-- A confirmed do-not-ask response creates concept/role suppression and ends
-  selection for that scope until the user changes it.
+- An elder's explicit do-not-ask withdrawal creates subject/concept
+  `profile_question` suppression and ends selection for that scope until the
+  elder changes it.
 - An answer may reveal a new question, but it may not automatically start a
   completeness chain. The owner must produce a new decision target and gap.
 - Safety preemption stops the remaining ordinary question budget.

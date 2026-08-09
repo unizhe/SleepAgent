@@ -4,32 +4,23 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
-    AcceptanceError,
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentEnvelope,
     AgentId,
     AuthenticatedBinding,
     CareActionCandidate,
-    CareActionCatalog,
-    CareActionDefinition,
     CareDeliveryDecision,
     CareDeliveryModality,
     CareDeliveryTiming,
     CareStrategy,
     CommunicationDraft,
     CommunicationSemanticBinding,
-    ConfirmationError,
-    ConfirmationToken,
     CoordinationCandidate,
-    DeterministicCommitController,
     EvidenceClaim,
     EvidencePacket,
     EvidenceSemantic,
     EvidenceSourceKind,
-    ExternalActionExecutionResult,
     FactSnapshot,
-    InMemoryCareContextStore,
-    InMemoryMemoryContextStore,
     InvocationOutcome,
     InterruptionBurden,
     MemoryChangeCandidate,
@@ -37,10 +28,22 @@ from sleepagent.radar_agent.product_agent import (
     SafetyVerdict,
     SourceScope,
     SourceScopeKind,
-    StaleStateError,
     ToolEffect,
     ToolReceipt,
     WorkProductStatus,
+)
+from sleepagent.radar_agent.product_agent.external_actions import (
+    ExternalActionExecutionResult,
+)
+from sleepagent.radar_agent.product_agent.governance import (
+    AcceptanceError,
+    CareActionCatalog,
+    CareActionDefinition,
+    ConfirmationError,
+    DeterministicCommitController,
+    InMemoryCareContextStore,
+    InMemoryMemoryContextStore,
+    StaleStateError,
     accept_care,
     accept_communication,
     accept_evidence,
@@ -48,10 +51,21 @@ from sleepagent.radar_agent.product_agent import (
     publication_postflight,
     safety_trigger_reasons,
 )
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionError,
+    HumanDecisionRequest,
+    HumanDecisionService,
+    HumanDecisionStatus,
+    VerifiedApprovalCapability,
+)
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
-VALID_UNTIL = datetime.now(timezone.utc) + timedelta(days=30)
+VALID_UNTIL = NOW + timedelta(days=30)
 
 
 def snapshot(*, active_constraint_codes: tuple[str, ...] = ()) -> FactSnapshot:
@@ -77,6 +91,100 @@ def snapshot(*, active_constraint_codes: tuple[str, ...] = ()) -> FactSnapshot:
         source_refs=("night:2026-07-26",),
         created_at=NOW,
     )
+
+
+def _approved_decision(
+    *,
+    action_kind: str,
+    action_scope: str,
+    target_id: str,
+    target_hash: str,
+    fact_snapshot: FactSnapshot | None = None,
+    expires_at: datetime = VALID_UNTIL,
+    policy_version: str = HITL_POLICY_VERSION,
+) -> tuple[HumanDecisionService, HumanDecisionRequest]:
+    bound_snapshot = fact_snapshot or snapshot()
+    service = HumanDecisionService()
+    service.policy.version = policy_version
+    request = service.create(
+        ActionProposal(
+            proposal_id=f"proposal:{action_scope}:{target_id}",
+            episode_id="episode-1",
+            subject_id=bound_snapshot.binding.subject_id,
+            proposer_actor_id=bound_snapshot.binding.actor_id,
+            action_kind=action_kind,
+            action_scope=action_scope,
+            target_id=target_id,
+            target_hash=target_hash,
+            fact_snapshot_id=bound_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=bound_snapshot.fact_snapshot_hash,
+            policy_version=policy_version,
+            payload={"target_id": target_id},
+            explanation=DecisionExplanation(
+                what_will_change=f"Execute {action_scope}",
+                why_now="The exact target is ready for accountable execution.",
+                who_will_receive_or_be_affected=bound_snapshot.binding.subject_id,
+                duration_or_frequency="One bounded execution.",
+                how_to_revoke="Revoke before execution begins.",
+            ),
+            created_at=NOW,
+            expires_at=expires_at,
+        )
+    )
+    approved = service.decide(
+        request.decision_id,
+        actor_id=bound_snapshot.binding.actor_id,
+        actor_role=bound_snapshot.binding.role,
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=target_hash,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert approved.status == HumanDecisionStatus.APPROVED
+    return service, approved
+
+
+def _approved_capability(
+    *,
+    action_kind: str,
+    action_scope: str,
+    target_id: str,
+    target_hash: str,
+    idempotency_key: str,
+    fact_snapshot: FactSnapshot | None = None,
+) -> tuple[HumanDecisionService, VerifiedApprovalCapability]:
+    bound_snapshot = fact_snapshot or snapshot()
+    service, request = _approved_decision(
+        action_kind=action_kind,
+        action_scope=action_scope,
+        target_id=target_id,
+        target_hash=target_hash,
+        fact_snapshot=bound_snapshot,
+    )
+    capability = service.acquire_verified_capability(
+        request.decision_id,
+        expected_proposal_id=request.proposal.proposal_id,
+        expected_subject_id=request.proposal.subject_id,
+        expected_target_id=request.proposal.target_id,
+        expected_target_hash=request.proposal.target_hash,
+        expected_action_scope=request.proposal.action_scope,
+        expected_fact_snapshot_id=bound_snapshot.fact_snapshot_id,
+        expected_fact_snapshot_hash=bound_snapshot.fact_snapshot_hash,
+        expected_policy_version=HITL_POLICY_VERSION,
+        idempotency_key=idempotency_key,
+        now=NOW + timedelta(minutes=2),
+    )
+    return service, capability
+
+
+def _assert_authority_refs(
+    tool_receipt: ToolReceipt,
+    capability: VerifiedApprovalCapability,
+) -> None:
+    grant = capability.grant
+    assert tool_receipt.source_refs == [
+        f"human-decision:{grant.decision_id}",
+        f"approval-grant:{grant.grant_id}:{grant.grant_hash}",
+    ]
 
 
 def receipt() -> ToolReceipt:
@@ -532,88 +640,224 @@ def test_communication_rejects_number_not_in_reviewed_knowledge() -> None:
         )
 
 
-def test_confirmation_binding_rejects_changed_candidate() -> None:
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    (
+        ("expected_target_id", "care-tampered"),
+        ("expected_target_hash", "f" * 64),
+        ("expected_fact_snapshot_id", "snapshot-tampered"),
+        ("expected_fact_snapshot_hash", "f" * 64),
+        ("expected_policy_version", "tampered-policy"),
+    ),
+)
+def test_hds_rejects_tampered_capability_binding(
+    field: str,
+    tampered_value: str,
+) -> None:
     action = care_action()
-    token = ConfirmationToken(
-        token_id="token-1",
-        candidate_id=action.candidate_id,
-        candidate_hash=action.candidate_hash,
-        actor_id="actor-1",
-        actor_role="elder",
-        subject_id="subject-1",
+    snap = snapshot()
+    service, request = _approved_decision(
+        action_kind="care",
         action_scope="activate_care",
-        expires_at=VALID_UNTIL,
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        fact_snapshot=snap,
     )
-    with pytest.raises(ConfirmationError, match="bound"):
-        token.validate_candidate(
-            candidate_id=action.candidate_id,
-            candidate_hash="f" * 64,
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            action_scope="activate_care",
-            now=NOW,
+    expected = {
+        "expected_proposal_id": request.proposal.proposal_id,
+        "expected_subject_id": request.proposal.subject_id,
+        "expected_target_id": request.proposal.target_id,
+        "expected_target_hash": request.proposal.target_hash,
+        "expected_action_scope": request.proposal.action_scope,
+        "expected_fact_snapshot_id": snap.fact_snapshot_id,
+        "expected_fact_snapshot_hash": snap.fact_snapshot_hash,
+        "expected_policy_version": HITL_POLICY_VERSION,
+    }
+    expected[field] = tampered_value
+
+    with pytest.raises(HumanDecisionError, match="bound"):
+        service.acquire_verified_capability(
+            request.decision_id,
+            **expected,
+            idempotency_key="care:tampered",
+            now=NOW + timedelta(minutes=2),
         )
+
+
+def test_hds_rejects_expired_approval_before_capability_acquisition() -> None:
+    action = care_action()
+    snap = snapshot()
+    service, request = _approved_decision(
+        action_kind="care",
+        action_scope="activate_care",
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        fact_snapshot=snap,
+        expires_at=NOW + timedelta(seconds=90),
+    )
+
+    with pytest.raises(HumanDecisionError, match="expired"):
+        service.acquire_verified_capability(
+            request.decision_id,
+            expected_proposal_id=request.proposal.proposal_id,
+            expected_subject_id=request.proposal.subject_id,
+            expected_target_id=request.proposal.target_id,
+            expected_target_hash=request.proposal.target_hash,
+            expected_action_scope=request.proposal.action_scope,
+            expected_fact_snapshot_id=snap.fact_snapshot_id,
+            expected_fact_snapshot_hash=snap.fact_snapshot_hash,
+            expected_policy_version=HITL_POLICY_VERSION,
+            idempotency_key="care:expired",
+            now=NOW + timedelta(minutes=2),
+        )
+    assert service.get(request.decision_id).status == HumanDecisionStatus.EXPIRED
+
+
+def test_commit_recovery_uses_policy_frozen_at_hds_linearization() -> None:
+    action = care_action()
+    snap = snapshot()
+    frozen_policy = "product-safety.v2"
+    service, request = _approved_decision(
+        action_kind="care",
+        action_scope="activate_care",
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        fact_snapshot=snap,
+        policy_version=frozen_policy,
+    )
+    capability = service.acquire_verified_capability(
+        request.decision_id,
+        expected_proposal_id=request.proposal.proposal_id,
+        expected_subject_id=request.proposal.subject_id,
+        expected_target_id=request.proposal.target_id,
+        expected_target_hash=request.proposal.target_hash,
+        expected_action_scope=request.proposal.action_scope,
+        expected_fact_snapshot_id=snap.fact_snapshot_id,
+        expected_fact_snapshot_hash=snap.fact_snapshot_hash,
+        expected_policy_version=frozen_policy,
+        idempotency_key="care:policy-upgrade-recovery",
+        now=NOW + timedelta(minutes=2),
+    )
+
+    receipt = DeterministicCommitController().activate_care(
+        action=action,
+        subject_id="subject-1",
+        expected_version=0,
+        fact_snapshot=snap,
+        idempotency_key="care:policy-upgrade-recovery",
+        approval_capability=capability,
+    )
+
+    assert receipt.outcome == InvocationOutcome.SUCCEEDED
+    _assert_authority_refs(receipt, capability)
+
+
+def test_commit_controller_rejects_fabricated_or_wrong_key_capability() -> None:
+    action = care_action()
+    snap = snapshot()
+    _service, capability = _approved_capability(
+        action_kind="care",
+        action_scope="activate_care",
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        idempotency_key="care:authorized",
+        fact_snapshot=snap,
+    )
+    forged = object.__new__(VerifiedApprovalCapability)
+    object.__setattr__(forged, "_grant", capability.grant)
+    controller = DeterministicCommitController()
+
+    with pytest.raises(ConfirmationError, match="stale|bound"):
+        controller.activate_care(
+            action=action,
+            subject_id="subject-1",
+            expected_version=0,
+            fact_snapshot=snap,
+            idempotency_key="care:authorized",
+            approval_capability=forged,
+        )
+    with pytest.raises(ConfirmationError, match="stale|bound"):
+        controller.activate_care(
+            action=action,
+            subject_id="subject-1",
+            expected_version=0,
+            fact_snapshot=snap,
+            idempotency_key="care:wrong-key",
+            approval_capability=capability,
+        )
+    assert controller.care_store.get("subject-1").version == 0
 
 
 def test_commit_controller_enforces_single_action_and_idempotency() -> None:
     store = InMemoryCareContextStore()
     controller = DeterministicCommitController(care_store=store)
     action = care_action()
-    token = ConfirmationToken(
-        token_id="token-1",
-        candidate_id=action.candidate_id,
-        candidate_hash=action.candidate_hash,
-        actor_id="actor-1",
-        actor_role="elder",
-        subject_id="subject-1",
+    snap = snapshot()
+    service, capability = _approved_capability(
+        action_kind="care",
         action_scope="activate_care",
-        expires_at=VALID_UNTIL,
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        idempotency_key="care:1",
+        fact_snapshot=snap,
     )
     first = controller.activate_care(
         action=action,
-        token=token,
-        actor_id="actor-1",
         subject_id="subject-1",
         expected_version=0,
-        fact_snapshot=snapshot(),
+        fact_snapshot=snap,
         idempotency_key="care:1",
+        approval_capability=capability,
     )
     replay = controller.activate_care(
         action=action,
-        token=token,
-        actor_id="actor-1",
         subject_id="subject-1",
         expected_version=0,
-        fact_snapshot=snapshot(),
+        fact_snapshot=snap,
         idempotency_key="care:1",
+        approval_capability=capability,
     )
     assert first == replay
     assert first.outcome == InvocationOutcome.SUCCEEDED
     assert store.get("subject-1").version == 1
+    _assert_authority_refs(first, capability)
+    _assert_authority_refs(replay, capability)
+    decision = service.record_execution_result(
+        capability,
+        status=HumanDecisionStatus.COMMITTED,
+        receipt_ref=first.tool_invocation_id,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert decision.status == HumanDecisionStatus.COMMITTED
 
 
 def test_care_transition_preserves_cross_day_lifecycle_history() -> None:
     store = InMemoryCareContextStore()
     controller = DeterministicCommitController(care_store=store)
     action = care_action()
-    controller.activate_care(
+    snap = snapshot()
+    activation_service, activation_capability = _approved_capability(
+        action_kind="care",
+        action_scope="activate_care",
+        target_id=action.candidate_id,
+        target_hash=action.candidate_hash,
+        idempotency_key="care:activate",
+        fact_snapshot=snap,
+    )
+    activation_receipt = controller.activate_care(
         action=action,
-        token=ConfirmationToken(
-            token_id="activate-token",
-            candidate_id=action.candidate_id,
-            candidate_hash=action.candidate_hash,
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            action_scope="activate_care",
-            expires_at=VALID_UNTIL,
-        ),
-        actor_id="actor-1",
         subject_id="subject-1",
         expected_version=0,
-        fact_snapshot=snapshot(),
+        fact_snapshot=snap,
         idempotency_key="care:activate",
+        approval_capability=activation_capability,
+    )
+    _assert_authority_refs(activation_receipt, activation_capability)
+    activation_service.record_execution_result(
+        activation_capability,
+        status=HumanDecisionStatus.COMMITTED,
+        receipt_ref=activation_receipt.tool_invocation_id,
+        now=NOW + timedelta(minutes=3),
     )
     strategy = CareStrategy(
         strategy_id="strategy-pause-1",
@@ -622,25 +866,23 @@ def test_care_transition_preserves_cross_day_lifecycle_history() -> None:
         transition_confirmation_required=True,
     )
     strategy_hash = "d" * 64
+    transition_service, transition_capability = _approved_capability(
+        action_kind="care",
+        action_scope="transition_care",
+        target_id=strategy.strategy_id,
+        target_hash=strategy_hash,
+        idempotency_key="care:pause",
+        fact_snapshot=snap,
+    )
 
     receipt = controller.transition_care(
         strategy=strategy,
         strategy_target_hash=strategy_hash,
-        token=ConfirmationToken(
-            token_id="pause-token",
-            candidate_id=strategy.strategy_id,
-            candidate_hash=strategy_hash,
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            action_scope="transition_care",
-            expires_at=VALID_UNTIL,
-        ),
-        actor_id="actor-1",
         subject_id="subject-1",
         expected_version=1,
-        fact_snapshot=snapshot(),
+        fact_snapshot=snap,
         idempotency_key="care:pause",
+        approval_capability=transition_capability,
     )
 
     state = store.get("subject-1")
@@ -655,6 +897,14 @@ def test_care_transition_preserves_cross_day_lifecycle_history() -> None:
     assert state.transition_history[-1].evidence_packet_refs == [
         "evidence:followup:1"
     ]
+    _assert_authority_refs(receipt, transition_capability)
+    transition_decision = transition_service.record_execution_result(
+        transition_capability,
+        status=HumanDecisionStatus.COMMITTED,
+        receipt_ref=receipt.tool_invocation_id,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert transition_decision.status == HumanDecisionStatus.COMMITTED
 
 
 def test_external_unknown_is_cached_and_not_blindly_retried() -> None:
@@ -667,24 +917,23 @@ def test_external_unknown_is_cached_and_not_blindly_retried() -> None:
         raise TimeoutError
 
     target_hash = "e" * 64
-    token = ConfirmationToken(
-        token_id="external-token",
-        candidate_id="share-target-1",
-        candidate_hash=target_hash,
-        actor_id="actor-1",
-        actor_role="elder",
-        subject_id="subject-1",
+    snap = snapshot()
+    service, capability = _approved_capability(
+        action_kind="external_action",
         action_scope="share_artifact",
-        expires_at=VALID_UNTIL,
+        target_id="share-target-1",
+        target_hash=target_hash,
+        idempotency_key="share:1",
+        fact_snapshot=snap,
     )
 
     first = controller.execute_external(
         tool_name="external.share",
         target={"artifact": "a1"},
-        snapshot=snapshot(),
+        snapshot=snap,
         idempotency_key="share:1",
         executor=fail,
-        token=token,
+        approval_capability=capability,
         actor_id="actor-1",
         subject_id="subject-1",
         action_scope="share_artifact",
@@ -695,10 +944,10 @@ def test_external_unknown_is_cached_and_not_blindly_retried() -> None:
     second = controller.execute_external(
         tool_name="external.share",
         target={"artifact": "a1"},
-        snapshot=snapshot(),
+        snapshot=snap,
         idempotency_key="share:1",
         executor=fail,
-        token=token,
+        approval_capability=capability,
         actor_id="actor-1",
         subject_id="subject-1",
         action_scope="share_artifact",
@@ -708,6 +957,16 @@ def test_external_unknown_is_cached_and_not_blindly_retried() -> None:
     )
     assert first.outcome == second.outcome == InvocationOutcome.UNKNOWN
     assert calls == 1
+    _assert_authority_refs(first, capability)
+    _assert_authority_refs(second, capability)
+    decision = service.record_execution_result(
+        capability,
+        status=HumanDecisionStatus.OUTCOME_UNKNOWN,
+        receipt_ref=first.tool_invocation_id,
+        failure_reason=first.error_code,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert decision.status == HumanDecisionStatus.OUTCOME_UNKNOWN
 
 
 def test_memory_is_a_versioned_service_not_an_agent() -> None:

@@ -21,7 +21,9 @@ from sleepagent.radar_agent.product_agent.contracts import (
     ExecutionMode,
 )
 from sleepagent.radar_agent.product_agent.agents import ProductAgentFactory
-from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunResult
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
+    ProductEpisodeRunResult,
+)
 from sleepagent.sleep_domain import (
     AgentAnalysisTrigger,
     AlgorithmVersionValue,

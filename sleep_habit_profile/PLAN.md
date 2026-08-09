@@ -97,7 +97,7 @@ LLM 不得创建新概念、改变问题语义、选项、单位、阈值、回�
 
 Evidence 合同必须新增并保留 `observer_reported` semantic 和 `authorized_observer_report` source kind（命名可按现有规范调整，但语义必须独立），不能把家属观察编码为 `user_reported`、`observed_fact` 或 canonical observation。Profile fact 经老人确认后，确认只授权持久化，不改变其 origin semantic；后续从 `confirmed_memory` 读取时仍必须携带最初 `elder_self_report | family_observation`、actor、窗口和 observation opportunity，不能因为“已确认”就把家属报告升级为老人自述或客观事实。
 
-`unknown` 只表示当前无法形成事实，不创建长期 Habit fact。`prefer_not_to_answer` 也不保存问题内容或推测值；如果用户明确表示“以后不要问这个”，系统可单独保存最小化的 `QuestionSuppression`（subject、concept、scope、到期时间、确认 ref），仅用于抑制提问，不能作为 Evidence 或画像值。普通跳过只触发当前 Episode/Policy 冷却，不产生长期 suppression。
+`unknown` 只表示当前无法形成事实，不创建长期 Habit fact。`prefer_not_to_answer` 也不保存问题内容或推测值；如果已认证老人通过独立 typed acknowledgement 明确表示“以后不要问这个”，系统可单独保存最小化的 `QuestionSuppression`（subject、concept、scope、到期时间、服务端派生的 opt-out command ref），仅用于抑制提问，不能作为 Evidence 或画像值。它是数据主体的直接撤回命令而非待审批 proposal；不接受 caller 提供的 confirmation/token 字符串。普通跳过只触发当前 Episode/Policy 冷却，不产生长期 suppression。
 
 字段到达 `valid_until` 后，由确定性读取策略计算 `effective_status=stale`，不依赖定时任务或模型写状态；数据库原记录仍保持不可变。重新确认产生 replace/supersede 事件。对于同一 concept，只有在适用日型和 observation window 重叠、值不可兼容时才标记冲突；时间段不同或明确描述“近期发生变化”的记录按版本演进处理，不能误判为冲突。每个来源/适用窗口最多有一个 current fact，多来源可以并列供 Evidence 处理。
 

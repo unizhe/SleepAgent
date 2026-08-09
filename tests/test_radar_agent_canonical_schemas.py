@@ -138,6 +138,8 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
     )
     confirmation = HumanConfirmationRequest(
         confirmation_id="confirm-001",
+        decision_id="decision-001",
+        decision_revision=0,
         task_id="task-001",
         action_type="export_doctor_report",
         requested_role="family",

@@ -471,8 +471,13 @@ def _exit_for_trace(trace: dict[str, Any]) -> int:
 
 def _default_runtime() -> Any:
     from sleepagent.radar_agent.api.http import RadarApiRuntime
+    from sleepagent.radar_agent.product_agent.runtime_factory import (
+        build_product_runtime_bundle_from_env,
+    )
 
-    return RadarApiRuntime()
+    return RadarApiRuntime(
+        product_runtime=build_product_runtime_bundle_from_env()
+    )
 
 
 __all__ = [

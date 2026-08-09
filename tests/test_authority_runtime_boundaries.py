@@ -3,9 +3,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-import backend.main as backend_main
-import server as legacy_server
-from backend.main import app
+import backend.legacy_main as backend_main
+from backend.legacy_main import app
 from sleepagent.integrations.perceptor.push_ingestion import (
     PerceptorPushConfigurationError,
 )
@@ -16,7 +15,7 @@ from sleepagent.integrations.perceptor.webhook import (
     PerceptorWebhookConfigurationError,
     build_perceptor_webhook_service_from_env,
 )
-from sleepagent.radar_agent.product_agent import runtime_factory
+import sleepagent.radar_agent.product_agent.runtime_factory as runtime_factory
 
 
 def test_old_radar_surfaces_are_not_exposed_outside_dev(
@@ -46,29 +45,6 @@ def test_fake_provider_requires_explicit_dev_and_fake_mode(
     monkeypatch.setattr(backend_main, "_RADAR_PRODUCT_PROVIDER", None)
     with pytest.raises(RuntimeError, match="explicit development/test"):
         backend_main._radar_product_data_provider()
-
-
-def test_legacy_probe_is_explicit_and_never_writes_authority_data(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("SLEEPAGENT_LEGACY_PERCEPTOR_DIAGNOSTIC", "true")
-    monkeypatch.setenv("SLEEPAGENT_DEPLOYMENT_MODE", "test")
-    summary = legacy_server.summarize_diagnostic_payload(
-        {"type": "VitalSignsDataEvent", "data": {"HeartRate": 61}}
-    )
-
-    assert legacy_server.diagnostic_enabled() is True
-    assert legacy_server.DIAGNOSTIC_PATH == "/diagnostics/perceptor/receive"
-    assert summary == {
-        "event_type": "VitalSignsDataEvent",
-        "message_id_present": False,
-        "device_identifier_present": False,
-        "data_type": "dict",
-    }
-    assert not (tmp_path / "radar_data.csv").exists()
-    assert not tuple(tmp_path.glob("*.sqlite3"))
 
 
 def test_product_runtime_production_cannot_fall_back_to_tmp_sqlite(

@@ -23,8 +23,9 @@
     "README.md": "8116b2156fd7169625a79c77d43c5a9b61891cfe492cec965ca9941899641cb7"
   },
   "archive": {
-    "path": "sleepagent-v18-complete-simulated-evidence.zip",
-    "sha256": "8dc3e39f55c76cfb1eb72053e68784a24fb6f0b29eb4ab5487e790b83c7ebea9"
+    "distribution": "generated_not_committed",
+    "archive_root": "sleepagent-v18-complete-simulated-evidence",
+    "sha256": "f6ba6d212692b908f7e5fc5259348611828c3a9601f787d5887c1a5a0d1c4f70"
   },
   "declarations": [
     "All participant identities and interactions are synthetic.",

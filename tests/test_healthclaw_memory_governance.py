@@ -54,6 +54,7 @@ from sleepagent.radar_agent.product_agent.registry import (
 )
 from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunResult
 from sleepagent.radar_agent.product_agent.tooling import (
+    CoreProductToolService,
     ProductToolError,
     ProductToolExecutionContext,
     ProductToolExecutor,
@@ -366,7 +367,8 @@ def test_memory_read_injects_subject_and_never_crosses_张三_李四() -> None:
     assert memory_store.read_subjects == []
 
     executor = ProductToolExecutor(
-        handlers={"memory.read": service.read}
+        handlers={"memory.read": service.read},
+        core_service=CoreProductToolService(),
     )
     denied = executor.execute(
         "memory.read",
@@ -413,15 +415,13 @@ def test_production_build_contains_one_memory_read_registry_definition() -> None
 
 
 def test_unbound_product_tool_executor_has_no_memory_read_fallback() -> None:
-    executor = ProductToolExecutor()
+    executor = ProductToolExecutor(core_service=CoreProductToolService())
     assert "memory.read" not in executor.handlers
-    with pytest.raises(
-        ProductToolError,
-        match="LongitudinalMemoryService.read",
-    ):
-        ProductToolExecutor(
-            handlers={"memory.read": lambda arguments, context: arguments}
-        )
+    explicitly_bound = ProductToolExecutor(
+        handlers={"memory.read": lambda arguments, context: arguments},
+        core_service=CoreProductToolService(),
+    )
+    assert "memory.read" in explicitly_bound.handlers
     with pytest.raises(ProductToolError, match="no handler"):
         executor.execute(
             "memory.read",
@@ -546,7 +546,7 @@ def test_multiple_memory_reads_share_one_agent_episode_budget() -> None:
 
 
 def test_governed_memory_revisions_append_and_invalidate_old_handle() -> None:
-    memory_store = InMemoryMemoryContextStore()
+    memory_store = InMemoryMemoryContextStore(control_clock=lambda: NOW)
     snapshot = _snapshot()
     create = MemoryChangeCandidate(
         candidate_id="memory:wake",
@@ -589,6 +589,7 @@ def test_governed_memory_revisions_append_and_invalidate_old_handle() -> None:
         "requested_time_scope": "current_night",
     }
     first = service.read(arguments, context, now=NOW)
+    assert len(first["items"]) == 1
     old_output = {"items": first["items"]}
     replace = create.model_copy(
         update={

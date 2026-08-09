@@ -16,6 +16,10 @@ from sleepagent.radar_agent.product_agent.contracts import (
     StrictContract,
     stable_hash,
 )
+from sleepagent.radar_agent.product_agent.hitl import (
+    ApprovalGrant,
+    VerifiedApprovalCapability,
+)
 from sleepagent.radar_agent.questionnaire import (
     DEFAULT_HABIT_CONCEPTS,
     CapturedHabitAnswer,
@@ -26,7 +30,7 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-HABIT_PROFILE_VERSION = "sleepagent-habit-profile.v3"
+HABIT_PROFILE_VERSION = "sleepagent-habit-profile.v4"
 
 
 class BaselineMaturity(str, Enum):
@@ -364,6 +368,8 @@ class HabitProfileChangeSet(StrictContract):
 
 
 class HabitProfileConfirmation(StrictContract):
+    """Legacy wire/audit shape; it is not accepted as commit authority."""
+
     confirmation_id: str
     actor_id: str
     actor_role: Literal["elder"]
@@ -462,7 +468,7 @@ class HabitProfileStore(Protocol):
     def commit(
         self,
         change_set: HabitProfileChangeSet,
-        confirmation: HabitProfileConfirmation,
+        approval_capability: VerifiedApprovalCapability,
         *,
         idempotency_key: str,
         now: datetime | None = None,
@@ -626,7 +632,7 @@ class InMemoryHabitProfileStore:
         }
         self._states: dict[str, HabitProfileState] = {}
         self._idempotent: dict[str, tuple[str, HabitProfileCommitReceipt]] = {}
-        self._consumed_confirmations: set[str] = set()
+        self._consumed_approval_grants: set[str] = set()
         self.lock = RLock()
 
     def get(self, subject_id: str) -> HabitProfileState:
@@ -640,23 +646,32 @@ class InMemoryHabitProfileStore:
     def commit(
         self,
         change_set: HabitProfileChangeSet,
-        confirmation: HabitProfileConfirmation,
+        approval_capability: VerifiedApprovalCapability,
         *,
         idempotency_key: str,
         now: datetime | None = None,
     ) -> HabitProfileCommitReceipt:
         committed_at = now or datetime.now(timezone.utc)
         self._validate_change_set_integrity(change_set)
-        payload_hash = habit_commit_payload_hash(change_set, confirmation)
+        payload_hash = habit_commit_payload_hash(
+            change_set,
+            approval_capability,
+        )
+        approval_grant = approval_capability.grant
         with self.lock:
             replay = self._idempotent.get(idempotency_key)
             if replay:
                 if replay[0] != payload_hash:
                     raise ValueError("Habit Profile idempotency-key collision")
                 return replay[1].model_copy(deep=True)
-            confirmation.validate_for(change_set, now=committed_at)
-            if confirmation.confirmation_id in self._consumed_confirmations:
-                raise ValueError("Habit Profile confirmation already consumed")
+            approval_grant = validate_habit_approval_capability(
+                change_set,
+                approval_capability,
+                idempotency_key=idempotency_key,
+                now=committed_at,
+            )
+            if approval_grant.grant_id in self._consumed_approval_grants:
+                raise ValueError("Habit Profile approval grant already consumed")
             state = self.get(change_set.subject_id)
             if state.version != change_set.expected_memory_version:
                 raise ValueError("stale Habit Profile memory version")
@@ -672,7 +687,7 @@ class InMemoryHabitProfileStore:
                         candidate,
                         facts,
                         change_set=change_set,
-                        confirmation=confirmation,
+                        approval_audit_ref=approval_grant.grant_id,
                         committed_at=committed_at,
                     )
                 )
@@ -693,7 +708,7 @@ class InMemoryHabitProfileStore:
                 facts=tuple(facts),
                 audit_receipts=(*state.audit_receipts, receipt),
             )
-            self._consumed_confirmations.add(confirmation.confirmation_id)
+            self._consumed_approval_grants.add(approval_grant.grant_id)
             self._idempotent[idempotency_key] = (payload_hash, receipt)
             return receipt.model_copy(deep=True)
 
@@ -883,7 +898,7 @@ class InMemoryHabitProfileStore:
         facts: list[HabitProfileFact],
         *,
         change_set: HabitProfileChangeSet,
-        confirmation: HabitProfileConfirmation,
+        approval_audit_ref: str,
         committed_at: datetime,
     ) -> list[str]:
         if candidate.operation in {
@@ -931,7 +946,7 @@ class InMemoryHabitProfileStore:
             last_verified_at=committed_at,
             valid_until=candidate.valid_until,
             source_answer_ref=candidate.source_answer_ref,
-            confirmation_ref=confirmation.confirmation_id,
+            confirmation_ref=approval_audit_ref,
             causal_change_set_id=change_set.change_set_id,
             replaces_fact_id=candidate.replace_fact_id,
             access_scopes=candidate.access_scopes,
@@ -984,14 +999,57 @@ def evidence_claim_from_captured_answer(
 
 def habit_commit_payload_hash(
     change_set: HabitProfileChangeSet,
-    confirmation: HabitProfileConfirmation,
+    approval_capability: VerifiedApprovalCapability,
 ) -> str:
+    if type(approval_capability) is not VerifiedApprovalCapability:
+        raise TypeError(
+            "Habit Profile commit requires a verified approval capability"
+        )
+    approval_grant = approval_capability.grant
     return stable_hash(
         {
             "change_set": change_set.model_dump(mode="json"),
-            "confirmation": confirmation.model_dump(mode="json"),
+            # This persisted projection is audit evidence only. The sealed
+            # capability, not these serializable fields, authorizes the write.
+            "approval_grant": approval_grant.model_dump(mode="json"),
         }
     )
+
+
+def validate_habit_approval_capability(
+    change_set: HabitProfileChangeSet,
+    approval_capability: VerifiedApprovalCapability,
+    *,
+    idempotency_key: str,
+    now: datetime,
+) -> ApprovalGrant:
+    """Validate the sealed HITL capability against the exact Habit manifest."""
+
+    if type(approval_capability) is not VerifiedApprovalCapability:
+        raise TypeError(
+            "Habit Profile commit requires a verified approval capability"
+        )
+    grant = approval_capability.grant
+    if grant.approver_role != "elder":
+        raise PermissionError("only an elder approval may commit Habit Profile")
+    if grant.expires_at != change_set.confirmation_expires_at:
+        raise ValueError("Habit Profile approval expiry binding mismatch")
+    approval_capability.validate_exact_binding(
+        decision_id=grant.decision_id,
+        proposal_id=grant.proposal_id,
+        actor_id=grant.approver_actor_id,
+        actor_role=grant.approver_role,
+        subject_id=change_set.subject_id,
+        target_id=change_set.change_set_id,
+        target_hash=change_set.manifest_hash,
+        action_scope=change_set.action_scope,
+        fact_snapshot_id=grant.fact_snapshot_id,
+        fact_snapshot_hash=change_set.fact_snapshot_hash,
+        policy_version=grant.policy_version,
+        idempotency_key=idempotency_key,
+        now=now,
+    )
+    return grant
 
 
 def evidence_claim_from_profile_fact(

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from sleepagent.radar_agent.persistence import (
     RadarPersistenceStore,
-    connect_postgres_store,
 )
 from sleepagent.radar_agent.product_agent.contracts import (
     AuthenticatedBinding,
@@ -26,107 +24,94 @@ from sleepagent.radar_agent.product_agent.habit_application import (
     HabitInteractionStartResponse,
     HabitObserverProposalRequest,
     HabitPendingChangeSet,
-    PersistentHabitPendingChangeSetStore,
     HabitProfileApplicationService,
 )
 from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileReadResult,
 )
-from sleepagent.radar_agent.product_agent.habit_persistence import (
-    PersistentHabitProfileStore,
-    PersistentHabitQuestionnaireStateStore,
-)
-from sleepagent.radar_agent.product_agent.habit_runtime import (
-    HabitProfileRuntimeService,
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    DEPLOYMENT_MODE_ENV,
+    ProductRuntimeBundle,
+    build_product_runtime_bundle_from_env,
 )
 from sleepagent.radar_agent.questionnaire import (
     DEFAULT_HABIT_CONCEPTS,
     HabitConceptDefinition,
-    HabitQuestionnaireService,
 )
 
 
 HABIT_PROFILE_API_PREFIX = "/product/habit-profile"
 PRODUCT_API_KEY_ENV = "SLEEPAGENT_PRODUCT_RADAR_API_KEY"
-RADAR_AGENT_DATABASE_URL_ENV = "SLEEPAGENT_RADAR_AGENT_DATABASE_URL"
-RADAR_AGENT_SQLITE_PATH_ENV = "SLEEPAGENT_RADAR_AGENT_SQLITE_PATH"
-DEFAULT_RADAR_AGENT_SQLITE_PATH = "/tmp/sleepagent_radar_agent.sqlite3"
-DEPLOYMENT_MODE_ENV = "SLEEPAGENT_DEPLOYMENT_MODE"
 
 router = APIRouter(prefix=HABIT_PROFILE_API_PREFIX, tags=["habit-profile"])
 
 
 def build_persistent_habit_profile_application(
     connection: sqlite3.Connection | None = None,
+    *,
+    human_decisions: Any | None = None,
 ) -> HabitProfileApplicationService:
+    """Compatibility facade over the canonical Product runtime factory."""
+
     production = (
         os.getenv(DEPLOYMENT_MODE_ENV, "development").strip().lower()
         == "production"
     )
+    persistence: RadarPersistenceStore | None = None
     if connection is not None:
         if production:
             raise RuntimeError(
                 "production Habit Profile authority cannot use SQLite"
             )
         persistence = RadarPersistenceStore.connect_sqlite(connection)
-    else:
-        database_url = os.getenv(RADAR_AGENT_DATABASE_URL_ENV)
-        if database_url:
-            lowered = database_url.strip().lower()
-            if production and (
-                lowered.startswith("sqlite")
-                or ":memory:" in lowered
-                or "/tmp/" in lowered
-            ):
-                raise RuntimeError(
-                    "production Habit Profile authority requires shared "
-                    "PostgreSQL storage"
-                )
-            persistence = connect_postgres_store(database_url)
-        else:
-            if production:
-                raise RuntimeError(
-                    "production Habit Profile authority requires "
-                    f"{RADAR_AGENT_DATABASE_URL_ENV}"
-                )
-            sqlite_path = Path(
-                os.getenv(
-                    RADAR_AGENT_SQLITE_PATH_ENV,
-                    DEFAULT_RADAR_AGENT_SQLITE_PATH,
-                )
-            )
-            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-            persistence = RadarPersistenceStore.connect_sqlite(
-                sqlite3.connect(
-                    sqlite_path,
-                    check_same_thread=False,
-                    timeout=30,
-                )
-            )
-    store = PersistentHabitProfileStore(persistence)
-    questionnaire = HabitQuestionnaireService(
-        state_store=PersistentHabitQuestionnaireStateStore(persistence)
-    )
-    return HabitProfileApplicationService(
-        runtime=HabitProfileRuntimeService(
-            questionnaire=questionnaire,
-            store=store,
-        ),
-        pending_store=PersistentHabitPendingChangeSetStore(persistence),
-    )
+    return build_product_runtime_bundle_from_env(
+        persistence_store=persistence,
+        human_decisions=human_decisions,
+    ).habit_application
 
 
-_APPLICATION = build_persistent_habit_profile_application()
+_RUNTIME_BUNDLE: ProductRuntimeBundle | None = None
+_APPLICATION: HabitProfileApplicationService | None = None
+
+
+def configure_habit_profile_runtime(bundle: ProductRuntimeBundle) -> None:
+    """Bind this transport to an already composed Product runtime bundle."""
+
+    global _APPLICATION, _RUNTIME_BUNDLE
+    _RUNTIME_BUNDLE = bundle
+    _APPLICATION = bundle.habit_application
+
+
+def _runtime_bundle() -> ProductRuntimeBundle:
+    if _RUNTIME_BUNDLE is None:
+        configure_habit_profile_runtime(build_product_runtime_bundle_from_env())
+    assert _RUNTIME_BUNDLE is not None
+    return _RUNTIME_BUNDLE
+
+
+def _application() -> HabitProfileApplicationService:
+    application = _runtime_bundle().habit_application
+    if _APPLICATION is not application:
+        raise RuntimeError("Habit Profile application/runtime binding drift")
+    return application
 
 
 def reset_habit_profile_api_for_tests(
     connection: sqlite3.Connection | None = None,
 ) -> None:
-    global _APPLICATION
-    _APPLICATION = (
-        HabitProfileApplicationService()
-        if connection is None
-        else build_persistent_habit_profile_application(connection)
+    test_connection = (
+        connection
+        if connection is not None
+        else sqlite3.connect(
+            ":memory:",
+            check_same_thread=False,
+        )
+    )
+    persistence = RadarPersistenceStore.connect_sqlite(test_connection)
+    configure_habit_profile_runtime(
+        build_product_runtime_bundle_from_env(
+            persistence_store=persistence,
+        )
     )
 
 
@@ -181,25 +166,14 @@ Binding = Annotated[AuthenticatedBinding, Depends(_authenticated_binding)]
 
 @router.get("/availability")
 async def habit_profile_availability() -> dict[str, object]:
+    persistent = _runtime_bundle().persistence_store is not None
     return {
         "application_version": HABIT_APPLICATION_VERSION,
         "explicit_user_flows_enabled": True,
         "default_proactive_intake_enabled": False,
-        "confirmed_profile_storage": (
-            "database"
-            if isinstance(
-                _APPLICATION.runtime.store,
-                PersistentHabitProfileStore,
-            )
-            else "in_memory_test"
-        ),
+        "confirmed_profile_storage": "database" if persistent else "in_memory_test",
         "confirmed_question_suppression_storage": (
-            "database"
-            if isinstance(
-                _APPLICATION.runtime.questionnaire.state_store,
-                PersistentHabitQuestionnaireStateStore,
-            )
-            else "in_memory_test"
+            "database" if persistent else "in_memory_test"
         ),
         "release_gate": "requires_real_3_to_5_participant_usability_report",
     }
@@ -222,7 +196,7 @@ async def start_habit_interaction(
     payload: HabitInteractionStartRequest,
     binding: Binding,
 ) -> HabitInteractionStartResponse:
-    return _call(_APPLICATION.start, payload, binding=binding)
+    return _call(_application().start, payload, binding=binding)
 
 
 @router.post(
@@ -233,7 +207,7 @@ async def submit_habit_answers(
     payload: HabitAnswerSubmitRequest,
     binding: Binding,
 ) -> HabitAnswerSubmitResponse:
-    return _call(_APPLICATION.submit, payload, binding=binding)
+    return _call(_application().submit, payload, binding=binding)
 
 
 @router.post(
@@ -244,7 +218,11 @@ async def build_observer_proposal(
     payload: HabitObserverProposalRequest,
     binding: Binding,
 ) -> HabitPendingChangeSet:
-    return _call(_APPLICATION.build_observer_proposal, payload, binding=binding)
+    return _call(
+        _application().build_observer_proposal,
+        payload,
+        binding=binding,
+    )
 
 
 @router.get("", response_model=HabitProfileReadResult)
@@ -266,7 +244,7 @@ async def read_habit_profile(
             detail="Collaborative Profile reads require explicit concept_id.",
         )
     return _call(
-        _APPLICATION.read_profile,
+        _application().read_profile,
         binding=binding,
         purpose=purpose,
         requested_concept_ids=tuple(concept_id or ()),
@@ -279,7 +257,7 @@ async def request_habit_forget(
     payload: HabitForgetRequest,
     binding: Binding,
 ) -> HabitPendingChangeSet:
-    return _call(_APPLICATION.request_forget, payload, binding=binding)
+    return _call(_application().request_forget, payload, binding=binding)
 
 
 @router.post("/confirm", response_model=HabitCommitResponse)
@@ -287,7 +265,7 @@ async def confirm_habit_change_set(
     payload: HabitChangeSetConfirmRequest,
     binding: Binding,
 ) -> HabitCommitResponse:
-    return _call(_APPLICATION.confirm, payload, binding=binding)
+    return _call(_application().confirm, payload, binding=binding)
 
 
 @router.post("/change-sets/prune", response_model=HabitPendingChangeSet)
@@ -295,7 +273,7 @@ async def prune_habit_change_set(
     payload: HabitChangeSetPruneRequest,
     binding: Binding,
 ) -> HabitPendingChangeSet:
-    return _call(_APPLICATION.prune_change_set, payload, binding=binding)
+    return _call(_application().prune_change_set, payload, binding=binding)
 
 
 def _call(function, *args, **kwargs):
@@ -313,6 +291,7 @@ __all__ = [
     "HABIT_PROFILE_API_PREFIX",
     "PRODUCT_API_KEY_ENV",
     "build_persistent_habit_profile_application",
+    "configure_habit_profile_runtime",
     "reset_habit_profile_api_for_tests",
     "router",
 ]

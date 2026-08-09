@@ -28,8 +28,14 @@ from sleepagent.radar_agent.product_agent.acceptance import (
 )
 from sleepagent.radar_agent.product_agent.registry import product_agent_manifest
 from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunner
+from sleepagent.radar_agent.product_agent.skills import (
+    SkillRegistry,
+    default_skill_packages,
+)
+import sleepagent.radar_agent.product_agent.runtime_factory as runtime_factory
 from sleepagent.radar_agent.product_agent.runtime_factory import (
     build_product_episode_runner_from_env,
+    build_product_runtime_bundle,
     product_episode_runner_is_configured,
 )
 
@@ -44,11 +50,13 @@ class NeverCalledModel:
 
 def build_roster() -> ProductAgentRoster:
     model = NeverCalledModel()
+    registry = SkillRegistry(default_skill_packages())
     return ProductAgentFactory.create(
         sleepcare_model=model,
         evidence_reasoning_model=model,
         care_strategy_model=model,
         safety_review_model=model,
+        skill_registry=registry,
     )
 
 
@@ -97,10 +105,10 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         item.value for item in PRODUCT_AGENT_ROSTER
     )
     assert stable_hash(product_agent_manifest()) == (
-        "bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22"
+        "2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3"
     )
     assert current_acceptance_release_identity().identity_hash == (
-        "02d4eff71d5d208288133237e6846da72ba45e984ac081e16544c90e47d344ae"
+        "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45"
     )
     assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
 
@@ -140,7 +148,7 @@ def test_concrete_roles_declare_distinct_context_and_permission_boundaries() -> 
 
 
 def test_runner_delegates_provider_calls_through_typed_agent_port() -> None:
-    runner = ProductEpisodeRunner(agent_roster=build_roster())
+    runner = build_product_runtime_bundle(agent_roster=build_roster()).runner
     assert tuple(runner.agent_roster.as_mapping()) == PRODUCT_AGENT_ROSTER
     source = inspect.getsource(ProductEpisodeRunner._invoke_and_accept)
     assert "agent.bind(" in source
@@ -153,7 +161,7 @@ def test_runner_delegates_provider_calls_through_typed_agent_port() -> None:
 
 def test_runner_configuration_probe_requires_exact_concrete_roster() -> None:
     assert not product_episode_runner_is_configured(object())  # type: ignore[arg-type]
-    runner = ProductEpisodeRunner(agent_roster=build_roster())
+    runner = build_product_runtime_bundle(agent_roster=build_roster()).runner
     assert product_episode_runner_is_configured(runner)
     runner.agent_roster = None  # type: ignore[assignment]
     assert not product_episode_runner_is_configured(runner)
@@ -169,8 +177,38 @@ def test_runner_configuration_probe_requires_exact_concrete_roster() -> None:
     assert not product_episode_runner_is_configured(duck_runner)  # type: ignore[arg-type]
 
 
-def test_production_factory_explicitly_constructs_concrete_roles() -> None:
-    source = inspect.getsource(build_product_episode_runner_from_env)
-    assert "ProductAgentFactory.create(" in source
-    assert "agent_models=" not in source
-    assert "for agent_id in AgentId" not in source
+def test_runner_requires_the_complete_runtime_graph() -> None:
+    with pytest.raises(TypeError):
+        ProductEpisodeRunner(agent_roster=build_roster())  # type: ignore[call-arg]
+
+    signature = inspect.signature(ProductEpisodeRunner)
+    legacy_arguments = {
+        "agent_models",
+        "invokers",
+        "model",
+        "sleepcare_model",
+        "source_resolvers",
+    }
+    assert legacy_arguments.isdisjoint(signature.parameters)
+    assert all(
+        parameter.default is inspect.Parameter.empty
+        for parameter in signature.parameters.values()
+    )
+    assert all(
+        parameter.kind
+        not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+        for parameter in signature.parameters.values()
+    )
+
+
+def test_runner_compatibility_factory_returns_the_canonical_bundle_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(
+        runtime_factory,
+        "build_product_runtime_bundle_from_env",
+        lambda **_kwargs: SimpleNamespace(runner=sentinel),
+    )
+
+    assert build_product_episode_runner_from_env() is sentinel

@@ -13,6 +13,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
     SourceScopeKind,
 )
 from sleepagent.radar_agent.product_agent.tooling import (
+    CoreProductToolService,
     ProductToolExecutionContext,
     ProductToolExecutor,
 )
@@ -206,7 +207,9 @@ def test_radar_data_adapter_rejects_quality_summary_subject_mismatch() -> None:
 
 
 def test_product_night_evidence_tool_rejects_cross_subject_canonical_facts() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_night_evidence",
         {
             "data": _product_facts(subject_id="different-subject").model_dump(
@@ -225,7 +228,9 @@ def test_product_night_evidence_tool_rejects_cross_subject_canonical_facts() -> 
 
 
 def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_night_evidence",
         {
             "data": _product_facts().model_dump(mode="json"),
@@ -244,7 +249,9 @@ def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() ->
 
 
 def test_agent_cannot_promote_caller_supplied_generic_radar_payload() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_night_evidence",
         {
             "data": {"total_sleep_minutes": 999},
@@ -262,7 +269,9 @@ def test_agent_cannot_promote_caller_supplied_generic_radar_payload() -> None:
 
 
 def test_agent_cannot_submit_even_well_formed_canonical_radar_facts() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_night_evidence",
         {
             "data": _product_facts().model_dump(mode="json"),
@@ -280,7 +289,9 @@ def test_agent_cannot_submit_even_well_formed_canonical_radar_facts() -> None:
 
 
 def test_runtime_canonical_radar_facts_require_complete_typed_payload() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_night_evidence",
         {
             "data": {
@@ -300,7 +311,9 @@ def test_runtime_canonical_radar_facts_require_complete_typed_payload() -> None:
 
 
 def test_product_quality_tool_preserves_pinned_fail_closed_assessment() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.assess_data_quality",
         {
             "coverage_ratio": 0.99,
@@ -332,7 +345,9 @@ def test_product_quality_tool_preserves_pinned_fail_closed_assessment() -> None:
 
 
 def test_agent_cannot_self_attest_pinned_quality_policy() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.assess_data_quality",
         {
             "data": {
@@ -356,7 +371,9 @@ def test_agent_cannot_self_attest_pinned_quality_policy() -> None:
 
 
 def test_quality_tool_rejects_source_outside_fact_snapshot() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.assess_data_quality",
         {
             "coverage_ratio": 0.95,
@@ -373,7 +390,9 @@ def test_quality_tool_rejects_source_outside_fact_snapshot() -> None:
 
 def test_product_device_status_tool_uses_typed_canonical_projection() -> None:
     facts = _product_facts()
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_device_status",
         facts.tool_inputs()["radar.get_device_status"],
         context=ProductToolExecutionContext(
@@ -394,7 +413,9 @@ def test_product_device_status_tool_uses_typed_canonical_projection() -> None:
 
 
 def test_product_device_status_rejects_unbound_source() -> None:
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "radar.get_device_status",
         {
             "data": {

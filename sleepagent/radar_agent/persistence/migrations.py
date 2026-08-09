@@ -42,6 +42,9 @@ def split_sql_statements(sql: str = RADAR_AGENT_POSTGRES_MIGRATION_SQL) -> list[
     start = 0
     index = 0
     single_quoted = False
+    double_quoted = False
+    line_comment = False
+    block_comment_depth = 0
     dollar_tag: str | None = None
     while index < len(sql):
         if dollar_tag is not None:
@@ -52,6 +55,22 @@ def split_sql_statements(sql: str = RADAR_AGENT_POSTGRES_MIGRATION_SQL) -> list[
             index += 1
             continue
         character = sql[index]
+        if line_comment:
+            if character in "\r\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment_depth:
+            if sql.startswith("/*", index):
+                block_comment_depth += 1
+                index += 2
+                continue
+            if sql.startswith("*/", index):
+                block_comment_depth -= 1
+                index += 2
+                continue
+            index += 1
+            continue
         if single_quoted:
             if character == "'" and index + 1 < len(sql) and sql[index + 1] == "'":
                 index += 2
@@ -60,8 +79,28 @@ def split_sql_statements(sql: str = RADAR_AGENT_POSTGRES_MIGRATION_SQL) -> list[
                 single_quoted = False
             index += 1
             continue
+        if double_quoted:
+            if character == '"' and index + 1 < len(sql) and sql[index + 1] == '"':
+                index += 2
+                continue
+            if character == '"':
+                double_quoted = False
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            line_comment = True
+            index += 2
+            continue
+        if sql.startswith("/*", index):
+            block_comment_depth = 1
+            index += 2
+            continue
         if character == "'":
             single_quoted = True
+            index += 1
+            continue
+        if character == '"':
+            double_quoted = True
             index += 1
             continue
         if character == "$":

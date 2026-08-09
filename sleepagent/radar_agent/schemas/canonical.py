@@ -393,7 +393,11 @@ class RoleReportArtifact(RadarAgentSchema):
 
 
 class HumanConfirmationRequest(RadarAgentSchema):
+    """Read-only task projection of one authoritative HumanDecisionRequest."""
+
     confirmation_id: str = Field(..., min_length=1)
+    decision_id: str = Field(..., min_length=1)
+    decision_revision: int = Field(default=0, ge=0)
     task_id: str = Field(..., min_length=1)
     action_type: str = Field(..., min_length=1)
     requested_role: Literal["elder", "family", "doctor", "system"]

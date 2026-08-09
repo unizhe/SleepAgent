@@ -3,16 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable, Literal
-
-from pydantic import Field
+from typing import Any
 
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
-    FactSnapshot,
     InvocationOutcome,
     MultifactorSafetyInput,
-    StrictContract,
     ToolEffect,
     ToolReceipt,
     TrustLabel,
@@ -23,8 +19,14 @@ from sleepagent.radar_agent.product_agent.online_reasoning import (
     fuse_multifactor_safety,
 )
 from sleepagent.radar_agent.product_agent.registry import (
+    RUNTIME_INTERACTION_TOOLS,
     TOOL_DEFINITIONS,
     authorize_tool_invocation,
+)
+from sleepagent.radar_agent.product_agent.runtime_ports import (
+    ProductToolExecutionContext,
+    ProductToolResult,
+    ToolHandler,
 )
 from sleepagent.radar_agent.product_agent.policies.risk import (
     RISK_POLICY_VERSION,
@@ -57,7 +59,7 @@ from sleepagent.radar_agent.product_agent.tools.radar_data import (
 from sleepagent.radar_agent.schemas import RadarNightSummary
 
 
-PRODUCT_TOOL_RUNTIME_VERSION = "sleepagent-product-tools.v8"
+PRODUCT_TOOL_RUNTIME_VERSION = "sleepagent-product-tools.v11"
 
 _RUNTIME_BOUND_SELECTOR_TOOLS = frozenset(
     {
@@ -77,71 +79,44 @@ class ProductToolError(RuntimeError):
     pass
 
 
-class ProductToolExecutionContext(StrictContract):
-    caller: AgentId | str
-    fact_snapshot: FactSnapshot
-    authorization_scope: tuple[str, ...] = ()
-    episode_id: str | None = None
-    plan_id: str | None = None
-    plan_revision: int | None = Field(default=None, ge=0)
-    allowed_plan_step_ids: tuple[str, ...] = ()
-    plan_step_id: str | None = None
-    invocation_id: str = Field(default="runtime:unbound", min_length=1)
-    user_intent_ref: str | None = None
-    user_intent_hash: str | None = Field(
-        default=None,
-        pattern=r"^[0-9a-f]{64}$",
-    )
-    user_intent_purpose: Literal[
-        "explicit_memory_review",
-        "explicit_memory_change",
-        "explicit_memory_forget",
-    ] | None = None
-    max_memory_items: int = Field(default=8, ge=1, le=20)
-    memory_token_budget: int = Field(default=1200, ge=64, le=4000)
-
-
-class ProductToolResult(StrictContract):
-    receipt: ToolReceipt
-    context_item: TrustedContextItem | None = None
-
-
-ToolHandler = Callable[[dict[str, Any], ProductToolExecutionContext], dict[str, Any]]
-
-
 class ProductToolExecutor:
-    """Deny-by-default execution for deterministic tools.
+    """Deny-by-default execution for deterministic Product capabilities.
 
-    Model Agents can request only registered read capabilities. Mutations remain
-    reserved for the deterministic Commit Controller.
+    Model Agents can request only registered read capabilities. The two
+    questionnaire interaction commands are runtime-only state transitions;
+    shared Product mutations remain reserved for the Commit Controller.
     """
 
-    def __init__(self, handlers: dict[str, ToolHandler] | None = None) -> None:
-        self.handlers = ExistingCapabilityToolHandlers().handlers()
+    def __init__(
+        self,
+        handlers: dict[str, ToolHandler] | None = None,
+        *,
+        core_service: CoreProductToolService,
+    ) -> None:
+        self.core_service = core_service
+        self.handlers = self.core_service.handlers()
         self._runtime_bound_outputs: dict[
             tuple[str, str, str, str], dict[str, Any]
         ] = {}
         self._runtime_bound_lock = RLock()
+        self._runtime_interaction_results: dict[
+            tuple[str, str, str, str], tuple[str, ProductToolResult]
+        ] = {}
+        self._runtime_interaction_lock = RLock()
         for tool_name, handler in (handlers or {}).items():
             self.register_handler(tool_name, handler)
 
     def register_handler(self, tool_name: str, handler: ToolHandler) -> None:
         if tool_name not in TOOL_DEFINITIONS:
             raise ProductToolError(f"unknown Product tool: {tool_name}")
-        if TOOL_DEFINITIONS[tool_name].effect != ToolEffect.READ_ONLY:
-            raise ProductToolError("only read capabilities can register handlers")
-        if tool_name == "memory.read":
-            from sleepagent.radar_agent.product_agent.longitudinal_memory import (
-                LongitudinalMemoryService,
+        definition = TOOL_DEFINITIONS[tool_name]
+        if (
+            definition.effect != ToolEffect.READ_ONLY
+            and tool_name not in RUNTIME_INTERACTION_TOOLS
+        ):
+            raise ProductToolError(
+                "only read or runtime-interaction capabilities register handlers"
             )
-
-            if not isinstance(
-                getattr(handler, "__self__", None),
-                LongitudinalMemoryService,
-            ):
-                raise ProductToolError(
-                    "memory.read must use LongitudinalMemoryService.read"
-                )
         self.handlers[tool_name] = handler
 
     def execute(
@@ -153,14 +128,103 @@ class ProductToolExecutor:
     ) -> ProductToolResult:
         authorize_tool_invocation(context.caller, tool_name)
         definition = TOOL_DEFINITIONS[tool_name]
-        if definition.effect != ToolEffect.READ_ONLY:
+        if (
+            definition.effect != ToolEffect.READ_ONLY
+            and tool_name not in RUNTIME_INTERACTION_TOOLS
+        ):
             raise ProductToolError(
                 "state changes must use DeterministicCommitController"
+            )
+        if (
+            tool_name in RUNTIME_INTERACTION_TOOLS
+            and context.caller != "runtime"
+        ):
+            raise ProductToolError(
+                "questionnaire interaction commands are runtime-only"
             )
         handler = self.handlers.get(tool_name)
         if handler is None:
             raise ProductToolError(f"no handler registered for {tool_name}")
         input_hash = stable_hash(arguments)
+        if tool_name in RUNTIME_INTERACTION_TOOLS:
+            if not context.episode_id:
+                raise ProductToolError(
+                    "runtime interaction command requires an Episode id"
+                )
+            interaction_identity_hash = _runtime_interaction_identity_hash(
+                tool_name,
+                arguments,
+            )
+            interaction_payload_hash = _runtime_interaction_payload_hash(
+                tool_name,
+                arguments,
+            )
+            interaction_key = (
+                context.episode_id,
+                context.fact_snapshot.fact_snapshot_hash,
+                tool_name,
+                interaction_identity_hash,
+            )
+            idempotency_key = (
+                "runtime-interaction:"
+                + stable_hash(
+                    {
+                        "episode_id": interaction_key[0],
+                        "fact_snapshot_hash": interaction_key[1],
+                        "tool_name": interaction_key[2],
+                        "interaction_identity_hash": interaction_key[3],
+                    }
+                )
+            )
+            with self._runtime_interaction_lock:
+                cached = self._runtime_interaction_results.get(interaction_key)
+                if cached is not None:
+                    if cached[0] != interaction_payload_hash:
+                        return self._runtime_interaction_conflict(
+                            tool_name,
+                            context=context,
+                            input_hash=interaction_payload_hash,
+                            idempotency_key=idempotency_key,
+                        )
+                    if not _runtime_interaction_cache_expired(
+                        tool_name,
+                        cached[1],
+                        arguments=arguments,
+                    ):
+                        return cached[1].model_copy(deep=True)
+                    del self._runtime_interaction_results[interaction_key]
+                result = self._execute_once(
+                    tool_name,
+                    arguments,
+                    context=context,
+                    input_hash=interaction_payload_hash,
+                    idempotency_key=idempotency_key,
+                )
+                if result.receipt.outcome == InvocationOutcome.SUCCEEDED:
+                    self._runtime_interaction_results[interaction_key] = (
+                        interaction_payload_hash,
+                        result.model_copy(deep=True),
+                    )
+                return result
+        return self._execute_once(
+            tool_name,
+            arguments,
+            context=context,
+            input_hash=input_hash,
+            idempotency_key=None,
+        )
+
+    def _execute_once(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        context: ProductToolExecutionContext,
+        input_hash: str,
+        idempotency_key: str | None,
+    ) -> ProductToolResult:
+        definition = TOOL_DEFINITIONS[tool_name]
+        handler = self.handlers[tool_name]
         try:
             if (
                 isinstance(context.caller, AgentId)
@@ -203,7 +267,7 @@ class ProductToolExecutor:
         receipt = ToolReceipt(
             tool_invocation_id=f"tool:{tool_name}:{input_hash[:16]}",
             tool_name=tool_name,
-            tool_version=f"{tool_name}.v1",
+            tool_version=f"{tool_name}.{definition.version}",
             caller=(
                 context.caller.value
                 if isinstance(context.caller, AgentId)
@@ -212,11 +276,12 @@ class ProductToolExecutor:
             fact_snapshot_id=context.fact_snapshot.fact_snapshot_id,
             fact_snapshot_hash=context.fact_snapshot.fact_snapshot_hash,
             input_hash=input_hash,
-            effect=ToolEffect.READ_ONLY,
+            effect=definition.effect,
             outcome=outcome,
             observed_at=datetime.now(timezone.utc),
             output=output,
             source_refs=list(output.get("source_refs", [])),
+            idempotency_key=idempotency_key,
             error_code=error_code,
         )
         if (
@@ -243,6 +308,32 @@ class ProductToolExecutor:
         )
         return ProductToolResult(receipt=receipt, context_item=item)
 
+    @staticmethod
+    def _runtime_interaction_conflict(
+        tool_name: str,
+        *,
+        context: ProductToolExecutionContext,
+        input_hash: str,
+        idempotency_key: str,
+    ) -> ProductToolResult:
+        definition = TOOL_DEFINITIONS[tool_name]
+        receipt = ToolReceipt(
+            tool_invocation_id=f"tool:{tool_name}:{input_hash[:16]}",
+            tool_name=tool_name,
+            tool_version=f"{tool_name}.{definition.version}",
+            caller="runtime",
+            fact_snapshot_id=context.fact_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=context.fact_snapshot.fact_snapshot_hash,
+            input_hash=input_hash,
+            effect=definition.effect,
+            outcome=InvocationOutcome.FAILED,
+            observed_at=datetime.now(timezone.utc),
+            output={},
+            idempotency_key=idempotency_key,
+            error_code="RuntimeInteractionPayloadConflict",
+        )
+        return ProductToolResult(receipt=receipt, context_item=None)
+
     def release_episode(self, episode_id: str) -> None:
         """Release transient Tool outputs after an Episode becomes terminal."""
 
@@ -254,6 +345,14 @@ class ProductToolExecutor:
             ]
             for key in keys:
                 del self._runtime_bound_outputs[key]
+        with self._runtime_interaction_lock:
+            interaction_keys = [
+                key
+                for key in self._runtime_interaction_results
+                if key[0] == episode_id
+            ]
+            for key in interaction_keys:
+                del self._runtime_interaction_results[key]
 
     def runtime_binding_count(self, episode_id: str) -> int:
         """Expose a bounded diagnostic for cache lifecycle tests."""
@@ -264,8 +363,8 @@ class ProductToolExecutor:
             )
 
 
-class ExistingCapabilityToolHandlers:
-    """Adapters for capabilities formerly misclassified as child Agents."""
+class CoreProductToolService:
+    """Real deterministic owners for stateless Product read capabilities."""
 
     def handlers(self) -> dict[str, ToolHandler]:
         return {
@@ -278,29 +377,7 @@ class ExistingCapabilityToolHandlers:
             "radar.get_night_evidence": CanonicalRadarEvidenceTool.read,
             "radar.get_range_evidence": CanonicalRadarEvidenceTool.read,
             "knowledge.retrieve_reviewed": self._reviewed_knowledge,
-            "evidence.read_ledger": self._passthrough,
-            "care.read_state": self._passthrough,
-            "care.read_catalog": self._passthrough,
-            "care.read_constraints": self._passthrough,
-            "care.read_feedback": self._passthrough,
-            "questionnaire.select": self._passthrough,
-            "artifact.read": self._passthrough,
             "artifact.render": self._render,
-            "memory.compare": self._memory_compare,
-            "coordination.read_policy": self._passthrough,
-            "coordination.read_schedule": self._passthrough,
-            "device.read_delivery_policy": self._passthrough,
-            "policy.read": self._passthrough,
-            "confirmation.validate": self._passthrough,
-        }
-
-    @staticmethod
-    def _passthrough(
-        arguments: dict[str, Any], context: ProductToolExecutionContext
-    ) -> dict[str, Any]:
-        return {
-            "data": arguments.get("data", {}),
-            "source_refs": list(arguments.get("source_refs", [])),
         }
 
     @staticmethod
@@ -669,21 +746,6 @@ class ExistingCapabilityToolHandlers:
             "artifact.render requires a FactSnapshot-bound typed request"
         )
 
-    @staticmethod
-    def _memory_compare(
-        arguments: dict[str, Any], context: ProductToolExecutionContext
-    ) -> dict[str, Any]:
-        current = arguments.get("current")
-        candidate = arguments.get("candidate")
-        return {
-            "same": current == candidate,
-            "semantic_conflict_candidate": (
-                current is not None and candidate is not None and current != candidate
-            ),
-            "source_refs": list(arguments.get("source_refs", [])),
-        }
-
-
 def _subject_matches_snapshot(
     *,
     canonical_subject: str,
@@ -728,12 +790,112 @@ def context_item_from_tool_receipt(receipt: ToolReceipt) -> TrustedContextItem:
     )
 
 
+def _runtime_interaction_identity_hash(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    if tool_name == "questionnaire.select_profile":
+        request = arguments.get("request")
+        if isinstance(request, dict):
+            material = {
+                key: request.get(key)
+                for key in (
+                    "request_id",
+                    "episode_id",
+                    "subject_id",
+                    "actor_id",
+                    "role",
+                    "plan_id",
+                    "plan_revision",
+                    "plan_step_id",
+                )
+            }
+        else:
+            material = {"request": request}
+    elif tool_name == "questionnaire.capture_profile":
+        selection = arguments.get("selection")
+        if isinstance(selection, dict):
+            material = {
+                key: selection.get(key)
+                for key in (
+                    "selection_id",
+                    "episode_id",
+                    "subject_id",
+                    "actor_id",
+                    "role",
+                )
+            }
+        else:
+            material = {"selection": selection}
+    else:  # pragma: no cover - guarded by the frozen interaction allowlist.
+        material = arguments
+    return stable_hash({"tool_name": tool_name, "identity": material})
+
+
+def _runtime_interaction_payload_hash(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    material = deepcopy(arguments)
+    material.pop("_now", None)
+    if tool_name == "questionnaire.select_profile":
+        request = material.get("request")
+        if isinstance(request, dict):
+            request.pop("remaining_episode_budget", None)
+    return stable_hash(material)
+
+
+def _runtime_interaction_cache_expired(
+    tool_name: str,
+    result: ProductToolResult,
+    *,
+    arguments: dict[str, Any],
+) -> bool:
+    if tool_name != "questionnaire.capture_profile":
+        return False
+    capture = result.receipt.output.get("capture")
+    if not isinstance(capture, dict):
+        return True
+    try:
+        read_at = _runtime_interaction_read_at(arguments)
+        expiries = [
+            item["episode_valid_until"]
+            for item in capture.get("answers", ())
+        ] + [
+            item["valid_until"]
+            for item in capture.get("safety_events", ())
+        ]
+        return any(_parse_runtime_time(item) <= read_at for item in expiries)
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
+def _runtime_interaction_read_at(arguments: dict[str, Any]) -> datetime:
+    value = arguments.get("_now")
+    if value is None:
+        return datetime.now(timezone.utc)
+    return _parse_runtime_time(value)
+
+
+def _parse_runtime_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise TypeError("runtime interaction time must be datetime or ISO string")
+    if parsed.tzinfo is None:
+        raise ValueError("runtime interaction time must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
 __all__ = [
+    "CoreProductToolService",
     "PRODUCT_TOOL_RUNTIME_VERSION",
-    "ExistingCapabilityToolHandlers",
     "ProductToolError",
     "ProductToolExecutionContext",
     "ProductToolExecutor",
     "ProductToolResult",
+    "ToolHandler",
     "context_item_from_tool_receipt",
 ]

@@ -2,8 +2,8 @@
 
 These files are collection slots, not release evidence. They are bound to:
 
-- release identity: `e2d721ca0d8906bf9fd53ab7844e4f49a5b892acf0ad14675471c1ed14c689d2`
-- Habit catalog: `a75aa424e3260f042b65be82dbd45600d370515b073d8d17f31e69c539f44ae1`
+- release identity: `7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`
+- Habit catalog: `d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903`
 
 Do not promote a placeholder by changing `evidence_kind`. Replace it with data
 from an actually observed 60+ participant session, an actual named professional

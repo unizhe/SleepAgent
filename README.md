@@ -21,18 +21,22 @@ SleepAgent 是面向居家老人、家属和医生协同场景的睡眠健康观
 - 渐进式 Habit Profile 作为 Questionnaire、类型化 Profile Store、Evidence adapter 和 Commit Controller 能力融入该内核，不新增 Agent；旧自由文本 Memory 和 family-only legacy writer 不是 Habit Profile 写入路径。
 - `sleepagent/product_device/` 只提供设备数据与产品适配 API，不得拥有独立 Agent 身份或 alias。
 - `sleepagent/integrations/perceptor/` 提供供应商 client、签名、统一 push/pull 规范化和真实验收合同；旧本地 webhook SQLite 仅用于显式诊断与一次性导入。
-- `backend/main.py` 保留健康状态、canonical Product Episode 诊断与非 Agent 数据入口，不再启动或路由旧 Agent Runtime。
+- `backend/main.py` 只按显式 profile 挂载模块化产品、公共、内部与健康状态入口，不再切换 legacy 应用。
 - `frontend/` 是唯一保留的 Next.js 用户界面。
 
 `sleepagent/radar_agent/` 中的旧角色只可作为能力迁移来源；禁止新增调用方，并将在收口阶段删除其可执行入口和身份。
 
 ## 快速启动
 
-要求 Python 3.10+ 和 Node.js。创建环境文件并安装依赖：
+要求 CPython 3.11.x 和 Node.js。创建环境文件，并从 hash lock 安装第三方
+依赖后再安装项目本身：
 
 ```bash
 cp .env.example .env
-python -m pip install -e .
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements/dev.lock
+python -m pip install --no-deps .
 cd frontend
 npm ci
 cd ..
@@ -125,14 +129,16 @@ Perceptor 边界详见 [接入说明](docs/PERCEPTOR_INTEGRATION.md)。
 receipt 逐项替换。审计器也可直接接收受限 ZIP；当前
 Product Agent v23 的采集骨架位于
 [`sleep_habit_profile/real-evidence-v23-collection`](sleep_habit_profile/real-evidence-v23-collection)，
-并绑定 release identity `e2d721ca…c689d2`；其中仍是 template，
+并绑定 release identity `7ece3929…424f45`；其中仍是 template，
 审计结果必须保持不可发布，直至真实材料完成。旧
-`sleepagent-v15-complete-simulated-evidence.zip` 保留为绑定旧 v15
-identity 的完整模拟 fixture，不会进入当前 v23 正式 manifest。
+[`simulated-evidence-v15-20260726-132754`](sleep_habit_profile/simulated-evidence-v15-20260726-132754)
+目录保留为绑定旧 v15 identity 的历史模板 fixture，不会进入当前 v23
+正式 manifest。
 历史习惯画像 v18 的完整模拟 fixture 位于
 [`sleep_habit_profile/simulated-evidence-v18-complete`](sleep_habit_profile/simulated-evidence-v18-complete)，
-并归档为 `sleepagent-v18-complete-simulated-evidence.zip`（SHA-256
-`8dc3e39f55c76cfb1eb72053e68784a24fb6f0b29eb4ab5487e790b83c7ebea9`）。
+测试会从该 canonical 目录确定性生成临时 ZIP（SHA-256
+`f6ba6d212692b908f7e5fc5259348611828c3a9601f787d5887c1a5a0d1c4f70`）；
+ZIP 不纳入版本库，测试也不读取仓库根目录的本地 ZIP。
 它包含 5 条模拟可用性观察、10 条模拟 catalog 审核和 68 条合成
 provider receipt 形状，只用于开发与审计器验证，不能作为真实发布证据。
 机器可读的完整覆盖与文件哈希清单位于
@@ -140,6 +146,8 @@ provider receipt 形状，只用于开发与审计器验证，不能作为真实
 固定证明 5 条观察、1 份 synthetic attestation、2 名虚构审核角色、
 10 个 concept、68 条场景观测、66 份 synthetic provider receipt/request
 ID 和 2 条无 receipt 的确定性观测。
+当前 22-concept catalog 的模拟 fixture 与相同的生成约束记录在
+[`SIMULATION-COVERAGE-v24.json`](sleep_habit_profile/SIMULATION-COVERAGE-v24.json)。
 旧 `real-evidence-v18-collection` 与 `real-evidence-v20-collection`
 只保留为历史模板，不能继续采集或升级到当前 identity。v23 骨架中的所有
 `template` 槽位都必须用实际会话、真实签字或真实 provider receipt
@@ -147,7 +155,7 @@ ID 和 2 条无 receipt 的确定性观测。
 签字/receipt 交接规则见
 [`REAL-EVIDENCE-COLLECTION-RUNBOOK.md`](sleep_habit_profile/REAL-EVIDENCE-COLLECTION-RUNBOOK.md)。
 
-安装 editable package 后可使用：
+安装项目后可使用：
 
 ```bash
 radar-agent run-demo --scenario normal_night --format pretty
@@ -161,8 +169,10 @@ radar-agent inspect-task <task_id> --decision-trace --format pretty
 已确认的 Habit Profile 复用同一个
 `SLEEPAGENT_RADAR_AGENT_DATABASE_URL`/`SLEEPAGENT_RADAR_AGENT_SQLITE_PATH`
 数据库，通过 `003_habit_profile` 迁移持久化；未确认 change set 仍只在
-当前进程短时保留，重启后要求重新汇总确认。经单独确认的“以后不要再问”
-偏好通过 `004_habit_question_suppression` 以最小字段持久化；普通跳过和
+当前进程短时保留，重启后要求重新汇总确认。老人以独立 typed acknowledgement
+直接确认的“以后不要再问”偏好通过 `004_habit_question_suppression` 以最小字段
+持久化；服务端从已认证 selection/answer 生成 opt-out command ref，不接受 caller
+confirmation 字符串。普通跳过和
 未确认回答仍不形成长期画像。`005_habit_questionnaire_state` 持久化
 Episode 三题预算、短期 selection receipt/消费状态和 actor 级跨 Episode
 冷却，使重启或并发请求不能重置采集边界。

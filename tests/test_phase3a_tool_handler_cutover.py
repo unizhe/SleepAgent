@@ -4,19 +4,22 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     AuthenticatedBinding,
+    EvidencePacket as ProductEvidencePacket,
     FactSnapshot,
     InvocationOutcome,
-    ProductToolExecutionContext,
-    ProductToolExecutor,
+    MultifactorSafetyInput,
     SourceScope,
     SourceScopeKind,
 )
-from sleepagent.radar_agent.product_agent.contracts import (
-    EvidencePacket as ProductEvidencePacket,
-    MultifactorSafetyInput,
+from sleepagent.radar_agent.product_agent.runtime_ports import (
+    ProductToolExecutionContext,
+)
+from sleepagent.radar_agent.product_agent.tooling import (
+    CoreProductToolService,
+    ProductToolExecutor,
 )
 from sleepagent.radar_agent.schemas import (
     ContextPacket,
@@ -53,7 +56,7 @@ def test_agent_cannot_self_attest_risk_facts() -> None:
         fact_snapshot=_snapshot(),
         episode_id="episode-phase3a-handler",
     )
-    executor = ProductToolExecutor()
+    executor = ProductToolExecutor(core_service=CoreProductToolService())
 
     risk = executor.execute(
         "risk.classify_signal",
@@ -415,7 +418,9 @@ def test_agent_cannot_submit_typed_artifact_fact_payload() -> None:
         ),
         evidence_packet=EvidencePacket(evidence_ledger=ledger),
     )
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "artifact.render",
         {
             "context": packet.model_dump(mode="json"),
@@ -483,7 +488,9 @@ def _execute(
                 episode_id = task_context.get("task_id")
     if episode_id is None:
         episode_id = "episode-phase3a-handler"
-    return ProductToolExecutor().execute(
+    return ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         tool_name,
         arguments,
         context=ProductToolExecutionContext(

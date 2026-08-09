@@ -163,6 +163,18 @@ from sleepagent.sleep_domain.registry import (
     perceptor_v1_descriptor,
     perceptor_v1_registration,
 )
+from sleepagent.sleep_domain.episode_v2 import (
+    EpisodeAssignmentBasis,
+    EpisodeDateConfidence,
+    EpisodePublicationStatus,
+    NightEpisodeV2,
+    UUID7Generator,
+    episode_anchor_key,
+    finalize_episode_date,
+    open_episode_v2,
+    upcast_night_episode,
+    uuid7_from_parts,
+)
 
 __all__ = [
     *_contract_exports,
@@ -217,6 +229,9 @@ __all__ = [
     "DomainNamespace",
     "EpisodeAggregationResult",
     "EpisodeAggregationStatus",
+    "EpisodeAssignmentBasis",
+    "EpisodeDateConfidence",
+    "EpisodePublicationStatus",
     "EpisodeObservationMembership",
     "EpisodeVersionPins",
     "EncryptedRawPayload",
@@ -245,6 +260,7 @@ __all__ = [
     "NormalizationWorkLease",
     "ObservationConflictRecord",
     "NightEpisodeService",
+    "NightEpisodeV2",
     "NightRevisionCommitResult",
     "OutboxLease",
     "ProviderAccountRecord",
@@ -282,6 +298,7 @@ __all__ = [
     "SubjectLifecycleLease",
     "TerminalRawQuarantine",
     "StaticAdapterRegistration",
+    "UUID7Generator",
     "bind_adapter_candidate",
     "legacy_raw_vendor_event_to_metadata",
     "radar_alert_to_candidate",
@@ -299,4 +316,9 @@ __all__ = [
     "monitoring_target",
     "require_night_episode_transition",
     "trigger_priority",
+    "episode_anchor_key",
+    "finalize_episode_date",
+    "open_episode_v2",
+    "upcast_night_episode",
+    "uuid7_from_parts",
 ]

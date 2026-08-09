@@ -6,7 +6,6 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Iterable, Protocol
-from uuid import uuid4
 
 from .contracts import (
     CapturedHabitAnswer,
@@ -27,7 +26,7 @@ from .contracts import (
 )
 from .defaults import DEFAULT_HABIT_CONCEPTS
 
-HABIT_QUESTIONNAIRE_VERSION = "sleepagent-habit-questionnaire.v3"
+HABIT_QUESTIONNAIRE_VERSION = "sleepagent-habit-questionnaire.v4"
 
 
 class HabitQuestionnaireStateStore(Protocol):
@@ -64,10 +63,23 @@ class HabitQuestionnaireStateStore(Protocol):
     def finalize_capture(
         self,
         receipt: HabitQuestionSelectionReceipt,
-        suppressions: Iterable[QuestionSuppression],
+        capture: HabitQuestionCapture,
         *,
+        capture_input_hash: str,
         now: datetime | None = None,
-    ) -> None: ...
+    ) -> HabitQuestionCapture: ...
+
+    def get_capture(
+        self,
+        selection_id: str,
+    ) -> tuple[HabitQuestionCapture, str] | None: ...
+
+    def get_captured_answer(
+        self,
+        answer_ref: str,
+        *,
+        subject_id: str,
+    ) -> CapturedHabitAnswer | None: ...
 
     def list_active_suppressions(
         self,
@@ -82,6 +94,9 @@ class InMemoryHabitQuestionnaireStateStore:
         self._episode_counts: dict[tuple[str, str], int] = {}
         self._selections: dict[str, HabitQuestionSelectionReceipt] = {}
         self._consumed_selections: set[str] = set()
+        self._captures: dict[
+            str, tuple[HabitQuestionCapture, str]
+        ] = {}
         self._last_asked: dict[
             tuple[str, str, str, str, str], datetime
         ] = {}
@@ -194,18 +209,30 @@ class InMemoryHabitQuestionnaireStateStore:
     def finalize_capture(
         self,
         receipt: HabitQuestionSelectionReceipt,
-        suppressions: Iterable[QuestionSuppression],
+        capture: HabitQuestionCapture,
         *,
+        capture_input_hash: str,
         now: datetime | None = None,
-    ) -> None:
+    ) -> HabitQuestionCapture:
         del now
-        staged = tuple(suppressions)
+        staged = tuple(capture.suppressions)
+        if capture.selection_id != receipt.selection_id:
+            raise ValueError("Habit capture selection binding mismatch")
         with self._lock:
             stored = self._selections.get(receipt.selection_id)
             if stored is None or stored != receipt:
                 raise ValueError("Habit selection receipt is forged or unknown")
             if receipt.selection_id in self._consumed_selections:
-                raise ValueError("Habit selection receipt was already consumed")
+                persisted = self._captures.get(receipt.selection_id)
+                if persisted is None:
+                    raise ValueError(
+                        "Habit selection receipt was already consumed"
+                    )
+                if persisted[1] != capture_input_hash:
+                    raise ValueError(
+                        "Habit capture idempotency payload conflict"
+                    )
+                return persisted[0].model_copy(deep=True)
             for item in staged:
                 if (
                     item.subject_id != receipt.subject_id
@@ -222,7 +249,44 @@ class InMemoryHabitQuestionnaireStateStore:
                 self._suppressions[
                     (item.subject_id, item.concept_id, item.scope)
                 ] = item.model_copy(deep=True)
+            self._captures[receipt.selection_id] = (
+                capture.model_copy(deep=True),
+                capture_input_hash,
+            )
             self._consumed_selections.add(receipt.selection_id)
+            return capture.model_copy(deep=True)
+
+    def get_capture(
+        self,
+        selection_id: str,
+    ) -> tuple[HabitQuestionCapture, str] | None:
+        with self._lock:
+            persisted = self._captures.get(selection_id)
+            if persisted is None:
+                return None
+            return persisted[0].model_copy(deep=True), persisted[1]
+
+    def get_captured_answer(
+        self,
+        answer_ref: str,
+        *,
+        subject_id: str,
+    ) -> CapturedHabitAnswer | None:
+        with self._lock:
+            matches = [
+                answer
+                for capture, _ in self._captures.values()
+                for answer in capture.answers
+                if answer.answer_ref == answer_ref
+                and answer.subject_id == subject_id
+            ]
+            if len(matches) > 1:
+                raise ValueError("duplicate persisted Habit answer authority")
+            return (
+                None
+                if not matches
+                else matches[0].model_copy(deep=True)
+            )
 
     def list_active_suppressions(
         self,
@@ -294,6 +358,15 @@ class HabitQuestionnaireService:
             subject_id=request.subject_id,
         )
         actual_remaining = self.EPISODE_QUESTION_LIMIT - already_issued
+        request_hash = _selection_request_hash(request)
+        selection_id = _selection_id(request)
+        persisted = self.state_store.get_selection(selection_id)
+        if persisted is not None:
+            return _validate_selection_replay(
+                persisted[0],
+                request=request,
+                request_hash=request_hash,
+            )
         if request.remaining_episode_budget > actual_remaining:
             raise ValueError("request attempts to reset Episode Habit question budget")
         remaining = min(request.remaining_episode_budget, actual_remaining)
@@ -397,7 +470,12 @@ class HabitQuestionnaireService:
                 unit=definition.unit,
                 minimum=definition.minimum,
                 maximum=definition.maximum,
-                allowed_dispositions=definition.allowed_dispositions,
+                allowed_dispositions=tuple(
+                    disposition
+                    for disposition in definition.allowed_dispositions
+                    if request.role == "elder"
+                    or disposition != HabitAnswerDisposition.NEVER_ASK
+                ),
                 respondent_rule=definition.respondent_rule,
                 persistence=definition.persistence,
                 trigger=request.trigger,
@@ -416,11 +494,9 @@ class HabitQuestionnaireService:
             )
         count = min(remaining, request.max_questions)
         chosen = tuple(item for _, item in sorted(candidates)[:count])
-        selection_id = (
-            f"habit-selection:{request.episode_id}:{uuid4().hex}"
-        )
         material = {
             "selection_id": selection_id,
+            "request_hash": request_hash,
             "request_id": request.request_id,
             "episode_id": request.episode_id,
             "subject_id": request.subject_id,
@@ -448,16 +524,26 @@ class HabitQuestionnaireService:
                 )
             }
         )
-        self.state_store.issue_selection(
-            receipt,
-            expected_question_count=already_issued,
-            cooldown_hours_by_concept={
-                candidate.concept_id: self.concepts[
-                    (candidate.concept_id, candidate.concept_version)
-                ].cooldown_hours
-                for candidate in receipt.candidates
-            },
-        )
+        try:
+            self.state_store.issue_selection(
+                receipt,
+                expected_question_count=already_issued,
+                cooldown_hours_by_concept={
+                    candidate.concept_id: self.concepts[
+                        (candidate.concept_id, candidate.concept_version)
+                    ].cooldown_hours
+                    for candidate in receipt.candidates
+                },
+            )
+        except ValueError:
+            concurrent = self.state_store.get_selection(selection_id)
+            if concurrent is None:
+                raise
+            return _validate_selection_replay(
+                concurrent[0],
+                request=request,
+                request_hash=request_hash,
+            )
         return receipt
 
     def remaining_budget(self, *, episode_id: str, subject_id: str) -> int:
@@ -480,7 +566,6 @@ class HabitQuestionnaireService:
         subject_id: str,
         actor_id: str,
         role: str,
-        suppression_confirmation_ref: str | None = None,
         now: datetime | None = None,
     ) -> HabitQuestionCapture:
         with self._lock:
@@ -491,7 +576,6 @@ class HabitQuestionnaireService:
                 subject_id=subject_id,
                 actor_id=actor_id,
                 role=role,
-                suppression_confirmation_ref=suppression_confirmation_ref,
                 now=now,
             )
 
@@ -504,15 +588,17 @@ class HabitQuestionnaireService:
         subject_id: str,
         actor_id: str,
         role: str,
-        suppression_confirmation_ref: str | None = None,
         now: datetime | None = None,
     ) -> HabitQuestionCapture:
         captured_at = now or datetime.now(timezone.utc)
+        staged_answers = tuple(answers)
+        capture_input_hash = _capture_input_hash(
+            receipt,
+            staged_answers,
+        )
         stored_state = self.state_store.get_selection(receipt.selection_id)
         if stored_state is None or stored_state[0] != receipt:
             raise ValueError("Habit selection receipt is forged or unknown")
-        if stored_state[1]:
-            raise ValueError("Habit selection receipt was already consumed")
         if (
             receipt.episode_id,
             receipt.subject_id,
@@ -520,11 +606,22 @@ class HabitQuestionnaireService:
             receipt.role,
         ) != (episode_id, subject_id, actor_id, role):
             raise ValueError("Habit selection receipt binding mismatch")
-        if receipt.expires_at <= captured_at:
-            raise ValueError("Habit selection receipt expired")
         material = receipt.model_dump(exclude={"selection_hash"})
         if receipt.selection_hash != _stable_hash(_selection_hash_material(material)):
             raise ValueError("Habit selection receipt hash mismatch")
+        if stored_state[1]:
+            persisted = self.state_store.get_capture(receipt.selection_id)
+            if persisted is None:
+                raise ValueError("Habit selection receipt was already consumed")
+            if persisted[1] != capture_input_hash:
+                raise ValueError("Habit capture idempotency payload conflict")
+            self._require_capture_authority_active(
+                persisted[0],
+                now=captured_at,
+            )
+            return self._restore_capture(persisted[0])
+        if receipt.expires_at <= captured_at:
+            raise ValueError("Habit selection receipt expired")
         issued = {
             (item.concept_id, item.concept_version): item
             for item in receipt.candidates
@@ -533,7 +630,7 @@ class HabitQuestionnaireService:
         suppressions: list[QuestionSuppression] = []
         safety_events: list[HabitSafetyEvent] = []
         seen: set[tuple[str, str]] = set()
-        for index, answer in enumerate(answers):
+        for index, answer in enumerate(staged_answers):
             key = (answer.concept_id, answer.concept_version)
             if key in seen:
                 raise ValueError("duplicate answer for one Habit concept")
@@ -542,6 +639,13 @@ class HabitQuestionnaireService:
             definition = self.concepts.get(key)
             if candidate is None or definition is None:
                 raise ValueError("answer does not belong to issued Habit selection")
+            if (
+                answer.disposition == HabitAnswerDisposition.NEVER_ASK
+                and role != "elder"
+            ):
+                raise PermissionError(
+                    "only the elder may suppress a subject-wide question"
+                )
             if answer.disposition not in candidate.allowed_dispositions:
                 raise ValueError("answer disposition is not allowed")
             if role == "family" and (
@@ -563,20 +667,20 @@ class HabitQuestionnaireService:
                 disposition = HabitAnswerDisposition.UNKNOWN
                 normalized = None
             answer_ref = (
-                f"habit-answer:{episode_id}:{answer.concept_id}:{index + 1}"
+                "habit-answer:"
+                f"{_stable_hash(receipt.selection_id)[:24]}:"
+                f"{answer.concept_id}:{index + 1}"
             )
             if disposition == HabitAnswerDisposition.NEVER_ASK:
-                if not suppression_confirmation_ref:
-                    raise ValueError(
-                        "never-ask requires a separate confirmation reference"
-                    )
                 suppressions.append(
                     QuestionSuppression(
                         suppression_id=f"suppress:{subject_id}:{answer.concept_id}",
                         subject_id=subject_id,
                         concept_id=answer.concept_id,
                         scope="profile_question",
-                        confirmation_ref=suppression_confirmation_ref,
+                        withdrawal_command_ref=(
+                            f"habit-withdrawal:{capture_input_hash}"
+                        ),
                         expires_at=captured_at + timedelta(days=365),
                     )
                 )
@@ -647,14 +751,35 @@ class HabitQuestionnaireService:
             safety_events=tuple(safety_events),
             stop_remaining_questions=bool(safety_events),
         )
-        self.state_store.finalize_capture(
+        result = self.state_store.finalize_capture(
             receipt,
-            result.suppressions,
+            result,
+            capture_input_hash=capture_input_hash,
             now=captured_at,
         )
+        return self._restore_capture(result)
+
+    def _restore_capture(
+        self,
+        capture: HabitQuestionCapture,
+    ) -> HabitQuestionCapture:
+        """Restore the durable capture into the short-lived verification cache."""
+
+        result = capture.model_copy(deep=True)
         for item in result.answers:
             self._captured_answers[item.answer_ref] = item
         return result
+
+    @staticmethod
+    def _require_capture_authority_active(
+        capture: HabitQuestionCapture,
+        *,
+        now: datetime,
+    ) -> None:
+        if any(item.episode_valid_until <= now for item in capture.answers):
+            raise ValueError("captured Habit answer authority expired")
+        if any(item.valid_until <= now for item in capture.safety_events):
+            raise ValueError("captured Habit Safety event authority expired")
 
     def verify_captured_answer(
         self,
@@ -665,6 +790,13 @@ class HabitQuestionnaireService:
         read_at = now or datetime.now(timezone.utc)
         with self._lock:
             stored = self._captured_answers.get(answer.answer_ref)
+            if stored is None:
+                stored = self.state_store.get_captured_answer(
+                    answer.answer_ref,
+                    subject_id=answer.subject_id,
+                )
+                if stored is not None:
+                    self._captured_answers[answer.answer_ref] = stored
             if stored is None or stored != answer:
                 raise ValueError("Habit answer is forged or was not captured")
             if answer.episode_valid_until <= read_at:
@@ -680,6 +812,13 @@ class HabitQuestionnaireService:
         read_at = now or datetime.now(timezone.utc)
         with self._lock:
             answer = self._captured_answers.get(answer_ref)
+            if answer is None:
+                answer = self.state_store.get_captured_answer(
+                    answer_ref,
+                    subject_id=subject_id,
+                )
+                if answer is not None:
+                    self._captured_answers[answer_ref] = answer
             if answer is None or answer.subject_id != subject_id:
                 raise KeyError("Habit answer is unavailable")
             if answer.episode_valid_until <= read_at:
@@ -747,6 +886,9 @@ def _selection_hash_material(material: dict[str, object]) -> dict[str, object]:
 
     normalized: dict[str, object] = {}
     for key, value in material.items():
+        if key == "request_hash" and value is None:
+            # Legacy v3 receipts did not bind the selection request hash.
+            continue
         if isinstance(value, datetime):
             normalized[key] = value.isoformat()
         elif hasattr(value, "model_dump"):
@@ -761,6 +903,79 @@ def _selection_hash_material(material: dict[str, object]) -> dict[str, object]:
         else:
             normalized[key] = getattr(value, "value", value)
     return normalized
+
+
+def _selection_request_hash(
+    request: HabitQuestionSelectionRequest,
+) -> str:
+    material = request.model_dump(
+        mode="json",
+        exclude={"remaining_episode_budget"},
+    )
+    return _stable_hash(material)
+
+
+def _selection_id(request: HabitQuestionSelectionRequest) -> str:
+    identity = {
+        "request_id": request.request_id,
+        "episode_id": request.episode_id,
+        "subject_id": request.subject_id,
+        "actor_id": request.actor_id,
+        "role": request.role,
+        "plan_id": request.plan_id,
+        "plan_revision": request.plan_revision,
+        "plan_step_id": request.plan_step_id,
+    }
+    return f"habit-selection:{request.episode_id}:{_stable_hash(identity)}"
+
+
+def _validate_selection_replay(
+    receipt: HabitQuestionSelectionReceipt,
+    *,
+    request: HabitQuestionSelectionRequest,
+    request_hash: str,
+) -> HabitQuestionSelectionReceipt:
+    expected = (
+        request.request_id,
+        request.episode_id,
+        request.subject_id,
+        request.actor_id,
+        request.role,
+        request.plan_id,
+        request.plan_revision,
+        request.plan_step_id,
+        request.trigger,
+    )
+    actual = (
+        receipt.request_id,
+        receipt.episode_id,
+        receipt.subject_id,
+        receipt.actor_id,
+        receipt.role,
+        receipt.plan_id,
+        receipt.plan_revision,
+        receipt.plan_step_id,
+        receipt.trigger,
+    )
+    if actual != expected or receipt.selection_id != _selection_id(request):
+        raise ValueError("Habit selection idempotency binding conflict")
+    if receipt.request_hash is None:
+        raise ValueError("legacy Habit selection cannot be replayed")
+    if receipt.request_hash != request_hash:
+        raise ValueError("Habit selection idempotency payload conflict")
+    return receipt.model_copy(deep=True)
+
+
+def _capture_input_hash(
+    receipt: HabitQuestionSelectionReceipt,
+    answers: tuple[HabitQuestionAnswer, ...],
+) -> str:
+    return _stable_hash(
+        {
+            "selection": receipt.model_dump(mode="json"),
+            "answers": [item.model_dump(mode="json") for item in answers],
+        }
+    )
 
 
 def _stable_hash(value) -> str:

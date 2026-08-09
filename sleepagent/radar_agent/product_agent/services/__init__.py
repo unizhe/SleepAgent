@@ -9,6 +9,11 @@ from .reviewed_knowledge import (
     SeedKnowledgeRepository,
     default_reviewed_knowledge_service,
 )
+from .runtime_capabilities import (
+    PRODUCT_RUNTIME_READ_SERVICE_VERSION,
+    CareContextReader,
+    ProductRuntimeReadService,
+)
 
 __all__ = [
     "ReviewedKnowledgePolicyError",
@@ -17,5 +22,8 @@ __all__ = [
     "ReviewedKnowledgeResult",
     "ReviewedKnowledgeService",
     "SeedKnowledgeRepository",
+    "PRODUCT_RUNTIME_READ_SERVICE_VERSION",
+    "CareContextReader",
+    "ProductRuntimeReadService",
     "default_reviewed_knowledge_service",
 ]

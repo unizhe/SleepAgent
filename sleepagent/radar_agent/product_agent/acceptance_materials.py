@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import stat
 import tempfile
@@ -97,6 +98,16 @@ class AcceptanceMaterialSimulationResult(StrictContract):
     provider_observations: int = Field(..., ge=1)
     files: tuple[str, ...]
     release_evidence_eligible: Literal[False] = False
+
+
+class AcceptanceMaterialArchiveResult(StrictContract):
+    schema_version: Literal[
+        "sleepagent-acceptance-material-archive.v1"
+    ] = "sleepagent-acceptance-material-archive.v1"
+    archive_path: str
+    archive_root: str
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    files: tuple[str, ...]
 
 
 def initialize_acceptance_materials(
@@ -209,6 +220,60 @@ def initialize_simulated_acceptance_materials(
     )
 
 
+def build_acceptance_material_archive(
+    root: Path,
+    archive: Path,
+    *,
+    archive_root: str,
+) -> AcceptanceMaterialArchiveResult:
+    """Build a byte-stable ZIP from one canonical material directory.
+
+    Archive member order, timestamps, permissions and compression are fixed so
+    checked-in fixture hashes do not depend on filesystem metadata or zlib.
+    Existing archives are never overwritten.
+    """
+
+    archive_path = PurePosixPath(archive_root)
+    if (
+        not archive_root
+        or archive_path.is_absolute()
+        or len(archive_path.parts) != 1
+        or archive_path.parts[0] in {".", ".."}
+        or "\\" in archive_root
+    ):
+        raise ValueError("archive_root must be one safe directory name")
+    missing = tuple(
+        filename
+        for filename in _MATERIAL_FILENAMES
+        if not (root / filename).is_file()
+    )
+    if missing:
+        raise FileNotFoundError(
+            "acceptance material archive is missing: " + ", ".join(missing)
+        )
+    if archive.exists():
+        raise FileExistsError(f"refusing to overwrite archive: {archive}")
+
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, mode="x", compression=zipfile.ZIP_STORED) as bundle:
+        for filename in _MATERIAL_FILENAMES:
+            member = zipfile.ZipInfo(
+                filename=f"{archive_root}/{filename}",
+                date_time=(2000, 1, 1, 0, 0, 0),
+            )
+            member.create_system = 3
+            member.compress_type = zipfile.ZIP_STORED
+            member.external_attr = (stat.S_IFREG | 0o644) << 16
+            bundle.writestr(member, (root / filename).read_bytes())
+
+    return AcceptanceMaterialArchiveResult(
+        archive_path=str(archive),
+        archive_root=archive_root,
+        sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        files=_MATERIAL_FILENAMES,
+    )
+
+
 def _simulated_usability_report() -> HabitUsabilityReport:
     participant_specs = (
         ("participant:simulated-60-01", "60-69", 2, 2),
@@ -238,18 +303,20 @@ def _simulated_usability_report() -> HabitUsabilityReport:
     refs = tuple(item.participant_ref for item in observations)
     return HabitUsabilityReport(
         evidence_kind=AcceptanceEvidenceKind.SIMULATED,
-        report_id="habit-usability:simulated-v18-complete",
+        report_id="habit-usability:simulated-v24-current",
         conducted_at=_SIMULATED_TIME,
         observations=observations,
-        reviewer_ref="facilitator:simulated-usability-v18",
+        reviewer_ref="facilitator:simulated-usability-v24-current",
         attestation=HabitUsabilityAttestation(
             protocol_version="sleep-habit-usability.v1",
-            facilitator_ref="facilitator:simulated-usability-v18",
+            facilitator_ref="facilitator:simulated-usability-v24-current",
             observed_participant_refs=refs,
             participant_interactions_observed=True,
             synthetic_data_used=True,
             signed_at=_SIMULATED_TIME,
-            signature_reference="signature:simulated-usability-v18-not-real",
+            signature_reference=(
+                "signature:simulated-usability-v24-current-not-real"
+            ),
         ),
     )
 
@@ -257,7 +324,7 @@ def _simulated_usability_report() -> HabitUsabilityReport:
 def _simulated_domain_review() -> HabitDomainReviewReport:
     reviewers = (
         HabitDomainReviewer(
-            reviewer_ref="reviewer:simulated-sleep-medicine-v18",
+            reviewer_ref="reviewer:simulated-sleep-medicine-v24-current",
             display_name="模拟睡眠医学审核员 A（非真人）",
             professional_role="simulated sleep-medicine reviewer",
             qualification="synthetic qualification; not a real license",
@@ -265,7 +332,7 @@ def _simulated_domain_review() -> HabitDomainReviewReport:
             conflict_of_interest="synthetic fixture; no real declaration",
         ),
         HabitDomainReviewer(
-            reviewer_ref="reviewer:simulated-geriatric-ux-v18",
+            reviewer_ref="reviewer:simulated-geriatric-ux-v24-current",
             display_name="模拟老年可用性审核员 B（非真人）",
             professional_role="simulated geriatric usability reviewer",
             qualification="synthetic qualification; not a real credential",
@@ -309,7 +376,7 @@ def _simulated_domain_review() -> HabitDomainReviewReport:
             final_decision="approved",
             reviewed_at=_SIMULATED_TIME,
             approval_record_ref=(
-                f"approval:simulated-v18:{concept.concept_id}"
+                f"approval:simulated-v24-current:{concept.concept_id}"
             ),
         )
         for concept in DEFAULT_HABIT_CONCEPTS
@@ -324,7 +391,7 @@ def _simulated_domain_review() -> HabitDomainReviewReport:
         )
     return HabitDomainReviewReport(
         evidence_kind=AcceptanceEvidenceKind.SIMULATED,
-        review_report_id="habit-domain-review:simulated-v18-complete",
+        review_report_id="habit-domain-review:simulated-v24-current",
         review_type="catalog_wording_options_ttl_persistence",
         reviewed_at=_SIMULATED_TIME,
         catalog=HabitDomainReviewCatalog(
@@ -348,12 +415,12 @@ def _simulated_domain_review() -> HabitDomainReviewReport:
         overall_findings=(
             "Synthetic approval exercises the complete review schema only.",
         ),
-        approval_reference="approval:simulated-v18-bundle-not-real",
+        approval_reference="approval:simulated-v24-current-bundle-not-real",
         signoff=HabitDomainReviewSignoff(
             status="approved",
             signed_at=_SIMULATED_TIME,
             signed_by=reviewer_refs,
-            signature_reference="signature:simulated-v18-not-real",
+            signature_reference="signature:simulated-v24-current-not-real",
         ),
     )
 
@@ -397,23 +464,26 @@ def _simulated_provider_observations(
                 }
                 receipt = ProviderRunReceipt(
                     receipt_ref=(
-                        f"trace:simulated-v18:{scenario.value}:{repetition}"
+                        f"trace:simulated-v24-current:{scenario.value}:"
+                        f"{repetition}"
                     ),
                     receipt_hash=stable_hash(material),
                     providers=("simulated-openai-compatible-provider",),
-                    model_ids=("simulated-model-v18",),
+                    model_ids=("simulated-model-v24-current",),
                     provider_request_ids=(
-                        f"request:simulated-v18:{scenario.value}:{repetition}",
+                        "request:simulated-v24-current:"
+                        f"{scenario.value}:{repetition}",
                     ),
                     invocation_ids=(
-                        f"invocation:simulated-v18:{scenario.value}:{repetition}",
+                        "invocation:simulated-v24-current:"
+                        f"{scenario.value}:{repetition}",
                     ),
                     executed_at=_SIMULATED_TIME,
                 )
             observations.append(
                 AcceptanceObservation(
                     observation_id=(
-                        f"observation:simulated-v18:{scenario.value}:"
+                        f"observation:simulated-v24-current:{scenario.value}:"
                         f"{repetition}"
                     ),
                     scenario=scenario,
@@ -447,7 +517,7 @@ This directory is synthetic development data, not release evidence.
 
 The fixture exercises every schema and all 68 scenario/repetition slots. It
 must remain `evidence_kind=simulated` and `real_provider=false`. Use
-`sleep_habit_profile/real-evidence-v18-collection` for actual collection.
+`sleep_habit_profile/real-evidence-v23-collection` for actual collection.
 
 Audit with:
 
@@ -1063,12 +1133,14 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "AcceptanceMaterialArchiveResult",
     "AcceptanceMaterialAudit",
     "AcceptanceMaterialFinding",
     "AcceptanceMaterialSimulationResult",
     "AcceptanceMaterialTemplateResult",
     "audit_acceptance_material_archive",
     "audit_acceptance_materials",
+    "build_acceptance_material_archive",
     "initialize_acceptance_materials",
     "initialize_simulated_acceptance_materials",
     "main",

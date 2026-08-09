@@ -9,36 +9,57 @@ import httpx
 import pytest
 
 from sleepagent.radar_agent.persistence import RadarPersistenceStore
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.acceptance import (
+    state_persistence_receipt_from_restart,
+)
+from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     AuthenticatedBinding,
-    CareContextState,
-    CareTransitionEvent,
-    CommitJournalEntry,
-    ConfiguredExternalActionExecutor,
-    ConfirmationToken,
-    DeterministicCommitController,
     EpisodeReceipt,
     EpisodeStatus,
     EpisodeType,
     ExecutionMode,
-    ExternalActionConfigurationError,
-    ExternalActionExecutionRequest,
-    ExternalActionExecutionResult,
     FactSnapshot,
     InvocationOutcome,
     MemoryChangeCandidate,
+    SourceScope,
+    SourceScopeKind,
+    ToolReceipt,
+    stable_hash,
+)
+from sleepagent.radar_agent.product_agent.external_actions import (
+    ConfiguredExternalActionExecutor,
+    ExternalActionConfigurationError,
+    ExternalActionExecutionRequest,
+    ExternalActionExecutionResult,
+    UnconfiguredExternalActionExecutor,
+)
+from sleepagent.radar_agent.product_agent.governance import (
+    CareContextState,
+    CareTransitionEvent,
+    CommitJournalEntry,
+    DeterministicCommitController,
+)
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionService,
+    HumanDecisionStatus,
+    VerifiedApprovalCapability,
+)
+from sleepagent.radar_agent.product_agent.product_persistence import (
     PersistentCareContextStore,
     PersistentCommitJournal,
     PersistentMemoryContextStore,
     PersistentProductEpisodeResultStore,
+)
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
     ProductEpisodeRunResult,
-    SourceScope,
-    SourceScopeKind,
-    UnconfiguredExternalActionExecutor,
+)
+from sleepagent.radar_agent.product_agent.runtime_factory import (
     build_product_episode_runner_from_env,
-    state_persistence_receipt_from_restart,
-    stable_hash,
 )
 
 
@@ -72,6 +93,77 @@ def _snapshot() -> FactSnapshot:
     )
 
 
+def _approved_capability(
+    *,
+    action_kind: str,
+    action_scope: str,
+    target_id: str,
+    target_hash: str,
+    idempotency_key: str,
+    fact_snapshot: FactSnapshot,
+) -> tuple[HumanDecisionService, VerifiedApprovalCapability]:
+    service = HumanDecisionService()
+    request = service.create(
+        ActionProposal(
+            proposal_id=f"proposal:persistence:{action_scope}:{target_id}",
+            episode_id="episode:persistence",
+            subject_id=fact_snapshot.binding.subject_id,
+            proposer_actor_id=fact_snapshot.binding.actor_id,
+            action_kind=action_kind,
+            action_scope=action_scope,
+            target_id=target_id,
+            target_hash=target_hash,
+            fact_snapshot_id=fact_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
+            policy_version=HITL_POLICY_VERSION,
+            payload={"target_id": target_id},
+            explanation=DecisionExplanation(
+                what_will_change=f"Execute {action_scope}",
+                why_now="The exact persisted target is ready for execution.",
+                who_will_receive_or_be_affected=fact_snapshot.binding.subject_id,
+                duration_or_frequency="One bounded execution.",
+                how_to_revoke="Revoke before execution begins.",
+            ),
+            created_at=NOW,
+            expires_at=NOW + timedelta(days=1),
+        )
+    )
+    approved = service.decide(
+        request.decision_id,
+        actor_id=fact_snapshot.binding.actor_id,
+        actor_role=fact_snapshot.binding.role,
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=target_hash,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert approved.status == HumanDecisionStatus.APPROVED
+    capability = service.acquire_verified_capability(
+        request.decision_id,
+        expected_proposal_id=request.proposal.proposal_id,
+        expected_subject_id=request.proposal.subject_id,
+        expected_target_id=request.proposal.target_id,
+        expected_target_hash=request.proposal.target_hash,
+        expected_action_scope=request.proposal.action_scope,
+        expected_fact_snapshot_id=fact_snapshot.fact_snapshot_id,
+        expected_fact_snapshot_hash=fact_snapshot.fact_snapshot_hash,
+        expected_policy_version=HITL_POLICY_VERSION,
+        idempotency_key=idempotency_key,
+        now=NOW + timedelta(minutes=2),
+    )
+    return service, capability
+
+
+def _assert_authority_refs(
+    receipt: ToolReceipt,
+    capability: VerifiedApprovalCapability,
+) -> None:
+    grant = capability.grant
+    assert receipt.source_refs == [
+        f"human-decision:{grant.decision_id}",
+        f"approval-grant:{grant.grant_id}:{grant.grant_hash}",
+    ]
+
+
 def _controller(persistence: RadarPersistenceStore) -> DeterministicCommitController:
     return DeterministicCommitController(
         care_store=PersistentCareContextStore(persistence),
@@ -86,6 +178,7 @@ def test_memory_care_and_commit_receipts_survive_process_restart(
     database = tmp_path / "product-state.sqlite3"
     first_persistence = _persistence(database)
     first = _controller(first_persistence)
+    snap = _snapshot()
     memory = MemoryChangeCandidate(
         candidate_id="memory-persistent-1",
         operation="create",
@@ -107,11 +200,20 @@ def test_memory_care_and_commit_receipts_survive_process_restart(
         explicit_user_authorization=True,
         confirmation_required=False,
     )
+    decision_service, capability = _approved_capability(
+        action_kind="memory",
+        action_scope="commit_memory",
+        target_id=memory.candidate_id,
+        target_hash=memory.candidate_hash,
+        idempotency_key="memory:persistent:1",
+        fact_snapshot=snap,
+    )
     first_receipt = first.commit_memory(
         candidate=memory,
         expected_version=0,
-        fact_snapshot=_snapshot(),
+        fact_snapshot=snap,
         idempotency_key="memory:persistent:1",
+        approval_capability=capability,
     )
     first.care_store.compare_and_set(
         "subject-1",
@@ -139,8 +241,9 @@ def test_memory_care_and_commit_receipts_survive_process_restart(
     replay = restarted.commit_memory(
         candidate=memory,
         expected_version=0,
-        fact_snapshot=_snapshot(),
+        fact_snapshot=snap,
         idempotency_key="memory:persistent:1",
+        approval_capability=capability,
     )
 
     assert memory_state.version == 1
@@ -151,6 +254,15 @@ def test_memory_care_and_commit_receipts_survive_process_restart(
     }
     assert care_state.transition_history[0].disposition == "propose"
     assert replay == first_receipt
+    _assert_authority_refs(first_receipt, capability)
+    _assert_authority_refs(replay, capability)
+    decision = decision_service.record_execution_result(
+        capability,
+        status=HumanDecisionStatus.COMMITTED,
+        receipt_ref=first_receipt.tool_invocation_id,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert decision.status == HumanDecisionStatus.COMMITTED
     assert restarted.memory_store.get("subject-1").version == 1
     proof = state_persistence_receipt_from_restart(
         state_kind="memory",
@@ -223,25 +335,24 @@ def test_external_effect_receipt_is_durable_and_not_reexecuted_after_restart(
         )
 
     target_hash = "e" * 64
-    token = ConfirmationToken(
-        token_id="external-token",
-        candidate_id="share-target-1",
-        candidate_hash=target_hash,
-        actor_id="actor-1",
-        actor_role="elder",
-        subject_id="subject-1",
+    snap = _snapshot()
+    decision_service, capability = _approved_capability(
+        action_kind="external_action",
         action_scope="share_artifact",
-        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        target_id="share-target-1",
+        target_hash=target_hash,
+        idempotency_key="external:persistent:1",
+        fact_snapshot=snap,
     )
     first_persistence = _persistence(database)
     first = _controller(first_persistence)
     receipt = first.execute_external(
         tool_name="external.share",
         target={"artifact_ref": "artifact-1", "recipient": "doctor-1"},
-        snapshot=_snapshot(),
+        snapshot=snap,
         idempotency_key="external:persistent:1",
         executor=execute,
-        token=token,
+        approval_capability=capability,
         actor_id="actor-1",
         subject_id="subject-1",
         action_scope="share_artifact",
@@ -255,10 +366,10 @@ def test_external_effect_receipt_is_durable_and_not_reexecuted_after_restart(
     replay = restarted.execute_external(
         tool_name="external.share",
         target={"artifact_ref": "artifact-1", "recipient": "doctor-1"},
-        snapshot=_snapshot(),
+        snapshot=snap,
         idempotency_key="external:persistent:1",
         executor=execute,
-        token=token,
+        approval_capability=capability,
         actor_id="actor-1",
         subject_id="subject-1",
         action_scope="share_artifact",
@@ -271,6 +382,15 @@ def test_external_effect_receipt_is_durable_and_not_reexecuted_after_restart(
     assert receipt.outcome == InvocationOutcome.SUCCEEDED
     assert receipt.output["delivery_status"] == "pending"
     assert len(calls) == 1
+    _assert_authority_refs(receipt, capability)
+    _assert_authority_refs(replay, capability)
+    decision = decision_service.record_execution_result(
+        capability,
+        status=HumanDecisionStatus.COMMITTED,
+        receipt_ref=receipt.tool_invocation_id,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert decision.status == HumanDecisionStatus.COMMITTED
 
 
 def test_pending_commit_reservation_recovers_as_unknown_without_execution(
@@ -281,6 +401,15 @@ def test_pending_commit_reservation_recovers_as_unknown_without_execution(
     snapshot = _snapshot()
     target_hash = "e" * 64
     target = {"artifact_ref": "artifact-1"}
+    decision_service, capability = _approved_capability(
+        action_kind="external_action",
+        action_scope="share_artifact",
+        target_id="share-target-1",
+        target_hash=target_hash,
+        idempotency_key="external:pending:1",
+        fact_snapshot=snapshot,
+    )
+    grant = capability.grant
     commit_payload = {
         "tool_name": "external.share",
         "target_id": "share-target-1",
@@ -291,13 +420,30 @@ def test_pending_commit_reservation_recovers_as_unknown_without_execution(
         "action_scope": "share_artifact",
         "payload": target,
     }
-    created_at = NOW
+    authority_refs = (
+        f"human-decision:{grant.decision_id}",
+        f"approval-grant:{grant.grant_id}:{grant.grant_hash}",
+    )
+    input_hash = stable_hash(
+        {
+            "operation": commit_payload,
+            "authority": {
+                "decision_id": grant.decision_id,
+                "proposal_id": grant.proposal_id,
+                "grant_id": grant.grant_id,
+                "grant_hash": grant.grant_hash,
+                "approving_records_hash": grant.approving_records_hash,
+            },
+        }
+    )
+    created_at = grant.issued_at
     assert journal.reserve(
         CommitJournalEntry(
             idempotency_key="external:pending:1",
             tool_name="external.share",
-            input_hash=stable_hash(commit_payload),
+            input_hash=input_hash,
             fact_snapshot_hash=snapshot.fact_snapshot_hash,
+            authority_refs=authority_refs,
             state="pending",
             created_at=created_at,
             updated_at=created_at,
@@ -325,16 +471,7 @@ def test_pending_commit_reservation_recovers_as_unknown_without_execution(
         snapshot=snapshot,
         idempotency_key="external:pending:1",
         executor=must_not_execute,
-        token=ConfirmationToken(
-            token_id="external-token",
-            candidate_id="share-target-1",
-            candidate_hash=target_hash,
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            action_scope="share_artifact",
-            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
-        ),
+        approval_capability=capability,
         actor_id="actor-1",
         subject_id="subject-1",
         action_scope="share_artifact",
@@ -346,6 +483,15 @@ def test_pending_commit_reservation_recovers_as_unknown_without_execution(
     assert receipt.outcome == InvocationOutcome.UNKNOWN
     assert receipt.error_code == "IndeterminatePriorAttempt"
     assert calls == 0
+    _assert_authority_refs(receipt, capability)
+    decision = decision_service.record_execution_result(
+        capability,
+        status=HumanDecisionStatus.OUTCOME_UNKNOWN,
+        receipt_ref=receipt.tool_invocation_id,
+        failure_reason=receipt.error_code,
+        now=NOW + timedelta(minutes=3),
+    )
+    assert decision.status == HumanDecisionStatus.OUTCOME_UNKNOWN
 
 
 def test_product_episode_result_history_survives_restart(tmp_path: Path) -> None:

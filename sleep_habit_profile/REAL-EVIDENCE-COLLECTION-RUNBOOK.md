@@ -1,4 +1,4 @@
-# v23 real acceptance evidence collection runbook
+# Real acceptance evidence collection runbook (v23 package)
 
 This runbook coordinates collection; it is not evidence and must not be signed
 on behalf of any participant, facilitator, reviewer or provider.
@@ -6,10 +6,10 @@ on behalf of any participant, facilitator, reviewer or provider.
 The collection target is `real-evidence-v23-collection`. It is bound to:
 
 - release identity:
-  `e2d721ca0d8906bf9fd53ab7844e4f49a5b892acf0ad14675471c1ed14c689d2`
+  `7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`
 - Habit catalog:
-  `a75aa424e3260f042b65be82dbd45600d370515b073d8d17f31e69c539f44ae1`
-- acceptance schema: `sleepagent-product-agent-acceptance.v23`
+  `d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903`
+- acceptance schema: `sleepagent-product-agent-acceptance.v25`
 
 If code changes any bound identity component or any Habit catalog entry, stop
 collection and regenerate a new empty template package. Never relabel evidence
@@ -46,7 +46,7 @@ The reviewer must be identifiable and qualified for the scope. Record their
 actual display name, professional role, qualification, organization and
 conflict-of-interest declaration.
 
-Every one of the ten concept rows must be reviewed. An approved bundle requires
+Every one of the 22 concept rows must be reviewed. An approved bundle requires
 all five per-concept findings and the overall decision to be `approved`, with
 no requested changes. The actual signer then records:
 
@@ -63,7 +63,7 @@ signature.
 
 ## 3. Actual provider executions
 
-Run the exact v23 build under the production-candidate provider configuration.
+Run the exact identity-bound build under the production-candidate provider configuration.
 The OpenAI-compatible adapter must receive and retain a non-empty request ID
 from the provider response for every Agent invocation. A fallback, replay,
 mock, locally fabricated ID or run against another release identity is not

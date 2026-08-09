@@ -3,12 +3,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock, Thread
-from typing import Any, Callable, Literal, Mapping, Protocol
-
-from pydantic import Field, model_validator
+from typing import Any, Callable, Literal, Mapping
 
 from sleepagent.radar_agent.product_agent.agents import (
-    ProductAgentFactory,
     ProductAgentRoster,
     ReviewTargetBinding,
     RuntimeAgentPort,
@@ -49,15 +46,12 @@ from sleepagent.radar_agent.product_agent.episode import (
 )
 from sleepagent.radar_agent.product_agent.external_actions import (
     ExternalActionExecutionRequest,
-    ExternalActionExecutionResult,
-    UnconfiguredExternalActionExecutor,
 )
 from sleepagent.radar_agent.product_agent.governance import (
     PRODUCT_SAFETY_POLICY_VERSION,
     AcceptanceError,
     AcceptedWorkProduct,
     CareActionCatalog,
-    ConfirmationToken,
     DeterministicCommitController,
     PublicationError,
     accept_care,
@@ -69,6 +63,14 @@ from sleepagent.radar_agent.product_agent.governance import (
     require_safety_approval,
     safety_trigger_reasons,
 )
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    HumanDecisionError,
+    HumanDecisionRequest,
+    HumanDecisionService,
+    HumanDecisionStatus,
+    VerifiedApprovalCapability,
+)
 from sleepagent.radar_agent.product_agent.cold_start import (
     CapabilityEligibilityReceipt,
     ClaimCeiling,
@@ -76,35 +78,45 @@ from sleepagent.radar_agent.product_agent.cold_start import (
     ResponseMode,
     degraded_boundary_sentence,
 )
-from sleepagent.radar_agent.product_agent.invocation import (
-    AgentInvocationRecord,
-    StructuredAgentModel,
-)
+from sleepagent.radar_agent.product_agent.invocation import AgentInvocationRecord
 from sleepagent.radar_agent.product_agent.registry import (
     EPISODE_DEFINITIONS,
     product_agent_manifest,
 )
 from sleepagent.radar_agent.product_agent.skills import (
+    AgentProfile,
     PromptCompiler,
     SkillRegistry,
     SkillResolver,
-    default_agent_profiles,
-    default_skill_packages,
+)
+from sleepagent.radar_agent.product_agent.runtime_contracts import (
+    PRODUCT_EPISODE_RESULT_SCHEMA_VERSION,
+    PRODUCT_EPISODE_RUNNER_VERSION,
+    CommitFrozenConfirmedAction,
+    PendingConfirmationTarget,
+    PendingUserInputTarget,
+    ProductEpisodeRunRequest,
+    ProductEpisodeRunResult,
+    ProductUserFactResponse,
+    doctor_safety_checkpoint as _doctor_safety_checkpoint,
+    effective_audience_role as _effective_audience_role,
+    uses_doctor_material_semantics as _uses_doctor_material_semantics,
+)
+from sleepagent.radar_agent.product_agent.runtime_ports import (
+    ExternalActionExecutor,
+    FactSnapshotRevalidator,
+    ProductEpisodeResultStore,
+    ProductToolExecutionContext,
+    ProductToolExecutorPort,
+    PublicationPublisher,
 )
 from sleepagent.radar_agent.product_agent.tooling import (
-    ProductToolExecutionContext,
-    ProductToolExecutor,
     context_item_from_tool_receipt,
-)
-from sleepagent.radar_agent.product_agent.tools.care_coordination import (
-    CareCoordinationPolicyRequest,
-    CareCoordinationTool,
 )
 from sleepagent.radar_agent.product_agent.habit_runtime import (
     HabitProfileRuntimeService,
 )
 from sleepagent.radar_agent.product_agent.longitudinal_memory import (
-    CanonicalSourceResolver,
     DeterministicInductionWorker,
     InMemoryLongitudinalResultStore,
     LongitudinalMemoryService,
@@ -114,12 +126,8 @@ from sleepagent.radar_agent.product_agent.longitudinal_memory import (
 )
 from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitProfileChangeSet,
-    HabitProfileConfirmation,
 )
 from sleepagent.radar_agent.questionnaire import (
-    CapturedHabitAnswer,
-    HabitConceptStatus,
-    HabitQuestionAnswer,
     HabitQuestionCapture,
     HabitQuestionSelectionReceipt,
     HabitQuestionSelectionRequest,
@@ -127,8 +135,6 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v43"
-PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
 MAX_PROVIDER_INPUT_TOKENS_PER_CALL = 16_000
 MAX_PROVIDER_INPUT_TOKENS_PER_AGENT_EPISODE = 48_000
 LOGGER = logging.getLogger(__name__)
@@ -147,366 +153,6 @@ class AgentInteractionRequired(RuntimeError):
         self.request = request
 
 
-class PublicationPublisher(Protocol):
-    def publish(self, draft: CommunicationDraft) -> bool: ...
-
-
-class ProductEpisodeResultStore(Protocol):
-    def append_nonterminal(
-        self,
-        result: "ProductEpisodeRunResult",
-        *,
-        subject_id: str,
-    ) -> None: ...
-
-    def append_terminal_bundle(
-        self,
-        result: "ProductEpisodeRunResult",
-        *,
-        subject_id: str,
-        now: datetime | None = None,
-    ) -> object: ...
-
-    def latest(self, episode_id: str) -> "ProductEpisodeRunResult": ...
-
-    def history(self, episode_id: str) -> list["ProductEpisodeRunResult"]: ...
-
-
-class ProductUserFactResponse(StrictContract):
-    request_id: str = Field(..., min_length=1)
-    answer: str = Field(..., min_length=1, max_length=1000)
-    actor_id: str = Field(..., min_length=1)
-    actor_role: Literal["elder", "family", "doctor"]
-    subject_id: str = Field(..., min_length=1)
-    observed_at: datetime
-
-    @property
-    def source_ref(self) -> str:
-        prefix = (
-            "user_report"
-            if self.actor_role == "elder"
-            else "authorized_observer_report"
-        )
-        return (
-            f"{prefix}:"
-            f"{stable_hash(self.model_dump(mode='json'))[:24]}"
-        )
-
-
-class ProductEpisodeRunRequest(StrictContract):
-    episode_id: str = Field(..., min_length=1)
-    episode_type: EpisodeType
-    objective: str = Field(..., min_length=1, max_length=1200)
-    fact_snapshot: FactSnapshot
-    runtime_readiness_decisions: tuple[MetricReadinessDecision, ...] = ()
-    runtime_capability_receipts: tuple[CapabilityEligibilityReceipt, ...] = ()
-    user_text: str = Field(default="", max_length=4000)
-    user_fact_responses: tuple[ProductUserFactResponse, ...] = ()
-    audience_role: Literal["elder", "family", "doctor"] | None = None
-    tool_inputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    online_events: tuple[OnlineReasoningEvent, ...] = ()
-    personalized: bool = True
-    doctor_material: bool = False
-    external_action: bool = False
-    care_confirmation: ConfirmationToken | None = None
-    memory_confirmations: dict[str, ConfirmationToken] = Field(default_factory=dict)
-    external_action_target: ExternalActionTarget | None = None
-    external_confirmation: ConfirmationToken | None = None
-    declined_confirmation_ids: tuple[str, ...] = ()
-    idempotency_key: str | None = None
-    profile_purpose: Literal[
-        "evidence", "care", "profile_review", "doctor_material", "family_coordination"
-    ] | None = None
-    profile_relevant_concept_ids: tuple[str, ...] = ()
-    habit_question_trigger: HabitQuestionTrigger | None = None
-    habit_candidate_concept_ids: tuple[str, ...] = ()
-    habit_decision_gap_ref: str | None = None
-    habit_alternative_explanations: tuple[str, ...] = ()
-    habit_concept_states: dict[str, HabitConceptStatus] = Field(
-        default_factory=dict
-    )
-    habit_profile_update_requested: bool = False
-    habit_question_max: int = Field(default=3, ge=1, le=3)
-    habit_selection: HabitQuestionSelectionReceipt | None = None
-    habit_answers: tuple[HabitQuestionAnswer, ...] = ()
-    habit_suppression_confirmation_ref: str | None = None
-    habit_profile_candidate_answers: tuple[CapturedHabitAnswer, ...] = ()
-
-    @model_validator(mode="after")
-    def validate_habit_flow(self) -> "ProductEpisodeRunRequest":
-        decision_refs = tuple(
-            item.decision_ref for item in self.runtime_readiness_decisions
-        )
-        decision_hashes = tuple(
-            item.decision_hash for item in self.runtime_readiness_decisions
-        )
-        capability_refs = tuple(
-            item.receipt_ref for item in self.runtime_capability_receipts
-        )
-        capability_hashes = tuple(
-            item.receipt_hash for item in self.runtime_capability_receipts
-        )
-        if (
-            decision_refs != self.fact_snapshot.readiness_decision_refs
-            or decision_hashes != self.fact_snapshot.readiness_decision_hashes
-            or capability_refs
-            != self.fact_snapshot.capability_eligibility_refs
-            or capability_hashes
-            != self.fact_snapshot.capability_eligibility_hashes
-        ):
-            raise ValueError(
-                "runtime cold-start inputs must exactly match FactSnapshot"
-            )
-        response_ids = [
-            response.request_id
-            for response in self.user_fact_responses
-        ]
-        if len(response_ids) != len(set(response_ids)):
-            raise ValueError("user fact response IDs must be unique")
-        event_ids = [event.event_id for event in self.online_events]
-        if len(event_ids) != len(set(event_ids)):
-            raise ValueError("online event IDs must be unique")
-        for response in self.user_fact_responses:
-            if (
-                response.actor_id
-                != self.fact_snapshot.binding.actor_id
-                or response.actor_role
-                != self.fact_snapshot.binding.role
-                or response.subject_id
-                != self.fact_snapshot.binding.subject_id
-            ):
-                raise ValueError(
-                    "user fact response must match authenticated binding"
-                )
-        if len(self.declined_confirmation_ids) != len(
-            set(self.declined_confirmation_ids)
-        ):
-            raise ValueError("declined confirmation IDs must be unique")
-        if self.profile_relevant_concept_ids and self.profile_purpose is None:
-            raise ValueError("Profile concept read requires an explicit purpose")
-        if self.doctor_material:
-            if self.audience_role not in {None, "doctor"}:
-                raise ValueError(
-                    "doctor_material cannot target an elder or family audience"
-                )
-            if (
-                self.episode_type is not EpisodeType.DATA_QUALITY_RECOVERY
-                and _doctor_safety_checkpoint(self.episode_type) is None
-            ):
-                raise ValueError(
-                    "doctor_material requires an Episode with a registered "
-                    "Safety checkpoint"
-                )
-        resolved_doctor_audience = self.audience_role == "doctor" or (
-            self.audience_role is None
-            and self.fact_snapshot.binding.role == "doctor"
-        )
-        if (
-            resolved_doctor_audience
-            and self.episode_type is not EpisodeType.ROLE_MATERIAL
-            and not self.doctor_material
-        ):
-            raise ValueError(
-                "doctor audience outside role material requires "
-                "doctor_material safety semantics"
-            )
-        doctor_target = self.doctor_material or (
-            self.episode_type is EpisodeType.ROLE_MATERIAL
-            and (
-                self.audience_role == "doctor"
-                or (
-                    self.audience_role is None
-                    and self.fact_snapshot.binding.role == "doctor"
-                )
-            )
-        )
-        if doctor_target and "draft_material" not in (
-            self.fact_snapshot.binding.authorization_scope
-        ):
-            raise ValueError(
-                "doctor material requires draft_material authorization"
-            )
-        if self.habit_answers and self.habit_selection is None:
-            raise ValueError("Habit answers require a Selection receipt")
-        if self.habit_profile_candidate_answers and (
-            self.fact_snapshot.binding.role != "elder"
-            or not self.habit_profile_update_requested
-        ):
-            raise ValueError(
-                "Profile candidates require an elder review/update request"
-            )
-        if (
-            self.habit_question_trigger
-            == HabitQuestionTrigger.EXPLICIT_PROFILE_REVIEW
-            and (
-                self.profile_purpose != "profile_review"
-                or not self.profile_relevant_concept_ids
-                or not self.habit_profile_update_requested
-            )
-        ):
-            raise ValueError(
-                "Profile review questions require prior summary and update request"
-            )
-        return self
-
-
-def _effective_audience_role(
-    request: ProductEpisodeRunRequest,
-) -> Literal["elder", "family", "doctor"]:
-    """Resolve one audience without changing the public request Contract.
-
-    Historical callers may set ``doctor_material`` without repeating the
-    audience.  Conversely, an explicit doctor role-material audience must not
-    bypass the doctor Skill and Safety gate merely because that compatibility
-    flag was omitted.
-    """
-
-    if request.doctor_material:
-        return "doctor"
-    if request.audience_role is not None:
-        return request.audience_role
-    role = request.fact_snapshot.binding.role
-    return role if role != "system" else "elder"
-
-
-def _uses_doctor_material_semantics(
-    request: ProductEpisodeRunRequest,
-) -> bool:
-    return request.doctor_material or (
-        request.episode_type is EpisodeType.ROLE_MATERIAL
-        and _effective_audience_role(request) == "doctor"
-    )
-
-
-def _doctor_safety_checkpoint(episode_type: EpisodeType) -> str | None:
-    registered = EPISODE_DEFINITIONS[
-        episode_type
-    ].conditional_safety_checkpoints
-    for checkpoint in (
-        "doctor_material_safety",
-        "personal_claim_safety",
-        "care_candidate_safety",
-        "external_action_safety",
-    ):
-        if checkpoint in registered:
-            return checkpoint
-    return None
-
-
-class PendingConfirmationTarget(StrictContract):
-    confirmation_id: str = Field(..., min_length=1)
-    target_kind: Literal["memory", "care", "external_action", "habit_profile"]
-    candidate_id: str = Field(..., min_length=1)
-    candidate_hash: str = Field(..., min_length=64, max_length=64)
-    actor_id: str = Field(..., min_length=1)
-    subject_id: str = Field(..., min_length=1)
-    action_scope: str = Field(..., min_length=1)
-    reason: str = Field(..., min_length=1, max_length=600)
-    expires_at: datetime
-
-
-class PendingUserInputTarget(StrictContract):
-    request_id: str = Field(..., min_length=1)
-    question_text: str = Field(..., min_length=1, max_length=500)
-    why_needed: str = Field(..., min_length=1, max_length=500)
-    decision_scope: str = Field(..., min_length=1, max_length=500)
-    target_role: Literal["elder", "family", "doctor"]
-    source_agent: AgentId
-    expires_at: datetime
-
-
-class ProductEpisodeRunResult(StrictContract):
-    schema_version: str = PRODUCT_EPISODE_RESULT_SCHEMA_VERSION
-    runner_version: str = PRODUCT_EPISODE_RUNNER_VERSION
-    registry_hash: str
-    receipt: EpisodeReceipt
-    publication: CommunicationDraft | None = None
-    publication_delivered: bool = False
-    envelopes: list[AgentEnvelope] = Field(default_factory=list)
-    agent_invocations: list[AgentInvocationRecord] = Field(default_factory=list)
-    tool_receipts: list[ToolReceipt] = Field(default_factory=list)
-    accepted_work_products: list[AcceptedWorkProduct] = Field(default_factory=list)
-    habit_selection: HabitQuestionSelectionReceipt | None = None
-    habit_capture: HabitQuestionCapture | None = None
-    habit_change_set: HabitProfileChangeSet | None = None
-    committed_memory_candidate_ids: list[str] = Field(default_factory=list)
-    committed_habit_change_set_id: str | None = None
-    declined_confirmation_ids: list[str] = Field(default_factory=list)
-    committed_care_candidate_id: str | None = None
-    external_action_target_id: str | None = None
-    external_action_target: ExternalActionTarget | None = None
-    external_action_target_hash: str | None = Field(
-        default=None,
-        min_length=64,
-        max_length=64,
-    )
-    external_action_receipt_id: str | None = None
-    external_action_delivery_status: Literal["pending", "delivered"] | None = None
-    pending_confirmations: list[PendingConfirmationTarget] = Field(
-        default_factory=list
-    )
-    pending_user_input: PendingUserInputTarget | None = None
-
-    @model_validator(mode="after")
-    def pending_state_matches_receipt(self) -> "ProductEpisodeRunResult":
-        if len(self.declined_confirmation_ids) != len(
-            set(self.declined_confirmation_ids)
-        ):
-            raise ValueError("declined confirmation IDs must be unique")
-        if bool(self.external_action_receipt_id) != bool(
-            self.external_action_delivery_status
-        ):
-            raise ValueError(
-                "external action receipt and delivery status must be recorded together"
-            )
-        if bool(self.external_action_target_id) != bool(
-            self.external_action_target_hash
-        ):
-            raise ValueError(
-                "external action target ID and hash must be recorded together"
-            )
-        if self.external_action_target is not None and (
-            self.external_action_target_id != self.external_action_target.target_id
-        ):
-            raise ValueError("frozen external action target ID mismatch")
-        if (
-            self.external_action_receipt_id
-            and self.external_action_target_hash is None
-        ):
-            raise ValueError("external action receipt requires its exact target")
-        if self.pending_confirmations and (
-            self.receipt.status != EpisodeStatus.WAITING_CONFIRMATION
-        ):
-            raise ValueError(
-                "pending confirmations require a waiting-confirmation receipt"
-            )
-        if (
-            self.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-            and not self.pending_confirmations
-        ):
-            raise ValueError(
-                "waiting-confirmation receipt requires exact pending targets"
-            )
-        if self.pending_user_input is not None and (
-            self.receipt.status != EpisodeStatus.WAITING_USER
-        ):
-            raise ValueError(
-                "pending user input requires a waiting-user receipt"
-            )
-        if (
-            self.receipt.status == EpisodeStatus.WAITING_USER
-            and self.pending_user_input is None
-        ):
-            raise ValueError(
-                "waiting-user receipt requires an exact user-input request"
-            )
-        if self.pending_confirmations and self.pending_user_input is not None:
-            raise ValueError(
-                "an Episode cannot wait for confirmation and user input together"
-            )
-        return self
-
-
 class InMemoryProductEpisodeResultStore(InMemoryLongitudinalResultStore):
     """Product-facing name for the atomic longitudinal reference store."""
 
@@ -517,151 +163,56 @@ class ProductEpisodeRunner:
     def __init__(
         self,
         *,
-        agent_roster: ProductAgentRoster | None = None,
-        sleepcare_model: StructuredAgentModel | None = None,
-        agent_models: Mapping[AgentId, StructuredAgentModel] | None = None,
-        tool_executor: ProductToolExecutor | None = None,
-        publisher: PublicationPublisher | None = None,
-        result_store: ProductEpisodeResultStore | None = None,
-        care_catalog: CareActionCatalog | None = None,
-        habit_runtime: HabitProfileRuntimeService | None = None,
-        skill_registry: SkillRegistry | None = None,
-        commit_controller: DeterministicCommitController | None = None,
-        external_executor: Callable[
-            [ExternalActionExecutionRequest],
-            ExternalActionExecutionResult,
-        ]
-        | None = None,
-        source_resolvers: Mapping[str, CanonicalSourceResolver] | None = None,
-        fact_snapshot_revalidator: Callable[[FactSnapshot], bool] | None = None,
+        agent_roster: ProductAgentRoster,
+        tool_executor: ProductToolExecutorPort,
+        publisher: PublicationPublisher,
+        result_store: ProductEpisodeResultStore,
+        care_catalog: CareActionCatalog,
+        habit_runtime: HabitProfileRuntimeService,
+        skill_registry: SkillRegistry,
+        skill_resolver: SkillResolver,
+        prompt_compiler: PromptCompiler,
+        agent_profiles: Mapping[AgentId, AgentProfile],
+        commit_controller: DeterministicCommitController,
+        human_decisions: HumanDecisionService,
+        longitudinal_memory: LongitudinalMemoryService,
+        induction_worker: DeterministicInductionWorker,
+        external_executor: ExternalActionExecutor,
+        fact_snapshot_revalidator: FactSnapshotRevalidator | None,
+        provider_input_ledger: dict[tuple[str, AgentId], int],
     ) -> None:
-        self.skill_registry = skill_registry or SkillRegistry(default_skill_packages())
-        if agent_roster is None:
-            if sleepcare_model is None or agent_models is None:
-                raise TypeError(
-                    "ProductEpisodeRunner requires a concrete Agent roster"
-                )
-            agent_roster = ProductAgentFactory.from_models(
-                agent_models,
-                sleepcare_planning_model=sleepcare_model,
-                skill_registry=self.skill_registry,
-            )
-        elif sleepcare_model is not None or agent_models is not None:
-            raise ValueError(
-                "provide agent_roster or legacy model bindings, not both"
-            )
         if any(
-            agent.skill_registry.snapshot() != self.skill_registry.snapshot()
+            agent.skill_registry.snapshot() != skill_registry.snapshot()
             for agent in agent_roster
         ):
             raise ValueError("Agent roster and Runner Skill registries differ")
+        if skill_resolver.registry is not skill_registry:
+            raise ValueError("Runner Skill resolver must use the injected registry")
+        if set(agent_profiles) != set(AgentId):
+            raise ValueError("Runner requires one profile for each concrete Agent")
+        if longitudinal_memory.memory_store is not commit_controller.memory_store:
+            raise ValueError("Runner Memory service/store graph is inconsistent")
+        if longitudinal_memory.repository is not result_store:
+            raise ValueError("Runner Memory/result-store graph is inconsistent")
+        if habit_runtime.store is not commit_controller.habit_profile_store:
+            raise ValueError("Runner Habit/Profile authority graph is inconsistent")
         self.agent_roster = agent_roster
-        self.tool_executor = tool_executor or ProductToolExecutor()
-        self.habit_runtime = habit_runtime or HabitProfileRuntimeService()
-        for tool_name, handler in self.habit_runtime.handlers().items():
-            self.tool_executor.register_handler(tool_name, handler)
+        self.tool_executor = tool_executor
+        self.habit_runtime = habit_runtime
         self.publisher = publisher
-        self.result_store = result_store or InMemoryProductEpisodeResultStore()
-        self.commit_controller = commit_controller or DeterministicCommitController()
-        self.longitudinal_memory = LongitudinalMemoryService(
-            memory_store=self.commit_controller.memory_store,
-            repository=self.result_store,
-            source_resolvers=dict(source_resolvers or {}),
-        )
-        self.care_catalog = care_catalog or CareActionCatalog()
-        self.skill_resolver = SkillResolver(self.skill_registry)
-        self.prompt_compiler = PromptCompiler()
-        self.agent_profiles = default_agent_profiles()
-        self.induction_worker = DeterministicInductionWorker(self.result_store)
-        self._provider_input_tokens: dict[tuple[str, AgentId], int] = {}
-        self.external_executor = (
-            external_executor or UnconfiguredExternalActionExecutor()
-        )
+        self.result_store = result_store
+        self.commit_controller = commit_controller
+        self.human_decisions = human_decisions
+        self.longitudinal_memory = longitudinal_memory
+        self.care_catalog = care_catalog
+        self.skill_registry = skill_registry
+        self.skill_resolver = skill_resolver
+        self.prompt_compiler = prompt_compiler
+        self.agent_profiles = agent_profiles
+        self.induction_worker = induction_worker
+        self._provider_input_tokens = provider_input_ledger
+        self.external_executor = external_executor
         self.fact_snapshot_revalidator = fact_snapshot_revalidator
-        self.tool_executor.register_handler(
-            "care.read_state", self._read_current_care_state
-        )
-        self.tool_executor.register_handler(
-            "device.read_delivery_policy", self._read_delivery_policy
-        )
-        self.tool_executor.register_handler(
-            "coordination.read_policy", self._read_coordination_policy
-        )
-        self.tool_executor.register_handler(
-            "memory.read", self.longitudinal_memory.read
-        )
-        self.tool_executor.register_handler(
-            "memory.resolve_source",
-            self.longitudinal_memory.resolve_source,
-        )
-        self.tool_executor.register_handler(
-            "memory.review_candidates",
-            self.longitudinal_memory.review_pending_candidates,
-        )
-        self.tool_executor.register_handler(
-            "memory.prepare_candidate",
-            self.longitudinal_memory.prepare_pending_candidate,
-        )
-
-    def _read_current_care_state(
-        self,
-        _arguments: dict[str, Any],
-        context: ProductToolExecutionContext,
-    ) -> dict[str, Any]:
-        state = self.commit_controller.care_store.get(
-            context.fact_snapshot.binding.subject_id
-        )
-        return {
-            "state": state.model_dump(mode="json"),
-            "source_refs": [
-                f"care-state:{state.subject_id}:v{state.version}"
-            ],
-        }
-
-    def _read_delivery_policy(
-        self,
-        _arguments: dict[str, Any],
-        _context: ProductToolExecutionContext,
-    ) -> dict[str, Any]:
-        policy = self.care_catalog.delivery_policy
-        return {
-            "policy": policy.model_dump(mode="json"),
-            "source_refs": [policy.device_policy_ref, policy.policy_ref],
-        }
-
-    def _read_coordination_policy(
-        self,
-        arguments: dict[str, Any],
-        context: ProductToolExecutionContext,
-    ) -> dict[str, Any]:
-        caller = (
-            context.caller.value
-            if isinstance(context.caller, AgentId)
-            else context.caller
-        )
-        if caller != "runtime":
-            raise PermissionError(
-                "coordination policy facts must be injected by runtime"
-            )
-        policy = self.care_catalog.delivery_policy
-        if "coordination_policy_ref" in arguments:
-            raise ValueError(
-                "coordination policy identity is derived from the Care catalog"
-            )
-        request = CareCoordinationPolicyRequest.model_validate(
-            {
-                **arguments,
-                "coordination_policy_ref": policy.coordination_policy_ref,
-            }
-        )
-        result = CareCoordinationTool().read_policy(request)
-        return {
-            **result.model_dump(mode="json"),
-            "policy": {
-                "coordination_policy_ref": policy.coordination_policy_ref,
-                "family_notification_requires_candidate": True,
-            },
-        }
 
     def process_induction_jobs(
         self,
@@ -675,11 +226,7 @@ class ProductEpisodeRunner:
 
     def commit_frozen_confirmations(
         self,
-        *,
-        request: ProductEpisodeRunRequest,
-        frozen_result: ProductEpisodeRunResult,
-        confirmations: Mapping[str, ConfirmationToken],
-        declined_confirmation_ids: tuple[str, ...] = (),
+        command: CommitFrozenConfirmedAction,
     ) -> ProductEpisodeRunResult:
         """Resume only the deterministic commit phase of a frozen Episode.
 
@@ -688,6 +235,8 @@ class ProductEpisodeRunner:
         bound to the exact target persisted in ``frozen_result``.
         """
 
+        request = command.request
+        frozen_result = command.frozen_result
         if frozen_result.receipt.status != EpisodeStatus.WAITING_CONFIRMATION:
             raise AcceptanceError("frozen Episode is not waiting for confirmation")
         if frozen_result.receipt.episode_id != request.episode_id:
@@ -707,21 +256,77 @@ class ProductEpisodeRunner:
         }
         if len(pending_by_id) != len(frozen_result.pending_confirmations):
             raise AcceptanceError("frozen confirmations contain duplicate IDs")
-        unknown = set(confirmations) - set(pending_by_id)
-        unknown.update(set(declined_confirmation_ids) - set(pending_by_id))
-        if unknown:
+
+        decision_by_confirmation: dict[str, HumanDecisionRequest] = {}
+        declined_confirmation_ids: set[str] = set()
+        declined_states = {
+            HumanDecisionStatus.REJECTED,
+            HumanDecisionStatus.EXPIRED,
+            HumanDecisionStatus.REVOKED,
+            HumanDecisionStatus.SUPERSEDED,
+            HumanDecisionStatus.HARD_BLOCKED,
+        }
+        executable_states = {
+            HumanDecisionStatus.APPROVED,
+            HumanDecisionStatus.EXECUTING,
+            HumanDecisionStatus.COMMITTED,
+            HumanDecisionStatus.EXECUTION_FAILED,
+            HumanDecisionStatus.OUTCOME_UNKNOWN,
+        }
+        decision_ids = [
+            target.decision_id for target in pending_by_id.values()
+        ]
+        proposal_ids = [
+            target.proposal_id for target in pending_by_id.values()
+        ]
+        if any(item is None for item in (*decision_ids, *proposal_ids)):
             raise AcceptanceError(
-                f"confirmation does not belong to frozen Episode: {sorted(unknown)}"
+                "frozen confirmation is missing its explicit authority binding"
             )
-        unresolved = (
-            set(pending_by_id)
-            - set(confirmations)
-            - set(declined_confirmation_ids)
-        )
-        if unresolved:
+        if len(set(decision_ids)) != len(decision_ids) or len(
+            set(proposal_ids)
+        ) != len(proposal_ids):
             raise AcceptanceError(
-                f"frozen confirmations remain unresolved: {sorted(unresolved)}"
+                "frozen confirmations reuse an authority binding"
             )
+        for confirmation_id, target in pending_by_id.items():
+            assert target.decision_id is not None
+            assert target.proposal_id is not None
+            try:
+                decision = self.human_decisions.get(target.decision_id)
+            except KeyError as exc:
+                raise AcceptanceError(
+                    "frozen confirmation authority decision does not exist"
+                ) from exc
+            proposal = decision.proposal
+            if (
+                proposal.proposal_id != target.proposal_id
+                or proposal.episode_id != request.episode_id
+                or proposal.subject_id != target.subject_id
+                or proposal.subject_id
+                != request.fact_snapshot.binding.subject_id
+                or proposal.proposer_actor_id != target.actor_id
+                or proposal.target_id != target.candidate_id
+                or proposal.target_hash != target.candidate_hash
+                or proposal.action_scope != target.action_scope
+                or proposal.fact_snapshot_id
+                != request.fact_snapshot.fact_snapshot_id
+                or proposal.fact_snapshot_hash
+                != request.fact_snapshot.fact_snapshot_hash
+                or proposal.expires_at != target.expires_at
+            ):
+                raise AcceptanceError(
+                    "frozen confirmation authority binding does not match its target"
+                )
+            decision = self.human_decisions.expire(target.decision_id)
+            if decision.status in declined_states:
+                declined_confirmation_ids.add(confirmation_id)
+            elif decision.status not in executable_states:
+                raise AcceptanceError(
+                    "frozen confirmations remain unresolved: "
+                    f"{confirmation_id} is {decision.status.value}"
+                )
+            decision_by_confirmation[confirmation_id] = decision
 
         tool_receipts = list(frozen_result.tool_receipts)
         committed_memory_ids = list(
@@ -747,16 +352,25 @@ class ProductEpisodeRunner:
                 candidate = candidates.get(target.candidate_id)
                 if candidate is None or str(candidate.candidate_hash) != target.candidate_hash:
                     raise AcceptanceError("frozen Memory target drift")
-                token = confirmations[confirmation_id]
-                commit = self.commit_controller.commit_memory(
-                    candidate=candidate,
-                    expected_version=memory_version,
-                    fact_snapshot=request.fact_snapshot,
-                    idempotency_key=(
-                        f"{request.idempotency_key or request.episode_id}:"
-                        f"memory:{candidate.candidate_id}:{candidate.candidate_version}"
+                idempotency_key = (
+                    f"{request.idempotency_key or request.episode_id}:"
+                    f"memory:{candidate.candidate_id}:{candidate.candidate_version}"
+                )
+                capability = self._acquire_confirmation_capability(
+                    decision_by_confirmation[confirmation_id],
+                    target=target,
+                    request=request,
+                    idempotency_key=idempotency_key,
+                )
+                commit = self._execute_confirmed_commit(
+                    capability,
+                    lambda: self.commit_controller.commit_memory(
+                        candidate=candidate,
+                        expected_version=memory_version,
+                        fact_snapshot=request.fact_snapshot,
+                        idempotency_key=idempotency_key,
+                        approval_capability=capability,
                     ),
-                    token=token,
                 )
                 if commit.outcome != InvocationOutcome.SUCCEEDED:
                     raise AcceptanceError("Memory commit returned unknown outcome")
@@ -776,7 +390,6 @@ class ProductEpisodeRunner:
                 raise AcceptanceError("frozen Care strategy is missing or ambiguous")
             care_product = care_products[0]
             strategy = CareStrategy.model_validate(care_product.payload)
-            token = confirmations[confirmation_id]
             if strategy.disposition == "propose" and strategy.primary_action is not None:
                 action = strategy.primary_action
                 if (
@@ -784,16 +397,25 @@ class ProductEpisodeRunner:
                     or action.candidate_hash != target.candidate_hash
                 ):
                     raise AcceptanceError("frozen Care target drift")
-                commit = self.commit_controller.activate_care(
-                    action=action,
-                    token=token,
-                    actor_id=request.fact_snapshot.binding.actor_id,
-                    subject_id=request.fact_snapshot.binding.subject_id,
-                    expected_version=request.fact_snapshot.care_context_version,
-                    fact_snapshot=request.fact_snapshot,
-                    idempotency_key=(
-                        f"{request.idempotency_key or request.episode_id}:"
-                        f"care:{action.candidate_id}:{action.candidate_version}"
+                idempotency_key = (
+                    f"{request.idempotency_key or request.episode_id}:"
+                    f"care:{action.candidate_id}:{action.candidate_version}"
+                )
+                capability = self._acquire_confirmation_capability(
+                    decision_by_confirmation[confirmation_id],
+                    target=target,
+                    request=request,
+                    idempotency_key=idempotency_key,
+                )
+                commit = self._execute_confirmed_commit(
+                    capability,
+                    lambda: self.commit_controller.activate_care(
+                        action=action,
+                        subject_id=request.fact_snapshot.binding.subject_id,
+                        expected_version=request.fact_snapshot.care_context_version,
+                        fact_snapshot=request.fact_snapshot,
+                        idempotency_key=idempotency_key,
+                        approval_capability=capability,
                     ),
                 )
                 committed_care_id = action.candidate_id
@@ -803,17 +425,26 @@ class ProductEpisodeRunner:
                     or care_product.target_hash != target.candidate_hash
                 ):
                     raise AcceptanceError("frozen Care transition drift")
-                commit = self.commit_controller.transition_care(
-                    strategy=strategy,
-                    strategy_target_hash=care_product.target_hash,
-                    token=token,
-                    actor_id=request.fact_snapshot.binding.actor_id,
-                    subject_id=request.fact_snapshot.binding.subject_id,
-                    expected_version=request.fact_snapshot.care_context_version,
-                    fact_snapshot=request.fact_snapshot,
-                    idempotency_key=(
-                        f"{request.idempotency_key or request.episode_id}:"
-                        f"care-transition:{strategy.strategy_id}"
+                idempotency_key = (
+                    f"{request.idempotency_key or request.episode_id}:"
+                    f"care-transition:{strategy.strategy_id}"
+                )
+                capability = self._acquire_confirmation_capability(
+                    decision_by_confirmation[confirmation_id],
+                    target=target,
+                    request=request,
+                    idempotency_key=idempotency_key,
+                )
+                commit = self._execute_confirmed_commit(
+                    capability,
+                    lambda: self.commit_controller.transition_care(
+                        strategy=strategy,
+                        strategy_target_hash=care_product.target_hash,
+                        subject_id=request.fact_snapshot.binding.subject_id,
+                        expected_version=request.fact_snapshot.care_context_version,
+                        fact_snapshot=request.fact_snapshot,
+                        idempotency_key=idempotency_key,
+                        approval_capability=capability,
                     ),
                 )
                 committed_care_id = (
@@ -835,35 +466,23 @@ class ProductEpisodeRunner:
                 or change_set.manifest_hash != target.candidate_hash
             ):
                 raise AcceptanceError("frozen Habit Profile target drift")
-            token = confirmations[confirmation_id]
-            token.validate_candidate(
-                candidate_id=change_set.change_set_id,
-                candidate_hash=change_set.manifest_hash,
-                actor_id=token.actor_id,
-                actor_role=token.actor_role,
-                subject_id=change_set.subject_id,
-                action_scope=change_set.action_scope,
-                fact_snapshot_hash=request.fact_snapshot.fact_snapshot_hash,
+            idempotency_key = (
+                f"{request.idempotency_key or request.episode_id}:"
+                f"habit:{change_set.change_set_id}:{change_set.version}"
             )
-            if token.actor_role != "elder":
-                raise AcceptanceError("only the elder owner may confirm Profile")
-            commit = self.commit_controller.commit_habit_profile(
-                change_set=change_set,
-                confirmation=HabitProfileConfirmation(
-                    confirmation_id=token.token_id,
-                    actor_id=token.actor_id,
-                    actor_role="elder",
-                    subject_id=token.subject_id,
-                    action_scope="write_habit_profile",
-                    change_set_id=change_set.change_set_id,
-                    change_set_version=change_set.version,
-                    manifest_hash=change_set.manifest_hash,
-                    expires_at=token.expires_at,
-                ),
-                fact_snapshot=request.fact_snapshot,
-                idempotency_key=(
-                    f"{request.idempotency_key or request.episode_id}:"
-                    f"habit:{change_set.change_set_id}:{change_set.version}"
+            capability = self._acquire_confirmation_capability(
+                decision_by_confirmation[confirmation_id],
+                target=target,
+                request=request,
+                idempotency_key=idempotency_key,
+            )
+            commit = self._execute_confirmed_commit(
+                capability,
+                lambda: self.commit_controller.commit_habit_profile(
+                    change_set=change_set,
+                    approval_capability=capability,
+                    fact_snapshot=request.fact_snapshot,
+                    idempotency_key=idempotency_key,
                 ),
             )
             if commit.outcome != InvocationOutcome.SUCCEEDED:
@@ -882,23 +501,32 @@ class ProductEpisodeRunner:
                 or external_target.target_id != target.candidate_id
             ):
                 raise AcceptanceError("frozen external-action target drift")
-            token = confirmations[confirmation_id]
-            commit = self.commit_controller.execute_external(
-                tool_name=external_target.tool_name,
-                target=external_target.payload,
-                snapshot=request.fact_snapshot,
-                idempotency_key=(
-                    request.idempotency_key
-                    or f"{request.episode_id}:external:{external_target.target_id}"
+            idempotency_key = (
+                request.idempotency_key
+                or f"{request.episode_id}:external:{external_target.target_id}"
+            )
+            capability = self._acquire_confirmation_capability(
+                decision_by_confirmation[confirmation_id],
+                target=target,
+                request=request,
+                idempotency_key=idempotency_key,
+            )
+            commit = self._execute_confirmed_commit(
+                capability,
+                lambda: self.commit_controller.execute_external(
+                    tool_name=external_target.tool_name,
+                    target=external_target.payload,
+                    snapshot=request.fact_snapshot,
+                    idempotency_key=idempotency_key,
+                    executor=self.external_executor,
+                    approval_capability=capability,
+                    actor_id=external_target.actor_id,
+                    subject_id=external_target.subject_id,
+                    action_scope=external_target.action_scope,
+                    target_id=external_target.target_id,
+                    target_version=external_target.target_version,
+                    target_hash=target.candidate_hash,
                 ),
-                executor=self.external_executor,
-                token=token,
-                actor_id=external_target.actor_id,
-                subject_id=external_target.subject_id,
-                action_scope=external_target.action_scope,
-                target_id=external_target.target_id,
-                target_version=external_target.target_version,
-                target_hash=target.candidate_hash,
             )
             if commit.outcome == InvocationOutcome.UNKNOWN:
                 raise AcceptanceError("external action outcome is unknown")
@@ -938,6 +566,65 @@ class ProductEpisodeRunner:
             subject_id=request.fact_snapshot.binding.subject_id,
         )
 
+    def _acquire_confirmation_capability(
+        self,
+        decision: HumanDecisionRequest,
+        *,
+        target: PendingConfirmationTarget,
+        request: ProductEpisodeRunRequest,
+        idempotency_key: str,
+    ) -> VerifiedApprovalCapability:
+        try:
+            return self.human_decisions.acquire_verified_capability(
+                decision.decision_id,
+                expected_proposal_id=decision.proposal.proposal_id,
+                expected_subject_id=target.subject_id,
+                expected_target_id=target.candidate_id,
+                expected_target_hash=target.candidate_hash,
+                expected_action_scope=target.action_scope,
+                expected_fact_snapshot_id=request.fact_snapshot.fact_snapshot_id,
+                expected_fact_snapshot_hash=(
+                    request.fact_snapshot.fact_snapshot_hash
+                ),
+                expected_policy_version=decision.proposal.policy_version,
+                idempotency_key=idempotency_key,
+            )
+        except HumanDecisionError as exc:
+            raise AcceptanceError(
+                "authoritative approval could not be acquired"
+            ) from exc
+
+    def _execute_confirmed_commit(
+        self,
+        capability: VerifiedApprovalCapability,
+        operation: Callable[[], ToolReceipt],
+    ) -> ToolReceipt:
+        try:
+            receipt = operation()
+        except Exception as exc:
+            self.human_decisions.record_execution_result(
+                capability,
+                status=HumanDecisionStatus.EXECUTION_FAILED,
+                failure_reason=type(exc).__name__,
+            )
+            raise
+        status = (
+            HumanDecisionStatus.COMMITTED
+            if receipt.outcome == InvocationOutcome.SUCCEEDED
+            else (
+                HumanDecisionStatus.OUTCOME_UNKNOWN
+                if receipt.outcome == InvocationOutcome.UNKNOWN
+                else HumanDecisionStatus.EXECUTION_FAILED
+            )
+        )
+        self.human_decisions.record_execution_result(
+            capability,
+            status=status,
+            receipt_ref=receipt.tool_invocation_id,
+            failure_reason=receipt.error_code,
+        )
+        return receipt
+
     def run(self, request: ProductEpisodeRunRequest) -> ProductEpisodeRunResult:
         urgent = self._urgent_preflight(request)
         if urgent is not None:
@@ -961,6 +648,24 @@ class ProductEpisodeRunner:
                     capability_receipts=request.runtime_capability_receipts,
                     observed_at=datetime.now(timezone.utc),
                 ),
+            )
+        failed_capture = next(
+            (
+                receipt
+                for receipt in preflight_receipts
+                if receipt.tool_name == "questionnaire.capture_profile"
+                and receipt.outcome != InvocationOutcome.SUCCEEDED
+            ),
+            None,
+        )
+        if failed_capture is not None:
+            return self._store(
+                self._failed_required_preflight(
+                    request,
+                    failed_capture,
+                    trace_suffix="habit-capture-preflight-failed",
+                ),
+                subject_id=request.fact_snapshot.binding.subject_id,
             )
         if habit_capture and habit_capture.safety_events:
             return self._store(
@@ -1061,10 +766,36 @@ class ProductEpisodeRunner:
             request, runtime, captured_preflight=habit_capture
         )
         tool_receipts.extend(habit_receipts)
+        failed_selection = next(
+            (
+                receipt
+                for receipt in habit_receipts
+                if receipt.tool_name == "questionnaire.select_profile"
+                and receipt.outcome != InvocationOutcome.SUCCEEDED
+            ),
+            None,
+        )
+        habit_selection_failure_code: str | None = None
+        if failed_selection is not None:
+            habit_selection_failure_code = (
+                "required_tool_failed:questionnaire.select_profile"
+            )
+            if (
+                request.habit_question_trigger
+                != HabitQuestionTrigger.OPTIONAL_LIGHT_INTAKE
+            ):
+                return self._store(
+                    self._degraded(
+                        request,
+                        runtime,
+                        failure_code=habit_selection_failure_code,
+                        tool_receipts=tool_receipts,
+                        envelopes=envelopes,
+                    ),
+                    subject_id=request.fact_snapshot.binding.subject_id,
+                )
         if (
             habit_change_set is not None
-            and habit_change_set.change_set_id
-            not in request.declined_confirmation_ids
         ):
             pending_confirmations.append(
                 PendingConfirmationTarget(
@@ -1078,8 +809,7 @@ class ProductEpisodeRunner:
                     subject_id=request.fact_snapshot.binding.subject_id,
                     action_scope="write_habit_profile",
                     reason="写入睡眠习惯画像前需要老人单独确认。",
-                    expires_at=datetime.now(timezone.utc)
-                    + timedelta(minutes=20),
+                    expires_at=habit_change_set.confirmation_expires_at,
                 )
             )
         evidence: AcceptedWorkProduct | None = None
@@ -1487,45 +1217,24 @@ class ProductEpisodeRunner:
                 Literal["pending", "delivered"] | None
             ) = None
             waiting_confirmation = bool(pending_confirmations)
-            memory_version = request.fact_snapshot.memory_context_version
             for candidate in draft.memory_change_candidates:
-                if candidate.candidate_id in request.declined_confirmation_ids:
-                    continue
-                token = request.memory_confirmations.get(candidate.candidate_id)
-                if candidate.confirmation_required and token is None:
-                    waiting_confirmation = True
-                    pending_confirmations.append(
-                        PendingConfirmationTarget(
-                            confirmation_id=(
-                                f"confirmation:memory:{candidate.candidate_id}"
-                            ),
-                            target_kind="memory",
-                            candidate_id=candidate.candidate_id,
-                            candidate_hash=str(candidate.candidate_hash),
-                            actor_id=request.fact_snapshot.binding.actor_id,
-                            subject_id=request.fact_snapshot.binding.subject_id,
-                            action_scope="commit_memory",
-                            reason="写入或修改长期记忆前需要老人确认。",
-                            expires_at=datetime.now(timezone.utc)
-                            + timedelta(minutes=20),
-                        )
+                waiting_confirmation = True
+                pending_confirmations.append(
+                    PendingConfirmationTarget(
+                        confirmation_id=(
+                            f"confirmation:memory:{candidate.candidate_id}"
+                        ),
+                        target_kind="memory",
+                        candidate_id=candidate.candidate_id,
+                        candidate_hash=str(candidate.candidate_hash),
+                        actor_id=request.fact_snapshot.binding.actor_id,
+                        subject_id=request.fact_snapshot.binding.subject_id,
+                        action_scope="commit_memory",
+                        reason="写入或修改长期记忆前需要老人确认。",
+                        expires_at=datetime.now(timezone.utc)
+                        + timedelta(minutes=20),
                     )
-                    continue
-                commit = self.commit_controller.commit_memory(
-                    candidate=candidate,
-                    expected_version=memory_version,
-                    fact_snapshot=request.fact_snapshot,
-                    idempotency_key=(
-                        f"{request.idempotency_key or request.episode_id}:"
-                        f"memory:{candidate.candidate_id}:{candidate.candidate_version}"
-                    ),
-                    token=token,
                 )
-                tool_receipts.append(commit)
-                if commit.outcome != InvocationOutcome.SUCCEEDED:
-                    raise AcceptanceError("Memory commit returned unknown outcome")
-                memory_version += 1
-                committed_memory_candidate_ids.append(candidate.candidate_id)
             if care:
                 strategy = CareStrategy.model_validate(care.payload)
                 action = strategy.primary_action
@@ -1536,150 +1245,72 @@ class ProductEpisodeRunner:
                         and action is not None
                         else strategy.strategy_id
                     )
-                    if (
-                        confirmation_candidate_id
-                        in request.declined_confirmation_ids
-                    ):
-                        pass
-                    elif request.care_confirmation is None:
-                        waiting_confirmation = True
-                        pending_confirmations.append(
-                            PendingConfirmationTarget(
-                                confirmation_id=(
-                                    "confirmation:care:"
-                                    f"{confirmation_candidate_id}"
-                                ),
-                                target_kind="care",
-                                candidate_id=confirmation_candidate_id,
-                                candidate_hash=(
-                                    action.candidate_hash
-                                    if strategy.disposition == "propose"
-                                    and action is not None
-                                    else care.target_hash
-                                ),
-                                actor_id=(
-                                    request.fact_snapshot.binding.actor_id
-                                ),
-                                subject_id=(
-                                    request.fact_snapshot.binding.subject_id
-                                ),
-                                action_scope=(
-                                    "activate_care"
-                                    if strategy.disposition == "propose"
-                                    else "transition_care"
-                                ),
-                                reason=(
-                                    "建立或实质修改主要照护行动前需要确认。"
-                                ),
-                                expires_at=datetime.now(timezone.utc)
-                                + timedelta(minutes=20),
-                            )
-                        )
-                    elif strategy.disposition == "propose" and action is not None:
-                        care_commit = self.commit_controller.activate_care(
-                            action=action,
-                            token=request.care_confirmation,
-                            actor_id=request.fact_snapshot.binding.actor_id,
-                            subject_id=request.fact_snapshot.binding.subject_id,
-                            expected_version=request.fact_snapshot.care_context_version,
-                            fact_snapshot=request.fact_snapshot,
-                            idempotency_key=(
-                                f"{request.idempotency_key or request.episode_id}:"
-                                f"care:{action.candidate_id}:{action.candidate_version}"
-                            ),
-                        )
-                        tool_receipts.append(care_commit)
-                        if care_commit.outcome != InvocationOutcome.SUCCEEDED:
-                            raise AcceptanceError("Care commit returned unknown outcome")
-                        committed_care_candidate_id = action.candidate_id
-                    elif strategy.disposition in {
-                        "adjust",
-                        "pause",
-                        "complete",
-                        "end",
-                    }:
-                        care_commit = self.commit_controller.transition_care(
-                            strategy=strategy,
-                            strategy_target_hash=care.target_hash,
-                            token=request.care_confirmation,
-                            actor_id=request.fact_snapshot.binding.actor_id,
-                            subject_id=request.fact_snapshot.binding.subject_id,
-                            expected_version=(
-                                request.fact_snapshot.care_context_version
-                            ),
-                            fact_snapshot=request.fact_snapshot,
-                            idempotency_key=(
-                                f"{request.idempotency_key or request.episode_id}:"
-                                f"care-transition:{strategy.strategy_id}"
-                            ),
-                        )
-                        tool_receipts.append(care_commit)
-                        if care_commit.outcome != InvocationOutcome.SUCCEEDED:
-                            raise AcceptanceError(
-                                "Care transition returned unknown outcome"
-                            )
-                        committed_care_candidate_id = (
-                            action.candidate_id if action else strategy.strategy_id
-                        )
-            if external_target is not None:
-                if (
-                    external_target.target_id
-                    in request.declined_confirmation_ids
-                ):
-                    pass
-                elif request.external_confirmation is None:
                     waiting_confirmation = True
-                    target = request.external_action_target
-                    assert target is not None
                     pending_confirmations.append(
                         PendingConfirmationTarget(
                             confirmation_id=(
-                                f"confirmation:external:{target.target_id}"
+                                "confirmation:care:"
+                                f"{confirmation_candidate_id}"
                             ),
-                            target_kind="external_action",
-                            candidate_id=target.target_id,
-                            candidate_hash=external_target.target_hash,
-                            actor_id=target.actor_id,
-                            subject_id=target.subject_id,
-                            action_scope=target.action_scope,
+                            target_kind="care",
+                            candidate_id=confirmation_candidate_id,
+                            candidate_hash=(
+                                action.candidate_hash
+                                if strategy.disposition == "propose"
+                                and action is not None
+                                else care.target_hash
+                            ),
+                            actor_id=(
+                                request.fact_snapshot.binding.actor_id
+                            ),
+                            subject_id=(
+                                request.fact_snapshot.binding.subject_id
+                            ),
+                            action_scope=(
+                                "activate_care"
+                                if strategy.disposition == "propose"
+                                else "transition_care"
+                            ),
                             reason=(
-                                "执行通知、分享或导出前需要对精确目标确认。"
+                                "建立或实质修改主要照护行动前需要确认。"
                             ),
-                            expires_at=target.expires_at,
+                            expires_at=datetime.now(timezone.utc)
+                            + timedelta(minutes=20),
                         )
                     )
-                else:
-                    target = request.external_action_target
-                    assert target is not None
-                    external_receipt = self.commit_controller.execute_external(
-                        tool_name=target.tool_name,
-                        target=target.payload,
-                        snapshot=request.fact_snapshot,
-                        idempotency_key=(
-                            request.idempotency_key
-                            or f"{request.episode_id}:external:{target.target_id}"
+            if external_target is not None:
+                waiting_confirmation = True
+                target = request.external_action_target
+                assert target is not None
+                pending_confirmations.append(
+                    PendingConfirmationTarget(
+                        confirmation_id=(
+                            f"confirmation:external:{target.target_id}"
                         ),
-                        executor=self.external_executor,
-                        token=request.external_confirmation,
+                        target_kind="external_action",
+                        candidate_id=target.target_id,
+                        candidate_hash=external_target.target_hash,
                         actor_id=target.actor_id,
                         subject_id=target.subject_id,
                         action_scope=target.action_scope,
-                        target_id=target.target_id,
-                        target_version=target.target_version,
-                        target_hash=external_target.target_hash,
+                        reason=(
+                            "执行通知、分享或导出前需要对精确目标确认。"
+                        ),
+                        expires_at=target.expires_at,
                     )
-                    tool_receipts.append(external_receipt)
-                    external_action_receipt_id = external_receipt.tool_invocation_id
-                    if external_receipt.outcome == InvocationOutcome.UNKNOWN:
-                        raise AcceptanceError("external action outcome is unknown")
-                    external_action_delivery_status = str(
-                        external_receipt.output["delivery_status"]
-                    )
+                )
             if not delivered:
                 receipt = runtime.finish(
                     status=EpisodeStatus.PARTIAL,
                     execution_mode=ExecutionMode.SAFE_DEGRADED,
-                    failure_codes=["publication_delivery_failed"],
+                    failure_codes=[
+                        "publication_delivery_failed",
+                        *(
+                            [habit_selection_failure_code]
+                            if habit_selection_failure_code
+                            else []
+                        ),
+                    ],
                     tool_receipt_ids=[
                         item.tool_invocation_id for item in tool_receipts
                     ],
@@ -1687,6 +1318,19 @@ class ProductEpisodeRunner:
             elif waiting_confirmation:
                 receipt = runtime.finish(
                     status=EpisodeStatus.WAITING_CONFIRMATION,
+                    failure_codes=(
+                        [habit_selection_failure_code]
+                        if habit_selection_failure_code
+                        else None
+                    ),
+                    tool_receipt_ids=[
+                        item.tool_invocation_id for item in tool_receipts
+                    ],
+                )
+            elif habit_selection_failure_code:
+                receipt = runtime.finish(
+                    status=EpisodeStatus.PARTIAL,
+                    failure_codes=[habit_selection_failure_code],
                     tool_receipt_ids=[
                         item.tool_invocation_id for item in tool_receipts
                     ],
@@ -1711,9 +1355,6 @@ class ProductEpisodeRunner:
                 habit_capture=habit_capture,
                 habit_change_set=habit_change_set,
                 committed_memory_candidate_ids=committed_memory_candidate_ids,
-                declined_confirmation_ids=list(
-                    request.declined_confirmation_ids
-                ),
                 committed_care_candidate_id=committed_care_candidate_id,
                 external_action_target_id=(
                     external_target.target_id if external_target else None
@@ -2458,7 +2099,7 @@ class ProductEpisodeRunner:
             ),
         )
         if result.receipt.outcome != InvocationOutcome.SUCCEEDED:
-            return self._failed_safety_preflight(request, result.receipt)
+            return self._failed_required_preflight(request, result.receipt)
         urgent = bool(result.receipt.output.get("urgent"))
         if not urgent:
             for event in request.online_events:
@@ -2480,7 +2121,7 @@ class ProductEpisodeRunner:
                     ),
                 )
                 if event_risk.receipt.outcome != InvocationOutcome.SUCCEEDED:
-                    return self._failed_safety_preflight(
+                    return self._failed_required_preflight(
                         request,
                         event_risk.receipt,
                     )
@@ -2522,9 +2163,11 @@ class ProductEpisodeRunner:
         )
 
     @staticmethod
-    def _failed_safety_preflight(
+    def _failed_required_preflight(
         request: ProductEpisodeRunRequest,
         receipt: ToolReceipt,
+        *,
+        trace_suffix: str = "safety-preflight-failed",
     ) -> ProductEpisodeRunResult:
         episode_receipt = EpisodeReceipt(
             episode_id=request.episode_id,
@@ -2540,7 +2183,7 @@ class ProductEpisodeRunner:
             final_episode_state_revision=0,
             tool_receipt_ids=[receipt.tool_invocation_id],
             failure_codes=[f"required_tool_failed:{receipt.tool_name}"],
-            trace_ref=f"trace:{request.episode_id}:safety-preflight-failed",
+            trace_ref=f"trace:{request.episode_id}:{trace_suffix}",
         )
         return ProductEpisodeRunResult(
             registry_hash=stable_hash(product_agent_manifest()),
@@ -2787,8 +2430,31 @@ class ProductEpisodeRunner:
                     )
                 )
             )
+            interaction_identity = request.idempotency_key or stable_hash(
+                {
+                    "episode_id": request.episode_id,
+                    "trigger": request.habit_question_trigger,
+                    "decision_kind": decision_kind,
+                    "decision_gap_ref": request.habit_decision_gap_ref,
+                    "concept_states": request.habit_concept_states,
+                    "alternative_explanations": (
+                        request.habit_alternative_explanations
+                    ),
+                    "candidate_concept_ids": (
+                        request.habit_candidate_concept_ids
+                    ),
+                    "max_questions": request.habit_question_max,
+                    "profile_update_requested": (
+                        request.habit_profile_update_requested
+                    ),
+                    "binding": binding.model_dump(mode="json"),
+                }
+            )
             selection_request = HabitQuestionSelectionRequest(
-                request_id=f"habit-request:{request.episode_id}:{runtime.episode_state_revision}",
+                request_id=(
+                    f"habit-request:{request.episode_id}:"
+                    f"{interaction_identity}"
+                ),
                 episode_id=request.episode_id,
                 subject_id=binding.subject_id,
                 actor_id=binding.actor_id,
@@ -2874,9 +2540,6 @@ class ProductEpisodeRunner:
                 "answers": [
                     item.model_dump(mode="json") for item in request.habit_answers
                 ],
-                "suppression_confirmation_ref": (
-                    request.habit_suppression_confirmation_ref
-                ),
             },
             context=ProductToolExecutionContext(
                 caller="runtime",
@@ -3015,7 +2678,6 @@ class ProductEpisodeRunner:
             agent_invocations=list(runtime.invocation_records),
             tool_receipts=tool_receipts,
             accepted_work_products=list(runtime.accepted_work_products.values()),
-            declined_confirmation_ids=list(request.declined_confirmation_ids),
         )
 
     def _publish(
@@ -3064,7 +2726,7 @@ class ProductEpisodeRunner:
             )
         if entry.state != "reserved":
             return bool(entry.delivered)
-        delivered = self.publisher.publish(draft) if self.publisher else True
+        delivered = self.publisher.publish(draft)
         self.result_store.complete_publication(
             intent_id=entry.intent_id,
             delivered=delivered,
@@ -3097,15 +2759,13 @@ class ProductEpisodeRunner:
                     }
                 )
         if result.receipt.terminal:
-            try:
-                self.result_store.append_terminal_bundle(
-                    result,
-                    subject_id=subject_id,
-                )
-            finally:
-                self.tool_executor.release_episode(
-                    result.receipt.episode_id
-                )
+            self.result_store.append_terminal_bundle(
+                result,
+                subject_id=subject_id,
+            )
+            self.tool_executor.release_episode(
+                result.receipt.episode_id
+            )
         else:
             self.result_store.append_nonterminal(
                 result,

@@ -20,12 +20,22 @@ from sleepagent.radar_agent.runtime import (
     RadarTaskStatus,
     build_developer_trace,
 )
-from sleepagent.radar_agent.persistence import RadarSubject
+from sleepagent.radar_agent.persistence import RadarPersistenceStore, RadarSubject
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    build_product_runtime_bundle_from_env,
+)
 from sleepagent.radar_agent.provider import ReplayRadarProvider
 
 
 def _runtime() -> RadarApiRuntime:
-    return RadarApiRuntime(sqlite3.connect(":memory:", check_same_thread=False))
+    persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    return RadarApiRuntime(
+        product_runtime=build_product_runtime_bundle_from_env(
+            persistence_store=persistence,
+        )
+    )
 
 
 def test_run_demo_json_executes_shared_runtime_and_emits_trace() -> None:

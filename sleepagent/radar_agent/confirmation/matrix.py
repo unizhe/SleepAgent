@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from sleepagent.radar_agent.schemas import HumanConfirmationRequest
-
-
 Role = Literal["elder", "family", "doctor", "system"]
 
 
@@ -98,36 +95,6 @@ def confirmation_rule(action_type: str) -> ConfirmationRule | None:
     return _RULES.get(canonical_action(action_type))
 
 
-def confirmation_request(
-    *,
-    task_id: str,
-    action_type: str,
-    evidence_refs: list[str],
-    reason: str | None = None,
-    scope_id: str | None = None,
-) -> HumanConfirmationRequest:
-    canonical = canonical_action(action_type)
-    rule = confirmation_rule(canonical)
-    if rule is None or not rule.requires_confirmation:
-        raise ValueError(f"action {action_type!r} does not require confirmation")
-    suffix = f":{scope_id}" if scope_id else ""
-    return HumanConfirmationRequest(
-        confirmation_id=f"confirm:{task_id}:{canonical}{suffix}",
-        task_id=task_id,
-        action_type=canonical,
-        requested_role=rule.requested_role,
-        allowed_roles=list(rule.allowed_roles),
-        reason=reason or f"{canonical} requires confirmation before execution.",
-        evidence_refs=evidence_refs,
-        confirmation_kind=rule.confirmation_kind,
-        blocks_daily_flow=rule.blocks_daily_flow,
-        idempotency_key=f"{task_id}:{canonical}{suffix}",
-        delivery_status=(
-            "pending" if rule.confirmation_kind == "delivery_record" else "not_applicable"
-        ),
-    )
-
-
 def automatic_actions(*, risk_level: str, data_quality_status: str) -> list[str]:
     actions = ["publish_daily_elder_report", "publish_daily_family_report"]
     if risk_level == "info":
@@ -147,7 +114,6 @@ __all__ = [
     "ConfirmationRule",
     "automatic_actions",
     "canonical_action",
-    "confirmation_request",
     "confirmation_rule",
     "matrix_rules",
 ]

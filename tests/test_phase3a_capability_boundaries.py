@@ -21,18 +21,7 @@ from sleepagent.radar_agent.product_agent.policies.workflow import (
 from sleepagent.radar_agent.product_agent.services.reviewed_knowledge import (
     ReviewedKnowledgeService,
 )
-from sleepagent.radar_agent.product_agent.skill_methods.care_coordination import (
-    CareCoordinationSkill,
-)
-from sleepagent.radar_agent.product_agent.skill_methods.evidence_trend import (
-    EvidenceTrendSkill,
-)
-from sleepagent.radar_agent.product_agent.skill_methods.memory import (
-    SleepCareMemorySkill,
-)
-from sleepagent.radar_agent.product_agent.skill_methods.role_material import (
-    SleepCareRoleMaterialSkill,
-)
+from sleepagent.radar_agent.product_agent.skills import default_skill_packages
 from sleepagent.radar_agent.product_agent.tools.artifact_rendering import (
     ArtifactRenderingTool,
 )
@@ -63,16 +52,15 @@ CAPABILITY_ROOT = (
 def test_all_legacy_capabilities_have_a_non_agent_canonical_owner() -> None:
     migrated_boundaries = {
         "radar_data": (RadarDataAdapter, CanonicalRadarEvidenceTool),
-        "trend": (TrendAnalysisTool, EvidenceTrendSkill),
+        "trend": (TrendAnalysisTool,),
         "risk": (RiskClassificationTool, classify_structured_risk),
         "knowledge": (KnowledgeRetrievalTool, ReviewedKnowledgeService),
-        "report": (SleepCareRoleMaterialSkill, ArtifactRenderingTool),
+        "report": (ArtifactRenderingTool,),
         "alert_care": (
-            CareCoordinationSkill,
             CareCoordinationTool,
             CareEscalationPolicy,
         ),
-        "memory": (SleepCareMemorySkill, LongitudinalMemoryService),
+        "memory": (LongitudinalMemoryService,),
         "fixed_orchestrator": (
             CanonicalWorkflowPolicy,
             ProductEpisodeRuntime,
@@ -121,7 +109,7 @@ def test_capability_source_has_no_legacy_agent_runtime_imports() -> None:
     }
     paths = [
         path
-        for folder in ("tools", "services", "skill_methods", "policies")
+        for folder in ("tools", "services", "policies")
         for path in (CAPABILITY_ROOT / folder).glob("*.py")
     ] + [CAPABILITY_ROOT / "episode.py"]
 
@@ -147,12 +135,17 @@ def test_capability_source_has_no_legacy_agent_runtime_imports() -> None:
         assert not (referenced_names & forbidden_names), path
 
 
-def test_skill_owners_are_limited_to_the_frozen_four_role_roster() -> None:
+def test_real_skill_packages_are_owned_by_the_frozen_four_role_roster() -> None:
+    owners = {
+        package.skill_id: package.owner_agent
+        for package in default_skill_packages()
+    }
+
     assert {
-        EvidenceTrendSkill.owner,
-        CareCoordinationSkill.owner,
-        SleepCareMemorySkill.owner,
-        SleepCareRoleMaterialSkill(audience_role="family").owner,
+        owners["interpret_longitudinal_pattern"],
+        owners["draft_coordination_candidate"],
+        owners["propose_memory_change"],
+        owners["draft_user_material"],
     } == {
         AgentId.EVIDENCE_REASONING,
         AgentId.CARE_STRATEGY,

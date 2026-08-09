@@ -3,14 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from sleepagent.radar_agent.product_agent.contracts import (
-    AgentId,
     AuthenticatedBinding,
     FactSnapshot,
     SourceScope,
     SourceScopeKind,
-)
-from sleepagent.radar_agent.product_agent.skill_methods.evidence_trend import (
-    EvidenceTrendSkill,
 )
 from sleepagent.radar_agent.product_agent.tools.trend_analysis import (
     TrendAnalysisTool,
@@ -18,6 +14,7 @@ from sleepagent.radar_agent.product_agent.tools.trend_analysis import (
     TrendMetricStatus,
 )
 from sleepagent.radar_agent.product_agent.tooling import (
+    CoreProductToolService,
     ProductToolExecutionContext,
     ProductToolExecutor,
 )
@@ -157,7 +154,7 @@ def test_trend_tool_never_borrows_baseline_across_calibration_versions() -> None
     assert any("early versus late" in item for item in metric.caveats)
 
 
-def test_evidence_trend_skill_expresses_insufficient_window_uncertainty() -> None:
+def test_trend_tool_expresses_insufficient_window_uncertainty() -> None:
     summary = _summary(
         night=LATEST,
         sleep_minutes=360,
@@ -165,17 +162,19 @@ def test_evidence_trend_skill_expresses_insufficient_window_uncertainty() -> Non
         calibration_state="unknown",
     )
 
-    drafts = EvidenceTrendSkill().interpret(
-        TrendAnalysisTool().analyze([summary])
-    )
+    analysis = TrendAnalysisTool().analyze([summary])
+    metrics = analysis.windows["7"]
 
-    assert drafts
-    assert all(item.risk_signal == "uncertain" for item in drafts)
+    assert metrics
     assert all(
         item.direction is TrendDirection.INSUFFICIENT_DATA
-        for item in drafts
+        for item in metrics
     )
-    assert all(item.evidence_refs == [summary.source_report_ref] for item in drafts)
+    assert all(
+        item.evidence_refs == [summary.source_report_ref]
+        for item in metrics
+    )
+    assert analysis.uncertainties
 
 
 def test_missing_compatible_baseline_is_explicit_uncertainty() -> None:
@@ -194,35 +193,14 @@ def test_missing_compatible_baseline_is_explicit_uncertainty() -> None:
     assert metric.status is TrendMetricStatus.COMPUTED
     assert metric.direction is TrendDirection.INSUFFICIENT_DATA
     assert "7d sleep_minutes: insufficient_data" in analysis.uncertainties
-    draft = next(
-        item
-        for item in EvidenceTrendSkill().interpret(analysis)
-        if item.metric_id == "sleep_minutes"
-    )
-    assert draft.risk_signal == "uncertain"
-    assert "baseline" in draft.statement
-
-
-def test_evidence_trend_skill_interprets_tool_output_without_recreating_trend_agent() -> None:
-    analysis = TrendAnalysisTool().analyze(
-        _history(baseline_nights=20, recent_nights=90)
-    )
-
-    drafts = EvidenceTrendSkill().interpret(analysis)
-
-    assert EvidenceTrendSkill.owner is AgentId.EVIDENCE_REASONING
-    assert EvidenceTrendSkill.skill_id == "interpret_longitudinal_pattern"
-    assert drafts
-    assert any(item.risk_signal == "watch" for item in drafts)
-    assert all(item.evidence_refs for item in drafts)
-    assert all(item.measurement_cohort_ref for item in drafts)
-    assert all(not hasattr(item, "agent_name") for item in drafts)
 
 
 def test_product_tool_executor_dispatches_structured_trend_analysis() -> None:
     summaries = _history(baseline_nights=20, recent_nights=90)
 
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "trend.calculate_metrics",
         {
             "night_summaries": [
@@ -246,7 +224,9 @@ def test_product_tool_executor_dispatches_structured_trend_analysis() -> None:
 def test_product_trend_handler_rejects_cross_subject_summaries() -> None:
     summaries = _history(baseline_nights=3, recent_nights=7)
 
-    result = ProductToolExecutor().execute(
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
         "trend.calculate_metrics",
         {
             "night_summaries": [

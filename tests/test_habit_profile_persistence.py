@@ -8,20 +8,29 @@ from pathlib import Path
 import pytest
 
 from sleepagent.radar_agent.persistence import RadarPersistenceStore
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.habit_persistence import (
+    PersistentHabitProfileStore,
+    PersistentHabitQuestionnaireStateStore,
+)
+from sleepagent.radar_agent.product_agent.habit_profile import (
     HabitChangeOperation,
     HabitProfileChangeCandidate,
     HabitProfileChangeSet,
     HabitProfileConfirmation,
-    PersistentHabitProfileStore,
-    PersistentHabitQuestionnaireStateStore,
 )
 from sleepagent.radar_agent.product_agent.habit_api import (
     build_persistent_habit_profile_application,
 )
-from sleepagent.radar_agent.questionnaire import QuestionSuppression
-
-
+from sleepagent.radar_agent.product_agent.hitl import (
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionPolicy,
+    HumanDecisionService,
+)
+from sleepagent.radar_agent.product_agent.product_persistence import (
+    PersistentCommitJournal,
+)
 NOW = datetime(2026, 7, 26, 8, 0, tzinfo=timezone.utc)
 
 
@@ -62,7 +71,7 @@ def change_set(
     )
 
 
-def confirmation(
+def legacy_confirmation(
     changes: HabitProfileChangeSet,
     *,
     confirmation_id: str = "confirmation:persistent",
@@ -80,6 +89,65 @@ def confirmation(
     )
 
 
+def approval_capability(
+    changes: HabitProfileChangeSet,
+    *,
+    idempotency_key: str,
+    proposal_suffix: str = "default",
+    proposal_expires_at: datetime | None = None,
+    proposal_policy_version: str | None = None,
+):
+    policy = HumanDecisionPolicy()
+    if proposal_policy_version is not None:
+        policy.version = proposal_policy_version
+    decisions = HumanDecisionService(policy=policy)
+    proposal = ActionProposal(
+        proposal_id=f"proposal:{changes.change_set_id}:{proposal_suffix}",
+        episode_id=f"episode:{changes.change_set_id}",
+        subject_id=changes.subject_id,
+        proposer_actor_id="elder-persistent",
+        action_kind="habit_profile",
+        action_scope=changes.action_scope,
+        target_id=changes.change_set_id,
+        target_hash=changes.manifest_hash,
+        fact_snapshot_id=f"snapshot:{changes.change_set_id}",
+        fact_snapshot_hash=changes.fact_snapshot_hash,
+        policy_version=policy.version,
+        payload={"change_set": changes.model_dump(mode="json")},
+        explanation=DecisionExplanation(
+            what_will_change="Persist the exact Habit Profile manifest.",
+            why_now="The elder requested this profile update.",
+            who_will_receive_or_be_affected=changes.subject_id,
+            duration_or_frequency="Until replaced, expired, or forgotten.",
+            how_to_revoke="Cancel before execution or forget after commit.",
+        ),
+        created_at=changes.created_at,
+        expires_at=proposal_expires_at or changes.confirmation_expires_at,
+    )
+    decision = decisions.create(proposal)
+    decisions.decide(
+        decision.decision_id,
+        actor_id="elder-persistent",
+        actor_role="elder",
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=changes.manifest_hash,
+        now=NOW + timedelta(seconds=1),
+    )
+    return decisions.acquire_verified_capability(
+        decision.decision_id,
+        expected_proposal_id=proposal.proposal_id,
+        expected_subject_id=changes.subject_id,
+        expected_target_id=changes.change_set_id,
+        expected_target_hash=changes.manifest_hash,
+        expected_action_scope=changes.action_scope,
+        expected_fact_snapshot_id=proposal.fact_snapshot_id,
+        expected_fact_snapshot_hash=changes.fact_snapshot_hash,
+        expected_policy_version=proposal.policy_version,
+        idempotency_key=idempotency_key,
+        now=NOW + timedelta(seconds=2),
+    )
+
+
 def persistent_store(path: Path) -> PersistentHabitProfileStore:
     persistence = RadarPersistenceStore.connect_sqlite(
         sqlite3.connect(path, check_same_thread=False)
@@ -90,12 +158,15 @@ def persistent_store(path: Path) -> PersistentHabitProfileStore:
 def test_confirmed_profile_and_audit_survive_store_restart(tmp_path: Path) -> None:
     path = tmp_path / "habit.sqlite3"
     changes = change_set()
-    signed = confirmation(changes)
+    capability = approval_capability(
+        changes,
+        idempotency_key="persistent-idempotency",
+    )
     first = persistent_store(path)
 
     receipt = first.commit(
         changes,
-        signed,
+        capability,
         idempotency_key="persistent-idempotency",
         now=NOW + timedelta(minutes=1),
     )
@@ -115,11 +186,14 @@ def test_persistent_replay_returns_original_receipt_after_expiry(
 ) -> None:
     path = tmp_path / "habit.sqlite3"
     changes = change_set()
-    signed = confirmation(changes)
+    capability = approval_capability(
+        changes,
+        idempotency_key="persistent-idempotency",
+    )
     first = persistent_store(path)
     receipt = first.commit(
         changes,
-        signed,
+        capability,
         idempotency_key="persistent-idempotency",
         now=NOW + timedelta(minutes=1),
     )
@@ -128,7 +202,7 @@ def test_persistent_replay_returns_original_receipt_after_expiry(
     restarted = persistent_store(path)
     replay = restarted.commit(
         changes,
-        signed,
+        capability,
         idempotency_key="persistent-idempotency",
         now=NOW + timedelta(days=1),
     )
@@ -137,60 +211,130 @@ def test_persistent_replay_returns_original_receipt_after_expiry(
     assert restarted.get(changes.subject_id).version == 1
 
 
-def test_persistent_store_rejects_confirmation_reuse_and_stale_cas(
+def test_acquired_capability_can_first_commit_after_expiry_with_its_policy(
+    tmp_path: Path,
+) -> None:
+    changes = change_set()
+    capability = approval_capability(
+        changes,
+        idempotency_key="acquired-before-expiry",
+        proposal_policy_version="sleepagent-hitl-policy.previous-deployment",
+    )
+    store = persistent_store(tmp_path / "habit.sqlite3")
+
+    receipt = store.commit(
+        changes,
+        capability,
+        idempotency_key="acquired-before-expiry",
+        now=changes.confirmation_expires_at + timedelta(days=1),
+    )
+
+    assert receipt.memory_version_after == 1
+    assert store.get(changes.subject_id).version == 1
+
+
+def test_persistent_store_rejects_capability_rebinding_and_stale_cas(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "habit.sqlite3"
     first_changes = change_set()
-    signed = confirmation(first_changes)
+    capability = approval_capability(
+        first_changes,
+        idempotency_key="first-idempotency",
+    )
     store = persistent_store(path)
     concurrent_store = persistent_store(path)
     store.commit(
         first_changes,
-        signed,
+        capability,
         idempotency_key="first-idempotency",
         now=NOW + timedelta(minutes=1),
     )
 
-    with pytest.raises(ValueError, match="confirmation already consumed"):
+    with pytest.raises(ValueError, match="not bound to this commit"):
         store.commit(
             first_changes,
-            signed,
+            capability,
             idempotency_key="different-idempotency",
             now=NOW + timedelta(minutes=2),
         )
     stale = change_set(change_set_id="stale-change", expected_version=0)
+    stale_capability = approval_capability(
+        stale,
+        idempotency_key="stale-idempotency",
+    )
     with pytest.raises(ValueError, match="stale Habit Profile memory version"):
         concurrent_store.commit(
             stale,
-            confirmation(stale, confirmation_id="confirmation:stale"),
+            stale_capability,
             idempotency_key="stale-idempotency",
             now=NOW + timedelta(minutes=2),
         )
     assert store.get(first_changes.subject_id).version == 1
 
 
-def test_persistent_idempotency_binds_exact_confirmation(tmp_path: Path) -> None:
+def test_persistent_idempotency_binds_exact_approval_grant(tmp_path: Path) -> None:
     path = tmp_path / "habit.sqlite3"
     changes = change_set()
     store = persistent_store(path)
+    first_capability = approval_capability(
+        changes,
+        idempotency_key="bound-idempotency",
+        proposal_suffix="first",
+    )
     store.commit(
         changes,
-        confirmation(changes),
+        first_capability,
         idempotency_key="bound-idempotency",
         now=NOW + timedelta(minutes=1),
     )
-    changed_confirmation = confirmation(
+    changed_capability = approval_capability(
         changes,
-        confirmation_id="confirmation:different",
+        idempotency_key="bound-idempotency",
+        proposal_suffix="different",
     )
 
     with pytest.raises(ValueError, match="idempotency-key collision"):
         store.commit(
             changes,
-            changed_confirmation,
+            changed_capability,
             idempotency_key="bound-idempotency",
             now=NOW + timedelta(minutes=2),
+        )
+
+
+def test_serializable_legacy_confirmation_cannot_authorize_store_commit(
+    tmp_path: Path,
+) -> None:
+    changes = change_set()
+    store = persistent_store(tmp_path / "habit.sqlite3")
+
+    with pytest.raises(TypeError, match="verified approval capability"):
+        store.commit(
+            changes,
+            legacy_confirmation(changes),  # type: ignore[arg-type]
+            idempotency_key="legacy-confirmation-must-not-authorize",
+            now=NOW + timedelta(minutes=1),
+        )
+
+
+def test_store_rejects_capability_with_different_expiry_binding(
+    tmp_path: Path,
+) -> None:
+    changes = change_set()
+    capability = approval_capability(
+        changes,
+        idempotency_key="mismatched-expiry",
+        proposal_expires_at=changes.confirmation_expires_at + timedelta(hours=1),
+    )
+    store = persistent_store(tmp_path / "habit.sqlite3")
+
+    with pytest.raises(ValueError, match="expiry binding mismatch"):
+        store.commit(
+            changes,
+            capability,
+            idempotency_key="mismatched-expiry",
+            now=NOW + timedelta(minutes=1),
         )
 
 
@@ -202,6 +346,10 @@ def test_product_application_uses_database_store_when_built_for_runtime() -> Non
     assert isinstance(application.runtime.store, PersistentHabitProfileStore)
     assert application.commit_controller.habit_profile_store is (
         application.runtime.store
+    )
+    assert isinstance(
+        application.commit_controller.commit_journal,
+        PersistentCommitJournal,
     )
     assert isinstance(
         application.runtime.questionnaire.state_store,
@@ -217,14 +365,6 @@ def test_persistent_suppression_filters_expiry_and_detects_index_corruption(
         sqlite3.connect(path, check_same_thread=False)
     )
     store = PersistentHabitQuestionnaireStateStore(persistence)
-    suppression = QuestionSuppression(
-        suppression_id="suppress:elder-persistent:habit.nap_pattern",
-        subject_id="elder-persistent",
-        concept_id="habit.nap_pattern",
-        scope="profile_question",
-        confirmation_ref="confirmation:suppress-nap",
-        expires_at=NOW + timedelta(days=365),
-    )
     from sleepagent.radar_agent.questionnaire import (
         HabitAnswerDisposition,
         HabitQuestionAnswer,
@@ -253,22 +393,23 @@ def test_persistent_suppression_filters_expiry_and_detects_index_corruption(
         ),
         now=NOW,
     )
-    service.capture(
+    capture = service.capture(
         selection,
         (
             HabitQuestionAnswer(
                 concept_id="habit.nap_pattern",
                 concept_version="1.0.0",
                 disposition=HabitAnswerDisposition.NEVER_ASK,
+                question_opt_out_acknowledged=True,
             ),
         ),
         episode_id=selection.episode_id,
         subject_id=selection.subject_id,
         actor_id=selection.actor_id,
         role=selection.role,
-        suppression_confirmation_ref=suppression.confirmation_ref,
         now=NOW,
     )
+    suppression = capture.suppressions[0]
     persistence.connection.close()
 
     restarted_persistence = RadarPersistenceStore.connect_sqlite(
@@ -300,6 +441,184 @@ def test_persistent_suppression_filters_expiry_and_detects_index_corruption(
             subject_id="elder-persistent",
             now=NOW + timedelta(days=1),
         )
+
+
+def test_persistent_capture_replays_safety_result_and_answer_authority_after_restart(
+    tmp_path: Path,
+) -> None:
+    from sleepagent.radar_agent.questionnaire import (
+        HabitAnswerDisposition,
+        HabitQuestionAnswer,
+        HabitQuestionSelectionRequest,
+        HabitQuestionTrigger,
+        HabitQuestionnaireService,
+    )
+
+    path = tmp_path / "habit-capture-replay.sqlite3"
+    first_persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(path, check_same_thread=False)
+    )
+    first = HabitQuestionnaireService(
+        state_store=PersistentHabitQuestionnaireStateStore(first_persistence)
+    )
+    selection = first.select(
+        HabitQuestionSelectionRequest(
+            request_id="request:durable-safety-capture",
+            episode_id="episode:durable-safety-capture",
+            subject_id="elder-persistent",
+            actor_id="elder-persistent",
+            role="elder",
+            plan_id="plan:durable-safety-capture",
+            plan_revision=0,
+            plan_step_id="progressive-habit-question",
+            trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
+            decision_kind="evidence",
+            alternative_explanations=("呼吸信号",),
+            candidate_concept_ids=("habit.observed_snoring",),
+            remaining_episode_budget=3,
+            max_questions=1,
+        ),
+        now=NOW,
+    )
+    answer = HabitQuestionAnswer(
+        concept_id="habit.observed_snoring",
+        concept_version="1.0.0",
+        disposition=HabitAnswerDisposition.ANSWERED,
+        value="观察到",
+    )
+    captured = first.capture(
+        selection,
+        (answer,),
+        episode_id=selection.episode_id,
+        subject_id=selection.subject_id,
+        actor_id=selection.actor_id,
+        role=selection.role,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert captured.safety_events
+    first_persistence.connection.close()
+
+    restarted_persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(path, check_same_thread=False)
+    )
+    restarted_store = PersistentHabitQuestionnaireStateStore(
+        restarted_persistence
+    )
+    restarted = HabitQuestionnaireService(state_store=restarted_store)
+    replay = restarted.capture(
+        selection,
+        (answer,),
+        episode_id=selection.episode_id,
+        subject_id=selection.subject_id,
+        actor_id=selection.actor_id,
+        role=selection.role,
+        now=NOW + timedelta(minutes=2),
+    )
+
+    assert replay == captured
+    restarted.verify_captured_answer(
+        captured.answers[0],
+        now=NOW + timedelta(minutes=2),
+    )
+    assert restarted.get_captured_answer(
+        captured.answers[0].answer_ref,
+        subject_id=selection.subject_id,
+        now=NOW + timedelta(minutes=2),
+    ) == captured.answers[0]
+    assert restarted_store.get_selection(selection.selection_id)[1] is True
+    with pytest.raises(ValueError, match="answer authority expired"):
+        restarted.capture(
+            selection,
+            (answer,),
+            episode_id=selection.episode_id,
+            subject_id=selection.subject_id,
+            actor_id=selection.actor_id,
+            role=selection.role,
+            now=captured.answers[0].episode_valid_until,
+        )
+    with pytest.raises(ValueError, match="payload conflict"):
+        restarted.capture(
+            selection,
+            (answer.model_copy(update={"value": "没有观察到"}),),
+            episode_id=selection.episode_id,
+            subject_id=selection.subject_id,
+            actor_id=selection.actor_id,
+            role=selection.role,
+            now=NOW + timedelta(minutes=2),
+        )
+
+
+def test_persistent_capture_rolls_back_suppression_and_consumption_together(
+    tmp_path: Path,
+) -> None:
+    from sleepagent.radar_agent.questionnaire import (
+        HabitAnswerDisposition,
+        HabitQuestionAnswer,
+        HabitQuestionSelectionRequest,
+        HabitQuestionTrigger,
+        HabitQuestionnaireService,
+    )
+
+    path = tmp_path / "habit-capture-rollback.sqlite3"
+    persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(path, check_same_thread=False)
+    )
+    store = PersistentHabitQuestionnaireStateStore(persistence)
+    service = HabitQuestionnaireService(state_store=store)
+    selection = service.select(
+        HabitQuestionSelectionRequest(
+            request_id="request:capture-rollback",
+            episode_id="episode:capture-rollback",
+            subject_id="elder-persistent",
+            actor_id="elder-persistent",
+            role="elder",
+            plan_id="plan:capture-rollback",
+            plan_revision=0,
+            plan_step_id="progressive-habit-question",
+            trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
+            decision_kind="evidence",
+            alternative_explanations=("午睡",),
+            candidate_concept_ids=("habit.nap_pattern",),
+            remaining_episode_budget=3,
+            max_questions=1,
+        ),
+        now=NOW,
+    )
+    answer = HabitQuestionAnswer(
+        concept_id="habit.nap_pattern",
+        concept_version="1.0.0",
+        disposition=HabitAnswerDisposition.NEVER_ASK,
+        question_opt_out_acknowledged=True,
+    )
+    persistence.connection.execute(
+        """
+        CREATE TRIGGER fail_habit_capture_update
+        BEFORE UPDATE OF receipt_json, consumed
+        ON product_habit_question_selections
+        BEGIN
+          SELECT RAISE(ABORT, 'fault-injected capture failure');
+        END
+        """
+    )
+    persistence.connection.commit()
+
+    with pytest.raises(sqlite3.DatabaseError, match="fault-injected"):
+        service.capture(
+            selection,
+            (answer,),
+            episode_id=selection.episode_id,
+            subject_id=selection.subject_id,
+            actor_id=selection.actor_id,
+            role=selection.role,
+            now=NOW + timedelta(minutes=1),
+        )
+
+    assert store.get_selection(selection.selection_id)[1] is False
+    assert store.get_capture(selection.selection_id) is None
+    assert store.list_active_suppressions(
+        subject_id=selection.subject_id,
+        now=NOW + timedelta(minutes=1),
+    ) == ()
 
 
 def test_persistent_question_budget_rejects_cross_connection_stale_issue(
@@ -420,11 +739,14 @@ def test_persistent_store_detects_index_and_receipt_corruption(
 ) -> None:
     path = tmp_path / "habit.sqlite3"
     changes = change_set()
-    signed = confirmation(changes)
+    capability = approval_capability(
+        changes,
+        idempotency_key="corruption-idempotency",
+    )
     store = persistent_store(path)
     store.commit(
         changes,
-        signed,
+        capability,
         idempotency_key="corruption-idempotency",
         now=NOW + timedelta(minutes=1),
     )
@@ -471,7 +793,7 @@ def test_persistent_store_detects_index_and_receipt_corruption(
     with pytest.raises(ValueError, match="persisted receipt mismatch"):
         store.commit(
             changes,
-            signed,
+            capability,
             idempotency_key="corruption-idempotency",
             now=NOW + timedelta(minutes=2),
         )

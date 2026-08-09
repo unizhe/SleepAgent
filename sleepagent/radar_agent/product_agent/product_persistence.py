@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -45,10 +45,12 @@ from sleepagent.radar_agent.product_agent.longitudinal_memory import (
 )
 
 if TYPE_CHECKING:
-    from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunResult
+    from sleepagent.radar_agent.product_agent.runtime_contracts import (
+        ProductEpisodeRunResult,
+    )
 
 
-PRODUCT_STATE_PERSISTENCE_VERSION = "sleepagent-product-state-persistence.v2"
+PRODUCT_STATE_PERSISTENCE_VERSION = "sleepagent-product-state-persistence.v3"
 MANIFEST_KEK_ENV = "SLEEPAGENT_MANIFEST_KEK"
 
 
@@ -97,7 +99,13 @@ class PersistentCareContextStore(InMemoryCareContextStore):
 class PersistentMemoryContextStore(InMemoryMemoryContextStore):
     """Database-backed governed long-term Memory authority."""
 
-    def __init__(self, persistence: RadarPersistenceStore) -> None:
+    def __init__(
+        self,
+        persistence: RadarPersistenceStore,
+        *,
+        control_clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(control_clock=control_clock)
         self.persistence = persistence
         self.lock = persistence.transaction_lock
 
@@ -1115,7 +1123,9 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
     def _hydrate(self) -> None:
-        from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunResult
+        from sleepagent.radar_agent.product_agent.runtime_contracts import (
+            ProductEpisodeRunResult,
+        )
 
         for raw in self.persistence.list_all_product_nonterminal_result_json():
             result = ProductEpisodeRunResult.model_validate_json(raw)

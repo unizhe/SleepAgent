@@ -2,15 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from sleepagent.radar_agent.product_agent.contracts import (
-    AgentId,
-)
 from sleepagent.radar_agent.product_agent.policies.care_coordination import (
     CareEscalationPolicy,
-)
-from sleepagent.radar_agent.product_agent.skill_methods.care_coordination import (
-    CareCapabilityPlan,
-    CareCoordinationSkill,
 )
 from sleepagent.radar_agent.product_agent.tools.care_coordination import (
     CareCoordinationPolicyRequest,
@@ -57,76 +50,25 @@ def test_care_escalation_policy_preserves_alert_capabilities_without_agent_ident
     assert not hasattr(migrated, "external_action_executed")
 
 
-def test_watch_capabilities_are_split_into_one_care_questionnaire_and_coordination() -> None:
+def test_watch_policy_splits_primary_questionnaire_and_coordination_intents() -> None:
     decision = CareEscalationPolicy().evaluate(
         risk_level="watch",
         data_quality_status="good",
     )
 
-    plan = CareCoordinationSkill().plan(
-        decision,
-        episode_id="phase3a-care",
-        evidence_refs=["evidence:phase3a-watch"],
+    assert sum(
+        item.kind == "primary_care" for item in decision.candidate_intents
+    ) == 1
+    assert sum(
+        item.kind == "questionnaire" for item in decision.candidate_intents
+    ) == 1
+    assert sum(
+        item.kind == "coordination" for item in decision.candidate_intents
+    ) == 1
+    assert not any(
+        item.kind in {"artifact", "external_action"}
+        for item in decision.candidate_intents
     )
-
-    assert CareCoordinationSkill.owner is AgentId.CARE_STRATEGY
-    assert CareCoordinationSkill.skill_id == "draft_coordination_candidate"
-    assert len(plan.primary_care_intents) == 1
-    assert len(plan.questionnaire_intents) == 1
-    assert len(plan.coordination_candidates) == 1
-    assert plan.coordination_candidates[0].recipient_role == "family"
-    assert plan.evidence_refs == ["evidence:phase3a-watch"]
-    assert plan.external_action_intents == []
-    assert plan.side_effect_executed is False
-
-
-def test_coordination_candidate_requires_accepted_evidence_binding() -> None:
-    decision = CareEscalationPolicy().evaluate(
-        risk_level="watch",
-        data_quality_status="good",
-    )
-
-    with pytest.raises(ValueError, match="accepted Evidence"):
-        CareCoordinationSkill().plan(
-            decision,
-            episode_id="phase3a-care",
-            evidence_refs=[],
-        )
-
-
-def test_care_skill_rejects_caller_forged_policy_intents() -> None:
-    canonical = CareEscalationPolicy().evaluate(
-        risk_level="escalate",
-        data_quality_status="good",
-    )
-    forged = canonical.model_copy(
-        update={
-            "candidate_intents": [
-                item.model_copy(
-                    update={
-                        "confirmation_required": False,
-                        "safety_required": False,
-                    }
-                )
-                for item in canonical.candidate_intents
-            ]
-        }
-    )
-
-    with pytest.raises(ValueError, match="canonical Care policy"):
-        CareCoordinationSkill().plan(
-            forged,
-            episode_id="phase3a-care-forged",
-            evidence_refs=["evidence:phase3a-escalate"],
-        )
-
-
-def test_care_skill_contract_cannot_claim_side_effect_execution() -> None:
-    with pytest.raises(ValueError, match="side_effect_executed"):
-        CareCapabilityPlan(
-            evidence_refs=["evidence:phase3a"],
-            side_effect_executed=True,
-        )
 
 
 def test_coordination_tool_projects_accepted_risk_into_same_policy() -> None:
@@ -183,27 +125,30 @@ def test_coordination_tool_rejects_unbound_evidence_hash() -> None:
 
 
 def test_escalate_and_urgent_remain_candidates_and_runtime_preemption() -> None:
-    escalate = CareCoordinationSkill().plan(
-        CareEscalationPolicy().evaluate(
-            risk_level="escalate",
-            data_quality_status="good",
-        ),
-        episode_id="phase3a-escalate",
-        evidence_refs=["evidence:phase3a-escalate"],
+    escalate = CareEscalationPolicy().evaluate(
+        risk_level="escalate",
+        data_quality_status="good",
     )
     urgent = CareEscalationPolicy().evaluate(
         risk_level="urgent_boundary",
         data_quality_status="good",
     )
+    external = [
+        item
+        for item in escalate.candidate_intents
+        if item.kind in {"artifact", "external_action"}
+    ]
 
-    assert escalate.primary_care_intents == []
-    assert {item.action_code for item in escalate.external_action_intents} == {
+    assert not any(
+        item.kind == "primary_care" for item in escalate.candidate_intents
+    )
+    assert {item.action_code for item in external} == {
         "export_doctor_material",
         "send_doctor_material",
         "create_medical_evaluation_card",
     }
-    assert all(item.safety_required for item in escalate.external_action_intents)
-    assert all(item.confirmation_required for item in escalate.external_action_intents)
+    assert all(item.safety_required for item in external)
+    assert all(item.confirmation_required for item in external)
     assert urgent.urgent_preempt is True
     assert urgent.candidate_intents[0].action_code == (
         "notify_family_delivery_record"

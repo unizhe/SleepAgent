@@ -58,7 +58,7 @@ as an automated PASS.
 | Gate | Current evidence | Status |
 |---|---|:---:|
 | Phase A deterministic contracts, reviewed-catalog mechanics, policy and safety routing | Contract/catalog tests and all mapped criteria above | PASS (implementation) |
-| Named domain/medical sign-off for wording, TTL and catalog release | The current v23 collection package contains all 10 catalog-bound review slots, but they remain unsigned templates | PENDING |
+| Named domain/medical sign-off for wording, TTL and catalog release | The current v23 collection package contains all 22 catalog-bound review slots, but they remain unsigned templates | PENDING |
 | Phase B integration into the four-Agent runtime and single Commit Controller path | Runner/governance tests; exact roster test; no generic-memory dual write; database-backed Product Memory/Care state, durable commit journal, atomic Profile state/commit ledger and persistent Questionnaire state | PASS |
 | Phase C optional intake, review/correct/forget and elder consent UI | Authenticated API tests, restart recovery, frontend contracts and production build | PASS (implementation) |
 | Real 3–5 participant target-age usability study | The current v23 package contains three catalog/identity-bound template slots only; no participant interaction is claimed | PENDING |
@@ -72,17 +72,18 @@ medical/domain approval or production-model release evidence.
 The current collection skeleton is
 `sleep_habit_profile/real-evidence-v23-collection`. It is bound to release
 identity
-`e2d721ca0d8906bf9fd53ab7844e4f49a5b892acf0ad14675471c1ed14c689d2`
+`7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`
 and catalog hash
-`a75aa424e3260f042b65be82dbd45600d370515b073d8d17f31e69c539f44ae1`.
+`d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903`.
 Its placeholder markers and simulated evidence kind intentionally keep it
 ineligible until every applicable slot is replaced by actually observed and
 attested material.
 
 The historical v18 development fixture is
-`sleep_habit_profile/simulated-evidence-v18-complete`, also archived as
-`sleepagent-v18-complete-simulated-evidence.zip` with SHA-256
-`8dc3e39f55c76cfb1eb72053e68784a24fb6f0b29eb4ab5487e790b83c7ebea9`.
+`sleep_habit_profile/simulated-evidence-v18-complete`. Its byte-stable generated
+archive root is `sleepagent-v18-complete-simulated-evidence` with SHA-256
+`f6ba6d212692b908f7e5fc5259348611828c3a9601f787d5887c1a5a0d1c4f70`;
+the ZIP is generated under test temporary storage and is not committed.
 `SIMULATION-COVERAGE-v18.json` binds the canonical file hashes and explicitly
 accounts for five simulated observations, one synthetic facilitator
 attestation, two fictional named reviewer personas, ten concepts, 68 scenario
@@ -96,14 +97,16 @@ It can be regenerated in a new empty directory with
 `release.gate_failed`. Its catalog and scenario set remain useful historical
 fixtures, but its v18 release identity is intentionally stale against v23.
 
-The archived development fixture is covered by
-`test_v15_complete_simulated_archive_is_a_bounded_historical_fixture`.
-Run its bounded ZIP audit directly with:
+The generated development archive is covered by
+`test_checked_in_v18_simulation_coverage_inventory_matches_artifacts` and its
+receipt/attestation semantics by
+`test_v18_simulated_receipt_and_attestation_are_honestly_parseable`. Generate
+and audit it through those tests with:
 
 ```bash
-python -m sleepagent.radar_agent.product_agent.acceptance_materials \
-  sleepagent-v15-complete-simulated-evidence.zip \
-  --manifest agent_architecture/ACCEPTANCE-MANIFEST.json
+PYTHONDONTWRITEBYTECODE=1 pytest -q \
+  tests/test_product_agent_acceptance.py \
+  -k 'v18_simulated or checked_in_v18'
 ```
 
 Its expected result is exit code `2`, `usable_as_simulation_fixture: true` and

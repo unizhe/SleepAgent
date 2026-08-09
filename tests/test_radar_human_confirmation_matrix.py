@@ -5,20 +5,36 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.radar_agent.confirmation import (
-    automatic_actions,
-    confirmation_request,
-    confirmation_rule,
-)
+import sleepagent.radar_agent.confirmation as confirmation_projection
+from sleepagent.radar_agent.confirmation import automatic_actions, confirmation_rule
 from sleepagent.radar_agent.persistence import RadarPersistenceStore, RadarSubject
-from sleepagent.radar_agent.runtime import IdempotencyConflict, RadarTaskStatus, TaskService
+from sleepagent.radar_agent.product_agent.hitl import (
+    HITL_POLICY_VERSION,
+    ActionProposal,
+    DecisionExplanation,
+    HumanDecisionChoice,
+    HumanDecisionError,
+    HumanDecisionRequest,
+    HumanDecisionService,
+    HumanDecisionStatus,
+    PersistentHumanDecisionRepository,
+)
+from sleepagent.radar_agent.runtime import TaskService
 from sleepagent.radar_agent.schemas import (
+    HumanConfirmationRequest,
     RadarDevice,
     RadarDeviceStatus,
 )
 
 
 NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
+CONFIRMATION_MUTATORS = (
+    "request_confirmation",
+    "resolve_confirmation",
+    "expire_confirmations",
+    "revoke_confirmation",
+    "complete_confirmation_action",
+)
 
 
 def test_matrix_classifies_auto_family_user_and_doctor_actions() -> None:
@@ -45,252 +61,285 @@ def test_matrix_classifies_auto_family_user_and_doctor_actions() -> None:
     assert confirmation_rule("doctor_annotation").allowed_roles == ("doctor",)
 
 
-@pytest.mark.parametrize(
-    "action_type",
-    [
-        "export_doctor_material",
-        "send_doctor_material",
-        "create_medical_evaluation_card",
-    ],
-)
-def test_user_or_family_actions_cannot_execute_before_approval(
-    action_type: str,
-) -> None:
-    service, _, task = _runtime()
-    service.transition_task(task.task_id, RadarTaskStatus.RUNNING)
-    request = confirmation_request(
-        task_id=task.task_id,
-        action_type=action_type,
-        evidence_refs=["night:001"],
-    )
-    service.request_confirmation(task.task_id, request)
-    with pytest.raises(PermissionError, match="approved"):
-        service.complete_confirmation_action(
-            task.task_id,
-            request.confirmation_id,
-            actor_id="executor",
-            actor_role="system",
-            execution_ref=f"result:{action_type}",
-        )
-    service.resolve_confirmation(
-        task.task_id,
-        request.confirmation_id,
-        approved=True,
-        actor_id="family-user",
-        actor_role="family",
-    )
-    completed = service.complete_confirmation_action(
-        task.task_id,
-        request.confirmation_id,
-        actor_id="executor",
-        actor_role="system",
-        execution_ref=f"result:{action_type}",
-    )
-    assert completed.execution_status == "completed"
-
-
-def test_approve_reject_expire_and_revoke_are_authorized_and_idempotent() -> None:
+def test_task_confirmation_surface_is_read_only_projection() -> None:
     service, store, task = _runtime()
-    service.transition_task(task.task_id, RadarTaskStatus.RUNNING)
 
-    approval = confirmation_request(
-        task_id=task.task_id,
-        action_type="export_doctor_material",
-        evidence_refs=["night:001"],
-    )
-    requested = service.request_confirmation(task.task_id, approval)
-    assert service.request_confirmation(task.task_id, approval) == requested
-    with pytest.raises(PermissionError):
-        service.resolve_confirmation(
-            task.task_id,
-            approval.confirmation_id,
-            approved=True,
-            actor_id="doctor-user",
-            actor_role="doctor",
-        )
-    approved = service.resolve_confirmation(
-        task.task_id,
-        approval.confirmation_id,
-        approved=True,
-        actor_id="family-user",
-        actor_role="family",
-    )
-    assert service.resolve_confirmation(
-        task.task_id,
-        approval.confirmation_id,
-        approved=True,
-        actor_id="family-user",
-        actor_role="family",
-    ) == approved
-    with pytest.raises(ValueError, match="terminal"):
-        service.resolve_confirmation(
-            task.task_id,
-            approval.confirmation_id,
-            approved=False,
-            actor_id="elder-user",
-            actor_role="elder",
-        )
-    with pytest.raises(PermissionError):
-        service.revoke_confirmation(
-            task.task_id,
-            approval.confirmation_id,
-            actor_id="doctor-user",
-            actor_role="doctor",
-            reason="无权限撤销",
-        )
-    revoked = service.revoke_confirmation(
-        task.task_id,
-        approval.confirmation_id,
-        actor_id="family-user",
-        actor_role="family",
-        reason="不再发送材料",
-    )
-    assert service.revoke_confirmation(
-        task.task_id,
-        approval.confirmation_id,
-        actor_id="family-user",
-        actor_role="family",
-        reason="不再发送材料",
-    ) == revoked
-    with pytest.raises(PermissionError):
-        service.complete_confirmation_action(
-            task.task_id,
-            approval.confirmation_id,
-            actor_id="executor",
-            actor_role="system",
-            execution_ref="should-not-run",
-        )
-
-    rejected_request = confirmation_request(
-        task_id=task.task_id,
-        action_type="enable_care_plan",
-        evidence_refs=["night:001"],
-    )
-    service.request_confirmation(task.task_id, rejected_request)
-    rejected = service.resolve_confirmation(
-        task.task_id,
-        rejected_request.confirmation_id,
-        approved=False,
-        actor_id="family-user",
-        actor_role="family",
-    )
-    assert rejected.status == "rejected"
-    assert service.resolve_confirmation(
-        task.task_id,
-        rejected_request.confirmation_id,
-        approved=False,
-        actor_id="family-user",
-        actor_role="family",
-    ) == rejected
-
-    expiring = confirmation_request(
-        task_id=task.task_id,
-        action_type="push_supplemental_questionnaire",
-        evidence_refs=["night:001"],
-    ).model_copy(update={"created_at": NOW - timedelta(hours=2)})
-    service.request_confirmation(task.task_id, expiring)
-    expired = service.expire_confirmations(task.task_id, before=NOW)
-    assert [item.confirmation_id for item in expired] == [expiring.confirmation_id]
-    assert service.expire_confirmations(task.task_id, before=NOW) == []
-    assert len(
-        [
-            event
-            for event in service.list_events(task.task_id)
-            if event.event_type == "confirmation.requested"
-            and event.payload["confirmation_id"] == approval.confirmation_id
-        ]
-    ) == 1
-    assert store.get_confirmation(expiring.confirmation_id).status == "expired"
+    assert all(not hasattr(TaskService, name) for name in CONFIRMATION_MUTATORS)
+    assert not hasattr(store, "save_confirmation")
+    assert not hasattr(confirmation_projection, "confirmation_request")
+    assert service.list_confirmations(task.task_id) == []
 
 
-def test_idempotency_conflict_and_action_completion_permissions() -> None:
-    service, _, task = _runtime()
-    service.transition_task(task.task_id, RadarTaskStatus.RUNNING)
-    request = confirmation_request(
-        task_id=task.task_id,
-        action_type="enable_persistent_family_reminder",
-        evidence_refs=["night:001"],
+def test_hds_projection_writer_persists_only_authoritative_state() -> None:
+    service, store, task = _runtime()
+    decisions = HumanDecisionService(PersistentHumanDecisionRepository(store))
+    authority = decisions.create(_proposal(task.task_id))
+    projection = _projection(authority)
+
+    assert store.save_hds_confirmation_projection(projection) == projection
+    assert store.save_hds_confirmation_projection(projection) == projection
+    assert store.get_confirmation(projection.confirmation_id) == projection
+    assert service.list_confirmations(task.task_id) == [projection]
+    assert decisions.get(authority.decision_id).status == HumanDecisionStatus.PENDING
+
+
+def test_projection_cannot_forge_approval_or_execution_capability() -> None:
+    _, store, task = _runtime()
+    decisions = HumanDecisionService(PersistentHumanDecisionRepository(store))
+    authority = decisions.create(_proposal(task.task_id))
+    projection = _projection(authority)
+    store.save_hds_confirmation_projection(projection)
+
+    forged_approval = projection.model_copy(
+        update={
+            "status": "approved",
+            "resolved_at": NOW + timedelta(minutes=1),
+            "resolved_by": "forged-actor",
+        }
     )
-    service.request_confirmation(task.task_id, request)
-    conflicting = request.model_copy(update={"evidence_refs": ["night:other"]})
-    with pytest.raises(IdempotencyConflict):
-        service.request_confirmation(task.task_id, conflicting)
-    service.resolve_confirmation(
-        task.task_id,
-        request.confirmation_id,
-        approved=True,
-        actor_id="family-user",
-        actor_role="family",
+    with pytest.raises(ValueError, match="not HDS-derived"):
+        store.save_hds_confirmation_projection(forged_approval)
+
+    forged_execution = projection.model_copy(
+        update={
+            "execution_status": "completed",
+            "execution_ref": "forged-receipt",
+            "executed_at": NOW + timedelta(minutes=1),
+        }
     )
-    with pytest.raises(PermissionError):
-        service.complete_confirmation_action(
-            task.task_id,
-            request.confirmation_id,
-            actor_id="doctor-user",
-            actor_role="doctor",
-            execution_ref="reminder:001",
+    with pytest.raises(ValueError, match="execution status mismatch"):
+        store.save_hds_confirmation_projection(forged_execution)
+
+    with pytest.raises(HumanDecisionError, match="not approved"):
+        decisions.acquire_verified_capability(
+            authority.decision_id,
+            expected_proposal_id=authority.proposal.proposal_id,
+            expected_subject_id=authority.proposal.subject_id,
+            expected_target_id=authority.proposal.target_id,
+            expected_target_hash=authority.proposal.target_hash,
+            expected_action_scope=authority.proposal.action_scope,
+            expected_fact_snapshot_id=authority.proposal.fact_snapshot_id,
+            expected_fact_snapshot_hash=authority.proposal.fact_snapshot_hash,
+            expected_policy_version=authority.proposal.policy_version,
+            idempotency_key="forged-projection-cannot-authorize",
+            now=NOW + timedelta(minutes=2),
         )
-    completed = service.complete_confirmation_action(
-        task.task_id,
-        request.confirmation_id,
-        actor_id="care-executor",
-        actor_role="system",
-        execution_ref="reminder:001",
+    assert store.get_confirmation(projection.confirmation_id) == projection
+    assert decisions.get(authority.decision_id).status == HumanDecisionStatus.PENDING
+
+
+def test_projection_rejects_old_revision_and_decision_rebinding() -> None:
+    _, store, task = _runtime()
+    decisions = HumanDecisionService(PersistentHumanDecisionRepository(store))
+    first = decisions.create(_proposal(task.task_id, suffix="first"))
+    pending = _projection(first, confirmation_id="confirmation:stable")
+    store.save_hds_confirmation_projection(pending)
+
+    approved = decisions.decide(
+        first.decision_id,
+        actor_id="elder-matrix",
+        actor_role="elder",
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=first.proposal.target_hash,
+        now=NOW + timedelta(minutes=1),
     )
-    assert service.complete_confirmation_action(
-        task.task_id,
-        request.confirmation_id,
-        actor_id="care-executor",
-        actor_role="system",
-        execution_ref="reminder:001",
-    ) == completed
-    with pytest.raises(ValueError, match="another result"):
-        service.complete_confirmation_action(
+    approved_projection = _projection(
+        approved,
+        confirmation_id=pending.confirmation_id,
+    )
+    store.save_hds_confirmation_projection(approved_projection)
+
+    with pytest.raises(ValueError, match="decision revision mismatch"):
+        store.save_hds_confirmation_projection(pending)
+
+    second = decisions.create(_proposal(task.task_id, suffix="second"))
+    rebound = _projection(second, confirmation_id=pending.confirmation_id)
+    with pytest.raises(ValueError, match="identity cannot be rebound"):
+        store.save_hds_confirmation_projection(rebound)
+
+    assert store.get_confirmation(pending.confirmation_id) == approved_projection
+
+
+def test_projection_writer_refuses_status_rollback_from_legacy_row() -> None:
+    _, store, task = _runtime()
+    decisions = HumanDecisionService(PersistentHumanDecisionRepository(store))
+    authority = decisions.create(
+        _proposal(
             task.task_id,
-            request.confirmation_id,
-            actor_id="care-executor",
-            actor_role="system",
-            execution_ref="reminder:002",
+            suffix="dual",
+            action_kind="external_action",
+            action_scope="send_doctor_material",
+            professional_review_required=True,
         )
-    with pytest.raises(ValueError, match="executed"):
-        service.revoke_confirmation(
-            task.task_id,
-            request.confirmation_id,
-            actor_id="family-user",
-            actor_role="family",
-            reason="执行后不可撤销",
+    )
+    pending = _projection(authority, confirmation_id="confirmation:legacy")
+    legacy_approved = HumanConfirmationRequest.model_validate(
+        pending.model_copy(
+            update={
+                "status": "approved",
+                "resolved_at": NOW,
+                "resolved_by": "legacy-authority",
+            }
+        ).model_dump(mode="python")
+    )
+    store.connection.execute(
+        """
+        INSERT INTO radar_human_confirmations (
+          confirmation_id, task_id, action_type, requested_role,
+          status, confirmation_json, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            legacy_approved.confirmation_id,
+            legacy_approved.task_id,
+            legacy_approved.action_type,
+            legacy_approved.requested_role,
+            legacy_approved.status,
+            legacy_approved.model_dump_json(),
+            legacy_approved.created_at.isoformat(),
+            legacy_approved.resolved_at.isoformat(),
+        ),
+    )
+    store.connection.commit()
+
+    partial = decisions.decide(
+        authority.decision_id,
+        actor_id="elder-matrix",
+        actor_role="elder",
+        choice=HumanDecisionChoice.APPROVE,
+        target_hash=authority.proposal.target_hash,
+        now=NOW + timedelta(minutes=1),
+    )
+    assert partial.status == HumanDecisionStatus.PARTIALLY_APPROVED
+    with pytest.raises(ValueError, match="status cannot regress"):
+        store.save_hds_confirmation_projection(
+            _projection(partial, confirmation_id=legacy_approved.confirmation_id)
         )
 
 
-def test_doctor_annotation_is_doctor_only_and_never_blocks_daily_flow() -> None:
-    service, _, task = _runtime()
-    service.transition_task(task.task_id, RadarTaskStatus.RUNNING)
-    service.transition_task(task.task_id, RadarTaskStatus.COMPLETED)
-    request = confirmation_request(
-        task_id=task.task_id,
-        action_type="doctor_annotation",
-        evidence_refs=["report:doctor:001"],
+def test_projection_requires_an_existing_authoritative_decision() -> None:
+    _, store, task = _runtime()
+    decisions = HumanDecisionService(PersistentHumanDecisionRepository(store))
+    authority = decisions.create(_proposal(task.task_id))
+    projection = _projection(authority).model_copy(
+        update={"decision_id": "decision:missing"}
     )
-    service.request_confirmation(task.task_id, request)
 
-    assert service.get_task(task.task_id).status == RadarTaskStatus.COMPLETED
-    with pytest.raises(PermissionError):
-        service.resolve_confirmation(
-            task.task_id,
-            request.confirmation_id,
-            approved=True,
-            actor_id="family-user",
-            actor_role="family",
-        )
-    annotation = service.resolve_confirmation(
-        task.task_id,
-        request.confirmation_id,
-        approved=True,
-        actor_id="doctor-user",
-        actor_role="doctor",
+    with pytest.raises(ValueError, match="requires an authoritative decision"):
+        store.save_hds_confirmation_projection(projection)
+
+
+def _proposal(
+    task_id: str,
+    *,
+    suffix: str = "one",
+    action_kind: str = "memory",
+    action_scope: str = "commit_memory",
+    professional_review_required: bool = False,
+) -> ActionProposal:
+    hash_character = {"first": "a", "second": "b", "dual": "c"}.get(
+        suffix,
+        "d",
     )
-    assert annotation.confirmation_kind == "doctor_annotation"
-    assert service.get_task(task.task_id).status == RadarTaskStatus.COMPLETED
+    return ActionProposal(
+        proposal_id=f"proposal:{suffix}",
+        task_id=task_id,
+        episode_id=f"episode:{suffix}",
+        subject_id="elder-matrix",
+        proposer_actor_id="family-matrix",
+        action_kind=action_kind,
+        action_scope=action_scope,
+        target_id=f"target:{suffix}",
+        target_hash=hash_character * 64,
+        fact_snapshot_id=f"snapshot:{suffix}",
+        fact_snapshot_hash="f" * 64,
+        policy_version=HITL_POLICY_VERSION,
+        payload={"candidate": suffix},
+        explanation=DecisionExplanation(
+            what_will_change=f"Apply candidate {suffix}.",
+            why_now="The candidate is ready but has not been executed.",
+            who_will_receive_or_be_affected="The elder owner.",
+            duration_or_frequency="One exact version only.",
+            how_to_revoke="Revoke through HDS before execution.",
+            exact_changes=[suffix],
+        ),
+        created_at=NOW,
+        expires_at=NOW + timedelta(minutes=20),
+        metadata={
+            "professional_review_required": professional_review_required,
+        },
+    )
+
+
+def _projection(
+    decision: HumanDecisionRequest,
+    *,
+    confirmation_id: str | None = None,
+) -> HumanConfirmationRequest:
+    status = {
+        HumanDecisionStatus.PENDING: "pending",
+        HumanDecisionStatus.PARTIALLY_APPROVED: "pending",
+        HumanDecisionStatus.APPROVED: "approved",
+        HumanDecisionStatus.EXECUTING: "approved",
+        HumanDecisionStatus.COMMITTED: "approved",
+        HumanDecisionStatus.EXECUTION_FAILED: "approved",
+        HumanDecisionStatus.OUTCOME_UNKNOWN: "approved",
+        HumanDecisionStatus.REJECTED: "rejected",
+        HumanDecisionStatus.HARD_BLOCKED: "rejected",
+        HumanDecisionStatus.EXPIRED: "expired",
+        HumanDecisionStatus.REVOKED: "revoked",
+        HumanDecisionStatus.SUPERSEDED: "revoked",
+    }[decision.status]
+    execution_status = {
+        HumanDecisionStatus.COMMITTED: "completed",
+        HumanDecisionStatus.EXECUTION_FAILED: "failed",
+        HumanDecisionStatus.OUTCOME_UNKNOWN: "failed",
+    }.get(decision.status, "not_started")
+    resolved_by = (
+        decision.decisions[-1].actor_id
+        if decision.decisions
+        else "human-decision-service"
+    )
+    resolved_confirmation_id = confirmation_id or f"confirmation:{decision.decision_id}"
+    return HumanConfirmationRequest(
+        confirmation_id=resolved_confirmation_id,
+        decision_id=decision.decision_id,
+        decision_revision=decision.revision,
+        task_id=decision.proposal.task_id or "missing-task",
+        action_type=(
+            f"product_{decision.proposal.action_kind}:"
+            f"{decision.proposal.action_scope}"
+        ),
+        requested_role="elder",
+        allowed_roles=[
+            requirement.role
+            for requirement in decision.requirements
+            if requirement.role in {"elder", "family", "doctor", "system"}
+        ],
+        reason=decision.proposal.explanation.what_will_change,
+        evidence_refs=[
+            decision.proposal.target_id,
+            decision.proposal.target_hash,
+        ],
+        status=status,
+        idempotency_key=resolved_confirmation_id,
+        created_at=decision.created_at,
+        resolved_at=decision.resolved_at if status != "pending" else None,
+        resolved_by=(
+            resolved_by
+            if status in {"approved", "rejected", "expired"}
+            else None
+        ),
+        revoked_at=decision.resolved_at if status == "revoked" else None,
+        revoked_by=resolved_by if status == "revoked" else None,
+        execution_status=execution_status,
+        execution_ref=decision.execution_receipt_ref,
+        executed_at=(
+            decision.updated_at
+            if execution_status in {"completed", "failed"}
+            else None
+        ),
+    )
 
 
 def _runtime():

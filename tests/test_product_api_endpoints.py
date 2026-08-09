@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 from typing import Any
 
-import backend.main as backend_main
-from backend.main import app
+import backend.legacy_main as backend_main
+from backend.legacy_main import app
 from sleepagent.observability import STATE
 from sleepagent.product_device import (
     DEFAULT_FAKE_RADAR_DEVICE_ID,
@@ -18,12 +18,14 @@ from sleepagent.product_device import (
     RadarDialogueStatus,
 )
 from sleepagent.radar_agent.replay import replay_scenario_ids
-from sleepagent.radar_agent.product_agent import (
+from sleepagent.radar_agent.product_agent.contracts import (
     CommunicationDraft,
-    DeterministicCommitController,
     EpisodeStatus,
 )
 from sleepagent.radar_agent.product_agent.agents import ProductAgentFactory
+from sleepagent.radar_agent.product_agent.governance import (
+    DeterministicCommitController,
+)
 
 
 PRODUCT_API_KEY = "test-product-radar-key"

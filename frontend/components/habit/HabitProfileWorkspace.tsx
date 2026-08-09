@@ -168,11 +168,9 @@ export function HabitProfileWorkspace() {
     setBusy(true);
     setError(null);
     try {
-      const confirmationId = `habit-confirm-${crypto.randomUUID()}`;
       await confirmHabitChangeSet({
-        pending,
-        confirmationId,
-        idempotencyKey: confirmationId,
+        decisionId: pending.decision_id,
+        idempotencyKey: `habit-confirm:${pending.decision_id}`,
       });
       setPending(null);
       await refreshProfile();
