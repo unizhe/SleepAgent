@@ -132,8 +132,8 @@ class ProductRevisionFacts(SleepDomainContract):
         evidence = self.model_dump(mode="json")
         quality = dict(self.deterministic_quality)
         coverage_ratio = quality.get("coverage_ratio", 0.0)
-        risk_state = str(self.deterministic_risk.get("risk_state", "unknown"))
-        risk_score = 0.8 if risk_state == "reviewed_signal" else 0.4
+        risk = dict(self.deterministic_risk)
+        risk.setdefault("data_sufficiency", self.data_sufficiency)
         return {
             "radar.get_night_evidence": {
                 "data": evidence,
@@ -146,6 +146,7 @@ class ProductRevisionFacts(SleepDomainContract):
             },
             "radar.get_device_status": {
                 "data": {
+                    "schema_version": "canonical_radar_device_status.v1",
                     "data_mode": self.data_mode.value,
                     "offline": bool(quality.get("offline", False)),
                     "stale": bool(quality.get("stale", False)),
@@ -153,8 +154,7 @@ class ProductRevisionFacts(SleepDomainContract):
                 "source_refs": list(self.provenance_references),
             },
             "risk.classify_signal": {
-                "score": risk_score,
-                "data": dict(self.deterministic_risk),
+                "data": risk,
                 "source_refs": list(self.provenance_references),
             },
         }

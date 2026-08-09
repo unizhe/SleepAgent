@@ -288,6 +288,16 @@ class EvidenceClaim(RadarAgentSchema):
     claim_id: str = Field(..., min_length=1)
     task_id: str = Field(..., min_length=1)
     text: str = Field(..., min_length=1)
+    source_kind: Literal[
+        "canonical_observation",
+        "user_report",
+        "authorized_observer_report",
+        "reviewed_knowledge",
+        "trend_tool",
+        "confirmed_memory",
+        "accepted_ledger",
+        "data_quality",
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     evidence_refs: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0, ge=0, le=1)
     risk_level: RiskLevel = RiskLevel.INFO

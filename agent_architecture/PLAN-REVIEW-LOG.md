@@ -3726,3 +3726,72 @@ readiness exact-roster-only and locked Phase 1 audit identity.
 
 Phase 1 was committed locally as `241d9be`; Phase 2 remains uncommitted. No
 push, release or remote mutation was made.
+
+### Round 63 — Codex build: Phase 3A legacy capability migration and parity
+
+Date: 2026-08-07
+
+- Committed the accepted Phase 2 scope locally as `08f20d8` with message
+  `refactor(agent): establish concrete four-role agent boundaries`; no unrelated
+  dirty-worktree file was included and nothing was pushed.
+- Migrated RadarData ownership to a subject/device-bound `RadarDataAdapter` and
+  canonical evidence Tool; Trend to `TrendAnalysisTool` plus an Evidence method;
+  Risk to `RiskClassificationTool` plus deterministic urgent/risk Policy; RAG to
+  a reviewed-only Knowledge Tool/Service; Report to an Artifact Tool plus the
+  SleepCare role-material method; AlertCare to a Care coordination Tool/Policy;
+  and Memory parity to the existing governed `LongitudinalMemoryService` plus a
+  SleepCare memory method.
+- Preserved the legacy Trend/Risk semantics that were missing from Product:
+  7/30/90-day windows, per-window minimums, latest-revision de-duplication,
+  baseline separation and fallback, coverage/quality confidence,
+  cohort/calibration isolation, structured multifactor risk and explicit
+  uncertain/fail-closed outcomes.
+- Added a provider-neutral `CanonicalWorkflowPolicy` describing the valuable
+  fixed-orchestrator invariants. Enforcement remains in the existing Runner,
+  governance and acceptance layers; `ProductEpisodeRunner` and its lifecycle
+  state machine were not split or redesigned.
+- Runtime now owns exact Tool result selectors. Successful outputs are bound to
+  the FactSnapshot and invocation receipt, so an Agent cannot self-attest a
+  Tool result. Role-material artifact basis is prepared once after accepted
+  Evidence and before SleepCare; Care coordination is bound to accepted
+  Evidence plus post-Evidence Risk receipts and fails before Care on mismatch.
+- Doctor-targeted generated material consistently selects the doctor SleepCare
+  method, requires `draft_material` authority and passes a registered Safety
+  checkpoint. The agentless deterministic data-quality-recovery path remains a
+  deliberate exception and preserves the existing three role views.
+- The Python classes under `skill_methods/` are typed parity/reference
+  implementations, not a second callable Skill runtime. Production continues to
+  use the versioned `SkillPackage`/prompt registry: Trend and role-material IDs
+  are selected directly, Care uses `propose_single_care_action`, and Memory
+  remains on the existing governed SleepCare/LongitudinalMemory path.
+- Legacy Agent packages remain present only as migration sources and test
+  oracles for Phase 3A. API/CLI/worker/backend runtime cutover, bounded Tool
+  selector cleanup, scalar/content-hash compatibility removal, golden fixture
+  conversion and physical legacy deletion are explicitly deferred to Phase
+  3B/3C.
+
+### Codex verification
+
+- Per-capability characterization/parity and boundary suite:
+  `128 passed in 1.84s`.
+- Four-role Product acceptance, architecture, runtime, Factory, governance,
+  invocation, persistence, provider, role, Runner and Tooling suite:
+  `171 passed in 4.02s`.
+- Product worker, SleepDomain bridge and PostgreSQL integration boundary:
+  `18 passed, 2 skipped in 1.61s`.
+- Full repository regression after all fixes:
+  `1086 passed, 5 skipped in 59.01s`.
+- The Product Contract remains `sleepagent-product-agent.v14`; Product registry
+  manifest hash remains
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`.
+  Phase 1 manifest and concrete-roster identity tests pass unchanged.
+- Independent boundary and adversarial reviews found no Phase 3A blocker.
+  Scoped `git diff --check` and legacy-identity boundary tests pass.
+
+Fix rounds used: 4. Reviews tightened Tool-result binding and Artifact truth,
+closed explicit and implicit doctor/Safety bypasses, moved Care coordination to
+accepted Evidence plus exact Risk receipts, and restored deterministic doctor
+views for data-quality recovery without widening generated-material permissions.
+
+Phase 3A remains uncommitted. No push, release or remote mutation was made, and
+execution is paused before Phase 3B as required.

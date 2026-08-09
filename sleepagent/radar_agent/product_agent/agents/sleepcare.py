@@ -327,12 +327,10 @@ class SleepCareAgent(
         *,
         doctor_material: bool = False,
     ) -> str:
+        if doctor_material:
+            return "draft_doctor_material"
         if episode_type is EpisodeType.ROLE_MATERIAL:
-            return (
-                "draft_doctor_material"
-                if doctor_material
-                else "draft_user_material"
-            )
+            return "draft_user_material"
         if episode_type is EpisodeType.GROUNDED_DIALOGUE:
             return "answer_grounded_question"
         return "explain_for_elder"

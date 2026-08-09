@@ -96,6 +96,10 @@ from sleepagent.radar_agent.product_agent.tooling import (
     ProductToolExecutor,
     context_item_from_tool_receipt,
 )
+from sleepagent.radar_agent.product_agent.tools.care_coordination import (
+    CareCoordinationPolicyRequest,
+    CareCoordinationTool,
+)
 from sleepagent.radar_agent.product_agent.habit_runtime import (
     HabitProfileRuntimeService,
 )
@@ -280,6 +284,48 @@ class ProductEpisodeRunRequest(StrictContract):
             raise ValueError("declined confirmation IDs must be unique")
         if self.profile_relevant_concept_ids and self.profile_purpose is None:
             raise ValueError("Profile concept read requires an explicit purpose")
+        if self.doctor_material:
+            if self.audience_role not in {None, "doctor"}:
+                raise ValueError(
+                    "doctor_material cannot target an elder or family audience"
+                )
+            if (
+                self.episode_type is not EpisodeType.DATA_QUALITY_RECOVERY
+                and _doctor_safety_checkpoint(self.episode_type) is None
+            ):
+                raise ValueError(
+                    "doctor_material requires an Episode with a registered "
+                    "Safety checkpoint"
+                )
+        resolved_doctor_audience = self.audience_role == "doctor" or (
+            self.audience_role is None
+            and self.fact_snapshot.binding.role == "doctor"
+        )
+        if (
+            resolved_doctor_audience
+            and self.episode_type is not EpisodeType.ROLE_MATERIAL
+            and not self.doctor_material
+        ):
+            raise ValueError(
+                "doctor audience outside role material requires "
+                "doctor_material safety semantics"
+            )
+        doctor_target = self.doctor_material or (
+            self.episode_type is EpisodeType.ROLE_MATERIAL
+            and (
+                self.audience_role == "doctor"
+                or (
+                    self.audience_role is None
+                    and self.fact_snapshot.binding.role == "doctor"
+                )
+            )
+        )
+        if doctor_target and "draft_material" not in (
+            self.fact_snapshot.binding.authorization_scope
+        ):
+            raise ValueError(
+                "doctor material requires draft_material authorization"
+            )
         if self.habit_answers and self.habit_selection is None:
             raise ValueError("Habit answers require a Selection receipt")
         if self.habit_profile_candidate_answers and (
@@ -302,6 +348,49 @@ class ProductEpisodeRunRequest(StrictContract):
                 "Profile review questions require prior summary and update request"
             )
         return self
+
+
+def _effective_audience_role(
+    request: ProductEpisodeRunRequest,
+) -> Literal["elder", "family", "doctor"]:
+    """Resolve one audience without changing the public request Contract.
+
+    Historical callers may set ``doctor_material`` without repeating the
+    audience.  Conversely, an explicit doctor role-material audience must not
+    bypass the doctor Skill and Safety gate merely because that compatibility
+    flag was omitted.
+    """
+
+    if request.doctor_material:
+        return "doctor"
+    if request.audience_role is not None:
+        return request.audience_role
+    role = request.fact_snapshot.binding.role
+    return role if role != "system" else "elder"
+
+
+def _uses_doctor_material_semantics(
+    request: ProductEpisodeRunRequest,
+) -> bool:
+    return request.doctor_material or (
+        request.episode_type is EpisodeType.ROLE_MATERIAL
+        and _effective_audience_role(request) == "doctor"
+    )
+
+
+def _doctor_safety_checkpoint(episode_type: EpisodeType) -> str | None:
+    registered = EPISODE_DEFINITIONS[
+        episode_type
+    ].conditional_safety_checkpoints
+    for checkpoint in (
+        "doctor_material_safety",
+        "personal_claim_safety",
+        "care_candidate_safety",
+        "external_action_safety",
+    ):
+        if checkpoint in registered:
+            return checkpoint
+    return None
 
 
 class PendingConfirmationTarget(StrictContract):
@@ -542,16 +631,36 @@ class ProductEpisodeRunner:
 
     def _read_coordination_policy(
         self,
-        _arguments: dict[str, Any],
-        _context: ProductToolExecutionContext,
+        arguments: dict[str, Any],
+        context: ProductToolExecutionContext,
     ) -> dict[str, Any]:
+        caller = (
+            context.caller.value
+            if isinstance(context.caller, AgentId)
+            else context.caller
+        )
+        if caller != "runtime":
+            raise PermissionError(
+                "coordination policy facts must be injected by runtime"
+            )
         policy = self.care_catalog.delivery_policy
+        if "coordination_policy_ref" in arguments:
+            raise ValueError(
+                "coordination policy identity is derived from the Care catalog"
+            )
+        request = CareCoordinationPolicyRequest.model_validate(
+            {
+                **arguments,
+                "coordination_policy_ref": policy.coordination_policy_ref,
+            }
+        )
+        result = CareCoordinationTool().read_policy(request)
         return {
+            **result.model_dump(mode="json"),
             "policy": {
                 "coordination_policy_ref": policy.coordination_policy_ref,
                 "family_notification_requires_candidate": True,
             },
-            "source_refs": [policy.coordination_policy_ref],
         }
 
     def process_induction_jobs(
@@ -924,7 +1033,25 @@ class ProductEpisodeRunner:
 
         for _ in preflight_receipts:
             runtime.record_tool_call()
-        tool_receipts.extend(self._run_registered_tools(request, runtime))
+        registered_receipts = self._run_registered_tools(request, runtime)
+        tool_receipts.extend(registered_receipts)
+        failed_required = [
+            receipt
+            for receipt in registered_receipts
+            if receipt.outcome != InvocationOutcome.SUCCEEDED
+        ]
+        if failed_required:
+            failed_tool = failed_required[0].tool_name
+            return self._store(
+                self._degraded(
+                    request,
+                    runtime,
+                    failure_code=f"required_tool_failed:{failed_tool}",
+                    tool_receipts=tool_receipts,
+                    envelopes=envelopes,
+                ),
+                subject_id=request.fact_snapshot.binding.subject_id,
+            )
         (
             habit_selection,
             habit_capture,
@@ -960,6 +1087,7 @@ class ProductEpisodeRunner:
         safety: AcceptedWorkProduct | None = None
         communication: AcceptedWorkProduct | None = None
         deterministic_risk_reasons: list[str] = []
+        coordination_risk_receipts: list[ToolReceipt] = []
 
         try:
             if WorkProductKind.EVIDENCE_PACKET in (
@@ -1001,8 +1129,16 @@ class ProductEpisodeRunner:
                         tool_receipts.append(risk_result.receipt)
                         if (
                             risk_result.receipt.outcome
-                            == InvocationOutcome.SUCCEEDED
-                            and risk_result.receipt.output.get("risk_level")
+                            != InvocationOutcome.SUCCEEDED
+                        ):
+                            raise AcceptanceError(
+                                "Safety risk classification failed"
+                            )
+                        coordination_risk_receipts.append(
+                            risk_result.receipt
+                        )
+                        if (
+                            risk_result.receipt.output.get("risk_level")
                             == OnlineRiskLevel.ESCALATE.value
                         ):
                             deterministic_risk_reasons.extend(
@@ -1036,12 +1172,86 @@ class ProductEpisodeRunner:
                         ),
                     )
                     tool_receipts.append(risk_result.receipt)
+                    if (
+                        risk_result.receipt.outcome
+                        != InvocationOutcome.SUCCEEDED
+                    ):
+                        raise AcceptanceError(
+                            "Safety risk classification failed"
+                        )
+                    if bool(
+                        risk_result.receipt.output.get("safety_required")
+                    ) or (
+                        risk_result.receipt.output.get("risk_level")
+                        == OnlineRiskLevel.ESCALATE.value
+                    ):
+                        deterministic_risk_reasons.extend(
+                            risk_result.receipt.output.get(
+                                "reason_codes",
+                                ("deterministic_risk_escalate",),
+                            )
+                        )
 
             if WorkProductKind.CARE_STRATEGY in (
                 set(plan.required_work_products) | set(plan.conditional_work_products)
             ):
                 if evidence is None:
                     raise AcceptanceError("Care cannot run without accepted Evidence")
+                if request.online_events:
+                    if len(coordination_risk_receipts) != len(
+                        request.online_events
+                    ):
+                        raise AcceptanceError(
+                            "Care coordination lacks exact Risk receipts"
+                        )
+                    runtime.record_tool_call()
+                    coordination_result = self.tool_executor.execute(
+                        "coordination.read_policy",
+                        {
+                            "accepted_evidence_ref": evidence.work_product_ref,
+                            "accepted_evidence_hash": evidence.target_hash,
+                            "risk_decisions": [
+                                {
+                                    "risk_receipt_ref": (
+                                        receipt.tool_invocation_id
+                                    ),
+                                    "risk_level": receipt.output[
+                                        "risk_level"
+                                    ],
+                                    "quality_status": receipt.output[
+                                        "quality_status"
+                                    ],
+                                    "urgent_required": bool(
+                                        receipt.output.get(
+                                            "urgent_required",
+                                            False,
+                                        )
+                                    ),
+                                    "source_refs": receipt.source_refs,
+                                }
+                                for receipt in coordination_risk_receipts
+                            ],
+                        },
+                        context=ProductToolExecutionContext(
+                            caller="runtime",
+                            fact_snapshot=request.fact_snapshot,
+                            authorization_scope=(
+                                request.fact_snapshot.binding.authorization_scope
+                            ),
+                            episode_id=request.episode_id,
+                            plan_id=runtime.plan.plan_id if runtime.plan else None,
+                            plan_revision=runtime.episode_state_revision,
+                            plan_step_id="read-care-coordination-policy",
+                        ),
+                    )
+                    tool_receipts.append(coordination_result.receipt)
+                    if (
+                        coordination_result.receipt.outcome
+                        != InvocationOutcome.SUCCEEDED
+                    ):
+                        raise AcceptanceError(
+                            "Care coordination policy failed"
+                        )
                 envelope, accepted = self._invoke_and_accept(
                     request=request,
                     runtime=runtime,
@@ -1083,7 +1293,7 @@ class ProductEpisodeRunner:
             )
             prepublication_safety_planned = (
                 safety_planned
-                and not request.doctor_material
+                and not _uses_doctor_material_semantics(request)
                 and not request.external_action
             )
             if trigger_reasons or prepublication_safety_planned:
@@ -1104,6 +1314,42 @@ class ProductEpisodeRunner:
                 elif review_target.agent_id == AgentId.CARE_STRATEGY:
                     care = review_target
 
+            if request.episode_type is EpisodeType.ROLE_MATERIAL:
+                if evidence is None:
+                    raise AcceptanceError(
+                        "Role material requires accepted Evidence"
+                    )
+                runtime.record_tool_call()
+                artifact_result = self.tool_executor.execute(
+                    "artifact.render",
+                    {
+                        "episode_id": request.episode_id,
+                        "accepted_evidence_ref": evidence.work_product_ref,
+                        "accepted_evidence_hash": evidence.target_hash,
+                        "evidence_packet": evidence.payload,
+                        "audience_role": _effective_audience_role(request),
+                    },
+                    context=ProductToolExecutionContext(
+                        caller="runtime",
+                        fact_snapshot=request.fact_snapshot,
+                        authorization_scope=(
+                            request.fact_snapshot.binding.authorization_scope
+                        ),
+                        episode_id=request.episode_id,
+                        plan_id=runtime.plan.plan_id if runtime.plan else None,
+                        plan_revision=runtime.episode_state_revision,
+                        plan_step_id="prepare-role-material-basis",
+                    ),
+                )
+                tool_receipts.append(artifact_result.receipt)
+                if (
+                    artifact_result.receipt.outcome
+                    != InvocationOutcome.SUCCEEDED
+                ):
+                    raise AcceptanceError(
+                        "Role material Artifact rendering failed"
+                    )
+
             envelope, accepted = self._invoke_and_accept(
                 request=request,
                 runtime=runtime,
@@ -1122,7 +1368,7 @@ class ProductEpisodeRunner:
                 episode_type=request.episode_type.value,
             )
             publication_safety_required = (
-                request.doctor_material
+                _uses_doctor_material_semantics(request)
                 or bool(communication_trigger_reasons)
             )
             if publication_safety_required:
@@ -1137,7 +1383,7 @@ class ProductEpisodeRunner:
                         *communication_trigger_reasons,
                         (
                             "doctor_material"
-                            if request.doctor_material
+                            if _uses_doctor_material_semantics(request)
                             else "communication_restricted_content"
                         )
                     ],
@@ -1514,7 +1760,7 @@ class ProductEpisodeRunner:
             )
         except Exception as exc:
             if safety is None and (
-                request.doctor_material
+                _uses_doctor_material_semantics(request)
                 or request.external_action
                 or isinstance(exc, AcceptanceError)
                 and "Safety" in str(exc)
@@ -1570,7 +1816,7 @@ class ProductEpisodeRunner:
         kind = agent.boundary.work_product_kind
         skill_id = agent.select_skill(
             request.episode_type,
-            doctor_material=request.doctor_material,
+            doctor_material=_uses_doctor_material_semantics(request),
         )
         tool_session_id = tool_session_id or (
             f"tool-session:{request.episode_id}:{agent_id.value}:"
@@ -1679,10 +1925,7 @@ class ProductEpisodeRunner:
                 TrustedContextItem(
                     key="requested_audience_role",
                     trust_label=TrustLabel.SYSTEM_POLICY,
-                    value=(
-                        request.audience_role
-                        or request.fact_snapshot.binding.role
-                    ),
+                    value=_effective_audience_role(request),
                 )
             ]
             if agent.boundary.context.audience_visible
@@ -1764,7 +2007,7 @@ class ProductEpisodeRunner:
                 context=context,
                 episode_type=request.episode_type,
                 subject_id=request.fact_snapshot.binding.subject_id,
-                doctor_material=request.doctor_material,
+                doctor_material=_uses_doctor_material_semantics(request),
                 parent_invocation_id=(
                     runtime.invocation_records[-1].invocation_id
                     if runtime.invocation_records
@@ -1805,10 +2048,7 @@ class ProductEpisodeRunner:
                     else None
                 ),
                 audience_role=(
-                    (
-                        request.audience_role
-                        or request.fact_snapshot.binding.role
-                    )
+                    _effective_audience_role(request)
                     if agent.boundary.context.audience_visible
                     else None
                 ),
@@ -2041,10 +2281,7 @@ class ProductEpisodeRunner:
                 },
                 require_personal_grounding=request.personalized,
                 authenticated_user_text=request.user_text,
-                expected_audience_role=(
-                    request.audience_role
-                    or request.fact_snapshot.binding.role
-                ),
+                expected_audience_role=_effective_audience_role(request),
             )
         runtime.accept(kind, accepted)
         return envelope, accepted
@@ -2202,13 +2439,23 @@ class ProductEpisodeRunner:
     ) -> ProductEpisodeRunResult | None:
         result = self.tool_executor.execute(
             "risk.match_urgent_boundary",
-            {"text": request.user_text},
+            {
+                "text_inputs": [
+                    request.user_text,
+                    *(
+                        response.answer
+                        for response in request.user_fact_responses
+                    ),
+                ]
+            },
             context=ProductToolExecutionContext(
                 caller="runtime",
                 fact_snapshot=request.fact_snapshot,
                 authorization_scope=request.fact_snapshot.binding.authorization_scope,
             ),
         )
+        if result.receipt.outcome != InvocationOutcome.SUCCEEDED:
+            return self._failed_safety_preflight(request, result.receipt)
         urgent = bool(result.receipt.output.get("urgent"))
         if not urgent:
             for event in request.online_events:
@@ -2228,6 +2475,11 @@ class ProductEpisodeRunner:
                         ),
                     ),
                 )
+                if event_risk.receipt.outcome != InvocationOutcome.SUCCEEDED:
+                    return self._failed_safety_preflight(
+                        request,
+                        event_risk.receipt,
+                    )
                 if event_risk.receipt.output.get("urgent_required"):
                     result = event_risk
                     urgent = True
@@ -2263,6 +2515,33 @@ class ProductEpisodeRunner:
             publication=draft,
             publication_delivered=True,
             tool_receipts=[result.receipt],
+        )
+
+    @staticmethod
+    def _failed_safety_preflight(
+        request: ProductEpisodeRunRequest,
+        receipt: ToolReceipt,
+    ) -> ProductEpisodeRunResult:
+        episode_receipt = EpisodeReceipt(
+            episode_id=request.episode_id,
+            episode_type=request.episode_type,
+            receipt_revision=1,
+            terminal=True,
+            execution_mode=ExecutionMode.SAFE_DEGRADED,
+            status=EpisodeStatus.BLOCKED,
+            goal_achieved=False,
+            fact_snapshot_id=request.fact_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=request.fact_snapshot.fact_snapshot_hash,
+            source_scope=request.fact_snapshot.source_scope,
+            final_episode_state_revision=0,
+            tool_receipt_ids=[receipt.tool_invocation_id],
+            failure_codes=[f"required_tool_failed:{receipt.tool_name}"],
+            trace_ref=f"trace:{request.episode_id}:safety-preflight-failed",
+        )
+        return ProductEpisodeRunResult(
+            registry_hash=stable_hash(product_agent_manifest()),
+            receipt=episode_receipt,
+            tool_receipts=[receipt],
         )
 
     @staticmethod
@@ -2328,8 +2607,7 @@ class ProductEpisodeRunner:
         draft = CommunicationDraft(
             draft_id=f"quality:{request.episode_id}",
             audience_role=(
-                request.audience_role
-                or request.fact_snapshot.binding.role
+                _effective_audience_role(request)
             ),
             text="当前记录质量不足，暂时无法形成个性化判断。请检查设备佩戴与连接。",
             context_notice="这是已审定的数据不足降级提示。",
@@ -2369,6 +2647,7 @@ class ProductEpisodeRunner:
             if tool_name in {
                 "risk.match_urgent_boundary",
                 "risk.classify_signal",
+                "artifact.render",
             }:
                 continue
             runtime.record_tool_call()
@@ -2472,17 +2751,13 @@ class ProductEpisodeRunner:
             receipts.append(result.receipt)
 
         if request.online_events and care_planned:
-            for tool_name in (
+            runtime.record_tool_call()
+            result = self.tool_executor.execute(
                 "device.read_delivery_policy",
-                "coordination.read_policy",
-            ):
-                runtime.record_tool_call()
-                result = self.tool_executor.execute(
-                    tool_name,
-                    {},
-                    context=context,
-                )
-                receipts.append(result.receipt)
+                {},
+                context=context,
+            )
+            receipts.append(result.receipt)
 
         if request.habit_question_trigger is not None:
             binding = request.fact_snapshot.binding
@@ -2658,9 +2933,14 @@ class ProductEpisodeRunner:
             required.add(WorkProductKind.EVIDENCE_PACKET)
         if request.personalized and request.episode_type == EpisodeType.GROUNDED_DIALOGUE:
             required.add(WorkProductKind.EVIDENCE_PACKET)
-        if request.doctor_material:
+        if _uses_doctor_material_semantics(request):
             required.add(WorkProductKind.SAFETY_DECISION)
-            checkpoints.add("doctor_material_safety")
+            checkpoint = _doctor_safety_checkpoint(request.episode_type)
+            if checkpoint is None:
+                raise AcceptanceError(
+                    "doctor material has no registered Safety checkpoint"
+                )
+            checkpoints.add(checkpoint)
         if request.external_action:
             required.add(WorkProductKind.SAFETY_DECISION)
             checkpoints.add("external_action_safety")
@@ -2675,7 +2955,7 @@ class ProductEpisodeRunner:
         tool_receipts: list[ToolReceipt],
         envelopes: list[AgentEnvelope],
     ) -> ProductEpisodeRunResult:
-        if request.doctor_material or request.external_action:
+        if _uses_doctor_material_semantics(request) or request.external_action:
             status = EpisodeStatus.BLOCKED
             publication = None
             delivered = False
@@ -2691,10 +2971,7 @@ class ProductEpisodeRunner:
             )
             publication = CommunicationDraft(
                 draft_id=f"degraded:{request.episode_id}",
-                audience_role=(
-                    request.audience_role
-                    or request.fact_snapshot.binding.role
-                ),
+                audience_role=_effective_audience_role(request),
                 text=(
                     "\n".join(cold_start_boundaries)
                     if cold_start_boundaries

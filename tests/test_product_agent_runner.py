@@ -4,6 +4,8 @@ import json
 import time
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 import sleepagent.radar_agent.product_agent.runner as runner_module
 
 from sleepagent.radar_agent.product_agent import (
@@ -124,6 +126,9 @@ def test_legacy_entry_without_exact_cohort_publishes_reviewed_boundary() -> None
 
 def snapshot(
     kind: SourceScopeKind = SourceScopeKind.CURRENT_NIGHT,
+    *,
+    role: str = "elder",
+    authorization_scope: tuple[str, ...] | None = None,
 ) -> FactSnapshot:
     if kind == SourceScopeKind.GENERAL_KNOWLEDGE:
         scope = SourceScope(
@@ -144,8 +149,12 @@ def snapshot(
         binding=AuthenticatedBinding(
             actor_id="actor-1",
             subject_id="subject-1",
-            role="elder",
-            authorization_scope=("read_sleep_data", "draft_material"),
+            role=role,
+            authorization_scope=(
+                authorization_scope
+                if authorization_scope is not None
+                else ("read_sleep_data", "draft_material")
+            ),
         ),
         source_scope=scope,
         canonical_data_version="v1",
@@ -410,9 +419,9 @@ class ToolFeedbackScenarioModel(ScenarioModel):
                         request_id="knowledge-for-evidence",
                         tool_name="knowledge.retrieve_reviewed",
                         arguments={
-                            "reviewed": True,
-                            "passages": ["睡眠解释需结合个人数据质量。"],
-                            "citations": ["knowledge:reviewed:1"],
+                            "query": "睡眠解释需结合个人数据质量",
+                            "roles": ["elder"],
+                            "limit": 8,
                         },
                     )
                 ]
@@ -705,6 +714,8 @@ def request(
     doctor_material=False,
     external_action=False,
     user_text="昨晚睡得怎么样？",
+    binding_role="elder",
+    binding_authorization_scope=None,
     **extra,
 ) -> ProductEpisodeRunRequest:
     kind = (
@@ -736,7 +747,11 @@ def request(
         episode_id=f"episode-{episode_type.value}",
         episode_type=episode_type,
         objective="完成当前睡眠照护任务",
-        fact_snapshot=snapshot(kind),
+        fact_snapshot=snapshot(
+            kind,
+            role=binding_role,
+            authorization_scope=binding_authorization_scope,
+        ),
         user_text=user_text,
         tool_inputs=inputs,
         personalized=personalized,
@@ -1128,8 +1143,8 @@ def test_safety_revision_returns_to_responsible_agent_and_rechecks() -> None:
     ) == 2
 
 
-def test_doctor_material_requires_safety() -> None:
-    instance, _ = runner(EpisodeType.ROLE_MATERIAL)
+def test_doctor_material_requires_safety_and_normalizes_implicit_audience() -> None:
+    instance, model = runner(EpisodeType.ROLE_MATERIAL)
     result = instance.run(
         request(
             EpisodeType.ROLE_MATERIAL,
@@ -1150,16 +1165,192 @@ def test_doctor_material_requires_safety() -> None:
         if item.agent_id == AgentId.SLEEP_CARE
     )
     assert safety.review_target_hash == communication.target_hash
+    assert result.publication is not None
+    assert result.publication.audience_role == "doctor"
+    sleepcare_record = next(
+        item
+        for item in result.agent_invocations
+        if item.agent_id is AgentId.SLEEP_CARE
+        and item.skill_id == "draft_doctor_material"
+    )
+    assert sleepcare_record.skill_id == "draft_doctor_material"
+    sleepcare_context = next(
+        item
+        for item in model.contexts
+        if item["agent_id"] == AgentId.SLEEP_CARE.value
+    )
+    artifact_item = next(
+        item
+        for item in sleepcare_context["items"]
+        if item["key"] == "tool:artifact.render"
+    )
+    assert artifact_item["value"]["audience_role"] == "doctor"
     assert result.receipt.status == EpisodeStatus.COMPLETE
 
 
-def test_elder_role_material_does_not_fixed_call_safety() -> None:
+def test_explicit_doctor_audience_cannot_bypass_doctor_safety_semantics() -> None:
     instance, _ = runner(EpisodeType.ROLE_MATERIAL)
+
+    result = instance.run(
+        request(EpisodeType.ROLE_MATERIAL, audience_role="doctor")
+    )
+
+    assert result.publication is not None
+    assert result.publication.audience_role == "doctor"
+    assert AgentId.SAFETY_REVIEW in {
+        item.agent_id for item in result.envelopes
+    }
+    sleepcare_record = next(
+        item
+        for item in result.agent_invocations
+        if item.agent_id is AgentId.SLEEP_CARE
+        and item.skill_id == "draft_doctor_material"
+    )
+    assert sleepcare_record.skill_id == "draft_doctor_material"
+
+
+def test_authenticated_doctor_binding_cannot_bypass_role_material_safety() -> None:
+    instance, _ = runner(EpisodeType.ROLE_MATERIAL)
+
+    result = instance.run(
+        request(EpisodeType.ROLE_MATERIAL, binding_role="doctor")
+    )
+
+    assert result.publication is not None
+    assert result.publication.audience_role == "doctor"
+    assert AgentId.SAFETY_REVIEW in {
+        item.agent_id for item in result.envelopes
+    }
+    assert any(
+        item.agent_id is AgentId.SLEEP_CARE
+        and item.skill_id == "draft_doctor_material"
+        for item in result.agent_invocations
+    )
+
+
+def test_non_role_material_doctor_audience_requires_explicit_safety_semantics() -> None:
+    with pytest.raises(ValueError, match="requires doctor_material"):
+        request(EpisodeType.MORNING_REVIEW, audience_role="doctor")
+
+
+def test_non_role_doctor_binding_requires_explicit_safety_semantics() -> None:
+    with pytest.raises(ValueError, match="requires doctor_material"):
+        request(EpisodeType.MORNING_REVIEW, binding_role="doctor")
+
+
+def test_compatibility_doctor_material_uses_doctor_skill_and_safety() -> None:
+    instance, _ = runner(EpisodeType.MORNING_REVIEW)
+
+    result = instance.run(
+        request(
+            EpisodeType.MORNING_REVIEW,
+            audience_role="doctor",
+            doctor_material=True,
+        )
+    )
+
+    assert result.receipt.status == EpisodeStatus.COMPLETE
+    assert result.publication is not None
+    assert result.publication.audience_role == "doctor"
+    assert AgentId.SAFETY_REVIEW in {
+        item.agent_id for item in result.envelopes
+    }
+    assert any(
+        item.agent_id is AgentId.SLEEP_CARE
+        and item.skill_id == "draft_doctor_material"
+        for item in result.agent_invocations
+    )
+
+
+def test_doctor_material_rejects_explicit_non_doctor_audience() -> None:
+    with pytest.raises(ValueError, match="cannot target"):
+        request(
+            EpisodeType.ROLE_MATERIAL,
+            doctor_material=True,
+            audience_role="family",
+        )
+
+
+def test_doctor_material_requires_draft_material_authorization() -> None:
+    with pytest.raises(ValueError, match="draft_material authorization"):
+        request(
+            EpisodeType.ROLE_MATERIAL,
+            audience_role="doctor",
+            doctor_material=True,
+            binding_authorization_scope=("read_sleep_data",),
+        )
+
+
+def test_elder_role_material_does_not_fixed_call_safety() -> None:
+    instance, model = runner(EpisodeType.ROLE_MATERIAL)
     result = instance.run(request(EpisodeType.ROLE_MATERIAL))
     assert AgentId.SAFETY_REVIEW not in {
         item.agent_id for item in result.envelopes
     }
     assert result.receipt.status == EpisodeStatus.COMPLETE
+    evidence = next(
+        item
+        for item in result.accepted_work_products
+        if item.agent_id is AgentId.EVIDENCE_REASONING
+    )
+    artifact = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "artifact.render"
+    )
+    assert artifact.output["schema_version"] == "product_artifact_basis.v1"
+    assert artifact.output["accepted_evidence_ref"] == evidence.work_product_ref
+    assert artifact.output["accepted_evidence_hash"] == evidence.target_hash
+    assert artifact.output["basis_prepared"] is True
+    assert artifact.output["rendered"] is False
+    assert artifact.output["committed"] is False
+    assert artifact.output["exported"] is False
+    assert "compatibility_mode" not in artifact.output
+    assert sum(
+        item.tool_name == "artifact.render"
+        for item in result.tool_receipts
+    ) == 1
+    sleepcare_context = next(
+        item
+        for item in model.contexts
+        if item["agent_id"] == AgentId.SLEEP_CARE.value
+    )
+    sleepcare_artifact = next(
+        item
+        for item in sleepcare_context["items"]
+        if item["key"] == "tool:artifact.render"
+    )
+    assert sleepcare_artifact["source_refs"][0] == (
+        artifact.tool_invocation_id
+    )
+    assert sleepcare_artifact["value"] == artifact.output
+
+
+def test_role_material_basis_binds_safety_revised_evidence() -> None:
+    instance, _ = runner(
+        EpisodeType.ROLE_MATERIAL,
+        low_confidence=True,
+        safety_verdicts=[SafetyVerdict.REVISE, SafetyVerdict.APPROVE],
+    )
+
+    result = instance.run(request(EpisodeType.ROLE_MATERIAL))
+
+    assert result.receipt.status == EpisodeStatus.COMPLETE
+    evidence = next(
+        item
+        for item in result.accepted_work_products
+        if item.agent_id is AgentId.EVIDENCE_REASONING
+    )
+    artifact = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "artifact.render"
+    )
+    assert artifact.output["accepted_evidence_ref"] == evidence.work_product_ref
+    assert artifact.output["accepted_evidence_hash"] == evidence.target_hash
+    assert [item.agent_id for item in result.envelopes].count(
+        AgentId.EVIDENCE_REASONING
+    ) == 2
 
 
 def test_required_safety_failure_blocks_role_material() -> None:
@@ -1172,6 +1363,27 @@ def test_required_safety_failure_blocks_role_material() -> None:
     )
     assert result.receipt.status == EpisodeStatus.BLOCKED
     assert result.publication is None
+
+
+def test_doctor_artifact_failure_blocks_before_sleepcare_and_publication() -> None:
+    instance, model = runner(EpisodeType.ROLE_MATERIAL)
+
+    def unavailable(_arguments, _context):
+        raise RuntimeError("artifact renderer unavailable")
+
+    instance.tool_executor.register_handler("artifact.render", unavailable)
+    result = instance.run(
+        request(EpisodeType.ROLE_MATERIAL, doctor_material=True)
+    )
+
+    assert result.receipt.status == EpisodeStatus.BLOCKED
+    assert result.publication is None
+    assert not any(
+        item.agent_id is AgentId.SLEEP_CARE
+        and item.skill_id == "draft_doctor_material"
+        for item in result.agent_invocations
+    )
+    assert SleepCareModelOutput.__name__ not in model.calls
 
 
 def test_evidence_failure_degrades_without_care_takeover() -> None:
@@ -1200,9 +1412,141 @@ def test_urgent_preempts_all_model_agents() -> None:
     assert not model.calls
 
 
+def test_failed_urgent_text_preflight_blocks_before_model_agents() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+
+    def unavailable(arguments, context):
+        raise RuntimeError("urgent boundary unavailable")
+
+    instance.tool_executor.register_handler(
+        "risk.match_urgent_boundary",
+        unavailable,
+    )
+
+    result = instance.run(request(EpisodeType.MORNING_REVIEW))
+
+    assert result.receipt.status is EpisodeStatus.BLOCKED
+    assert result.receipt.execution_mode is ExecutionMode.SAFE_DEGRADED
+    assert result.receipt.failure_codes == [
+        "required_tool_failed:risk.match_urgent_boundary"
+    ]
+    assert model.calls == []
+    assert result.tool_receipts[0].outcome is InvocationOutcome.FAILED
+
+
+def test_authenticated_user_fact_urgent_answer_preempts_all_model_agents() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+    run_request = request(EpisodeType.MORNING_REVIEW).model_copy(
+        update={
+            "user_fact_responses": (
+                ProductUserFactResponse(
+                    request_id="urgent-followup-answer",
+                    answer="现在胸痛，而且呼吸困难。",
+                    actor_id="actor-1",
+                    actor_role="elder",
+                    subject_id="subject-1",
+                    observed_at=NOW,
+                ),
+            )
+        }
+    )
+
+    result = instance.run(run_request)
+
+    assert result.receipt.episode_type is EpisodeType.URGENT_BOUNDARY
+    assert result.receipt.execution_mode is ExecutionMode.DETERMINISTIC_ONLY
+    assert result.publication_delivered is True
+    assert model.calls == []
+
+
+def test_failed_online_risk_preflight_blocks_before_model_agents() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+
+    def unavailable(arguments, context):
+        raise RuntimeError("online risk unavailable")
+
+    instance.tool_executor.register_handler(
+        "risk.classify_signal",
+        unavailable,
+    )
+
+    result = instance.run(
+        request(
+            EpisodeType.MORNING_REVIEW,
+            online_events=(online_night_event(),),
+        )
+    )
+
+    assert result.receipt.status is EpisodeStatus.BLOCKED
+    assert result.receipt.execution_mode is ExecutionMode.SAFE_DEGRADED
+    assert result.receipt.failure_codes == [
+        "required_tool_failed:risk.classify_signal"
+    ]
+    assert model.calls == []
+    assert result.tool_receipts[0].outcome is InvocationOutcome.FAILED
+
+
+def test_failed_post_evidence_online_risk_stops_before_care_or_publication() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+    calls = 0
+
+    def intermittent(arguments, context):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "risk_level": "normal",
+                "urgent_required": False,
+                "safety_required": False,
+                "reason_codes": ["routine_observation"],
+                "source_refs": [],
+            }
+        raise RuntimeError("post-evidence risk unavailable")
+
+    instance.tool_executor.register_handler(
+        "risk.classify_signal",
+        intermittent,
+    )
+
+    result = instance.run(
+        request(
+            EpisodeType.MORNING_REVIEW,
+            online_events=(online_night_event(),),
+        )
+    )
+
+    assert result.receipt.goal_achieved is False
+    assert any(
+        item.tool_name == "risk.classify_signal"
+        and item.outcome is InvocationOutcome.FAILED
+        for item in result.tool_receipts
+    )
+    assert CareStrategyModelOutput.__name__ not in model.calls
+    assert SleepCareModelOutput.__name__ not in model.calls
+    assert result.publication_delivered is False
+
+
 def test_data_quality_recovery_is_deterministic_and_truthful() -> None:
     instance, model = runner(EpisodeType.DATA_QUALITY_RECOVERY)
     result = instance.run(request(EpisodeType.DATA_QUALITY_RECOVERY))
+    assert result.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
+    assert result.receipt.status == EpisodeStatus.PARTIAL
+    assert not result.envelopes
+    assert not model.calls
+
+
+def test_doctor_data_quality_recovery_preserves_agentless_deterministic_view() -> None:
+    instance, model = runner(EpisodeType.DATA_QUALITY_RECOVERY)
+
+    result = instance.run(
+        request(
+            EpisodeType.DATA_QUALITY_RECOVERY,
+            audience_role="doctor",
+            binding_role="doctor",
+            doctor_material=True,
+        )
+    )
+
     assert result.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
     assert result.receipt.status == EpisodeStatus.PARTIAL
     assert not result.envelopes
@@ -2022,8 +2366,76 @@ def test_online_risk_escalate_deterministically_invokes_safety() -> None:
     )
 
 
+def test_exact_revision_risk_escalate_deterministically_invokes_safety() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+    run_request = request(EpisodeType.MORNING_REVIEW)
+    tool_inputs = dict(run_request.tool_inputs)
+    tool_inputs["risk.classify_signal"] = {
+        "data": {
+            "risk_state": "reviewed_signal",
+            "data_sufficiency": "sufficient",
+            "health_escalation_allowed": True,
+            "reason_codes": ["approved_vendor_alert"],
+        },
+        "source_refs": list(run_request.fact_snapshot.source_refs),
+    }
+
+    result = instance.run(
+        run_request.model_copy(update={"tool_inputs": tool_inputs})
+    )
+
+    risk_receipt = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "risk.classify_signal"
+    )
+    assert risk_receipt.output["risk_level"] == "escalate"
+    assert risk_receipt.output["safety_required"] is True
+    assert SafetyReviewModelOutput.__name__ in model.calls
+    assert any(
+        item.agent_id == AgentId.SAFETY_REVIEW
+        for item in result.accepted_work_products
+    )
+
+
+def test_failed_required_evidence_tool_degrades_before_evidence_agent() -> None:
+    instance, _ = runner(EpisodeType.MORNING_REVIEW)
+    run_request = request(EpisodeType.MORNING_REVIEW)
+    tool_inputs = dict(run_request.tool_inputs)
+    tool_inputs["radar.get_night_evidence"] = {
+        "data": {
+            "schema_version": "product_revision_facts.v1",
+            "subject_id": "another-subject",
+            "canonical_data_version": (
+                run_request.fact_snapshot.canonical_data_version
+            ),
+        },
+        "source_refs": list(run_request.fact_snapshot.source_refs),
+    }
+
+    result = instance.run(
+        run_request.model_copy(update={"tool_inputs": tool_inputs})
+    )
+
+    failed = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "radar.get_night_evidence"
+    )
+    assert failed.outcome is InvocationOutcome.FAILED
+    assert result.receipt.status is EpisodeStatus.PARTIAL
+    assert result.receipt.goal_achieved is False
+    assert "required_tool_failed:radar.get_night_evidence" in (
+        result.receipt.failure_codes
+    )
+    assert not any(
+        item.agent_id == AgentId.EVIDENCE_REASONING
+        for item in result.accepted_work_products
+    )
+
+
 def test_online_care_path_auto_reads_delivery_preferences_and_policies() -> None:
-    instance, _ = runner(EpisodeType.CARE_PLAN)
+    instance, model = runner(EpisodeType.CARE_PLAN)
 
     result = instance.run(
         request(
@@ -2051,6 +2463,122 @@ def test_online_care_path_auto_reads_delivery_preferences_and_policies() -> None
         "device.read_delivery_policy",
         "coordination.read_policy",
     }.issubset({item.tool_name for item in result.tool_receipts})
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    evidence = next(
+        item
+        for item in result.accepted_work_products
+        if item.agent_id is AgentId.EVIDENCE_REASONING
+    )
+    risk_receipts = [
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "risk.classify_signal"
+    ]
+    assert coordination.output["tool_version"] == (
+        "sleepagent-care-coordination-tool.v1"
+    )
+    assert coordination.output["accepted_evidence_ref"] == (
+        evidence.work_product_ref
+    )
+    assert coordination.output["accepted_evidence_hash"] == evidence.target_hash
+    assert coordination.output["risk_receipt_refs"] == [
+        item.tool_invocation_id for item in risk_receipts
+    ]
+    assert coordination.output["routing"]["risk_level"] == "info"
+    assert coordination.output["routing"]["data_quality_status"] == "good"
+    assert coordination.output["routing"]["candidate_intents"] == []
+    assert coordination.output["source_refs"][0] == "coordination-policy.v1"
+    assert coordination.output["policy"] == {
+        "coordination_policy_ref": "coordination-policy.v1",
+        "family_notification_requires_candidate": True,
+    }
+    care_context = next(
+        item
+        for item in model.contexts
+        if item["agent_id"] == AgentId.CARE_STRATEGY.value
+    )
+    care_policy = next(
+        item
+        for item in care_context["items"]
+        if item["key"] == "tool:coordination.read_policy"
+    )
+    assert care_policy["value"] == coordination.output
+
+
+def test_coordination_policy_failure_degrades_before_care_agent() -> None:
+    instance, model = runner(EpisodeType.CARE_PLAN)
+
+    def unavailable(_arguments, _context):
+        raise RuntimeError("coordination policy unavailable")
+
+    instance.tool_executor.register_handler(
+        "coordination.read_policy",
+        unavailable,
+    )
+    result = instance.run(
+        request(
+            EpisodeType.CARE_PLAN,
+            online_events=(online_night_event(),),
+        )
+    )
+
+    assert result.receipt.status == EpisodeStatus.PARTIAL
+    assert not any(
+        item.agent_id is AgentId.CARE_STRATEGY
+        for item in result.envelopes
+    )
+    assert CareStrategyModelOutput.__name__ not in model.calls
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.outcome is InvocationOutcome.FAILED
+
+
+def test_online_care_escalation_receipt_reaches_care_and_safety() -> None:
+    instance, model = runner(EpisodeType.CARE_PLAN)
+
+    result = instance.run(
+        request(
+            EpisodeType.CARE_PLAN,
+            online_events=(
+                online_night_event(significant_deviation=True),
+            ),
+        )
+    )
+
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["risk_level"] == "escalate"
+    assert {
+        item["action_code"]
+        for item in coordination.output["routing"]["candidate_intents"]
+    } == {
+        "export_doctor_material",
+        "send_doctor_material",
+        "create_medical_evaluation_card",
+    }
+    care_context = next(
+        item
+        for item in model.contexts
+        if item["agent_id"] == AgentId.CARE_STRATEGY.value
+    )
+    assert any(
+        item["key"] == "tool:coordination.read_policy"
+        and item["value"] == coordination.output
+        for item in care_context["items"]
+    )
+    assert AgentId.SAFETY_REVIEW in {
+        item.agent_id for item in result.envelopes
+    }
 
 
 def test_online_urgent_red_flag_preempts_all_model_agents() -> None:

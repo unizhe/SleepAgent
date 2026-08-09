@@ -16,6 +16,7 @@ from sleepagent.radar_agent.product_agent import (
     SourceScopeKind,
     TrustLabel,
 )
+from sleepagent.radar_agent.product_agent.contracts import stable_hash
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -46,12 +47,104 @@ def test_trend_is_deterministic_tool_not_agent() -> None:
         "trend.calculate_metrics",
         {"values": [7.0, 6.5, 6.0], "source_refs": ["range:1"]},
         context=ProductToolExecutionContext(
-            caller=AgentId.EVIDENCE_REASONING,
+            caller="runtime",
             fact_snapshot=snapshot(),
         ),
     )
     assert result.receipt.output["change"] == -1.0
     assert result.context_item.trust_label == TrustLabel.TOOL_OUTPUT_UNTRUSTED
+
+
+def test_agent_cannot_self_attest_scalar_trend_values() -> None:
+    result = ProductToolExecutor().execute(
+        "trend.calculate_metrics",
+        {"values": [7.0, 6.5, 6.0], "source_refs": ["range:1"]},
+        context=ProductToolExecutionContext(
+            caller=AgentId.EVIDENCE_REASONING,
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    assert result.receipt.outcome is InvocationOutcome.FAILED
+
+
+def test_agent_selector_reuses_only_runtime_bound_tool_output() -> None:
+    executor = ProductToolExecutor()
+    runtime_result = executor.execute(
+        "trend.calculate_metrics",
+        {"values": [7.0, 6.5, 6.0], "source_refs": ["range:1"]},
+        context=ProductToolExecutionContext(
+            caller="runtime",
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    selected = executor.execute(
+        "trend.calculate_metrics",
+        {
+            "bound_tool_invocation_id": (
+                runtime_result.receipt.tool_invocation_id
+            )
+        },
+        context=ProductToolExecutionContext(
+            caller=AgentId.EVIDENCE_REASONING,
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    assert selected.receipt.outcome is InvocationOutcome.SUCCEEDED
+    assert selected.receipt.output == runtime_result.receipt.output
+
+
+def test_agent_selector_fails_when_runtime_has_not_bound_tool_output() -> None:
+    result = ProductToolExecutor().execute(
+        "trend.calculate_metrics",
+        {"bound_tool_invocation_id": "tool:trend.calculate_metrics:missing"},
+        context=ProductToolExecutionContext(
+            caller=AgentId.EVIDENCE_REASONING,
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    assert result.receipt.outcome is InvocationOutcome.FAILED
+    assert result.receipt.error_code == "ProductToolError"
+
+
+def test_invalid_runtime_receipt_is_never_available_to_agent_selector() -> None:
+    arguments = {"values": [1.0], "source_refs": ["range:1"]}
+
+    def invalid_output(values, context):
+        return {
+            "source_refs": [f"source:{index}" for index in range(51)]
+        }
+
+    executor = ProductToolExecutor(
+        {"trend.calculate_metrics": invalid_output}
+    )
+    with pytest.raises(ValueError, match="at most 50"):
+        executor.execute(
+            "trend.calculate_metrics",
+            arguments,
+            context=ProductToolExecutionContext(
+                caller="runtime",
+                fact_snapshot=snapshot(),
+            ),
+        )
+
+    expected_ref = (
+        "tool:trend.calculate_metrics:" + stable_hash(arguments)[:16]
+    )
+    selected = executor.execute(
+        "trend.calculate_metrics",
+        {"bound_tool_invocation_id": expected_ref},
+        context=ProductToolExecutionContext(
+            caller=AgentId.EVIDENCE_REASONING,
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    assert selected.receipt.outcome is InvocationOutcome.FAILED
+    assert selected.receipt.error_code == "ProductToolError"
 
 
 def test_reviewed_knowledge_fails_closed_for_unreviewed_content() -> None:
@@ -72,12 +165,27 @@ def test_artifact_render_does_not_claim_commit_or_export() -> None:
         "artifact.render",
         {"content": "draft", "source_refs": ["claim:1"]},
         context=ProductToolExecutionContext(
-            caller=AgentId.SLEEP_CARE,
+            caller="runtime",
             fact_snapshot=snapshot(),
         ),
     )
     assert result.receipt.output["rendered"]
     assert not result.receipt.output["committed"]
+    assert result.receipt.output["compatibility_mode"] == "content_hash_only"
+    assert result.receipt.source_refs == []
+
+
+def test_sleepcare_cannot_self_attest_unbound_artifact_content() -> None:
+    result = ProductToolExecutor().execute(
+        "artifact.render",
+        {"content": "draft", "source_refs": ["claim:1"]},
+        context=ProductToolExecutionContext(
+            caller=AgentId.SLEEP_CARE,
+            fact_snapshot=snapshot(),
+        ),
+    )
+
+    assert result.receipt.outcome is InvocationOutcome.FAILED
 
 
 def test_model_agent_cannot_execute_state_change() -> None:

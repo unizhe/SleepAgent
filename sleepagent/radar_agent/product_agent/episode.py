@@ -33,6 +33,10 @@ from sleepagent.radar_agent.product_agent.invocation import (
     AgentInvocationRecord,
     StructuredAgentModel,
 )
+from sleepagent.radar_agent.product_agent.policies.workflow import (
+    CANONICAL_WORKFLOW_POLICY,
+    CanonicalWorkflowPolicy,
+)
 from sleepagent.radar_agent.product_agent.registry import (
     EPISODE_DEFINITIONS,
     validate_episode_plan,
@@ -99,6 +103,8 @@ class EpisodeRuntimeSnapshot(StrictContract):
 
 class ProductEpisodeRuntime:
     """Runtime-owned lifecycle for the four-Agent topology."""
+
+    workflow_policy: CanonicalWorkflowPolicy = CANONICAL_WORKFLOW_POLICY
 
     def __init__(
         self,

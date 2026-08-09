@@ -17,7 +17,6 @@ from sleepagent.radar_agent.schemas import (
     EvidenceClaim,
     EvidenceLedger,
     QuestionnaireEntry,
-    RadarAgentName,
     RadarNightSummary,
     RiskLevel,
     RoleReportArtifact,
@@ -228,8 +227,7 @@ def _trend_highlights(ledger: EvidenceLedger) -> list[str]:
     return [
         claim.text
         for claim in ledger.claims
-        if claim.generated_by == RadarAgentName.TREND.value
-        or "trend" in claim.generated_by.lower()
+        if claim.source_kind == "trend_tool"
     ]
 
 
