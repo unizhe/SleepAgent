@@ -2,19 +2,20 @@ from __future__ import annotations
 
 import inspect
 
-from sleepagent.radar_agent.orchestrator.contracts import (
-    WORKFLOW_NODE_ORDER as LEGACY_NODE_ORDER,
-)
 from sleepagent.radar_agent.product_agent.episode import ProductEpisodeRuntime
 from sleepagent.radar_agent.product_agent.policies.workflow import (
     CANONICAL_WORKFLOW_POLICY,
     CanonicalWorkflowInvariant,
 )
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 def test_legacy_order_characterizes_deterministic_rules_worth_preserving() -> None:
+    node_order = load_phase3a_capability_goldens()["fixed_runtime_policy"][
+        "node_order"
+    ]
     legacy_positions = {
-        item.value: index for index, item in enumerate(LEGACY_NODE_ORDER)
+        item: index for index, item in enumerate(node_order)
     }
 
     assert legacy_positions["DataQualityGate"] < legacy_positions[

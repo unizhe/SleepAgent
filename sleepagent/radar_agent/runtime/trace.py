@@ -4,6 +4,10 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from sleepagent.observability import redact_text
+from sleepagent.radar_agent.persistence.history import (
+    HistoricalRecord,
+    HistoricalTaskRecord,
+)
 
 from .contracts import RadarArtifactVersion, RadarTaskEvent
 
@@ -24,6 +28,9 @@ def build_developer_trace(task_service: TaskService, task_id: str) -> dict[str, 
     """Build a minimized trace from the same persisted source used by API/SSE."""
 
     task = task_service.get_task(task_id)
+    if isinstance(task, HistoricalTaskRecord):
+        return _historical_developer_trace(task_service, task)
+
     artifacts = task_service.list_artifacts(task_id)
     workflow = _latest_workflow_payload(artifacts)
     ledgers = [item.evidence_ledger for item in artifacts if item.evidence_ledger]
@@ -31,31 +38,7 @@ def build_developer_trace(task_service: TaskService, task_id: str) -> dict[str, 
     return sanitize_trace_value(
         {
             "schema_version": TRACE_SCHEMA_VERSION,
-            "task": {
-                "task_id": task.task_id,
-                "trace_id": task.trace_id,
-                "scenario": task.scenario,
-                "runtime_kind": task.runtime_kind,
-                "runtime_contract_version": task.runtime_contract_version,
-                "execution_mode": task.execution_mode,
-                "completion_status": task.completion_status,
-                "status": task.status.value,
-                "retry_count": task.retry_count,
-                "parent_task_id": task.parent_task_id,
-                "failure": (
-                    {
-                        "error_code": task.failure.error_code,
-                        "summary": task.failure.message,
-                        "failed_node": task.failure.failed_node,
-                        "retryable": task.failure.retryable,
-                    }
-                    if task.failure
-                    else None
-                ),
-                "node_status": {
-                    node: status.value for node, status in task.node_status.items()
-                },
-            },
+            "task": _canonical_task_summary(task),
             "events": [
                 _event_summary(event) for event in task_service.list_events(task_id)
             ],
@@ -71,37 +54,6 @@ def build_developer_trace(task_service: TaskService, task_id: str) -> dict[str, 
                     "caveats": claim.caveats,
                 }
                 for claim in _unique_by_id(claims, "claim_id")
-            ],
-            "a2a": [
-                {
-                    "message_id": item.message_id,
-                    "sender": item.sender,
-                    "receiver": item.receiver,
-                    "intent": item.intent,
-                    "requested_action": item.requested_action,
-                    "request_type": item.request_type,
-                    "risk_level": item.risk_level.value,
-                    "message_status": item.message_status,
-                    "resolution_status": item.resolution_status,
-                    "resolution_summary": item.resolution_summary,
-                    "source_agent_invocation_id": item.source_agent_invocation_id,
-                    "target_agent_invocation_id": item.target_agent_invocation_id,
-                    "expected_output_schema": item.expected_output_schema,
-                    "evidence_refs": item.evidence_refs,
-                }
-                for item in task_service.list_a2a_messages(task_id)
-            ],
-            "conflicts": [
-                {
-                    "conflict_id": item.conflict_id,
-                    "sources": item.sources,
-                    "summary": item.summary,
-                    "decision": item.decision,
-                    "final_status": item.final_status,
-                    "requires_human_confirmation": item.requires_human_confirmation,
-                    "evidence_refs": item.evidence_refs,
-                }
-                for item in task_service.list_conflicts(task_id)
             ],
             "llm": _llm_summaries(artifacts),
             "questionnaires": [
@@ -143,47 +95,115 @@ def build_developer_trace(task_service: TaskService, task_id: str) -> dict[str, 
                 for item in task_service.list_confirmations(task_id)
             ],
             "artifacts": [_artifact_summary(item) for item in artifacts],
-            "dynamic": _dynamic_trace(task_service, task),
+            "history": {},
         }
     )
 
 
-def _dynamic_trace(task_service: TaskService, task: Any) -> dict[str, Any]:
-    if task.runtime_kind != "dynamic_goal":
-        return {}
-    store = task_service.store
-    try:
-        budget = store.get_runtime_budget(task.task_id).model_dump(mode="json")
-    except KeyError:
-        budget = None
-    try:
-        receipt = store.get_completion_receipt(task.task_id).model_dump(mode="json")
-    except KeyError:
-        receipt = None
+def _historical_developer_trace(
+    task_service: TaskService,
+    task: HistoricalTaskRecord,
+) -> dict[str, Any]:
+    """Render retired-runtime records without loading executable contracts."""
+
+    persisted = task_service.store.history.read_trace(task.task_id)
+    historical = persisted.to_dict()
+    return sanitize_trace_value(
+        {
+            "schema_version": TRACE_SCHEMA_VERSION,
+            "task": _historical_task_summary(task),
+            "events": [
+                _historical_event_summary(event)
+                for event in persisted.events
+            ],
+            "claims": [],
+            "llm": [],
+            "questionnaires": [],
+            "alert_decision": {},
+            "memory_candidates": [],
+            "a2a": [item.to_dict() for item in persisted.a2a_messages],
+            "conflicts": [item.to_dict() for item in persisted.conflicts],
+            "confirmations": [
+                item.to_dict() for item in persisted.confirmations
+            ],
+            "artifacts": [item.to_dict() for item in persisted.artifacts],
+            "history": {
+                key: value
+                for key, value in historical.items()
+                if key
+                not in {
+                    "task",
+                    "events",
+                    "a2a_messages",
+                    "conflicts",
+                    "confirmations",
+                    "artifacts",
+                }
+            },
+        }
+    )
+
+
+def _canonical_task_summary(task: Any) -> dict[str, Any]:
+    failure = getattr(task, "failure", None)
     return {
-        "plans": [
-            plan.model_dump(mode="json")
-            for plan in store.list_execution_plans(task.task_id)
-        ],
-        "model_invocations": [
-            item.model_dump(mode="json")
-            for item in store.list_model_invocations(task.task_id)
-        ],
-        "agent_invocations": [
-            item.model_dump(mode="json")
-            for item in store.list_agent_invocations(task.task_id)
-        ],
-        "tool_invocations": [
-            item.model_dump(mode="json")
-            for item in store.list_tool_invocations(task.task_id)
-        ],
-        "user_input_requests": [
-            item.model_dump(mode="json")
-            for item in store.list_user_input_requests(task.task_id)
-        ],
-        "budget": budget,
-        "completion_receipt": receipt,
+        "task_id": task.task_id,
+        "trace_id": task.trace_id,
+        "scenario": task.scenario,
+        "runtime_kind": task.runtime_kind,
+        "runtime_contract_version": task.runtime_contract_version,
+        "execution_mode": task.execution_mode,
+        "completion_status": task.completion_status,
+        "status": _enum_value(task.status),
+        "retry_count": task.retry_count,
+        "parent_task_id": task.parent_task_id,
+        "failure": (
+            {
+                "error_code": failure.error_code,
+                "summary": failure.message,
+                "failed_node": failure.failed_node,
+                "retryable": failure.retryable,
+            }
+            if failure
+            else None
+        ),
+        "node_status": {
+            node: _enum_value(status)
+            for node, status in getattr(task, "node_status", {}).items()
+        },
     }
+
+
+def _historical_task_summary(task: HistoricalTaskRecord) -> dict[str, Any]:
+    persisted = task.to_dict()
+    failure = persisted.get("failure") or {}
+    return {
+        "task_id": task.task_id,
+        "trace_id": task.trace_id,
+        "scenario": task.scenario,
+        "runtime_kind": task.runtime_kind,
+        "runtime_contract_version": task.runtime_contract_version,
+        "execution_mode": task.execution_mode,
+        "completion_status": task.completion_status,
+        "status": task.status,
+        "retry_count": task.retry_count,
+        "parent_task_id": task.parent_task_id,
+        "failure": (
+            {
+                "error_code": failure.get("error_code"),
+                "summary": failure.get("message"),
+                "failed_node": failure.get("failed_node"),
+                "retryable": failure.get("retryable"),
+            }
+            if failure
+            else None
+        ),
+        "node_status": persisted.get("node_status") or {},
+    }
+
+
+def _enum_value(value: Any) -> Any:
+    return getattr(value, "value", value)
 
 
 def sanitize_trace_value(value: Any, *, depth: int = 0) -> Any:
@@ -209,12 +229,39 @@ def sanitize_trace_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def _event_summary(event: RadarTaskEvent) -> dict[str, Any]:
+    return {
+        "sequence": event.sequence,
+        "event_type": event.event_type,
+        "summary": event.message,
+        "created_at": event.created_at.isoformat(),
+        "refs": _event_refs(event.payload),
+    }
+
+
+def _historical_event_summary(event: HistoricalRecord) -> dict[str, Any]:
+    payload = event.to_dict()
+    created_at = payload.get("created_at")
+    return {
+        "sequence": payload.get("sequence"),
+        "event_type": payload.get("event_type"),
+        "summary": payload.get("message"),
+        "created_at": (
+            created_at.isoformat()
+            if hasattr(created_at, "isoformat")
+            else created_at
+        ),
+        "refs": _event_refs(payload.get("payload", {})),
+    }
+
+
+def _event_refs(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
     allowed_payload_keys = {
         "status", "node", "error_code", "failed_node", "retryable",
         "retry_count", "artifact_id", "version", "message_id", "sender",
         "receiver", "intent", "evidence_refs", "risk_level", "claim_id",
-        "generated_by", "confidence", "conflict_id", "sources",
-        "final_status", "requires_human_confirmation", "role",
+        "generated_by", "confidence", "role",
         "generation_mode", "model_provider", "model_id", "prompt_version",
         "output_schema_status", "fallback_reason", "confirmation_id",
         "action_type", "actor_role", "memory_summary_id", "memory_type",
@@ -230,15 +277,7 @@ def _event_summary(event: RadarTaskEvent) -> dict[str, Any]:
         "causal_source_agent_invocation_id", "artifact_version_id",
         "request_type",
     }
-    return {
-        "sequence": event.sequence,
-        "event_type": event.event_type,
-        "summary": event.message,
-        "created_at": event.created_at.isoformat(),
-        "refs": {
-            key: value for key, value in event.payload.items() if key in allowed_payload_keys
-        },
-    }
+    return {key: value for key, value in payload.items() if key in allowed_payload_keys}
 
 
 def _artifact_summary(item: RadarArtifactVersion) -> dict[str, Any]:

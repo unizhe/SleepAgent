@@ -6,12 +6,6 @@ from typing import Sequence
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    EvidencePacket,
-    RAGAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.product_agent.services.reviewed_knowledge import (
     RepositoryKnowledgeRecord,
     ReviewedKnowledgePolicyError,
@@ -22,6 +16,7 @@ from sleepagent.radar_agent.product_agent.services.reviewed_knowledge import (
 from sleepagent.radar_agent.product_agent.tools.knowledge_retrieval import (
     KnowledgeRetrievalTool,
 )
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 @pytest.mark.parametrize(
@@ -38,40 +33,25 @@ def test_reviewed_knowledge_tool_preserves_legacy_routing_and_metadata(
     query: str,
     roles: tuple[str, ...],
 ) -> None:
-    legacy = _legacy_result(query=query, roles=roles)
+    expected = load_phase3a_capability_goldens()["reviewed_knowledge"][
+        f"{query}|{','.join(roles)}"
+    ]
     result = KnowledgeRetrievalTool().retrieve(
         ReviewedKnowledgeQuery(query=query, roles=roles, limit=8)
     )
 
-    legacy_context = legacy.output_payload["rag_context"]
-    assert result.chunk_ids == tuple(legacy_context["chunk_ids"])
-    assert result.citation_ids == tuple(legacy.evidence_refs)
+    assert result.chunk_ids == tuple(expected["chunk_ids"])
+    assert result.citation_ids == tuple(expected["citation_ids"])
     assert result.source_refs == result.citation_ids
-    assert result.snippets == tuple(legacy_context["snippets"])
-    assert result.caveats == tuple(legacy_context["caveats"])
-    expected_metadata = [
-        {
-            **item,
-            "source_type": (
-                "role_template"
-                if item["source_type"] == "personal_summary"
-                else item["source_type"]
-            ),
-        }
-        for item in legacy_context["source_metadata"]
+    assert result.caveats == tuple(expected["caveats"])
+    assert [source.source_type for source in result.sources] == expected[
+        "source_types"
     ]
-    assert [
-        {
-            "chunk_id": source.chunk_id,
-            "citation_id": source.citation_id,
-            "source_type": source.source_type,
-            "review_status": source.review_status,
-            "version": source.version,
-            "applicable_roles": list(source.applicable_roles),
-            "safety_notes": list(source.safety_notes),
-        }
-        for source in result.sources
-    ] == expected_metadata
+    assert len(result.snippets) == len(result.sources)
+    assert all(source.review_status == "reviewed" for source in result.sources)
+    assert all(source.version for source in result.sources)
+    assert all(source.applicable_roles for source in result.sources)
+    assert all(source.safety_notes for source in result.sources)
     assert all(
         source.source_origin
         in {
@@ -299,19 +279,3 @@ class _StaticRepository(ReviewedKnowledgeRepository):
     ) -> Sequence[RepositoryKnowledgeRecord]:
         del query, role
         return self._records[:limit]
-
-
-def _legacy_result(*, query: str, roles: tuple[str, ...]):
-    return RAGAgent().run(
-        ContextPacket(
-            task_context=TaskContext(
-                task_id="phase3a-rag-parity",
-                trace_id="phase3a-rag-parity",
-                role=roles[0],
-                purpose="rag",
-            ),
-            evidence_packet=EvidencePacket(
-                data_quality={"rag_query": query, "rag_roles": list(roles)}
-            ),
-        )
-    )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 DEFAULT_RADAR_VENDOR = "perceptor"
 VITAL_SIGNS_DATA_EVENT = "VitalSignsDataEvent"
 INVALID_VENDOR_READING = -1
-PRODUCT_DIALOGUE_SCHEMA_VERSION = "product_dialogue.v1"
-NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
 class ProductDeviceSchema(BaseModel):
@@ -244,44 +242,6 @@ class RadarDashboardSummary(ProductDeviceSchema):
     blocked_reasons: list[str] = Field(default_factory=list)
     source_metadata: list[RadarSourceMetadata] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class RadarDashboardRequest(ProductDeviceSchema):
-    device: RadarDevice
-    recent_snapshots: list[RadarVitalSnapshot] = Field(default_factory=list)
-    latest_sleep_report: RadarSleepReport | None = None
-    recent_alerts: list[RadarAlertEvent] = Field(default_factory=list)
-    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class RadarProductDialogueRequest(ProductDeviceSchema):
-    radar_device_id: str = Field(..., min_length=1)
-    user_message: str = Field(..., min_length=1)
-    dashboard_summary: RadarDashboardSummary | None = None
-    recent_snapshots: list[RadarVitalSnapshot] = Field(default_factory=list)
-    recent_alerts: list[RadarAlertEvent] = Field(default_factory=list)
-    locale: str = "zh-CN"
-    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class RadarProductDialogueResult(ProductDeviceSchema):
-    radar_device_id: str = Field(..., min_length=1)
-    status: RadarDialogueStatus
-    assistant_message: str = Field(..., min_length=1)
-    safety_flags: list[str] = Field(default_factory=list)
-    blocked_reasons: list[str] = Field(default_factory=list)
-    caveats: list[str] = Field(default_factory=list)
-    source_metadata: list[RadarSourceMetadata] = Field(default_factory=list)
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class RadarProductDialogueDraft(ProductDeviceSchema):
-    schema_version: Literal["product_dialogue.v1"] = PRODUCT_DIALOGUE_SCHEMA_VERSION
-    answer: str = Field(..., min_length=1)
-    observations: list[NonEmptyStr] = Field(default_factory=list)
-    suggested_actions: list[NonEmptyStr] = Field(default_factory=list)
-    caveats: list[NonEmptyStr] = Field(default_factory=list)
-    referenced_fields: list[NonEmptyStr] = Field(default_factory=list)
 
 
 def build_raw_vendor_event(

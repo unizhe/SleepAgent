@@ -71,18 +71,6 @@ class RadarBedPresence(str, Enum):
     UNKNOWN = "unknown"
 
 
-class RadarAgentName(str, Enum):
-    ORCHESTRATOR = "orchestrator"
-    RADAR_DATA = "radar_data"
-    TREND = "trend"
-    RISK_SIGNAL = "risk_signal"
-    RAG = "rag"
-    REPORT = "report"
-    DIALOGUE = "dialogue"
-    ALERT_CARE = "alert_care"
-    MEMORY = "memory"
-
-
 class RadarRawEvent(RadarAgentSchema):
     """Raw vendor event retained only for trace and replay validation."""
 
@@ -221,57 +209,6 @@ class QuestionnaireEntry(RadarAgentSchema):
         return self
 
 
-class QuestionnaireQuestion(RadarAgentSchema):
-    question_id: str = Field(..., min_length=1)
-    text: str = Field(..., min_length=1, max_length=120)
-    answer_type: Literal["choice", "scale", "short_text"] = "choice"
-    options: list[str] = Field(default_factory=list, max_length=7)
-    applicable_roles: list[Literal["elder", "family", "doctor"]] = Field(
-        default_factory=lambda: ["elder", "family", "doctor"]
-    )
-    role_text: dict[Literal["elder", "family", "doctor"], str] = Field(
-        default_factory=dict
-    )
-    triggers: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def choices_need_options_and_short_role_text(self) -> "QuestionnaireQuestion":
-        if self.answer_type in {"choice", "scale"} and not self.options:
-            raise ValueError("choice/scale questionnaire questions require options.")
-        if any(len(text) > 120 for text in self.role_text.values()):
-            raise ValueError("role-adapted questionnaire text must stay short.")
-        return self
-
-
-class QuestionnaireBank(RadarAgentSchema):
-    bank_id: str = Field(..., min_length=1)
-    version: str = Field(..., min_length=1)
-    questions: dict[str, str | QuestionnaireQuestion] = Field(default_factory=dict)
-    reviewed: bool = False
-
-    @model_validator(mode="after")
-    def reviewed_banks_need_questions(self) -> "QuestionnaireBank":
-        if self.reviewed and not self.questions:
-            raise ValueError("reviewed questionnaire banks require questions.")
-        for question_id, question in self.questions.items():
-            if isinstance(question, QuestionnaireQuestion) and question.question_id != question_id:
-                raise ValueError("question map keys must match QuestionnaireQuestion.question_id.")
-        return self
-
-
-class QuestionnairePolicy(RadarAgentSchema):
-    policy_id: str = Field(..., min_length=1)
-    version: str = Field(..., min_length=1)
-    trigger: str = Field(..., min_length=1)
-    allowed_question_ids: list[str] = Field(default_factory=list)
-    applicable_roles: list[Literal["elder", "family", "doctor"]] = Field(
-        default_factory=list
-    )
-    max_questions_per_turn: int = Field(default=3, ge=1, le=3)
-    cooldown_hours: int = Field(default=24, ge=0)
-    enabled: bool = True
-
-
 class SupplementaryDocument(RadarAgentSchema):
     document_id: str = Field(..., min_length=1)
     subject_id: str = Field(..., min_length=1)
@@ -339,106 +276,6 @@ class EvidenceLedger(RadarAgentSchema):
             },
             owner="EvidenceLedger",
         )
-        return self
-
-
-class A2AMessage(RadarAgentSchema):
-    message_id: str = Field(..., min_length=1)
-    sender: str = Field(..., min_length=1)
-    receiver: str = Field(..., min_length=1)
-    task_id: str = Field(..., min_length=1)
-    target_task_id: str | None = None
-    intent: str = Field(..., min_length=1)
-    evidence_refs: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=0, ge=0, le=1)
-    requested_action: str | None = None
-    request_type: Literal["evidence", "critique", "revision"] = "critique"
-    caused_by_invocation_id: str | None = None
-    target_invocation_id: str | None = None
-    expected_output_schema: str = "AgentWorkProduct.v1"
-    resolution_status: Literal[
-        "pending", "accepted", "changed", "rejected", "unresolved"
-    ] = "pending"
-    resolution_summary: str | None = Field(default=None, max_length=1000)
-    risk_level: RiskLevel = RiskLevel.INFO
-    requires_approval: bool = False
-    collaboration_round: int = Field(default=1, ge=1, le=2)
-    routed_by: str = "orchestrator"
-    shared_artifact_type: Literal[
-        "trend_summary",
-        "pattern",
-        "suggestion",
-    ] | None = None
-    payload: dict[str, Any] = Field(default_factory=dict)
-    message_status: Literal["queued", "delivered", "handled", "rejected"] = "queued"
-    source_agent_invocation_id: str | None = None
-    target_agent_invocation_id: str | None = None
-    accepted_by_orchestrator_at: datetime | None = None
-    handled_at: datetime | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    @model_validator(mode="after")
-    def validate_a2a_boundaries(self) -> "A2AMessage":
-        if self.routed_by != RadarAgentName.ORCHESTRATOR.value:
-            raise ValueError("A2A messages must be routed by the Orchestrator.")
-        _assert_no_direct_raw_event(self.payload, owner="A2AMessage")
-        _assert_no_forbidden_a2a_payload(self.payload)
-        if self.target_task_id and self.target_task_id != self.task_id:
-            if self.shared_artifact_type is None:
-                raise ValueError(
-                    "cross-task A2A messages require a shared_artifact_type."
-                )
-            if not self.requires_approval:
-                raise ValueError("cross-task A2A messages require approval.")
-        if (
-            self.message_status == "handled"
-            and self.source_agent_invocation_id is not None
-            and (self.target_agent_invocation_id is None or self.handled_at is None)
-        ):
-            raise ValueError(
-                "dynamic handled A2A requires the actual target Agent invocation link"
-            )
-        if (
-            self.caused_by_invocation_id is not None
-            and self.source_agent_invocation_id is not None
-            and self.caused_by_invocation_id != self.source_agent_invocation_id
-        ):
-            raise ValueError("A2A causal source invocation fields must agree")
-        if (
-            self.target_invocation_id is not None
-            and self.target_agent_invocation_id is not None
-            and self.target_invocation_id != self.target_agent_invocation_id
-        ):
-            raise ValueError("A2A target invocation fields must agree")
-        return self
-
-    def is_real_dynamic_collaboration(self) -> bool:
-        return bool(
-            self.message_status == "handled"
-            and self.source_agent_invocation_id
-            and self.target_agent_invocation_id
-            and self.accepted_by_orchestrator_at
-            and self.handled_at
-        )
-
-
-class ConflictRecord(RadarAgentSchema):
-    conflict_id: str = Field(..., min_length=1)
-    task_id: str = Field(..., min_length=1)
-    sources: list[str] = Field(default_factory=list)
-    summary: str = Field(..., min_length=1)
-    decision: str = Field(..., min_length=1)
-    final_status: Literal["accepted", "downgraded", "rejected", "uncertain"]
-    requires_human_confirmation: bool = False
-    evidence_refs: list[str] = Field(default_factory=list)
-    decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-    @model_validator(mode="after")
-    def conflict_records_need_sources_and_decision(self) -> "ConflictRecord":
-        if not self.sources:
-            raise ValueError("conflict records require sources.")
-        if not self.decision.strip():
-            raise ValueError("conflict records require a decision rationale.")
         return self
 
 
@@ -612,22 +449,6 @@ class HumanConfirmationRequest(RadarAgentSchema):
         return self
 
 
-class MemoryCandidate(RadarAgentSchema):
-    candidate_id: str = Field(..., min_length=1)
-    subject_id: str = Field(..., min_length=1)
-    task_id: str = Field(..., min_length=1)
-    memory_type: Literal["trend", "preference", "care_event"]
-    summary: str = Field(..., min_length=1)
-    payload: dict[str, Any] = Field(default_factory=dict)
-    evidence_refs: list[str] = Field(default_factory=list)
-    privacy_tags: list[str] = Field(default_factory=list)
-    authorization_refs: list[str] = Field(default_factory=list)
-    confirmation_action: str = "write_long_term_memory"
-    requires_confirmation: bool = True
-    approved: bool = False
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
 class TaskContext(RadarAgentSchema):
     task_id: str = Field(..., min_length=1)
     trace_id: str = Field(..., min_length=1)
@@ -684,7 +505,6 @@ class ContextPacket(RadarAgentSchema):
     memory_snippets: list[str] = Field(default_factory=list)
     rag_context: RagContext = Field(default_factory=RagContext)
     safety_policy: SafetyPolicy = Field(default_factory=SafetyPolicy)
-    a2a_messages: list[A2AMessage] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def block_direct_raw_event_reads(self) -> "ContextPacket":
@@ -693,29 +513,9 @@ class ContextPacket(RadarAgentSchema):
                 "evidence_packet": self.evidence_packet,
                 "memory_snippets": self.memory_snippets,
                 "rag_context": self.rag_context,
-                "a2a_messages": self.a2a_messages,
             },
             owner=f"ContextPacket:{self.task_context.purpose}",
         )
-        return self
-
-
-class AgentResult(RadarAgentSchema):
-    agent_name: RadarAgentName
-    skill_version: str = "1.0.0"
-    prompt_version: str = "1.0.0"
-    claims: list[EvidenceClaim] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=0, ge=0, le=1)
-    uncertainties: list[str] = Field(default_factory=list)
-    next_requests: list[A2AMessage] = Field(default_factory=list)
-    safety_flags: list[str] = Field(default_factory=list)
-    candidate_actions: list[str] = Field(default_factory=list)
-    output_payload: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def block_direct_raw_event_reads(self) -> "AgentResult":
-        _assert_no_direct_raw_event(self.output_payload, owner="AgentResult")
         return self
 
 
@@ -827,75 +627,13 @@ def _contains_direct_raw_event(value: Any) -> bool:
     return False
 
 
-_FORBIDDEN_A2A_KEYS = {
-    "raw_radar_stream",
-    "raw_radar_frames",
-    "raw_payload",
-    "full_conversation",
-    "conversation_history",
-    "conversation_transcript",
-    "family_privacy",
-    "home_address",
-    "phone_number",
-    "identity_card",
-    "private_note",
-    "pii",
-}
-
-_FORBIDDEN_A2A_TEXT = (
-    "raw_radar_stream",
-    "raw payload",
-    "raw_payload",
-    "full conversation",
-    "full_conversation",
-    "conversation transcript",
-    "家庭隐私",
-    "完整对话",
-    "原始雷达",
-    "home address",
-    "phone number",
-    "identity card",
-)
-
-
-def _assert_no_forbidden_a2a_payload(value: Any) -> None:
-    if _contains_forbidden_a2a_payload(value):
-        raise ValueError(
-            "A2A messages cannot share raw radar streams, full conversations, "
-            "family privacy, or other sensitive payloads."
-        )
-
-
-def _contains_forbidden_a2a_payload(value: Any) -> bool:
-    if isinstance(value, BaseModel):
-        return _contains_forbidden_a2a_payload(value.model_dump(mode="python"))
-    if isinstance(value, dict):
-        if {str(key).lower() for key in value}.intersection(_FORBIDDEN_A2A_KEYS):
-            return True
-        return any(_contains_forbidden_a2a_payload(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_contains_forbidden_a2a_payload(item) for item in value)
-    if isinstance(value, str):
-        lowered = value.lower()
-        return any(marker in lowered for marker in _FORBIDDEN_A2A_TEXT)
-    return False
-
-
 __all__ = [
-    "A2AMessage",
-    "AgentResult",
-    "ConflictRecord",
     "ContextPacket",
     "EvidenceClaim",
     "EvidenceLedger",
     "EvidencePacket",
     "HumanConfirmationRequest",
-    "MemoryCandidate",
-    "QuestionnaireBank",
     "QuestionnaireEntry",
-    "QuestionnairePolicy",
-    "QuestionnaireQuestion",
-    "RadarAgentName",
     "RadarAgentSchema",
     "RadarBedPresence",
     "RadarDataQualityStatus",

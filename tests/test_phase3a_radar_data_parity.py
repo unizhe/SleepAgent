@@ -17,12 +17,6 @@ from sleepagent.radar_agent.product_agent.tooling import (
     ProductToolExecutor,
 )
 
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    EvidencePacket,
-    RadarDataAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.product_agent.tools.radar_data import (
     RadarDataAdapter,
     RadarNightEvidenceRequest,
@@ -32,32 +26,19 @@ from sleepagent.radar_agent.quality import DataQualityGate
 from sleepagent.radar_agent.schemas import RadarNightSummary
 from sleepagent.sleep_domain.contracts import DataMode
 from sleepagent.sleep_domain.product_data import ProductRevisionFacts
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 NIGHT = date(2026, 7, 9)
 
 
 def test_radar_data_adapter_preserves_canonical_ingest_and_quality_semantics() -> None:
-    legacy_provider = ReplayRadarProvider(scenario="normal_night")
-    device = legacy_provider.list_devices()[0]
+    expected = load_phase3a_capability_goldens()["radar_data"]
+    provider = ReplayRadarProvider(scenario="normal_night")
+    device = provider.list_devices()[0]
     assert device.bound_subject_id is not None
-    legacy = RadarDataAgent(legacy_provider).run(
-        ContextPacket(
-            task_context=TaskContext(
-                task_id="phase3a-radar-data",
-                trace_id="trace-phase3a-radar-data",
-                purpose="analysis",
-            ),
-            evidence_packet=EvidencePacket(
-                data_quality={"night_of": NIGHT.isoformat()}
-            ),
-        )
-    )
-    legacy_summary = RadarNightSummary.model_validate(
-        legacy.output_payload["night_summary"]
-    )
 
-    result = RadarDataAdapter(legacy_provider).read_night(
+    result = RadarDataAdapter(provider).read_night(
         RadarNightEvidenceRequest(
             authorized_radar_device_id=device.radar_device_id,
             expected_subject_id=device.bound_subject_id,
@@ -65,12 +46,12 @@ def test_radar_data_adapter_preserves_canonical_ingest_and_quality_semantics() -
         )
     )
 
-    assert result.device.model_dump(mode="json") == legacy.output_payload["device"]
-    assert result.snapshot_count == legacy.output_payload["snapshot_count"]
+    assert result.device.model_dump(mode="json") == expected["device"]
+    assert result.snapshot_count == expected["snapshot_count"]
     assert result.night_summary.model_dump(
         mode="json", exclude={"generated_at"}
-    ) == legacy_summary.model_dump(mode="json", exclude={"generated_at"})
-    assert result.source_refs == legacy.evidence_refs
+    ) == expected["night_summary"]
+    assert result.source_refs == expected["evidence_refs"]
     assert not hasattr(result, "agent_name")
     assert not hasattr(result, "next_requests")
 

@@ -24,8 +24,6 @@ from sleepagent.radar_agent.persistence import (
 from sleepagent.radar_agent.persistence.migrations import _postgres_statement_to_sqlite
 from sleepagent.radar_agent.runtime import RadarAgentTask, RadarTaskStatus
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
-    ConflictRecord,
     EvidenceClaim,
     EvidenceLedger,
     RadarBedPresence,
@@ -283,27 +281,6 @@ def test_radar_agent_persistence_basic_crud_round_trip() -> None:
         review_status=ReviewStatus.REVIEWED,
         updated_at=NOW,
     )
-    message = A2AMessage(
-        message_id="a2a-001",
-        sender="trend",
-        receiver="risk_signal",
-        task_id=task.task_id,
-        intent="review_watch_signal",
-        evidence_refs=[claim.claim_id],
-        confidence=0.76,
-        risk_level=RiskLevel.WATCH,
-        created_at=NOW,
-    )
-    conflict = ConflictRecord(
-        conflict_id="conflict-001",
-        task_id=task.task_id,
-        sources=["radar_data", "risk_signal"],
-        summary="数据质量足够但风险表达需要保守。",
-        decision="保留 watch，不输出诊断结论。",
-        final_status="downgraded",
-        evidence_refs=[claim.claim_id],
-        decided_at=NOW,
-    )
     alert = RadarAlertRecord(
         alert_id="alert-001",
         task_id=task.task_id,
@@ -385,10 +362,6 @@ def test_radar_agent_persistence_basic_crud_round_trip() -> None:
 
     assert store.save_evidence_ledger(ledger) == ledger
     assert store.get_evidence_ledger(ledger.ledger_id) == ledger
-    assert store.save_a2a_message(message) == message
-    assert store.list_a2a_messages(task.task_id) == [message]
-    assert store.save_conflict(conflict) == conflict
-    assert store.list_conflicts(task.task_id) == [conflict]
     assert store.save_alert(alert) == alert
     assert store.list_alerts(subject.subject_id) == [alert]
 

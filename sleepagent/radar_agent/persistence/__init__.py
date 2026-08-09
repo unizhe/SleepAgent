@@ -6,6 +6,13 @@ from sleepagent.radar_agent.persistence.migrations import (
     apply_sqlite_migration,
     split_sql_statements,
 )
+from sleepagent.radar_agent.persistence.history import (
+    HistoricalRecord,
+    HistoricalRuntimeReadError,
+    HistoricalRuntimeReader,
+    HistoricalRuntimeTrace,
+    HistoricalTaskRecord,
+)
 from sleepagent.radar_agent.persistence.models import (
     ObjectBlobReference,
     RadarAlertRecord,
@@ -31,6 +38,11 @@ from sleepagent.radar_agent.persistence.vector_store import (
 __all__ = [
     "MIGRATION_VERSION",
     "MIGRATION_VERSIONS",
+    "HistoricalRecord",
+    "HistoricalRuntimeReadError",
+    "HistoricalRuntimeReader",
+    "HistoricalRuntimeTrace",
+    "HistoricalTaskRecord",
     "ObjectBlobReference",
     "ObjectStore",
     "RADAR_AGENT_POSTGRES_MIGRATION_SQL",

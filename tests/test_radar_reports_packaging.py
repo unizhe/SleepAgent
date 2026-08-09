@@ -5,9 +5,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-import sleepagent.radar_agent.agents.report as report_caller
 import sleepagent.radar_agent.reports as public_reports
+import sleepagent.radar_agent.reports.rendering as report_rendering
 import sleepagent.radar_agent.reports.roles as report_roles
+from sleepagent.radar_agent.product_agent.tools.artifact_rendering import (
+    ArtifactRenderingTool,
+    build_role_report_templates,
+)
 from sleepagent.radar_agent.schemas import (
     RoleReportArtifact as CanonicalRoleReportArtifact,
 )
@@ -75,7 +79,7 @@ def test_reports_package_is_discoverable_for_distribution() -> None:
     assert (ROOT / "sleepagent/radar_agent/reports/rendering.py").is_file()
 
 
-def test_public_report_contract_and_direct_caller_are_unchanged() -> None:
+def test_public_report_contract_and_canonical_tool_boundary_are_stable() -> None:
     assert public_reports.__all__ == EXPECTED_EXPORTS
     assert report_roles.__all__ == EXPECTED_EXPORTS
     assert [role.value for role in public_reports.ReportRole] == [
@@ -89,8 +93,8 @@ def test_public_report_contract_and_direct_caller_are_unchanged() -> None:
         public_reports.ReportRole.DOCTOR,
     )
     assert public_reports.RoleReportArtifact is CanonicalRoleReportArtifact
-    assert report_caller.REPORT_ROLE_ORDER is public_reports.REPORT_ROLE_ORDER
-    assert report_caller.RoleReportBundle is public_reports.RoleReportBundle
+    assert build_role_report_templates is report_rendering.build_role_report_templates
+    assert not ArtifactRenderingTool.__name__.endswith("Agent")
 
     bundle = public_reports.RoleReportBundle(task_id="task-package-boundary")
     assert bundle.for_role(public_reports.ReportRole.ELDER) is None

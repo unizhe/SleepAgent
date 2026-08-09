@@ -1,15 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
 
-from sleepagent.radar_agent.agents import (
-    AlertCareAgent,
-    ContextPacket,
-    EvidencePacket,
-    TaskContext,
-)
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
 )
@@ -26,13 +18,9 @@ from sleepagent.radar_agent.product_agent.tools.care_coordination import (
     CareRiskReceiptBinding,
 )
 from sleepagent.radar_agent.schemas import (
-    EvidenceClaim,
-    EvidenceLedger,
-    RadarDataQualityStatus,
-    RadarNightSummary,
-    ReviewStatus,
     RiskLevel,
 )
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 @pytest.mark.parametrize(
@@ -49,23 +37,22 @@ def test_care_escalation_policy_preserves_alert_capabilities_without_agent_ident
     risk: RiskLevel,
     quality: str,
 ) -> None:
-    legacy = AlertCareAgent().run(_context(risk=risk, quality=quality))
-    legacy_decision = legacy.output_payload["alert_care"]
+    expected = load_phase3a_capability_goldens()["care_coordination"][
+        f"{risk.value}:{quality}"
+    ]
 
     migrated = CareEscalationPolicy().evaluate(
         risk_level=risk.value,
         data_quality_status=quality,
     )
 
-    assert [item.action_code for item in migrated.candidate_intents] == (
-        legacy_decision["candidate_actions"]
-    )
-    assert list(migrated.automatic_communication_codes) == (
-        legacy_decision["automatic_actions"]
-    )
-    assert migrated.urgent_preempt == legacy_decision[
-        "urgent_safety_notice_displayed"
+    assert [item.action_code for item in migrated.candidate_intents] == expected[
+        "candidate_actions"
     ]
+    assert list(migrated.automatic_communication_codes) == expected[
+        "automatic_actions"
+    ]
+    assert migrated.urgent_preempt == expected["urgent_preempt"]
     assert not hasattr(migrated, "agent_name")
     assert not hasattr(migrated, "external_action_executed")
 
@@ -220,49 +207,4 @@ def test_escalate_and_urgent_remain_candidates_and_runtime_preemption() -> None:
     assert urgent.urgent_preempt is True
     assert urgent.candidate_intents[0].action_code == (
         "notify_family_delivery_record"
-    )
-
-
-def _context(*, risk: RiskLevel, quality: str) -> ContextPacket:
-    ref = "night-summary:phase3a-care"
-    summary = RadarNightSummary(
-        radar_device_id="radar-phase3a",
-        subject_id="elder-phase3a",
-        night_of=date(2026, 7, 10),
-        data_coverage_ratio=0.92,
-        data_quality_status=RadarDataQualityStatus(quality),
-        source_report_ref=ref,
-    )
-    claim = EvidenceClaim(
-        claim_id="claim-phase3a-care",
-        task_id="task-phase3a-care",
-        text="Characterized accepted evidence.",
-        evidence_refs=[ref],
-        confidence=0.8,
-        risk_level=risk,
-        generated_by="evidence_reasoning",
-        review_status=ReviewStatus.REVIEWED,
-    )
-    ledger = EvidenceLedger(
-        ledger_id="ledger-phase3a-care",
-        task_id="task-phase3a-care",
-        canonical_evidence_refs=[ref],
-        derived_metrics={
-            "risk_level": risk.value,
-            "data_quality_status": quality,
-        },
-        claims=[claim],
-        confidence=0.8,
-        review_status=ReviewStatus.REVIEWED,
-    )
-    return ContextPacket(
-        task_context=TaskContext(
-            task_id="task-phase3a-care",
-            trace_id="trace-phase3a-care",
-            purpose="alert",
-        ),
-        evidence_packet=EvidencePacket(
-            night_summaries=[summary],
-            evidence_ledger=ledger,
-        ),
     )

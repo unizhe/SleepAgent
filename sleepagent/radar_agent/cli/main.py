@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import Any, TextIO
 
 from sleepagent.radar_agent.provider import ReplayRadarProvider
+from sleepagent.radar_agent.persistence.history import HistoricalTaskRecord
 from sleepagent.radar_agent.replay import (
     default_replay_scenario_id,
     get_replay_scenario,
@@ -179,7 +180,7 @@ def _inspect_task(
 ) -> int:
     selected_task_id = task_id
     task = runtime.service.get_task(task_id)
-    if (retry or rerun) and task.runtime_kind != "product_episode":
+    if (retry or rerun) and isinstance(task, HistoricalTaskRecord):
         raise InvalidTaskTransition(
             f"historical {task.runtime_kind!r} task is read-only"
         )
@@ -201,7 +202,7 @@ def _inspect_task(
             _write_trace(trace, output_format=output_format, stdout=stdout)
             return EXIT_TASK_FAILED
     trace = build_developer_trace(runtime.service, selected_task_id)
-    if decision_trace and trace["task"].get("runtime_kind") == "product_episode":
+    if decision_trace and not trace.get("history"):
         trace["decision_trace_note"] = (
             "canonical Product Episode decisions are recorded in Agent/tool events"
         )
@@ -235,7 +236,7 @@ def _run_goal(runtime: Any, *, args: Any, stdout: TextIO) -> int:
 
 def _answer_input(runtime: Any, *, args: Any, stdout: TextIO) -> int:
     task = runtime.service.get_task(args.task_id)
-    if task.runtime_kind != "product_episode":
+    if isinstance(task, HistoricalTaskRecord):
         raise InvalidTaskTransition(
             f"historical {task.runtime_kind!r} task is read-only"
         )
@@ -303,15 +304,20 @@ def _write_trace(trace: dict[str, Any], *, output_format: str, stdout: TextIO) -
             file=stdout,
         )
         for section in (
-            "events", "claims", "a2a", "conflicts", "llm", "questionnaires",
-            "memory_candidates", "confirmations", "artifacts"
+            "events",
+            "claims",
+            "llm",
+            "questionnaires",
+            "memory_candidates",
+            "confirmations",
+            "artifacts",
         ):
             for item in trace[section]:
                 print(
                     json.dumps({"type": section.rstrip("s"), "payload": item}, ensure_ascii=False),
                     file=stdout,
                 )
-        dynamic = trace.get("dynamic") or {}
+        history = trace.get("history") or {}
         for section in (
             "plans",
             "model_invocations",
@@ -319,19 +325,19 @@ def _write_trace(trace: dict[str, Any], *, output_format: str, stdout: TextIO) -
             "tool_invocations",
             "user_input_requests",
         ):
-            for item in dynamic.get(section, []):
+            for item in history.get(section, []):
                 print(
                     json.dumps(
-                        {"type": f"dynamic_{section.rstrip('s')}", "payload": item},
+                        {"type": f"history_{section.rstrip('s')}", "payload": item},
                         ensure_ascii=False,
                     ),
                     file=stdout,
                 )
         for key in ("budget", "completion_receipt"):
-            if dynamic.get(key) is not None:
+            if history.get(key) is not None:
                 print(
                     json.dumps(
-                        {"type": f"dynamic_{key}", "payload": dynamic[key]},
+                        {"type": f"history_{key}", "payload": history[key]},
                         ensure_ascii=False,
                     ),
                     file=stdout,
@@ -356,9 +362,10 @@ def _write_pretty(trace: dict[str, Any], *, stdout: TextIO) -> None:
     print(f"Task: {task['task_id']}", file=stdout)
     print(f"Trace: {task['trace_id']}", file=stdout)
     print(f"Scenario: {task['scenario']}  Status: {task['status']}", file=stdout)
-    if task.get("runtime_kind") == "dynamic_goal":
+    history = trace.get("history") or {}
+    if history:
         print(
-            "Runtime: dynamic_goal  "
+            f"Runtime: historical ({task.get('runtime_kind') or '-'})  "
             f"Mode: {task.get('execution_mode') or '-'}  "
             f"Completion: {task.get('completion_status') or '-'}",
             file=stdout,
@@ -366,23 +373,32 @@ def _write_pretty(trace: dict[str, Any], *, stdout: TextIO) -> None:
     if task["parent_task_id"]:
         print(f"Rerun of: {task['parent_task_id']}", file=stdout)
 
-    print("\nNode progress", file=stdout)
-    for node, status in task["node_status"].items():
-        print(f"  {status:>24}  {node}", file=stdout)
-    dynamic = trace.get("dynamic") or {}
-    if dynamic:
-        print("\nDynamic plans", file=stdout)
-        for plan in dynamic.get("plans", []):
-            capabilities = ", ".join(step["capability"] for step in plan["steps"])
-            print(f"  revision={plan['revision']}  {capabilities}", file=stdout)
+    node_status = task.get("node_status") or {}
+    if node_status:
+        print("\nNode progress", file=stdout)
+        for node, status in node_status.items():
+            print(f"  {status:>24}  {node}", file=stdout)
+    if history:
+        print("\nHistorical plans", file=stdout)
+        for plan in history.get("plans", []):
+            steps = plan.get("steps") or []
+            capabilities = ", ".join(
+                str(step.get("capability", "-"))
+                for step in steps
+                if isinstance(step, dict)
+            )
+            print(
+                f"  revision={plan.get('revision', '-')}  {capabilities or '-'}",
+                file=stdout,
+            )
         print(
             "  calls: "
-            f"model={len(dynamic.get('model_invocations', []))} "
-            f"agent={len(dynamic.get('agent_invocations', []))} "
-            f"tool={len(dynamic.get('tool_invocations', []))}",
+            f"model={len(history.get('model_invocations', []))} "
+            f"agent={len(history.get('agent_invocations', []))} "
+            f"tool={len(history.get('tool_invocations', []))}",
             file=stdout,
         )
-        budget = dynamic.get("budget") or {}
+        budget = history.get("budget") or {}
         if budget:
             print(
                 "  budget: "
@@ -394,7 +410,7 @@ def _write_pretty(trace: dict[str, Any], *, stdout: TextIO) -> None:
                 f"paused={budget.get('clock_paused')}",
                 file=stdout,
             )
-        for invocation in dynamic.get("model_invocations", []):
+        for invocation in history.get("model_invocations", []):
             print(
                 "  model: "
                 f"{invocation.get('purpose')} "
@@ -403,12 +419,11 @@ def _write_pretty(trace: dict[str, Any], *, stdout: TextIO) -> None:
                 f"outcome={invocation.get('outcome')}",
                 file=stdout,
             )
-        for invocation in dynamic.get("agent_invocations", []):
+        for invocation in history.get("agent_invocations", []):
             print(
                 "  agent: "
                 f"{invocation.get('agent')} status={invocation.get('status')} "
-                f"parent={invocation.get('parent_invocation_id') or '-'} "
-                f"a2a={invocation.get('caused_by_a2a_message_id') or '-'}",
+                f"parent={invocation.get('parent_invocation_id') or '-'}",
                 file=stdout,
             )
 
@@ -429,8 +444,6 @@ def _write_pretty(trace: dict[str, Any], *, stdout: TextIO) -> None:
 
     labels = (
         ("claims", "Claims", "claim_id", "summary"),
-        ("a2a", "A2A", "message_id", "intent"),
-        ("conflicts", "Conflicts", "conflict_id", "summary"),
         ("llm", "LLM / fallback", "artifact_id", "generation_mode"),
         ("questionnaires", "Questionnaires", "question_id", "summary"),
         ("memory_candidates", "Memory candidates", "candidate_id", "memory_type"),

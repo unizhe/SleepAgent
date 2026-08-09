@@ -9,17 +9,12 @@ from sleepagent.radar_agent import (
     CANONICAL_SUBPACKAGES,
     RADAR_AGENT_API_PREFIX,
 )
-from sleepagent.radar_agent.a2a import InMemoryA2AMailbox
 from sleepagent.radar_agent.api import full_route_paths
 from sleepagent.radar_agent.cli import build_demo_payload, build_parser
-from sleepagent.radar_agent.evidence import EvidenceLedgerBuilder
-from sleepagent.radar_agent.orchestrator import WORKFLOW_NODE_ORDER, WorkflowNodeName
 from sleepagent.radar_agent.provider import ReplayRadarProvider
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
     EvidenceClaim,
     ReviewStatus,
-    RiskLevel,
 )
 
 
@@ -52,51 +47,6 @@ def test_reviewed_evidence_claim_requires_evidence_refs() -> None:
             generated_by="test",
             review_status=ReviewStatus.REVIEWED,
         )
-
-
-def test_evidence_ledger_and_a2a_mailbox_are_minimally_usable() -> None:
-    claim = EvidenceClaim(
-        claim_id="claim-1",
-        task_id="task-demo",
-        text="Latest replay night has a usable summary.",
-        evidence_refs=["night-summary:demo"],
-        confidence=0.82,
-        generated_by="trend",
-        review_status=ReviewStatus.REVIEWED,
-    )
-    builder = EvidenceLedgerBuilder(ledger_id="ledger-demo", task_id="task-demo")
-    builder.add_raw_ref("snapshot:demo")
-    builder.add_canonical_ref("night-summary:demo")
-    builder.add_metric("data_coverage_ratio", 0.91)
-    builder.add_claim(claim)
-
-    ledger = builder.build()
-    mailbox = InMemoryA2AMailbox()
-    message = mailbox.publish(
-        A2AMessage(
-            message_id="msg-1",
-            sender="trend",
-            receiver="risk_signal",
-            task_id="task-demo",
-            intent="review_trend_claim",
-            evidence_refs=[claim.claim_id],
-            confidence=0.8,
-            risk_level=RiskLevel.WATCH,
-        )
-    )
-
-    assert ledger.claims == [claim]
-    assert ledger.derived_metrics["data_coverage_ratio"] == 0.91
-    assert mailbox.list_messages(task_id="task-demo") == [message]
-    assert mailbox.drain_for(task_id="task-demo", receiver="risk_signal") == [message]
-    assert mailbox.list_messages(task_id="task-demo") == []
-
-
-def test_workflow_order_keeps_quality_gate_before_risk_assessment() -> None:
-    assert WORKFLOW_NODE_ORDER.index(WorkflowNodeName.DATA_QUALITY_GATE) < (
-        WORKFLOW_NODE_ORDER.index(WorkflowNodeName.RISK_SIGNAL_ASSESSMENT)
-    )
-    assert WORKFLOW_NODE_ORDER[-1] == WorkflowNodeName.PUBLISH_ARTIFACTS
 
 
 def test_api_and_cli_boundaries_are_frozen() -> None:

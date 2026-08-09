@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from sleepagent.radar_agent.agents import TrendAgent
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     AuthenticatedBinding,
@@ -26,6 +25,10 @@ from sleepagent.radar_agent.schemas import (
     RadarDataQualityStatus,
     RadarNightSummary,
 )
+from tests.golden_fixtures import (
+    canonical_json_sha256,
+    load_phase3a_capability_goldens,
+)
 
 
 LATEST = date(2026, 7, 10)
@@ -33,28 +36,35 @@ LATEST = date(2026, 7, 10)
 
 def test_trend_tool_preserves_7_30_90_window_baseline_and_coverage_semantics() -> None:
     summaries = _history(baseline_nights=20, recent_nights=90)
-    legacy = TrendAgent().analyze(task_id="legacy-trend", summaries=summaries)
+    expected = load_phase3a_capability_goldens()["trend_analysis"]
     migrated = TrendAnalysisTool().analyze(summaries)
 
-    assert legacy.claims
-    assert all(claim.source_kind == "trend_tool" for claim in legacy.claims)
-    assert set(migrated.windows) == {"7", "30", "90"}
-    assert migrated.latest_night == legacy.latest_night
-    for window, legacy_metrics in legacy.windows.items():
+    assert set(migrated.windows) == set(expected["windows"])
+    assert migrated.latest_night.isoformat() == expected["latest_night"]
+    assert expected["claim_count"] == len(expected["metrics"])
+    assert expected["claim_source_kinds"] == ["trend_tool"]
+    for window, window_expected in expected["windows"].items():
         migrated_metrics = migrated.windows[window]
-        assert len(migrated_metrics) == len(legacy_metrics)
-        for old, new in zip(legacy_metrics, migrated_metrics, strict=True):
-            assert new.metric_name == old.metric_name
-            assert new.status.value == old.status.value
-            assert new.direction.value == old.direction.value
-            assert new.sample_count == old.sample_count
-            assert new.required_sample_count == old.required_sample_count
-            assert new.value == old.value
-            assert new.baseline_value == old.baseline_value
-            assert new.absolute_delta == old.absolute_delta
-            assert new.percent_delta == old.percent_delta
-            assert new.confidence == old.confidence
-            assert new.evidence_refs == old.evidence_refs
+        assert len(migrated_metrics) == len(expected["metrics"])
+        for new in migrated_metrics:
+            metric_expected = expected["metrics"][new.metric_name]
+            assert new.status.value == metric_expected["status"]
+            assert new.direction.value == metric_expected["direction"]
+            assert new.sample_count == window_expected["sample_count"]
+            assert new.required_sample_count == window_expected[
+                "required_sample_count"
+            ]
+            assert new.value == metric_expected["value"]
+            assert new.baseline_value == metric_expected["baseline_value"]
+            assert new.absolute_delta == metric_expected["absolute_delta"]
+            assert new.percent_delta == metric_expected["percent_delta"]
+            assert new.confidence == metric_expected["confidence"]
+            assert len(new.evidence_refs) == window_expected[
+                "evidence_ref_count"
+            ]
+            assert canonical_json_sha256(new.evidence_refs) == window_expected[
+                "evidence_refs_sha256"
+            ]
             assert new.measurement_cohort_ref
 
     coverage = _metric(migrated.windows["90"], "data_coverage_ratio")

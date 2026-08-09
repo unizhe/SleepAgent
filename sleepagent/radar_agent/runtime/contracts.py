@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
     EvidenceLedger,
-    HumanConfirmationRequest,
     RadarAgentSchema,
     RoleReportArtifact,
 )
@@ -17,7 +16,6 @@ from sleepagent.radar_agent.schemas import (
 
 CANONICAL_AGENT_RUNTIME_KIND = "product_episode"
 CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION = "product-episode.v1"
-HISTORICAL_AGENT_RUNTIME_KINDS = frozenset({"legacy_fixed", "dynamic_goal"})
 
 
 class RadarTaskStatus(str, Enum):
@@ -28,15 +26,6 @@ class RadarTaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-
-
-class RadarNodeStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    WAITING_FOR_CONFIRMATION = "waiting_for_confirmation"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    SKIPPED = "skipped"
 
 
 class RadarTaskFailure(RadarAgentSchema):
@@ -70,27 +59,21 @@ class RadarAgentTask(RadarAgentSchema):
     authorization_id: str | None = None
     scenario: str = "replay"
     provider_input: dict[str, Any] = Field(default_factory=dict)
-    runtime_kind: Literal[
-        "legacy_fixed",
-        "dynamic_goal",
-        "product_episode",
-    ] = CANONICAL_AGENT_RUNTIME_KIND
-    runtime_contract_version: str = CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION
+    runtime_kind: Literal["product_episode"] = CANONICAL_AGENT_RUNTIME_KIND
+    runtime_contract_version: Literal[
+        "product-episode.v1"
+    ] = CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION
     execution_mode: Literal[
         "intelligent",
         "safe_degraded",
         "deterministic_only",
-        "legacy_fixed",
     ] | None = None
     completion_status: Literal[
         "complete", "partial", "blocked"
     ] | None = None
     goal_payload: dict[str, Any] | None = None
-    current_plan_id: str | None = None
-    pending_user_input_request_id: str | None = None
     task_version: int = Field(default=1, ge=1)
     status: RadarTaskStatus = RadarTaskStatus.CREATED
-    node_status: dict[str, RadarNodeStatus] = Field(default_factory=dict)
     retry_count: int = Field(default=0, ge=0)
     max_retries: int = Field(default=3, ge=0)
     idempotency_key: str | None = None
@@ -100,45 +83,31 @@ class RadarAgentTask(RadarAgentSchema):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @model_validator(mode="after")
-    def reject_mixed_runtime_state(self) -> "RadarAgentTask":
-        if self.runtime_kind == "dynamic_goal":
-            if self.runtime_contract_version != "radar-dynamic.v1":
-                raise ValueError("dynamic task requires radar-dynamic.v1")
-            if self.node_status:
-                raise ValueError("dynamic tasks cannot persist legacy node state")
-        elif self.runtime_kind == "legacy_fixed":
-            if self.runtime_contract_version != "radar-legacy.v1":
-                raise ValueError("legacy task requires radar-legacy.v1")
-            if any(
-                value is not None
-                for value in (
-                    self.goal_payload,
-                    self.current_plan_id,
-                    self.pending_user_input_request_id,
-                )
-            ):
-                raise ValueError("legacy tasks cannot persist dynamic runtime state")
-        else:
-            if self.runtime_contract_version != "product-episode.v1":
+    @classmethod
+    def decode_persisted_json(
+        cls,
+        value: str | bytes | bytearray,
+    ) -> "RadarAgentTask":
+        """Decode canonical rows written before retired state fields were removed."""
+
+        payload = json.loads(value)
+        if not isinstance(payload, dict):
+            raise ValueError("persisted canonical task must be a JSON object")
+        inert_compatibility_fields = {
+            "node_status": {},
+            "current_plan_id": None,
+            "pending_user_input_request_id": None,
+        }
+        for field_name, inert_value in inert_compatibility_fields.items():
+            if field_name not in payload:
+                continue
+            if payload[field_name] != inert_value:
                 raise ValueError(
-                    "product task requires product-episode.v1"
+                    f"persisted canonical task contains active retired state: "
+                    f"{field_name}"
                 )
-            if self.node_status:
-                raise ValueError(
-                    "product tasks cannot persist legacy node state"
-                )
-            if any(
-                value is not None
-                for value in (
-                    self.current_plan_id,
-                    self.pending_user_input_request_id,
-                )
-            ):
-                raise ValueError(
-                    "product task state belongs to ProductEpisodeRunner"
-                )
-        return self
+            payload.pop(field_name)
+        return cls.model_validate(payload)
 
 
 class UserInputRequest(RadarAgentSchema):
@@ -191,149 +160,14 @@ class RadarArtifactVersion(RadarAgentSchema):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class WorkflowRuntime(Protocol):
-    """Lifecycle layer between transports and the canonical Product Episode."""
-
-    def create_task(
-        self,
-        *,
-        subject_id: str,
-        radar_device_id: str,
-        role: str = "family",
-        actor_id: str | None = None,
-        authorization_id: str | None = None,
-        scenario: str = "replay",
-        idempotency_key: str | None = None,
-    ) -> RadarAgentTask:
-        ...
-
-    def export_subject_data(
-        self,
-        subject_id: str,
-        *,
-        actor_id: str,
-        role_binding_id: str,
-        authorization_id: str,
-    ) -> dict[str, Any]:
-        ...
-
-    def delete_subject_data(
-        self,
-        subject_id: str,
-        *,
-        actor_id: str,
-        role_binding_id: str,
-        authorization_id: str,
-    ) -> dict[str, Any]:
-        ...
-
-    def list_role_reports(
-        self,
-        subject_id: str,
-        *,
-        actor_id: str,
-        role_binding_id: str,
-        authorization_id: str,
-    ) -> list[RadarArtifactVersion]:
-        ...
-
-    def append_event(self, task_id: str, event: RadarTaskEvent) -> None:
-        ...
-
-    def save_artifact(
-        self,
-        task_id: str,
-        artifact: RoleReportArtifact | EvidenceLedger,
-    ) -> RadarArtifactVersion:
-        ...
-
-    def request_confirmation(
-        self,
-        task_id: str,
-        request: HumanConfirmationRequest,
-    ) -> HumanConfirmationRequest:
-        ...
-
-    def export_doctor_material(
-        self,
-        task_id: str,
-        *,
-        confirmation_id: str,
-    ) -> RadarArtifactVersion:
-        ...
-
-    def revoke_confirmation(
-        self,
-        task_id: str,
-        confirmation_id: str,
-        *,
-        actor_id: str,
-        actor_role: str,
-        reason: str,
-    ) -> HumanConfirmationRequest:
-        ...
-
-    def complete_confirmation_action(
-        self,
-        task_id: str,
-        confirmation_id: str,
-        *,
-        actor_id: str,
-        actor_role: str,
-        execution_ref: str,
-        delivery_status: str | None = None,
-    ) -> HumanConfirmationRequest:
-        ...
-
-    def forward_a2a_message(
-        self,
-        task_id: str,
-        message: A2AMessage,
-        *,
-        approved_by_orchestrator: bool = True,
-    ) -> A2AMessage:
-        ...
-
-    def approve_cross_task_share(
-        self,
-        source_task_id: str,
-        target_task_id: str,
-        *,
-        sender: str,
-        receiver: str,
-        intent: str,
-        shared_artifact_type: str,
-        payload: dict[str, Any],
-        evidence_refs: list[str] | None = None,
-        approved_by_orchestrator: bool,
-        collaboration_round: int = 1,
-    ) -> A2AMessage:
-        ...
-
-    def get_task(self, task_id: str) -> RadarAgentTask:
-        ...
-
-    def list_artifacts(
-        self,
-        task_id: str,
-        *,
-        artifact_id: str | None = None,
-    ) -> list[RadarArtifactVersion]:
-        ...
-
-    def list_confirmations(
-        self,
-        task_id: str,
-    ) -> list[HumanConfirmationRequest]:
-        ...
-
-
 __all__ = [
+    "CANONICAL_AGENT_RUNTIME_CONTRACT_VERSION",
+    "CANONICAL_AGENT_RUNTIME_KIND",
     "RadarAgentTask",
     "RadarArtifactVersion",
-    "RadarNodeStatus",
     "RadarTaskFailure",
     "RadarTaskEvent",
     "RadarTaskStatus",
-    "WorkflowRuntime",
+    "UserInputRequest",
+    "UserInputResponse",
 ]

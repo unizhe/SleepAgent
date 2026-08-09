@@ -1,35 +1,18 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-
 import pytest
 
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    EvidencePacket,
-    MemoryAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.product_agent.contracts import AgentId
 from sleepagent.radar_agent.product_agent.skill_methods.memory import (
     MemoryCapabilityInput,
     MemoryChangeRequest,
     SleepCareMemorySkill,
 )
-from sleepagent.radar_agent.schemas import (
-    EvidenceClaim,
-    EvidenceLedger,
-    RadarDataQualityStatus,
-    RadarNightSummary,
-    ReviewStatus,
-    RiskLevel,
-)
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 def test_memory_capabilities_are_routed_to_governed_memory_digest_and_care_state() -> None:
-    context = _context()
-    legacy = MemoryAgent().run(context).output_payload["memory_proposal"]
-    legacy_types = {item["memory_type"] for item in legacy["candidates"]}
+    expected = load_phase3a_capability_goldens()["memory_routing"]
 
     routed = SleepCareMemorySkill().route(
         MemoryCapabilityInput(
@@ -52,7 +35,12 @@ def test_memory_capabilities_are_routed_to_governed_memory_digest_and_care_state
         )
     )
 
-    assert legacy_types == {"trend", "preference", "care_event"}
+    assert expected["candidate_count"] == 3
+    assert set(expected["candidate_types"]) == {
+        "trend",
+        "preference",
+        "care_event",
+    }
     assert len(routed.memory_change_candidates) == 1
     assert routed.memory_change_candidates[0].memory_type == (
         "communication_preference"
@@ -221,75 +209,3 @@ def test_memory_skill_rejects_empty_evidence_handles_and_cannot_claim_write() ->
     assert routed.rejected_reasons == ["accepted_evidence_refs_missing"]
     with pytest.raises(ValueError, match="write_performed"):
         type(routed)(write_performed=True)
-
-
-def _context() -> ContextPacket:
-    ref = "night-summary:phase3a-memory"
-    summary = RadarNightSummary(
-        radar_device_id="radar-phase3a",
-        subject_id="elder-phase3a",
-        night_of=date(2026, 7, 10),
-        data_coverage_ratio=0.92,
-        data_quality_status=RadarDataQualityStatus.GOOD,
-        source_report_ref=ref,
-    )
-    claim = EvidenceClaim(
-        claim_id="claim-phase3a-memory",
-        task_id="task-phase3a-memory",
-        text="Accepted trend evidence.",
-        evidence_refs=[ref],
-        confidence=0.8,
-        risk_level=RiskLevel.WATCH,
-        generated_by="evidence_reasoning",
-        review_status=ReviewStatus.REVIEWED,
-    )
-    ledger = EvidenceLedger(
-        ledger_id="ledger-phase3a-memory",
-        task_id="task-phase3a-memory",
-        canonical_evidence_refs=[ref],
-        derived_metrics={
-            "risk_level": "watch",
-            "data_quality_status": "good",
-        },
-        claims=[claim],
-        confidence=0.8,
-        review_status=ReviewStatus.REVIEWED,
-    )
-    return ContextPacket(
-        task_context=TaskContext(
-            task_id="task-phase3a-memory",
-            trace_id="trace-phase3a-memory",
-            purpose="memory",
-        ),
-        evidence_packet=EvidencePacket(
-            night_summaries=[summary],
-            evidence_ledger=ledger,
-            data_quality={
-                "trend_result": {
-                    "windows": {
-                        key: [
-                            {
-                                "metric_name": "sleep_minutes",
-                                "status": "computed",
-                                "value": 380,
-                                "evidence_refs": [ref],
-                            }
-                        ]
-                        for key in ("7", "30", "90")
-                    }
-                },
-                "preference_updates": {
-                    "expression_style": "简洁温和"
-                },
-                "care_events": [
-                    {
-                        "event_type": "care_plan",
-                        "status": "candidate",
-                        "occurred_at": datetime(
-                            2026, 7, 10, tzinfo=timezone.utc
-                        ).isoformat(),
-                    }
-                ],
-            },
-        ),
-    )

@@ -3855,3 +3855,64 @@ and removed stale compatibility naming/documentation.
 Phase 3B remains uncommitted. No push, release, database rewrite, migration
 deletion or Phase 3C source deletion was performed; execution is paused for
 Phase 3B acceptance.
+
+### Round 65 — Codex build: Phase 3C physical legacy removal
+
+Date: 2026-08-09
+
+- Committed the accepted Phase 3B scope locally as `ae3e0e2` with message
+  `refactor(agent): cut over to canonical product runtime`; no unrelated
+  dirty-worktree file was included and nothing was pushed.
+- Replaced the remaining Phase 3A execution-based characterization oracles with
+  checked-in JSON golden fixtures. Parity tests now exercise only canonical
+  Tool, Service, Skill-method and Policy boundaries and do not import,
+  instantiate or execute a retired Agent, Orchestrator or Dynamic Runtime.
+- Added `persistence.history` as an opaque, immutable and SELECT-only decoder
+  for historical tasks, events, artifacts, confirmations, collaboration and
+  conflict records, plans, invocations, budgets and receipts. Historical
+  API/CLI detail and trace reads remain supported, while task creation,
+  execution, retry, rerun, input, confirmation, resume and replanning fail
+  closed before a persistence mutation.
+- Physically removed the retired `agents`, `orchestrator`, `dynamic`, `a2a`,
+  `prompts`, `skills`, `tools`, `evidence` and `memory` packages. Also removed
+  the old product-device Agent modules and all tests that existed solely to
+  execute the retired identities. No importable archive was created; applied
+  migrations and historical database tables were left intact.
+- Removed old A2A/roster DTO exports, the legacy micro-questionnaire path,
+  `TaskService.execute`, stale Runtime branches and LangGraph from the package
+  dependency surface. Canonical reviewed knowledge, report rendering,
+  confirmation, replay, provider, governance and longitudinal memory
+  capabilities remain in their final boundaries.
+- A clean wheel was built and inspected. It contains none of the retired
+  packages or product-device Agent modules, exposes no retired console entry,
+  contains none of the forbidden identities/runtime kinds in production Python,
+  and has no LangGraph dependency. Generated build artifacts and stale caches
+  were moved recoverably to `/tmp` after inspection.
+- `ProductEpisodeRunner`, its lifecycle/state machine, the concrete Agent files,
+  typed ports and four-role manifest were not modified in this phase.
+
+### Codex verification
+
+- Frozen Phase 3A capability/golden suite: `128 passed in 1.41s`.
+- Canonical static boundary, physical deletion, history compatibility and
+  four-role Factory/architecture suite: `51 passed in 3.66s`.
+- Full repository regression: `943 passed, 5 skipped in 48.33s`.
+- `python -m compileall -q sleepagent backend reference_client tests` and
+  `git diff --check` pass. Production static scans across every packaged Python
+  root find no retired identity, runtime kind, import, `TaskService.execute`
+  caller or old package path.
+- Product Contract remains `sleepagent-product-agent.v14`; the exact four-role
+  manifest remains `sleep_care`, `evidence_reasoning`, `care_strategy`,
+  `safety_review`, with hash
+  `bc5879c7c10636f5df02cc7132e99edd3a200e48f98488c64e9ca52a0d60fc22`.
+
+Fix rounds used: 3. The first isolated historical decoding and removed the dead
+execution graph. The second updated one governance test that still opened a
+physically deleted legacy Tool file. The independent final review then restored
+opaque read compatibility for historical artifact, confirmation, collaboration
+and conflict trace records and expanded package-root anti-backflow coverage
+before the full regression and package proof were repeated.
+
+Phase 3C remains uncommitted. No push, release, database rewrite or migration
+deletion was performed, unrelated dirty-worktree changes remain untouched, and
+execution is paused before any `ProductEpisodeRunner` decomposition.

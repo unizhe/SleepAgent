@@ -17,7 +17,6 @@ from sleepagent.product_device.schemas import (
     RadarDevice,
     RadarDeviceStatus,
     RadarDialogueStatus,
-    RadarProductDialogueResult,
     RadarSleepReport,
     RadarSleepStage,
     RadarSleepStageSegment,
@@ -413,20 +412,6 @@ def build_public_alert(alert: RadarAlertEvent) -> RadarPublicAlertEvent:
         resolved_at=alert.resolved_at,
         title=alert.title,
         message=alert.message,
-    )
-
-
-def build_public_dialogue_result(
-    result: RadarProductDialogueResult,
-) -> RadarPublicDialogueResult:
-    return RadarPublicDialogueResult(
-        radar_device_id=result.radar_device_id,
-        status=result.status,
-        assistant_message=result.assistant_message,
-        safety_flags=result.safety_flags,
-        blocked_reasons=result.blocked_reasons,
-        caveats=result.caveats,
-        generated_at=result.generated_at,
     )
 
 

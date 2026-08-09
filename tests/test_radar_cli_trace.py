@@ -17,13 +17,11 @@ from sleepagent.radar_agent.cli import (
     main,
 )
 from sleepagent.radar_agent.runtime import (
-    RadarAgentTask,
     RadarTaskStatus,
     build_developer_trace,
 )
 from sleepagent.radar_agent.persistence import RadarSubject
 from sleepagent.radar_agent.provider import ReplayRadarProvider
-from sleepagent.radar_agent.schemas import A2AMessage
 
 
 def _runtime() -> RadarApiRuntime:
@@ -75,28 +73,13 @@ def test_run_demo_jsonl_and_pretty_expose_summary_views_only() -> None:
         "trace", "event", "artifact"
     }
 
-    runtime.service.forward_a2a_message(
-        task_id,
-        A2AMessage(
-            message_id="a2a-cli-summary",
-            task_id=task_id,
-            sender="trend",
-            receiver="risk_signal",
-            intent="review_out_of_bed_trend",
-            evidence_refs=["claim:out-of-bed-trend"],
-        ),
-    )
-
     assert main(
         ["inspect-task", task_id, "--format", "pretty"],
         runtime=runtime,
         stdout=pretty_out,
     ) == EXIT_OK
     rendered = pretty_out.getvalue()
-    assert "Node progress" in rendered
     assert "Claims" in rendered
-    assert "A2A" in rendered
-    assert "a2a-cli-summary" in rendered
     assert "LLM / fallback" in rendered
     assert "Questionnaires" in rendered
     assert "Memory candidates" in rendered
@@ -127,18 +110,54 @@ def test_inspect_task_exit_codes_are_stable() -> None:
         update={"bound_subject_id": "historical-subject"}
     )
     runtime.store.save_device(device)
-    task = RadarAgentTask(
-        task_id="historical-cli-task",
-        trace_id="historical-cli-trace",
-        subject_id="historical-subject",
-        radar_device_id=device.radar_device_id,
-        runtime_kind="legacy_fixed",
-        runtime_contract_version="radar-legacy.v1",
-        node_status={"legacy-node": "pending"},
+    task_id = "historical-cli-task"
+    task_payload = {
+        "task_id": task_id,
+        "trace_id": "historical-cli-trace",
+        "subject_id": "historical-subject",
+        "radar_device_id": device.radar_device_id,
+        "role": "family",
+        "scenario": "historical",
+        "status": "completed",
+        "runtime_kind": "retired-test-runtime",
+        "runtime_contract_version": "retired-test.v1",
+    }
+    runtime.store.connection.execute(
+        """
+        INSERT INTO radar_tasks (
+          task_id, trace_id, subject_id, radar_device_id, role, scenario,
+          status, task_json, created_at, updated_at, runtime_kind,
+          runtime_contract_version, task_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task_id,
+            "historical-cli-trace",
+            "historical-subject",
+            device.radar_device_id,
+            "family",
+            "historical",
+            "completed",
+            json.dumps(task_payload),
+            "2026-08-09T00:00:00+00:00",
+            "2026-08-09T00:00:00+00:00",
+            "retired-test-runtime",
+            "retired-test.v1",
+            1,
+        ),
     )
-    runtime.store.save_task(task)
+    runtime.store.connection.commit()
+    history_out = io.StringIO()
     assert main(
-        ["inspect-task", task.task_id, "--retry"],
+        ["inspect-task", task_id, "--format", "json"],
+        runtime=runtime,
+        stdout=history_out,
+    ) == EXIT_OK
+    history_trace = json.loads(history_out.getvalue())
+    assert history_trace["task"]["runtime_kind"] == "retired-test-runtime"
+    assert history_trace["history"]["plans"] == []
+    assert main(
+        ["inspect-task", task_id, "--retry"],
         runtime=runtime,
         stderr=io.StringIO(),
     ) == EXIT_INVALID_STATE
@@ -261,10 +280,10 @@ def test_run_goal_executes_canonical_product_episode(
         item["artifact_type"] == "product_episode_result"
         for item in payload["artifacts"]
     )
-    assert not payload.get("dynamic")
+    assert payload["history"] == {}
 
 
-def test_inspect_product_decision_trace_has_no_dynamic_runtime_sections(
+def test_inspect_product_decision_trace_has_no_historical_runtime_sections(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
@@ -302,4 +321,4 @@ def test_inspect_product_decision_trace_has_no_dynamic_runtime_sections(
     assert "trace" in types
     assert "event" in types
     assert "artifact" in types
-    assert not any(item.startswith("dynamic_") for item in types)
+    assert not any(item.startswith("history_") for item in types)

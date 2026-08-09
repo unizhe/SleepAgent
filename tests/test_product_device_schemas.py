@@ -6,9 +6,6 @@ from sleepagent.product_device import (
     RadarBedPresence,
     RadarDevice,
     RadarDeviceStatus,
-    RadarDialogueStatus,
-    RadarProductDialogueRequest,
-    RadarProductDialogueResult,
     RadarSourceMetadata,
     RawVendorEventNormalizationStatus,
     build_raw_vendor_event,
@@ -111,20 +108,8 @@ def test_core_product_device_schemas_keep_source_metadata() -> None:
         vendor_device_name="imei-003",
         source_metadata=source,
     )
-    request = RadarProductDialogueRequest(
-        radar_device_id=device.radar_device_id,
-        user_message="昨晚心率怎么看？",
-    )
-    result = RadarProductDialogueResult(
-        radar_device_id=device.radar_device_id,
-        status=RadarDialogueStatus.LLM_NOT_CONFIGURED,
-        assistant_message="LLM is not configured.",
-        source_metadata=[source],
-    )
-
     assert device.source_metadata.device_identifier == "imei-003"
-    assert request.radar_device_id == "radar-device-003"
-    assert result.source_metadata[0].raw_event_id == "perceptor:ConnectedEvent:msg-003"
+    assert device.source_metadata.raw_event_id == "perceptor:ConnectedEvent:msg-003"
 
 
 def test_raw_vendor_event_rejects_non_object_data_string() -> None:

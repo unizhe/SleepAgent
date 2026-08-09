@@ -6,12 +6,6 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    EvidencePacket,
-    ReportAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.llm import (
     CloudLLMClient,
     CloudLLMConfig,
@@ -19,7 +13,6 @@ from sleepagent.radar_agent.llm import (
     ModelInvocationMetadata,
     task_service_llm_audit_sink,
 )
-from sleepagent.radar_agent.orchestrator import OrchestratorDecision, WorkflowNodeName
 from sleepagent.radar_agent.persistence import (
     RadarAlertRecord,
     RadarDataAuthorization,
@@ -30,21 +23,14 @@ from sleepagent.radar_agent.persistence import (
 )
 from sleepagent.radar_agent.runtime import (
     AuthorizationRequired,
-    RadarTaskStatus,
     RoleAccessDenied,
     TaskService,
 )
 from sleepagent.radar_agent.schemas import (
-    EvidenceClaim,
-    EvidenceLedger,
-    QuestionnaireEntry,
     RadarDataQualityStatus,
     RadarDevice,
     RadarDeviceStatus,
     RadarNightSummary,
-    ReviewStatus,
-    RiskLevel,
-    SupplementaryDocument,
 )
 
 
@@ -56,19 +42,6 @@ ALL_SCOPES = [
     "export_data",
     "delete_data",
 ]
-
-
-class StaticOrchestrator:
-    def __init__(self, decision: OrchestratorDecision | None = None) -> None:
-        self.calls = 0
-        self.decision = decision
-
-    def run(self, context: ContextPacket) -> OrchestratorDecision:
-        self.calls += 1
-        return self.decision or OrchestratorDecision(
-            task_id=context.task_context.task_id,
-            node=WorkflowNodeName.PUBLISH_ARTIFACTS,
-        )
 
 
 class FakeResponse:
@@ -105,47 +78,7 @@ def test_task_creation_and_processing_fail_without_authorization_or_role_permiss
         )
 
 
-@pytest.mark.parametrize(
-    ("extra_payload", "missing_scope"),
-    [
-        ("questionnaire", "process_questionnaire"),
-        ("supplementary", "process_supplementary_document"),
-    ],
-)
-def test_questionnaire_and_supplementary_material_need_explicit_scope(
-    extra_payload: str,
-    missing_scope: str,
-) -> None:
-    service, _, bindings = _runtime()
-    authorization = _grant(service, bindings["family"], ["process_radar_summary"])
-    task = _task(service, bindings["family"], authorization)
-    context = _context(task.task_id, task.trace_id)
-    if extra_payload == "questionnaire":
-        context = context.model_copy(
-            update={
-                "evidence_packet": context.evidence_packet.model_copy(
-                    update={"questionnaire_entries": [_questionnaire()]}
-                )
-            }
-        )
-    else:
-        context = context.model_copy(
-            update={
-                "evidence_packet": context.evidence_packet.model_copy(
-                    update={"supplementary_documents": [_document()]}
-                )
-            }
-        )
-    orchestrator = StaticOrchestrator()
-
-    with pytest.raises(AuthorizationRequired, match=missing_scope):
-        service.execute(task.task_id, orchestrator, context)
-
-    assert orchestrator.calls == 0
-    assert service.get_task(task.task_id).status == RadarTaskStatus.CREATED
-
-
-def test_revoked_authorization_stops_processing_before_orchestrator() -> None:
+def test_revoked_authorization_stops_canonical_task_access() -> None:
     service, _, bindings = _runtime()
     authorization = _grant(service, bindings["family"], ALL_SCOPES)
     task = _task(service, bindings["family"], authorization)
@@ -154,39 +87,18 @@ def test_revoked_authorization_stops_processing_before_orchestrator() -> None:
         actor_id="family-user",
         role_binding_id=bindings["family"].role_binding_id,
     )
-    orchestrator = StaticOrchestrator()
-
     with pytest.raises(AuthorizationRequired, match="not active"):
-        service.execute(
+        service.assert_task_access(
             task.task_id,
-            orchestrator,
-            _context(task.task_id, task.trace_id),
+            actor_id="family-user",
+            actor_role="family",
         )
-    assert orchestrator.calls == 0
 
 
 def test_authorized_export_is_role_scoped_minimized_and_contains_owned_artifacts() -> None:
     service, store, bindings = _runtime()
     authorization = _grant(service, bindings["family"], ALL_SCOPES)
     task = _task(service, bindings["family"], authorization)
-    ledger = _ledger(task.task_id)
-    service.execute(
-        task.task_id,
-        StaticOrchestrator(
-            OrchestratorDecision(
-                task_id=task.task_id,
-                node=WorkflowNodeName.PUBLISH_ARTIFACTS,
-                evidence_ledger=ledger,
-            )
-        ),
-        _context(
-            task.task_id,
-            task.trace_id,
-            questionnaire=True,
-            supplementary=True,
-            ledger=ledger,
-        ),
-    )
     store.save_night_summary(_summary())
 
     with pytest.raises(RoleAccessDenied):
@@ -207,91 +119,17 @@ def test_authorized_export_is_role_scoped_minimized_and_contains_owned_artifacts
     assert exported["schema_version"] == "radar-subject-export.v1"
     assert exported["tasks"][0]["task_id"] == task.task_id
     assert exported["night_summaries"][0]["source_report_ref"] == "night:private"
-    ledger_payload = next(
-        item["evidence_ledger"]
-        for item in exported["artifacts"]
-        if item["evidence_ledger"] is not None
-    )
-    assert ledger_payload["questionnaire_entries"][0]["answer"] == "明显"
-    assert ledger_payload["supplementary_documents"][0]["document_id"] == "doc-001"
+    assert exported["artifacts"] == []
     assert "raw_radar_stream" in exported["excluded"]
     assert "raw_payload" not in serialized
     assert "secret-api-key" not in serialized
     assert "provider-secret-value" not in serialized
 
 
-def test_role_filtered_report_reads_prevent_cross_role_access() -> None:
-    service, _, bindings = _runtime()
-    authorization = _grant(service, bindings["family"], ALL_SCOPES)
-    task = _task(service, bindings["family"], authorization)
-    ledger = _ledger(task.task_id)
-    report_context = _context(
-        task.task_id,
-        task.trace_id,
-        questionnaire=True,
-        supplementary=True,
-        ledger=ledger,
-    )
-    report_result = ReportAgent().run(report_context)
-    service.execute(
-        task.task_id,
-        StaticOrchestrator(
-            OrchestratorDecision(
-                task_id=task.task_id,
-                node=WorkflowNodeName.PUBLISH_ARTIFACTS,
-                accepted_results=[report_result],
-                evidence_ledger=ledger,
-            )
-        ),
-        report_context,
-    )
-
-    elder_reports = service.list_role_reports(
-        "elder-private",
-        actor_id="elder-user",
-        role_binding_id=bindings["elder"].role_binding_id,
-        authorization_id=authorization.authorization_id,
-    )
-    family_reports = service.list_role_reports(
-        "elder-private",
-        actor_id="family-user",
-        role_binding_id=bindings["family"].role_binding_id,
-        authorization_id=authorization.authorization_id,
-    )
-    doctor_reports = service.list_role_reports(
-        "elder-private",
-        actor_id="doctor-user",
-        role_binding_id=bindings["doctor"].role_binding_id,
-        authorization_id=authorization.authorization_id,
-    )
-
-    assert {item.report.role for item in elder_reports} == {"elder"}
-    assert {item.report.role for item in family_reports} == {"elder", "family"}
-    assert {item.report.role for item in doctor_reports} == {"doctor"}
-    with pytest.raises(RoleAccessDenied):
-        service.list_role_reports(
-            "elder-private",
-            actor_id="family-user",
-            role_binding_id=bindings["doctor"].role_binding_id,
-            authorization_id=authorization.authorization_id,
-        )
-
-
 def test_authorized_subject_deletion_cascades_private_data_but_keeps_hashed_receipt() -> None:
     service, store, bindings = _runtime()
     authorization = _grant(service, bindings["family"], ALL_SCOPES)
     task = _task(service, bindings["family"], authorization)
-    service.execute(
-        task.task_id,
-        StaticOrchestrator(
-            OrchestratorDecision(
-                task_id=task.task_id,
-                node=WorkflowNodeName.PUBLISH_ARTIFACTS,
-                evidence_ledger=_ledger(task.task_id),
-            )
-        ),
-        _context(task.task_id, task.trace_id, ledger=_ledger(task.task_id)),
-    )
     store.save_night_summary(_summary())
     store.save_memory_summary(
         RadarMemorySummary(
@@ -480,78 +318,6 @@ def _task(
             "raw_payload": {"secret": "provider-secret-value"},
             "api_key": "secret-api-key",
         },
-    )
-
-
-def _context(
-    task_id: str,
-    trace_id: str,
-    *,
-    questionnaire: bool = False,
-    supplementary: bool = False,
-    ledger: EvidenceLedger | None = None,
-) -> ContextPacket:
-    return ContextPacket(
-        task_context=TaskContext(
-            task_id=task_id,
-            trace_id=trace_id,
-            role="family",
-            purpose="orchestration",
-        ),
-        evidence_packet=EvidencePacket(
-            questionnaire_entries=[_questionnaire()] if questionnaire else [],
-            supplementary_documents=[_document()] if supplementary else [],
-            evidence_ledger=ledger,
-        ),
-    )
-
-
-def _ledger(task_id: str) -> EvidenceLedger:
-    claim = EvidenceClaim(
-        claim_id=f"claim:{task_id}",
-        task_id=task_id,
-        text="近七晚睡眠连续性发生变化。",
-        evidence_refs=["night:private", "questionnaire:private"],
-        confidence=0.7,
-        risk_level=RiskLevel.WATCH,
-        caveats=["非诊断观察。"],
-        generated_by="trend",
-        review_status=ReviewStatus.REVIEWED,
-    )
-    return EvidenceLedger(
-        ledger_id=f"ledger:{task_id}",
-        task_id=task_id,
-        canonical_evidence_refs=["night:private", "questionnaire:private"],
-        derived_metrics={"risk_level": "watch", "data_quality_status": "partial"},
-        questionnaire_entries=[_questionnaire()],
-        supplementary_documents=[_document()],
-        claims=[claim],
-        confidence=0.7,
-        caveats=["仅供健康观察。"],
-        review_status=ReviewStatus.REVIEWED,
-    )
-
-
-def _questionnaire() -> QuestionnaireEntry:
-    return QuestionnaireEntry(
-        entry_id="questionnaire-private",
-        subject_id="elder-private",
-        role="family",
-        question_id="q-sleepiness",
-        answer="明显",
-        evidence_ref="questionnaire:private",
-    )
-
-
-def _document() -> SupplementaryDocument:
-    return SupplementaryDocument(
-        document_id="doc-001",
-        subject_id="elder-private",
-        document_type="doctor_note",
-        title="既往材料",
-        summary="敏感补充材料摘要",
-        review_status=ReviewStatus.REVIEWED,
-        caveats=["由用户授权提供。"],
     )
 
 

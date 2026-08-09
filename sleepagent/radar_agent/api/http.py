@@ -21,6 +21,10 @@ from sleepagent.radar_agent.persistence import (
     RadarSubject,
     connect_postgres_store,
 )
+from sleepagent.radar_agent.persistence.history import (
+    HistoricalRecord,
+    HistoricalTaskRecord,
+)
 from sleepagent.radar_agent.provider import ReplayRadarProvider, SUPPORTED_REPLAY_SCENARIOS
 from sleepagent.radar_agent.replay import ReplayScenario, get_replay_scenario
 from sleepagent.radar_agent.runtime import (
@@ -36,6 +40,7 @@ from sleepagent.radar_agent.runtime import (
     TaskService,
     UserInputRequest,
     UserInputResponse,
+    build_developer_trace,
 )
 from sleepagent.radar_agent.schemas import (
     EvidenceLedger,
@@ -43,7 +48,6 @@ from sleepagent.radar_agent.schemas import (
     RadarAgentSchema,
     RadarNightSummary,
 )
-from sleepagent.radar_agent.questionnaire import QuestionnaireCandidate
 from sleepagent.radar_agent.product_agent import (
     ActionProposal,
     AgentId as ProductAgentId,
@@ -129,13 +133,13 @@ class RadarTaskCreateRequest(RadarAgentSchema):
 
 
 class RadarTaskDetail(RadarAgentSchema):
-    task: RadarAgentTask
+    task: RadarAgentTask | HistoricalTaskRecord
     risk_level: str | None = None
     replay_scenario: ReplayScenario | None = None
     artifacts: list[RadarArtifactVersion] = Field(default_factory=list)
     confirmations: list[HumanConfirmationRequest] = Field(default_factory=list)
     decisions: list[HumanDecisionRequest] = Field(default_factory=list)
-    questionnaire_candidates: list[QuestionnaireCandidate] = Field(
+    questionnaire_candidates: list[dict[str, Any]] = Field(
         default_factory=list,
         max_length=3,
     )
@@ -393,8 +397,6 @@ class RadarApiRuntime:
                 provider_input={"provider": "replay", **payload.provider_input},
                 idempotency_key=idempotency_key or payload.idempotency_key,
                 max_retries=payload.max_retries,
-                runtime_kind="product_episode",
-                runtime_contract_version="product-episode.v1",
                 goal_payload=goal_payload,
             )
             return task
@@ -868,7 +870,7 @@ class RadarApiRuntime:
     ) -> RadarTaskDetail:
         task = self.service.get_task(task_id)
         if (
-            task.runtime_kind != "product_episode"
+            not isinstance(task, RadarAgentTask)
             or task.status != RadarTaskStatus.RUNNING
         ):
             raise InvalidTaskTransition(
@@ -880,7 +882,7 @@ class RadarApiRuntime:
         )
         if "result" not in checkpoint.payload:
             raise InvalidTaskTransition(
-                "legacy checkpoint has no frozen Product Episode result"
+                "persisted checkpoint has no frozen Product Episode result"
             )
         frozen_result = ProductEpisodeRunResult.model_validate(
             checkpoint.payload["result"]
@@ -990,7 +992,7 @@ class RadarApiRuntime:
     ) -> RadarTaskDetail:
         task = self.service.get_task(task_id)
         if (
-            task.runtime_kind != "product_episode"
+            not isinstance(task, RadarAgentTask)
             or task.status != RadarTaskStatus.WAITING_FOR_USER_INPUT
         ):
             raise InvalidTaskTransition(
@@ -1285,6 +1287,15 @@ class RadarApiRuntime:
 
     def detail(self, task_id: str) -> RadarTaskDetail:
         task = self.service.get_task(task_id)
+        if isinstance(task, HistoricalTaskRecord):
+            receipt = self.store.history.read_completion_receipt(task_id)
+            return RadarTaskDetail(
+                task=task,
+                completion_receipt=(
+                    receipt.to_dict() if receipt is not None else None
+                ),
+            )
+
         all_artifacts = self.service.list_artifacts(task_id)
         artifacts = [
             item
@@ -1298,18 +1309,11 @@ class RadarApiRuntime:
             for item in artifacts
             if item.artifact_type == "product_episode_result"
         ]
-        try:
-            receipt = self.store.get_completion_receipt(task_id)
-        except KeyError:
-            receipt = None
+        receipt: dict[str, Any] | EpisodeReceipt | None = None
         if product_artifacts:
             receipt_payload = product_artifacts[-1].payload.get("receipt")
             if receipt_payload:
                 receipt = EpisodeReceipt.model_validate(receipt_payload)
-        elif receipt is not None and hasattr(receipt, "model_dump"):
-            # Historical dynamic receipts remain readable without importing
-            # their executable runtime contracts into the canonical API.
-            receipt = receipt.model_dump(mode="json")
         risk_level = (
             str(ledger.derived_metrics.get("risk_level"))
             if ledger
@@ -1324,29 +1328,17 @@ class RadarApiRuntime:
             risk_level=risk_level,
             replay_scenario=(
                 get_replay_scenario(task.scenario)
-                if task.runtime_kind == "legacy_fixed"
-                or os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
+                if os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
                 else None
             ),
             artifacts=artifacts,
             confirmations=self.service.list_confirmations(task_id),
-            decisions=(
-                self.human_decisions.repository.list(task_id=task_id)
-                if task.runtime_kind == "product_episode"
-                else []
-            ),
+            decisions=self.human_decisions.repository.list(task_id=task_id),
             questionnaire_candidates=_workflow_questionnaire_candidates(artifacts),
-            user_input_requests=(
-                [
-                    UserInputRequest.model_validate(
-                        item.model_dump(mode="python")
-                    )
-                    for item in self.store.list_user_input_requests(task_id)
-                ]
-                if task.runtime_kind
-                in {"dynamic_goal", "product_episode"}
-                else []
-            ),
+            user_input_requests=[
+                UserInputRequest.model_validate(item.model_dump(mode="python"))
+                for item in self.store.list_user_input_requests(task_id)
+            ],
             completion_receipt=receipt,
         )
 
@@ -1451,7 +1443,11 @@ def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Radar Agent API authentication required.")
 
 
-def _assert_actor(task: RadarAgentTask, actor_id: str, actor_role: str) -> None:
+def _assert_actor(
+    task: RadarAgentTask | HistoricalTaskRecord,
+    actor_id: str,
+    actor_role: str,
+) -> None:
     if actor_role == "system":
         return
     if task.requested_by_user_id != actor_id:
@@ -1461,7 +1457,7 @@ def _assert_actor(task: RadarAgentTask, actor_id: str, actor_role: str) -> None:
 
 
 def _identity(
-    task: RadarAgentTask,
+    task: RadarAgentTask | HistoricalTaskRecord,
     *,
     actor_id: str | None,
     actor_role: str | None,
@@ -1474,10 +1470,7 @@ def _identity(
     resolved_id = actor_id
     resolved_role = actor_role
     _assert_actor(task, resolved_id, resolved_role)
-    if (
-        task.runtime_kind == "product_episode"
-        and not _development_mode_enabled()
-    ):
+    if isinstance(task, RadarAgentTask) and not _development_mode_enabled():
         try:
             _RUNTIME.service.assert_task_access(
                 task.task_id,
@@ -1493,8 +1486,10 @@ def _development_mode_enabled() -> bool:
     return os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
 
 
-def _assert_task_runtime_writable(task: RadarAgentTask) -> None:
-    if task.runtime_kind != "product_episode":
+def _assert_task_runtime_writable(
+    task: RadarAgentTask | HistoricalTaskRecord,
+) -> None:
+    if not isinstance(task, RadarAgentTask):
         raise InvalidTaskTransition(
             f"historical {task.runtime_kind!r} task is read-only"
         )
@@ -1671,7 +1666,12 @@ async def list_radar_tasks(
         RadarTaskStatus.WAITING_FOR_CONFIRMATION,
     }
     tasks = _RUNTIME.store.list_tasks()
-    tasks = [task for task in tasks if (task.status in active) == (view == "active")]
+    active_values = {status.value for status in active}
+    tasks = [
+        task
+        for task in tasks
+        if (_task_status_value(task) in active_values) == (view == "active")
+    ]
     visible: list[RadarTaskDetail] = []
     for task in tasks:
         try:
@@ -1707,19 +1707,26 @@ async def get_radar_task(
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
 
 
-@router.get("/tasks/{task_id}/events", response_model=list[RadarTaskEvent])
+@router.get("/tasks/{task_id}/events", response_model=None)
 async def get_radar_task_events(
     task_id: str,
     after_sequence: int = Query(default=0, ge=0),
     x_api_key: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
     x_actor_role: str | None = Header(default=None),
-) -> list[RadarTaskEvent]:
+) -> list[RadarTaskEvent | dict[str, Any]]:
     _require_api_key(x_api_key)
     try:
         task = _RUNTIME.service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        return _RUNTIME.service.list_events(task_id, after_sequence=after_sequence)
+        events = _RUNTIME.service.list_events(
+            task_id,
+            after_sequence=after_sequence,
+        )
+        return [
+            event.to_dict() if isinstance(event, HistoricalRecord) else event
+            for event in events
+        ]
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
 
@@ -1740,7 +1747,6 @@ async def get_radar_task_decision_trace(
             "plan.",
             "agent.",
             "tool.",
-            "a2a.",
             "user_input.",
             "confirmation.",
             "human_decision.",
@@ -1750,60 +1756,14 @@ async def get_radar_task_decision_trace(
         events = [
             event
             for event in _RUNTIME.service.list_events(task_id)
-            if event.event_type.startswith(visible_prefixes)
+            if _event_type(event).startswith(visible_prefixes)
         ]
         return {
             "task_id": task_id,
             "execution_mode": task.execution_mode,
             "completion_status": task.completion_status,
             "entries": [
-                {
-                    "sequence": event.sequence,
-                    "event_type": event.event_type,
-                    "summary": event.message,
-                    "created_at": event.created_at,
-                    "details": {
-                        key: value
-                        for key, value in event.payload.items()
-                        if key
-                        in {
-                            "goal_type",
-                            "execution_mode",
-                            "completion_status",
-                            "revision",
-                            "capabilities",
-                            "agent",
-                            "capability",
-                            "confidence",
-                            "uncertainty_count",
-                            "tool_name",
-                            "sender",
-                            "receiver",
-                            "intent",
-                            "decision",
-                            "decision_id",
-                            "risk_level",
-                            "route",
-                            "required_roles",
-                            "target_hash",
-                            "decision_summary",
-                            "question_type",
-                            "why_needed",
-                            "reason_code",
-                            "checkpoint_kind",
-                            "changed_fields",
-                            "source_agent_invocation_id",
-                            "target_agent_invocation_id",
-                            "causal_source_agent_invocation_id",
-                            "resolution_status",
-                            "request_type",
-                            "skip_reason",
-                            "reused_from_plan_id",
-                            "action_type",
-                            "artifact_version_id",
-                        }
-                    },
-                }
+                _decision_trace_entry(event)
                 for event in events
             ],
         }
@@ -1824,40 +1784,7 @@ async def get_radar_task_developer_trace(
     try:
         task = _RUNTIME.service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        plans = _RUNTIME.store.list_execution_plans(task_id) if task.runtime_kind == "dynamic_goal" else []
-        return {
-            "task": {
-                "task_id": task.task_id,
-                "trace_id": task.trace_id,
-                "runtime_kind": task.runtime_kind,
-                "runtime_contract_version": task.runtime_contract_version,
-                "execution_mode": task.execution_mode,
-                "completion_status": task.completion_status,
-                "status": task.status.value,
-            },
-            "plans": [plan.model_dump(mode="json") for plan in plans],
-            "model_invocations": [
-                item.model_dump(mode="json")
-                for item in _RUNTIME.store.list_model_invocations(task_id)
-            ],
-            "agent_invocations": [
-                item.model_dump(mode="json")
-                for item in _RUNTIME.store.list_agent_invocations(task_id)
-            ],
-            "tool_invocations": [
-                item.model_dump(mode="json")
-                for item in _RUNTIME.store.list_tool_invocations(task_id)
-            ],
-            "a2a": [
-                item.model_dump(mode="json")
-                for item in _RUNTIME.service.list_a2a_messages(task_id)
-            ],
-            "budget": (
-                _RUNTIME.store.get_runtime_budget(task_id).model_dump(mode="json")
-                if task.runtime_kind == "dynamic_goal"
-                else None
-            ),
-        }
+        return build_developer_trace(_RUNTIME.service, task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
 
@@ -1879,7 +1806,7 @@ async def stream_radar_task_events(
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
     cursor = _sse_cursor(request.headers.get("last-event-id"), after_sequence)
 
-    if task.status in {
+    if isinstance(task, HistoricalTaskRecord) or task.status in {
         RadarTaskStatus.COMPLETED,
         RadarTaskStatus.FAILED,
         RadarTaskStatus.CANCELLED,
@@ -1903,7 +1830,7 @@ async def stream_radar_task_events(
                 live_cursor = event.sequence
                 yield _format_sse_event(event)
             current = _RUNTIME.service.get_task(task_id)
-            if current.status in {
+            if isinstance(current, HistoricalTaskRecord) or current.status in {
                 RadarTaskStatus.COMPLETED,
                 RadarTaskStatus.FAILED,
                 RadarTaskStatus.CANCELLED,
@@ -1938,65 +1865,60 @@ async def confirm_radar_task(
     try:
         task = _RUNTIME.service.get_task(task_id)
         _assert_task_runtime_writable(task)
-        if task.runtime_kind == "product_episode":
-            if not x_actor_id or x_actor_role not in {
-                "elder",
-                "family",
-                "doctor",
-            }:
-                raise RoleAccessDenied(
-                    "human decisions require authenticated actor and role headers"
-                )
-            actor_id, actor_role = x_actor_id, x_actor_role
-            projection = _RUNTIME.store.get_confirmation(
-                payload.confirmation_id
+        if not x_actor_id or x_actor_role not in {
+            "elder",
+            "family",
+            "doctor",
+        }:
+            raise RoleAccessDenied(
+                "human decisions require authenticated actor and role headers"
             )
-            if len(projection.evidence_refs) < 2:
-                raise InvalidTaskTransition(
-                    "product confirmation lacks an exact target binding"
-                )
-            target_id, target_hash = projection.evidence_refs[:2]
-            matching = [
-                item
-                for item in _RUNTIME.human_decisions.repository.list(
-                    task_id=task_id
-                )
-                if item.proposal.target_id == target_id
-                and item.proposal.target_hash == target_hash
-            ]
-            if len(matching) != 1:
-                raise InvalidTaskTransition(
-                    "product confirmation has no unique authoritative decision"
-                )
-            decision = _RUNTIME.human_decisions.decide(
-                matching[0].decision_id,
-                actor_id=actor_id,
-                actor_role=actor_role,
-                choice=(
-                    HumanDecisionChoice.APPROVE
-                    if payload.approved
-                    else HumanDecisionChoice.REJECT
-                ),
-                target_hash=target_hash,
-                reason=payload.reason,
-                role_binding_id=(
-                    x_role_binding_id
-                    or next(
-                        (
-                            item.strip()
-                            for item in (x_role_binding_ids or "").split(",")
-                            if item.strip()
-                        ),
-                        None,
-                    )
-                ),
-                authorization_id=x_authorization_id,
+        actor_id, actor_role = x_actor_id, x_actor_role
+        projection = _RUNTIME.store.get_confirmation(payload.confirmation_id)
+        if len(projection.evidence_refs) < 2:
+            raise InvalidTaskTransition(
+                "product confirmation lacks an exact target binding"
             )
-            if decision.status in {
-                HumanDecisionStatus.PENDING,
-                HumanDecisionStatus.PARTIALLY_APPROVED,
-            }:
-                return projection
+        target_id, target_hash = projection.evidence_refs[:2]
+        matching = [
+            item
+            for item in _RUNTIME.human_decisions.repository.list(task_id=task_id)
+            if item.proposal.target_id == target_id
+            and item.proposal.target_hash == target_hash
+        ]
+        if len(matching) != 1:
+            raise InvalidTaskTransition(
+                "product confirmation has no unique authoritative decision"
+            )
+        decision = _RUNTIME.human_decisions.decide(
+            matching[0].decision_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
+            choice=(
+                HumanDecisionChoice.APPROVE
+                if payload.approved
+                else HumanDecisionChoice.REJECT
+            ),
+            target_hash=target_hash,
+            reason=payload.reason,
+            role_binding_id=(
+                x_role_binding_id
+                or next(
+                    (
+                        item.strip()
+                        for item in (x_role_binding_ids or "").split(",")
+                        if item.strip()
+                    ),
+                    None,
+                )
+            ),
+            authorization_id=x_authorization_id,
+        )
+        if decision.status in {
+            HumanDecisionStatus.PENDING,
+            HumanDecisionStatus.PARTIALLY_APPROVED,
+        }:
+            return projection
         resolved = _RUNTIME.service.resolve_confirmation(
             task_id,
             payload.confirmation_id,
@@ -2004,17 +1926,14 @@ async def confirm_radar_task(
             actor_id=actor_id,
             actor_role=actor_role,
         )
-        if task.runtime_kind == "product_episode":
-            pending = [
-                item
-                for item in _RUNTIME.service.list_confirmations(task_id)
-                if item.status == "pending" and item.blocks_daily_flow
-            ]
-            if not pending:
-                _RUNTIME.resume_product_after_confirmations(task_id)
-                resolved = _RUNTIME.store.get_confirmation(
-                    resolved.confirmation_id
-                )
+        pending = [
+            item
+            for item in _RUNTIME.service.list_confirmations(task_id)
+            if item.status == "pending" and item.blocks_daily_flow
+        ]
+        if not pending:
+            _RUNTIME.resume_product_after_confirmations(task_id)
+            resolved = _RUNTIME.store.get_confirmation(resolved.confirmation_id)
         return resolved
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task or confirmation not found.") from exc
@@ -2206,15 +2125,13 @@ def _product_user_input_id(task_id: str, request_id: str) -> str:
 
 def _workflow_questionnaire_candidates(
     artifacts: list[RadarArtifactVersion],
-) -> list[QuestionnaireCandidate]:
+) -> list[dict[str, Any]]:
     snapshots = [item for item in artifacts if item.artifact_type == "workflow_run"]
     if not snapshots:
         return []
     latest = max(snapshots, key=lambda item: (item.version, item.created_at))
-    return [
-        QuestionnaireCandidate.model_validate(item)
-        for item in latest.payload.get("questionnaire_candidates", [])
-    ]
+    values = latest.payload.get("questionnaire_candidates", [])
+    return [dict(item) for item in values if isinstance(item, dict)][:3]
 
 
 def _replay_trend_summaries(
@@ -2252,6 +2169,77 @@ def _replay_trend_summaries(
     return summaries
 
 
+def _task_status_value(task: RadarAgentTask | HistoricalTaskRecord) -> str:
+    status = task.status
+    return status.value if isinstance(status, RadarTaskStatus) else str(status)
+
+
+def _event_payload(event: RadarTaskEvent | HistoricalRecord) -> dict[str, Any]:
+    return (
+        event.to_dict()
+        if isinstance(event, HistoricalRecord)
+        else event.model_dump(mode="json")
+    )
+
+
+def _event_type(event: RadarTaskEvent | HistoricalRecord) -> str:
+    return str(_event_payload(event).get("event_type", ""))
+
+
+def _decision_trace_entry(
+    event: RadarTaskEvent | HistoricalRecord,
+) -> dict[str, Any]:
+    persisted = _event_payload(event)
+    details = persisted.get("payload", {})
+    if not isinstance(details, dict):
+        details = {}
+    allowed_details = {
+        "goal_type",
+        "execution_mode",
+        "completion_status",
+        "revision",
+        "capabilities",
+        "agent",
+        "capability",
+        "confidence",
+        "uncertainty_count",
+        "tool_name",
+        "sender",
+        "receiver",
+        "intent",
+        "decision",
+        "decision_id",
+        "risk_level",
+        "route",
+        "required_roles",
+        "target_hash",
+        "decision_summary",
+        "question_type",
+        "why_needed",
+        "reason_code",
+        "checkpoint_kind",
+        "changed_fields",
+        "source_agent_invocation_id",
+        "target_agent_invocation_id",
+        "causal_source_agent_invocation_id",
+        "resolution_status",
+        "request_type",
+        "skip_reason",
+        "reused_from_plan_id",
+        "action_type",
+        "artifact_version_id",
+    }
+    return {
+        "sequence": persisted.get("sequence"),
+        "event_type": persisted.get("event_type"),
+        "summary": persisted.get("message"),
+        "created_at": persisted.get("created_at"),
+        "details": {
+            key: value for key, value in details.items() if key in allowed_details
+        },
+    }
+
+
 def _sse_cursor(last_event_id: str | None, after_sequence: int) -> int:
     if not last_event_id:
         return after_sequence
@@ -2272,11 +2260,11 @@ def _sse_history(task_id: str, *, after_sequence: int) -> str:
     return "".join([*chunks, ": keep-alive\n\n"])
 
 
-def _format_sse_event(event: RadarTaskEvent) -> str:
-    payload = event.model_dump(mode="json")
+def _format_sse_event(event: RadarTaskEvent | HistoricalRecord) -> str:
+    payload = _event_payload(event)
     return (
-        f"id: {event.sequence}\n"
-        f"event: {event.event_type}\n"
+        f"id: {payload.get('sequence', '')}\n"
+        f"event: {payload.get('event_type', 'historical.event')}\n"
         f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
     )
 

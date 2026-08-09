@@ -2,27 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from threading import RLock
 from typing import Any
-from uuid import uuid4
 
-from sleepagent.radar_agent.dynamic import (
-    AgentInvocation,
-    CompletionReceipt,
-    DynamicStepRecord,
-    ExecutionPlan,
-    FactSnapshot,
-    JobLease,
-    ModelInvocation,
-    RuntimeBudget,
-    RuntimeCheckpoint,
-    ToolInvocation,
-    UserGoal,
-    UserInputRequest,
-    UserInputResponse,
+from sleepagent.radar_agent.persistence.history import (
+    HistoricalRecord,
+    HistoricalRuntimeReader,
+    HistoricalTaskRecord,
 )
-
 from sleepagent.radar_agent.persistence.migrations import (
     RADAR_AGENT_POSTGRES_MIGRATION_SQL,
     RADAR_AGENT_POSTGRES_MIGRATIONS,
@@ -40,14 +28,15 @@ from sleepagent.radar_agent.persistence.models import (
     RadarUserRoleBinding,
 )
 from sleepagent.radar_agent.runtime.contracts import (
+    CANONICAL_AGENT_RUNTIME_KIND,
     RadarAgentTask,
     RadarArtifactVersion,
     RadarTaskEvent,
     RadarTaskStatus,
+    UserInputRequest,
+    UserInputResponse,
 )
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
-    ConflictRecord,
     EvidenceClaim,
     EvidenceLedger,
     HumanConfirmationRequest,
@@ -65,6 +54,11 @@ class RadarPersistenceStore:
         self.connection = connection
         self.dialect = dialect
         self._lock = RLock()
+        self.history = HistoricalRuntimeReader(
+            connection,
+            dialect=dialect,
+            lock=self._lock,
+        )
         if dialect == "sqlite":
             self.connection.execute("PRAGMA foreign_keys = ON")
 
@@ -211,13 +205,18 @@ class RadarPersistenceStore:
 
     def save_task(self, task: RadarAgentTask) -> RadarAgentTask:
         existing = self._fetchone(
-            "SELECT task_json FROM radar_tasks WHERE task_id = ?", (task.task_id,)
+            """
+            SELECT runtime_kind, runtime_contract_version, task_json
+            FROM radar_tasks WHERE task_id = ?
+            """,
+            (task.task_id,),
         )
         if existing is not None:
-            persisted = RadarAgentTask.model_validate_json(existing[0])
+            if str(existing[0]) != CANONICAL_AGENT_RUNTIME_KIND:
+                raise PermissionError("historical Agent task records are read-only")
             immutable_before = (
-                persisted.runtime_kind,
-                persisted.runtime_contract_version,
+                str(existing[0]),
+                str(existing[1]),
             )
             immutable_after = (task.runtime_kind, task.runtime_contract_version)
             if immutable_before != immutable_after:
@@ -264,316 +263,8 @@ class RadarPersistenceStore:
         )
         return task
 
-    def save_task_if_version(
-        self, task: RadarAgentTask, *, expected_version: int
-    ) -> RadarAgentTask:
-        """Optimistic write used by the dynamic controller state machine."""
-
-        task = RadarAgentTask.model_validate(task.model_dump(mode="python"))
-        if task.task_version != expected_version + 1:
-            raise ValueError("optimistic task update must increment task_version once")
-        with self._lock:
-            cursor = self.connection.execute(
-                self._sql(
-                    """
-                    UPDATE radar_tasks SET
-                      status = ?, role = ?, scenario = ?, execution_mode = ?,
-                      completion_status = ?, task_version = ?, task_json = ?,
-                      updated_at = ?
-                    WHERE task_id = ? AND task_version = ?
-                    """
-                ),
-                (
-                    task.status.value,
-                    task.role,
-                    task.scenario,
-                    task.execution_mode,
-                    task.completion_status,
-                    task.task_version,
-                    _dump_json(task),
-                    _dump_datetime(task.updated_at),
-                    task.task_id,
-                    expected_version,
-                ),
-            )
-            if cursor.rowcount != 1:
-                self.connection.rollback()
-                raise RuntimeError("optimistic task version conflict")
-            self.connection.commit()
-        return task
-
-    def save_user_goal(self, goal: UserGoal) -> UserGoal:
-        task = self.get_task(goal.task_id)
-        if task.runtime_kind != "dynamic_goal" or task.node_status:
-            raise ValueError("dynamic goals require a clean dynamic task")
-        if goal.subject_id != task.subject_id:
-            raise ValueError("dynamic goal subject does not match task")
-        row = self._fetchone(
-            "SELECT goal_json FROM radar_dynamic_goals WHERE goal_id = ?",
-            (goal.goal_id,),
-        )
-        if row is not None:
-            existing = UserGoal.model_validate_json(row[0])
-            if existing != goal:
-                raise ValueError("accepted dynamic goals are immutable")
-            return existing
-        self._execute(
-            """
-            INSERT INTO radar_dynamic_goals (
-              goal_id, task_id, goal_type, goal_json, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                goal.goal_id,
-                goal.task_id,
-                goal.goal_type.value,
-                _dump_json(goal),
-                _dump_datetime(goal.created_at),
-            ),
-        )
-        return goal
-
-    def get_user_goal(self, goal_id: str) -> UserGoal:
-        return self._get_json_model(
-            "SELECT goal_json FROM radar_dynamic_goals WHERE goal_id = ?",
-            (goal_id,),
-            UserGoal,
-            f"dynamic goal not found: {goal_id}",
-        )
-
-    def get_task_goal(self, task_id: str) -> UserGoal:
-        return self._get_json_model(
-            """
-            SELECT goal_json FROM radar_dynamic_goals
-            WHERE task_id = ? ORDER BY created_at LIMIT 1
-            """,
-            (task_id,),
-            UserGoal,
-            f"dynamic goal not found for task: {task_id}",
-        )
-
-    def save_execution_plan(self, plan: ExecutionPlan) -> ExecutionPlan:
-        task = self.get_task(plan.task_id)
-        if task.runtime_kind != "dynamic_goal" or task.node_status:
-            raise ValueError("execution plans require a clean dynamic task")
-        goal = self.get_task_goal(plan.task_id)
-        if plan.goal_id != goal.goal_id:
-            raise ValueError("execution plan does not match the accepted goal")
-        existing = self._fetchone(
-            "SELECT plan_json FROM radar_dynamic_plan_revisions WHERE plan_id = ?",
-            (plan.plan_id,),
-        )
-        if existing is not None:
-            persisted = ExecutionPlan.model_validate_json(existing[0])
-            if persisted != plan:
-                raise ValueError("persisted execution plans are immutable")
-            return persisted
-        self._execute(
-            """
-            INSERT INTO radar_dynamic_plan_revisions (
-              plan_id, task_id, goal_id, revision, supersedes_plan_id,
-              plan_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(plan_id) DO NOTHING
-            """,
-            (
-                plan.plan_id,
-                plan.task_id,
-                plan.goal_id,
-                plan.revision,
-                plan.supersedes_plan_id,
-                _dump_json(plan),
-                _dump_datetime(plan.created_at),
-            ),
-        )
-        for step in plan.steps:
-            self.save_dynamic_step(
-                DynamicStepRecord(task_id=plan.task_id, plan_id=plan.plan_id, step=step)
-            )
-        return plan
-
-    def get_execution_plan(self, plan_id: str) -> ExecutionPlan:
-        return self._get_json_model(
-            "SELECT plan_json FROM radar_dynamic_plan_revisions WHERE plan_id = ?",
-            (plan_id,),
-            ExecutionPlan,
-            f"dynamic plan not found: {plan_id}",
-        )
-
-    def list_execution_plans(self, task_id: str) -> list[ExecutionPlan]:
-        return self._list_json_models(
-            """
-            SELECT plan_json FROM radar_dynamic_plan_revisions
-            WHERE task_id = ? ORDER BY revision
-            """,
-            (task_id,),
-            ExecutionPlan,
-        )
-
-    def save_dynamic_step(self, record: DynamicStepRecord) -> DynamicStepRecord:
-        plan = self.get_execution_plan(record.plan_id)
-        if plan.task_id != record.task_id:
-            raise ValueError("dynamic step task does not match its execution plan")
-        declared = next(
-            (item for item in plan.steps if item.step_id == record.step.step_id),
-            None,
-        )
-        if declared is None or declared != record.step:
-            raise ValueError("dynamic step is not declared by its immutable plan")
-        self._execute(
-            """
-            INSERT INTO radar_dynamic_steps (
-              task_id, plan_id, step_id, ordinal, status, step_json,
-              output_json, started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(plan_id, step_id) DO UPDATE SET
-              status = excluded.status,
-              step_json = excluded.step_json,
-              output_json = excluded.output_json,
-              started_at = excluded.started_at,
-              finished_at = excluded.finished_at
-            """,
-            (
-                record.task_id,
-                record.plan_id,
-                record.step.step_id,
-                record.step.ordinal,
-                record.status,
-                _dump_json(record),
-                _dump_plain_json(record.output),
-                _dump_optional_datetime(record.started_at),
-                _dump_optional_datetime(record.finished_at),
-            ),
-        )
-        return record
-
-    def list_dynamic_steps(self, plan_id: str) -> list[DynamicStepRecord]:
-        return self._list_json_models(
-            """
-            SELECT step_json FROM radar_dynamic_steps
-            WHERE plan_id = ? ORDER BY ordinal
-            """,
-            (plan_id,),
-            DynamicStepRecord,
-        )
-
-    def save_model_invocation(self, value: ModelInvocation) -> ModelInvocation:
-        self._execute(
-            """
-            INSERT INTO radar_model_invocations (
-              invocation_id, task_id, purpose, agent, client_idempotency_key,
-              attempt, outcome, provider_request_id, invocation_json,
-              started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(invocation_id) DO UPDATE SET
-              outcome = excluded.outcome,
-              provider_request_id = excluded.provider_request_id,
-              invocation_json = excluded.invocation_json,
-              finished_at = excluded.finished_at
-            """,
-            (
-                value.invocation_id,
-                value.task_id,
-                value.purpose,
-                value.agent.value,
-                value.client_idempotency_key,
-                value.attempt,
-                value.outcome.value,
-                value.provider_request_id,
-                _dump_json(value),
-                _dump_datetime(value.started_at),
-                _dump_optional_datetime(value.finished_at),
-            ),
-        )
-        return value
-
-    def list_model_invocations(self, task_id: str) -> list[ModelInvocation]:
-        return self._list_json_models(
-            """
-            SELECT invocation_json FROM radar_model_invocations
-            WHERE task_id = ? ORDER BY started_at, invocation_id
-            """,
-            (task_id,),
-            ModelInvocation,
-        )
-
-    def save_agent_invocation(self, value: AgentInvocation) -> AgentInvocation:
-        self._execute(
-            """
-            INSERT INTO radar_agent_invocations (
-              invocation_id, task_id, plan_id, step_id, agent, status,
-              caused_by_a2a_message_id, invocation_json, started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(invocation_id) DO UPDATE SET
-              status = excluded.status,
-              invocation_json = excluded.invocation_json,
-              finished_at = excluded.finished_at
-            """,
-            (
-                value.invocation_id,
-                value.task_id,
-                value.plan_id,
-                value.step_id,
-                value.agent.value,
-                value.status.value,
-                value.caused_by_a2a_message_id,
-                _dump_json(value),
-                _dump_datetime(value.started_at),
-                _dump_optional_datetime(value.finished_at),
-            ),
-        )
-        return value
-
-    def list_agent_invocations(self, task_id: str) -> list[AgentInvocation]:
-        return self._list_json_models(
-            """
-            SELECT invocation_json FROM radar_agent_invocations
-            WHERE task_id = ? ORDER BY started_at, invocation_id
-            """,
-            (task_id,),
-            AgentInvocation,
-        )
-
-    def save_tool_invocation(self, value: ToolInvocation) -> ToolInvocation:
-        self._execute(
-            """
-            INSERT INTO radar_tool_invocations (
-              invocation_id, task_id, plan_id, step_id, tool_name,
-              client_idempotency_key, attempt, outcome, invocation_json,
-              started_at, finished_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(invocation_id) DO UPDATE SET
-              outcome = excluded.outcome,
-              invocation_json = excluded.invocation_json,
-              finished_at = excluded.finished_at
-            """,
-            (
-                value.invocation_id,
-                value.task_id,
-                value.plan_id,
-                value.step_id,
-                value.tool_name,
-                value.client_idempotency_key,
-                value.attempt,
-                value.outcome.value,
-                _dump_json(value),
-                _dump_datetime(value.started_at),
-                _dump_optional_datetime(value.finished_at),
-            ),
-        )
-        return value
-
-    def list_tool_invocations(self, task_id: str) -> list[ToolInvocation]:
-        return self._list_json_models(
-            """
-            SELECT invocation_json FROM radar_tool_invocations
-            WHERE task_id = ? ORDER BY started_at, invocation_id
-            """,
-            (task_id,),
-            ToolInvocation,
-        )
-
     def save_user_input_request(self, value: UserInputRequest) -> UserInputRequest:
+        self._require_canonical_task(value.task_id)
         existing = self._fetchone(
             "SELECT response_json FROM radar_user_input_requests WHERE request_id = ?",
             (value.request_id,),
@@ -604,14 +295,20 @@ class RadarPersistenceStore:
         return value
 
     def get_user_input_request(self, request_id: str) -> UserInputRequest:
-        return self._get_json_model(
-            "SELECT request_json FROM radar_user_input_requests WHERE request_id = ?",
+        row = self._fetchone(
+            """
+            SELECT task_id, request_json FROM radar_user_input_requests
+            WHERE request_id = ?
+            """,
             (request_id,),
-            UserInputRequest,
-            f"user input request not found: {request_id}",
         )
+        if row is None:
+            raise KeyError(f"user input request not found: {request_id}")
+        self._require_canonical_task(str(row[0]))
+        return UserInputRequest.model_validate_json(row[1])
 
     def list_user_input_requests(self, task_id: str) -> list[UserInputRequest]:
+        self._require_canonical_task(task_id)
         return self._list_json_models(
             """
             SELECT request_json FROM radar_user_input_requests
@@ -689,224 +386,82 @@ class RadarPersistenceStore:
 
     def get_user_input_response(self, request_id: str) -> UserInputResponse | None:
         row = self._fetchone(
-            "SELECT response_json FROM radar_user_input_requests WHERE request_id = ?",
+            """
+            SELECT task_id, response_json FROM radar_user_input_requests
+            WHERE request_id = ?
+            """,
             (request_id,),
         )
-        if row is None or row[0] is None:
+        if row is None:
             return None
-        return UserInputResponse.model_validate_json(row[0])
+        self._require_canonical_task(str(row[0]))
+        if row[1] is None:
+            return None
+        return UserInputResponse.model_validate_json(row[1])
 
-    def save_runtime_budget(self, value: RuntimeBudget) -> RuntimeBudget:
-        self._execute(
-            """
-            INSERT INTO radar_runtime_budgets (task_id, budget_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(task_id) DO UPDATE SET
-              budget_json = excluded.budget_json,
-              updated_at = excluded.updated_at
-            """,
-            (value.task_id, _dump_json(value), _dump_datetime(value.updated_at)),
-        )
-        return value
-
-    def get_runtime_budget(self, task_id: str) -> RuntimeBudget:
-        return self._get_json_model(
-            "SELECT budget_json FROM radar_runtime_budgets WHERE task_id = ?",
-            (task_id,),
-            RuntimeBudget,
-            f"runtime budget not found: {task_id}",
-        )
-
-    def save_runtime_checkpoint(self, value: RuntimeCheckpoint) -> RuntimeCheckpoint:
-        self._execute(
-            """
-            INSERT INTO radar_runtime_checkpoints (
-              checkpoint_id, task_id, sequence, state_json, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(checkpoint_id) DO UPDATE SET state_json = excluded.state_json
-            """,
-            (
-                value.checkpoint_id,
-                value.task_id,
-                value.sequence,
-                _dump_json(value),
-                _dump_datetime(value.created_at),
-            ),
-        )
-        return value
-
-    def latest_runtime_checkpoint(self, task_id: str) -> RuntimeCheckpoint | None:
+    def get_task(self, task_id: str) -> RadarAgentTask | HistoricalTaskRecord:
         row = self._fetchone(
-            """
-            SELECT state_json FROM radar_runtime_checkpoints
-            WHERE task_id = ? ORDER BY sequence DESC LIMIT 1
-            """,
+            "SELECT runtime_kind, task_json FROM radar_tasks WHERE task_id = ?",
             (task_id,),
         )
-        return RuntimeCheckpoint.model_validate_json(row[0]) if row else None
+        if row is None:
+            raise KeyError(f"radar task not found: {task_id}")
+        if str(row[0]) == CANONICAL_AGENT_RUNTIME_KIND:
+            return RadarAgentTask.decode_persisted_json(row[1])
+        return self.history.read_task(task_id)
 
-    def acquire_job_lease(
+    def get_task_by_idempotency_key(
         self,
-        task_id: str,
-        *,
-        worker_id: str,
-        lease_seconds: int = 30,
-        now: datetime | None = None,
-    ) -> JobLease | None:
-        current = now or datetime.now(timezone.utc)
-        lease = JobLease(
-            task_id=task_id,
-            worker_id=worker_id,
-            lease_token=uuid4().hex,
-            lease_expires_at=current + timedelta(seconds=lease_seconds),
-            heartbeat_at=current,
-        )
-        self._execute(
-            """
-            INSERT INTO radar_job_leases (
-              task_id, worker_id, lease_token, lease_expires_at, heartbeat_at, attempt
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(task_id) DO UPDATE SET
-              worker_id = excluded.worker_id,
-              lease_token = excluded.lease_token,
-              lease_expires_at = excluded.lease_expires_at,
-              heartbeat_at = excluded.heartbeat_at,
-              attempt = radar_job_leases.attempt + 1
-            WHERE radar_job_leases.lease_expires_at <= ?
-               OR radar_job_leases.worker_id = excluded.worker_id
-            """,
-            (
-                lease.task_id,
-                lease.worker_id,
-                lease.lease_token,
-                _dump_datetime(lease.lease_expires_at),
-                _dump_datetime(lease.heartbeat_at),
-                lease.attempt,
-                _dump_datetime(current),
-            ),
-        )
+        idempotency_key: str,
+    ) -> RadarAgentTask | HistoricalTaskRecord | None:
         row = self._fetchone(
             """
-            SELECT worker_id, lease_token, lease_expires_at, heartbeat_at, attempt
-            FROM radar_job_leases WHERE task_id = ?
+            SELECT task_id, runtime_kind, task_json FROM radar_tasks
+            WHERE idempotency_key = ?
             """,
-            (task_id,),
-        )
-        if row is None or row[1] != lease.lease_token:
-            return None
-        return JobLease(
-            task_id=task_id,
-            worker_id=row[0],
-            lease_token=row[1],
-            lease_expires_at=datetime.fromisoformat(row[2]),
-            heartbeat_at=datetime.fromisoformat(row[3]),
-            attempt=row[4],
-        )
-
-    def release_job_lease(self, task_id: str, *, lease_token: str) -> bool:
-        row = self._fetchone(
-            "SELECT lease_token FROM radar_job_leases WHERE task_id = ?", (task_id,)
-        )
-        if row is None or row[0] != lease_token:
-            return False
-        self._execute("DELETE FROM radar_job_leases WHERE task_id = ?", (task_id,))
-        return True
-
-    def save_fact_snapshot(self, value: FactSnapshot) -> FactSnapshot:
-        row = self._fetchone(
-            "SELECT snapshot_json FROM radar_fact_snapshots WHERE snapshot_id = ?",
-            (value.snapshot_id,),
-        )
-        if row is not None:
-            existing = FactSnapshot.model_validate_json(row[0])
-            if existing != value:
-                raise ValueError("accepted fact snapshots are immutable")
-            return existing
-        self._execute(
-            """
-            INSERT INTO radar_fact_snapshots (
-              snapshot_id, task_id, sha256, snapshot_json, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                value.snapshot_id,
-                value.task_id,
-                value.sha256,
-                _dump_json(value),
-                _dump_datetime(value.created_at),
-            ),
-        )
-        return value
-
-    def get_fact_snapshot(self, snapshot_id: str) -> FactSnapshot:
-        return self._get_json_model(
-            "SELECT snapshot_json FROM radar_fact_snapshots WHERE snapshot_id = ?",
-            (snapshot_id,),
-            FactSnapshot,
-            f"fact snapshot not found: {snapshot_id}",
-        )
-
-    def save_completion_receipt(self, value: CompletionReceipt) -> CompletionReceipt:
-        self._execute(
-            """
-            INSERT INTO radar_completion_receipts (
-              receipt_id, task_id, execution_mode, completion_status,
-              receipt_json, completed_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(receipt_id) DO UPDATE SET receipt_json = excluded.receipt_json
-            """,
-            (
-                value.receipt_id,
-                value.task_id,
-                value.execution_mode.value,
-                value.completion_status.value,
-                _dump_json(value),
-                _dump_datetime(value.completed_at),
-            ),
-        )
-        return value
-
-    def get_completion_receipt(self, task_id: str) -> CompletionReceipt:
-        return self._get_json_model(
-            """
-            SELECT receipt_json FROM radar_completion_receipts
-            WHERE task_id = ? ORDER BY completed_at DESC LIMIT 1
-            """,
-            (task_id,),
-            CompletionReceipt,
-            f"completion receipt not found: {task_id}",
-        )
-
-    def get_task(self, task_id: str) -> RadarAgentTask:
-        return self._get_json_model(
-            "SELECT task_json FROM radar_tasks WHERE task_id = ?",
-            (task_id,),
-            RadarAgentTask,
-            f"radar task not found: {task_id}",
-        )
-
-    def get_task_by_idempotency_key(self, idempotency_key: str) -> RadarAgentTask | None:
-        row = self._fetchone(
-            "SELECT task_json FROM radar_tasks WHERE idempotency_key = ?",
             (idempotency_key,),
         )
-        return RadarAgentTask.model_validate_json(row[0]) if row is not None else None
+        if row is None:
+            return None
+        if str(row[1]) == CANONICAL_AGENT_RUNTIME_KIND:
+            return RadarAgentTask.decode_persisted_json(row[2])
+        return self.history.read_task(str(row[0]))
 
     def list_tasks(
         self,
         *,
         statuses: set[RadarTaskStatus] | None = None,
-    ) -> list[RadarAgentTask]:
-        tasks = self._list_json_models(
-            "SELECT task_json FROM radar_tasks ORDER BY created_at, task_id",
-            (),
-            RadarAgentTask,
+    ) -> list[RadarAgentTask | HistoricalTaskRecord]:
+        rows = self._fetchall(
+            """
+            SELECT task_id, runtime_kind, task_json
+            FROM radar_tasks ORDER BY created_at, task_id
+            """
         )
+        tasks: list[RadarAgentTask | HistoricalTaskRecord] = [
+            (
+                RadarAgentTask.decode_persisted_json(row[2])
+                if str(row[1]) == CANONICAL_AGENT_RUNTIME_KIND
+                else self.history.read_task(str(row[0]))
+            )
+            for row in rows
+        ]
         if statuses is None:
             return tasks
-        return [task for task in tasks if task.status in statuses]
+        allowed = {status.value for status in statuses}
+        return [
+            task
+            for task in tasks
+            if (
+                task.status.value
+                if isinstance(task, RadarAgentTask)
+                else task.status
+            )
+            in allowed
+        ]
 
     def save_task_event(self, event: RadarTaskEvent) -> RadarTaskEvent:
+        self._require_canonical_task(event.task_id)
         self._execute(
             """
             INSERT INTO radar_task_events (
@@ -931,7 +486,15 @@ class RadarPersistenceStore:
         task_id: str,
         *,
         after_sequence: int = 0,
-    ) -> list[RadarTaskEvent]:
+    ) -> list[RadarTaskEvent | HistoricalRecord]:
+        task = self.get_task(task_id)
+        if isinstance(task, HistoricalTaskRecord):
+            return list(
+                self.history.read_events(
+                    task_id,
+                    after_sequence=after_sequence,
+                )
+            )
         return self._list_json_models(
             """
             SELECT event_json FROM radar_task_events
@@ -943,6 +506,7 @@ class RadarPersistenceStore:
         )
 
     def delete_task(self, task_id: str) -> None:
+        self._require_canonical_task(task_id)
         self._execute("DELETE FROM radar_tasks WHERE task_id = ?", (task_id,))
 
     def delete_subject_data(self, subject_id: str) -> dict[str, int]:
@@ -1457,85 +1021,6 @@ class RadarPersistenceStore:
                 claim.confidence,
                 _dump_json(claim),
             ),
-        )
-
-    def save_a2a_message(self, message: A2AMessage) -> A2AMessage:
-        self._execute(
-            """
-            INSERT INTO radar_a2a_messages (
-              message_id, task_id, target_task_id, sender, receiver, intent, risk_level,
-              collaboration_round, routed_by, shared_artifact_type,
-              message_status, message_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(message_id) DO UPDATE SET
-              target_task_id = excluded.target_task_id,
-              collaboration_round = excluded.collaboration_round,
-              routed_by = excluded.routed_by,
-              shared_artifact_type = excluded.shared_artifact_type,
-              message_status = excluded.message_status,
-              message_json = excluded.message_json
-            """,
-            (
-                message.message_id,
-                message.task_id,
-                message.target_task_id,
-                message.sender,
-                message.receiver,
-                message.intent,
-                message.risk_level.value,
-                message.collaboration_round,
-                message.routed_by,
-                message.shared_artifact_type,
-                message.message_status,
-                _dump_json(message),
-                _dump_datetime(message.created_at),
-            ),
-        )
-        return message
-
-    def list_a2a_messages(self, task_id: str) -> list[A2AMessage]:
-        return self._list_json_models(
-            """
-            SELECT message_json FROM radar_a2a_messages
-            WHERE task_id = ?
-            ORDER BY created_at, message_id
-            """,
-            (task_id,),
-            A2AMessage,
-        )
-
-    def save_conflict(self, conflict: ConflictRecord) -> ConflictRecord:
-        self._execute(
-            """
-            INSERT INTO radar_conflict_records (
-              conflict_id, task_id, final_status, requires_human_confirmation,
-              conflict_json, decided_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conflict_id) DO UPDATE SET
-              final_status = excluded.final_status,
-              requires_human_confirmation = excluded.requires_human_confirmation,
-              conflict_json = excluded.conflict_json
-            """,
-            (
-                conflict.conflict_id,
-                conflict.task_id,
-                conflict.final_status,
-                int(conflict.requires_human_confirmation),
-                _dump_json(conflict),
-                _dump_datetime(conflict.decided_at),
-            ),
-        )
-        return conflict
-
-    def list_conflicts(self, task_id: str) -> list[ConflictRecord]:
-        return self._list_json_models(
-            """
-            SELECT conflict_json FROM radar_conflict_records
-            WHERE task_id = ?
-            ORDER BY decided_at, conflict_id
-            """,
-            (task_id,),
-            ConflictRecord,
         )
 
     def save_alert(self, alert: RadarAlertRecord) -> RadarAlertRecord:
@@ -3228,6 +2713,12 @@ class RadarPersistenceStore:
                 """
             )
         ]
+
+    def _require_canonical_task(self, task_id: str) -> RadarAgentTask:
+        task = self.get_task(task_id)
+        if not isinstance(task, RadarAgentTask):
+            raise PermissionError("historical Agent task records are read-only")
+        return task
 
     def _get_json_model(
         self,

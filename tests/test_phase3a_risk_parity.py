@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import inspect
-from datetime import date
 
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.radar_agent.agents import RiskSignalAgent
 from sleepagent.radar_agent.product_agent.contracts import (
     CurrentContextRisk,
     LongitudinalTrend,
@@ -26,34 +24,14 @@ from sleepagent.radar_agent.product_agent.tools.risk_classification import (
     RiskObservation,
     TrendRiskSignal,
 )
-from sleepagent.radar_agent.schemas import (
-    EvidenceClaim,
-    RadarAgentName,
-    RadarDataQualityStatus,
-    RadarNightSummary,
-    ReviewStatus,
-    RiskLevel,
-)
-
-
-NIGHT = date(2026, 7, 10)
+from tests.golden_fixtures import load_phase3a_capability_goldens
 
 
 def test_urgent_policy_preserves_legacy_terms_priority_and_evidence_ref() -> None:
+    expected = load_phase3a_capability_goldens()["risk_classification"]
     tool = RiskClassificationTool()
     for term in URGENT_TERMS:
         text = f"context before {term} context after"
-        legacy = RiskSignalAgent().analyze(
-            task_id="legacy-urgent",
-            night_summary=_summary(
-                quality_status=RadarDataQualityStatus.UNUSABLE,
-                confidence_label="not_interpretable",
-                health_conclusion_allowed=False,
-            ),
-            trend_claims=[_trend_signal("legacy", RiskLevel.ESCALATE)],
-            text_inputs=[text],
-        )
-
         migrated = tool.classify(
             RiskClassificationInput(
                 text_inputs=(text,),
@@ -72,28 +50,23 @@ def test_urgent_policy_preserves_legacy_terms_priority_and_evidence_ref() -> Non
             )
         )
 
-        assert legacy.risk_level == RiskLevel.URGENT_BOUNDARY
         assert migrated.risk_level == RiskClassificationLevel.URGENT_BOUNDARY
         assert migrated.reason_codes == ("urgent_text_boundary",)
-        assert migrated.source_refs == tuple(legacy.evidence_refs)
+        assert migrated.source_refs == (
+            expected["urgent_evidence_refs"][term],
+        )
         assert migrated.should_stop_sleep_trend_explanation is True
         assert migrated.urgent_required is True
 
 
 def test_quality_block_precedes_legacy_trend_escalation() -> None:
-    legacy_claims = [
-        _trend_signal("sleep", RiskLevel.WATCH),
-        _trend_signal("movement", RiskLevel.WATCH),
-        _trend_signal("vital", RiskLevel.WATCH),
+    expected = load_phase3a_capability_goldens()["risk_classification"][
+        "quality_block"
     ]
-    legacy = RiskSignalAgent().analyze(
-        task_id="legacy-quality-block",
-        night_summary=_summary(
-            quality_status=RadarDataQualityStatus.UNUSABLE,
-            confidence_label="not_interpretable",
-            health_conclusion_allowed=False,
-        ),
-        trend_claims=legacy_claims,
+    trend_signals = (
+        _trend_signal("sleep", "watch"),
+        _trend_signal("movement", "watch"),
+        _trend_signal("vital", "watch"),
     )
 
     migrated = RiskClassificationTool().classify(
@@ -103,12 +76,13 @@ def test_quality_block_precedes_legacy_trend_escalation() -> None:
                 confidence_label="not_interpretable",
                 health_conclusion_allowed=False,
             ),
-            trend_signals=tuple(_migrated_signal(item) for item in legacy_claims),
+            trend_signals=trend_signals,
         )
     )
 
-    assert legacy.risk_level == RiskLevel.UNCERTAIN
-    assert migrated.risk_level == RiskClassificationLevel.UNCERTAIN
+    assert migrated.risk_level.value == expected["risk_level"]
+    assert migrated.risk_level is RiskClassificationLevel.UNCERTAIN
+    assert list(migrated.source_refs) == expected["evidence_refs"]
     assert migrated.reason_codes == ("data_not_interpretable",)
     assert migrated.quality_blocks_escalation is True
     assert migrated.should_stop_sleep_trend_explanation is True
@@ -131,17 +105,9 @@ def test_structured_risk_thresholds_match_legacy(
     movement: int,
     expected: RiskClassificationLevel,
 ) -> None:
-    legacy_claims = [
-        _trend_signal(str(index), RiskLevel.WATCH)
+    trend_signals = tuple(
+        _trend_signal(str(index), "watch")
         for index in range(watch_count)
-    ]
-    legacy = RiskSignalAgent().analyze(
-        task_id="legacy-thresholds",
-        night_summary=_summary(
-            out_of_bed_count=out_of_bed,
-            movement_count=movement,
-        ),
-        trend_claims=legacy_claims,
     )
 
     migrated = RiskClassificationTool().classify(
@@ -150,42 +116,42 @@ def test_structured_risk_thresholds_match_legacy(
                 out_of_bed_count=out_of_bed,
                 movement_count=movement,
             ),
-            trend_signals=tuple(_migrated_signal(item) for item in legacy_claims),
+            trend_signals=trend_signals,
         )
     )
 
-    expected_legacy = {
-        RiskClassificationLevel.NORMAL: RiskLevel.INFO,
-        RiskClassificationLevel.WATCH: RiskLevel.WATCH,
-        RiskClassificationLevel.ESCALATE: RiskLevel.ESCALATE,
-    }[expected]
-    assert legacy.risk_level == expected_legacy
+    frozen_level = load_phase3a_capability_goldens()["risk_classification"][
+        "thresholds"
+    ][f"{watch_count}:{out_of_bed}:{movement}"]
+    assert expected is {
+        "info": RiskClassificationLevel.NORMAL,
+        "watch": RiskClassificationLevel.WATCH,
+        "escalate": RiskClassificationLevel.ESCALATE,
+    }[frozen_level]
     assert migrated.risk_level == expected
 
 
 def test_explicit_escalate_signal_matches_legacy() -> None:
-    legacy_claim = _trend_signal("escalate", RiskLevel.ESCALATE)
-    legacy = RiskSignalAgent().analyze(
-        task_id="legacy-explicit-escalate",
-        night_summary=_summary(),
-        trend_claims=[legacy_claim],
-    )
+    expected = load_phase3a_capability_goldens()["risk_classification"][
+        "explicit_escalate"
+    ]
 
     migrated = RiskClassificationTool().classify(
         RiskClassificationInput(
             observation=_observation(),
-            trend_signals=(_migrated_signal(legacy_claim),),
+            trend_signals=(_trend_signal("escalate", "escalate"),),
         )
     )
 
-    assert legacy.risk_level == RiskLevel.ESCALATE
-    assert migrated.risk_level == RiskClassificationLevel.ESCALATE
+    assert migrated.risk_level.value == expected["risk_level"]
+    assert migrated.risk_level is RiskClassificationLevel.ESCALATE
+    assert list(migrated.source_refs) == expected["evidence_refs"]
     assert migrated.reason_codes == ("multi_signal_escalation",)
     assert migrated.safety_required is True
 
 
 @pytest.mark.parametrize(
-    ("observation_kwargs", "summary_kwargs", "expected_reason"),
+    ("observation_kwargs", "expected_reason"),
     (
         (
             {
@@ -193,15 +159,9 @@ def test_explicit_escalate_signal_matches_legacy() -> None:
                 "confidence_label": "low_confidence",
                 "abnormal_reading_count": 3,
             },
-            {
-                "quality_status": RadarDataQualityStatus.PARTIAL,
-                "confidence_label": "low_confidence",
-                "abnormal_reading_count": 3,
-            },
             "low_quality_vital_signal",
         ),
         (
-            {"vital_fluctuation_count": 1},
             {"vital_fluctuation_count": 1},
             "vital_fluctuation_signal",
         ),
@@ -209,18 +169,16 @@ def test_explicit_escalate_signal_matches_legacy() -> None:
 )
 def test_watch_quality_and_vital_signals_match_legacy(
     observation_kwargs: dict[str, object],
-    summary_kwargs: dict[str, object],
     expected_reason: str,
 ) -> None:
-    legacy = RiskSignalAgent().analyze(
-        task_id="legacy-watch-signal",
-        night_summary=_summary(**summary_kwargs),
-    )
     migrated = RiskClassificationTool().classify(
         RiskClassificationInput(observation=_observation(**observation_kwargs))
     )
 
-    assert legacy.risk_level == RiskLevel.WATCH
+    expected = load_phase3a_capability_goldens()["risk_classification"][
+        "watch_signals"
+    ][expected_reason]
+    assert migrated.risk_level.value == expected
     assert migrated.risk_level == RiskClassificationLevel.WATCH
     assert migrated.reason_codes == (expected_reason,)
 
@@ -403,51 +361,9 @@ def _observation(
     )
 
 
-def _summary(
-    *,
-    quality_status: RadarDataQualityStatus = RadarDataQualityStatus.GOOD,
-    confidence_label: str = "normal",
-    health_conclusion_allowed: bool = True,
-    abnormal_reading_count: int = 0,
-    vital_fluctuation_count: int = 0,
-    out_of_bed_count: int = 1,
-    movement_count: int = 8,
-) -> RadarNightSummary:
-    return RadarNightSummary(
-        radar_device_id="radar-001",
-        subject_id="elder-001",
-        night_of=NIGHT,
-        total_sleep_minutes=420,
-        out_of_bed_count=out_of_bed_count,
-        movement_count=movement_count,
-        data_coverage_ratio=0.94,
-        data_quality_status=quality_status,
-        confidence_label=confidence_label,
-        health_conclusion_allowed=health_conclusion_allowed,
-        abnormal_reading_count=abnormal_reading_count,
-        explainable_metrics={
-            "vital_fluctuation_count": vital_fluctuation_count,
-        },
-        source_report_ref="night-summary:radar-001:2026-07-10",
-    )
-
-
-def _trend_signal(suffix: str, risk_level: RiskLevel) -> EvidenceClaim:
-    return EvidenceClaim(
-        claim_id=f"trend:{suffix}",
-        task_id="legacy-risk",
-        text=f"Trend signal {suffix}",
-        evidence_refs=[f"trend:{suffix}"],
-        confidence=0.72,
-        risk_level=risk_level,
-        generated_by=RadarAgentName.TREND.value,
-        review_status=ReviewStatus.REVIEWED,
-    )
-
-
-def _migrated_signal(claim: EvidenceClaim) -> TrendRiskSignal:
+def _trend_signal(suffix: str, risk_level: str) -> TrendRiskSignal:
     return TrendRiskSignal(
-        risk_level=claim.risk_level.value,
-        confidence=claim.confidence,
-        source_refs=tuple(claim.evidence_refs),
+        risk_level=risk_level,
+        confidence=0.72,
+        source_refs=(f"trend:{suffix}",),
     )

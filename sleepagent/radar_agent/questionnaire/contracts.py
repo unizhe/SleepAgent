@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
-from sleepagent.radar_agent.schemas import (
-    QuestionnaireEntry,
-    QuestionnaireQuestion,
-    RadarAgentSchema,
-)
-
-
-class QuestionnaireTrigger(str, Enum):
-    TREND_CAUSE_UNKNOWN = "trend_cause_unknown"
-    DATA_QUALITY_INSUFFICIENT = "data_quality_insufficient"
-    WATCH_OR_ESCALATE = "watch_or_escalate"
-    RECENT_WORSENING_QUESTION = "recent_worsening_question"
-    DOCTOR_BACKGROUND_MISSING = "doctor_background_missing"
+from sleepagent.radar_agent.schemas import RadarAgentSchema
 
 
 class HabitQuestionTrigger(str, Enum):
@@ -336,58 +324,6 @@ class HabitQuestionCapture(RadarAgentSchema):
     stop_remaining_questions: bool = False
 
 
-class SkillQuestionPack(RadarAgentSchema):
-    skill_id: str = Field(..., min_length=1)
-    version: str = Field(..., min_length=1)
-    questions: dict[str, QuestionnaireQuestion] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def skill_source_must_be_registered_and_versioned(self) -> "SkillQuestionPack":
-        from sleepagent.radar_agent.skills import SKILL_REGISTRY
-
-        skill = SKILL_REGISTRY.get(self.skill_id)
-        if skill is None or skill.version != self.version:
-            raise ValueError("Skill question packs require a registered matching Skill version.")
-        if not self.questions:
-            raise ValueError("Skill question packs require questions.")
-        return self
-
-
-class QuestionnaireCandidate(RadarAgentSchema):
-    question_id: str = Field(..., min_length=1)
-    prompt_text: str = Field(..., min_length=1, max_length=120)
-    answer_type: Literal["choice", "scale", "short_text"]
-    options: list[str] = Field(default_factory=list)
-    role: Literal["elder", "family", "doctor"]
-    question_source: Literal["bank", "skill"]
-    source_id: str = Field(..., min_length=1)
-    source_version: str = Field(..., min_length=1)
-    policy_id: str = Field(..., min_length=1)
-    policy_version: str = Field(..., min_length=1)
-    trigger: QuestionnaireTrigger
-
-
-class QuestionnaireSelection(RadarAgentSchema):
-    subject_id: str = Field(..., min_length=1)
-    role: Literal["elder", "family", "doctor"]
-    selected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    candidates: list[QuestionnaireCandidate] = Field(default_factory=list, max_length=3)
-    suppressed_policy_ids: list[str] = Field(default_factory=list)
-
-
-class ToneRewriter(Protocol):
-    def rewrite_question(self, *, text: str, role: str) -> str: ...
-
-
-class QuestionnaireAnswer(RadarAgentSchema):
-    question_id: str = Field(..., min_length=1)
-    answer: str = Field(..., min_length=1)
-
-
-class QuestionnaireCapture(RadarAgentSchema):
-    entries: list[QuestionnaireEntry] = Field(default_factory=list, max_length=3)
-
-
 __all__ = [
     "CapturedHabitAnswer",
     "HabitAnswerDisposition",
@@ -405,11 +341,4 @@ __all__ = [
     "HabitSafetyEvent",
     "ObservationOpportunity",
     "QuestionSuppression",
-    "QuestionnaireAnswer",
-    "QuestionnaireCandidate",
-    "QuestionnaireCapture",
-    "QuestionnaireSelection",
-    "QuestionnaireTrigger",
-    "SkillQuestionPack",
-    "ToneRewriter",
 ]

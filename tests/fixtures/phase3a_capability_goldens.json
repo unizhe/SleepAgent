@@ -1,0 +1,426 @@
+{
+  "_metadata": {
+    "frozen_at_phase": "3C-step-1",
+    "schema_version": "phase3a-capability-goldens.v1",
+    "source_owners": {
+      "artifact_rendering": "ReportAgent",
+      "care_coordination": "AlertCareAgent",
+      "fixed_runtime_policy": "fixed Orchestrator",
+      "memory_routing": "MemoryAgent",
+      "radar_data": "RadarDataAgent",
+      "reviewed_knowledge": "RAGAgent",
+      "risk_classification": "RiskSignalAgent",
+      "trend_analysis": "TrendAgent"
+    }
+  },
+  "artifact_rendering": {
+    "doctor": {
+      "claim_ids": ["claim-trend", "claim-risk"],
+      "risk_level": "escalate",
+      "sha256": "de776e2f68d3ad467714246e0dbbdeb4cce4aa4c610cc3159ef7a7a2915742cc",
+      "source_refs": [
+        "night-summary:phase3a-role-material",
+        "source:questionnaire:phase3a"
+      ]
+    },
+    "elder": {
+      "claim_ids": ["claim-trend", "claim-risk"],
+      "risk_level": "escalate",
+      "sha256": "f120ce72f8cf6efde205a14c21c4d802bfe2bd3bc9b2d86b82f6f559631522ec",
+      "source_refs": [
+        "night-summary:phase3a-role-material",
+        "source:questionnaire:phase3a"
+      ]
+    },
+    "family": {
+      "claim_ids": ["claim-trend", "claim-risk"],
+      "risk_level": "escalate",
+      "sha256": "edfd5a50bf1bed231663f60a620681ae2fb16517006f90c03a6a3bf61e75e863",
+      "source_refs": [
+        "night-summary:phase3a-role-material",
+        "source:questionnaire:phase3a"
+      ]
+    }
+  },
+  "care_coordination": {
+    "escalate:good": {
+      "automatic_actions": [
+        "publish_daily_elder_report",
+        "publish_daily_family_report"
+      ],
+      "candidate_actions": [
+        "export_doctor_material",
+        "send_doctor_material",
+        "create_medical_evaluation_card"
+      ],
+      "urgent_preempt": false
+    },
+    "info:good": {
+      "automatic_actions": [
+        "publish_daily_elder_report",
+        "publish_daily_family_report",
+        "publish_info_notice"
+      ],
+      "candidate_actions": [],
+      "urgent_preempt": false
+    },
+    "uncertain:partial": {
+      "automatic_actions": [
+        "publish_daily_elder_report",
+        "publish_daily_family_report",
+        "publish_data_quality_notice"
+      ],
+      "candidate_actions": [],
+      "urgent_preempt": false
+    },
+    "urgent_boundary:good": {
+      "automatic_actions": [
+        "publish_daily_elder_report",
+        "publish_daily_family_report",
+        "show_urgent_safety_notice"
+      ],
+      "candidate_actions": ["notify_family_delivery_record"],
+      "urgent_preempt": true
+    },
+    "watch:good": {
+      "automatic_actions": [
+        "publish_daily_elder_report",
+        "publish_daily_family_report"
+      ],
+      "candidate_actions": [
+        "enable_persistent_family_reminder",
+        "push_supplemental_questionnaire",
+        "enable_care_plan"
+      ],
+      "urgent_preempt": false
+    }
+  },
+  "fixed_runtime_policy": {
+    "node_order": [
+      "IngestRadarData",
+      "NormalizeCanonicalData",
+      "DataQualityGate",
+      "NightSummary",
+      "TrendAnalysis",
+      "RiskSignalAssessment",
+      "EvidenceLedgerReview",
+      "RAGGrounding",
+      "A2ACollaborationRound",
+      "RoleReportGeneration",
+      "AlertDecision",
+      "MemoryCandidate",
+      "HumanConfirmation",
+      "PublishArtifacts"
+    ]
+  },
+  "memory_routing": {
+    "candidate_count": 3,
+    "candidate_types": ["care_event", "preference", "trend"]
+  },
+  "radar_data": {
+    "device": {
+      "bound_subject_id": "elder-demo-001",
+      "display_name": "Replay bedroom radar - Normal night",
+      "firmware_version": null,
+      "provider": "replay",
+      "radar_device_id": "radar-device-demo-001",
+      "registered_at": "2026-06-10T06:30:00Z",
+      "source_raw_event_ids": ["normal_night:device"],
+      "standard_mappings": {
+        "fhir_profile": null,
+        "fhir_resource": null,
+        "local_codes": {},
+        "loinc_codes": [],
+        "notes": [],
+        "snomed_codes": []
+      },
+      "status": "online",
+      "timezone_name": "Asia/Shanghai",
+      "updated_at": "2026-07-10T06:30:00Z",
+      "vendor_device_id": "vendor-device-demo-001",
+      "vendor_device_name": "imei-demo-001",
+      "vendor_home_id": "home-demo-001"
+    },
+    "evidence_refs": [
+      "replay-night-report:normal_night",
+      "snapshot:normal-000",
+      "snapshot:normal-001",
+      "snapshot:normal-002",
+      "snapshot:normal-003",
+      "snapshot:normal-004"
+    ],
+    "night_summary": {
+      "abnormal_reading_count": 0,
+      "blocked_reasons": [],
+      "caveats": [
+        "Radar observation is not a medical diagnosis.",
+        "Metrics are explainable only inside the canonical night window."
+      ],
+      "confidence_label": "normal",
+      "data_coverage_ratio": 0.96,
+      "data_quality_status": "good",
+      "device_status": "online",
+      "explainable_metrics": {
+        "coverage_ratio": 0.96,
+        "in_bed_snapshot_count": 5,
+        "mean_body_movement": 0.64,
+        "mean_breath_rate_bpm": 15.0,
+        "mean_heart_rate_bpm": 63.2,
+        "not_in_bed_minutes": 0.0,
+        "not_in_bed_snapshot_count": 0,
+        "snapshot_count": 5,
+        "vital_fluctuation_count": 0
+      },
+      "health_conclusion_allowed": true,
+      "invalid_reading_count": 0,
+      "missing_intervals": [],
+      "movement_count": 8,
+      "night_boundary_end_at": "2026-07-10T04:00:00Z",
+      "night_boundary_start_at": "2026-07-09T10:00:00Z",
+      "night_of": "2026-07-09",
+      "not_in_bed_intervals": [],
+      "out_of_bed_count": 1,
+      "out_of_bed_intervals": [],
+      "quality_reasons": [],
+      "radar_device_id": "radar-device-demo-001",
+      "sleep_end_at": "2026-07-10T06:10:00Z",
+      "sleep_score": 82.0,
+      "sleep_start_at": "2026-07-09T22:40:00Z",
+      "source_raw_event_ids": [
+        "normal_night:raw:normal-000",
+        "normal_night:raw:normal-001",
+        "normal_night:raw:normal-002",
+        "normal_night:raw:normal-003",
+        "normal_night:raw:normal-004"
+      ],
+      "source_report_ref": "replay-night-report:normal_night",
+      "source_snapshot_ids": [
+        "normal-000",
+        "normal-001",
+        "normal-002",
+        "normal-003",
+        "normal-004"
+      ],
+      "standard_mappings": {
+        "fhir_profile": null,
+        "fhir_resource": null,
+        "local_codes": {},
+        "loinc_codes": [],
+        "notes": [],
+        "snomed_codes": []
+      },
+      "subject_id": "elder-demo-001",
+      "timezone_name": "Asia/Shanghai",
+      "total_sleep_minutes": 420.0
+    },
+    "snapshot_count": 5
+  },
+  "reviewed_knowledge": {
+    "三角色报告解释|elder,family,doctor": {
+      "caveats": [
+        "不得输出确诊、精确 AHI、处方或药物建议。",
+        "只改变表达，不改变 Evidence Ledger 的事实或风险等级。",
+        "只改变表达，不改变 Evidence Ledger 的事实或风险等级。",
+        "只改变表达，不改变 Evidence Ledger 的事实或风险等级。"
+      ],
+      "chunk_ids": [
+        "safety-nondiagnostic-v1",
+        "role-elder-v1",
+        "role-family-v1",
+        "role-doctor-v1"
+      ],
+      "citation_ids": [
+        "seed:safety:nondiagnostic:v1",
+        "seed:role:elder:v1",
+        "seed:role:family:v1",
+        "seed:role:doctor:v1"
+      ],
+      "source_types": ["safety", "role_template", "role_template", "role_template"]
+    },
+    "如何写家属角色报告|family": {
+      "caveats": [
+        "不得输出确诊、精确 AHI、处方或药物建议。",
+        "只改变表达，不改变 Evidence Ledger 的事实或风险等级。"
+      ],
+      "chunk_ids": ["safety-nondiagnostic-v1", "role-family-v1"],
+      "citation_ids": [
+        "seed:safety:nondiagnostic:v1",
+        "seed:role:family:v1"
+      ],
+      "source_types": ["safety", "role_template"]
+    },
+    "完全无关的园艺问题|family": {
+      "caveats": ["不得输出确诊、精确 AHI、处方或药物建议。"],
+      "chunk_ids": ["safety-nondiagnostic-v1"],
+      "citation_ids": ["seed:safety:nondiagnostic:v1"],
+      "source_types": ["safety"]
+    },
+    "查看30天长期趋势和个人偏好|family": {
+      "caveats": [
+        "不得输出确诊、精确 AHI、处方或药物建议。",
+        "不得存放原始雷达流、完整敏感对话或未确认个人信息。"
+      ],
+      "chunk_ids": [
+        "safety-nondiagnostic-v1",
+        "personal-confirmed-summary-v1"
+      ],
+      "citation_ids": [
+        "seed:safety:nondiagnostic:v1",
+        "seed:personal:confirmed-summary:v1"
+      ],
+      "source_types": ["safety", "role_template"]
+    },
+    "雷达设备离线且覆盖率不足|family": {
+      "caveats": [
+        "不得输出确诊、精确 AHI、处方或药物建议。",
+        "数据不足时应少说并提示设备或采集检查。"
+      ],
+      "chunk_ids": ["safety-nondiagnostic-v1", "device-quality-v1"],
+      "citation_ids": [
+        "seed:safety:nondiagnostic:v1",
+        "seed:device:data-quality:v1"
+      ],
+      "source_types": ["safety", "device"]
+    }
+  },
+  "risk_classification": {
+    "explicit_escalate": {
+      "evidence_refs": [
+        "night-summary:radar-001:2026-07-10",
+        "trend:escalate"
+      ],
+      "risk_level": "escalate"
+    },
+    "quality_block": {
+      "evidence_refs": [
+        "night-summary:radar-001:2026-07-10",
+        "trend:sleep",
+        "trend:movement",
+        "trend:vital"
+      ],
+      "risk_level": "uncertain"
+    },
+    "thresholds": {
+      "0:1:8": "info",
+      "1:12:40": "watch",
+      "2:1:25": "escalate",
+      "2:5:24": "watch",
+      "2:6:8": "escalate",
+      "3:1:8": "escalate"
+    },
+    "urgent_evidence_refs": {
+      "cannot breathe": "user-text:urgent-boundary:dd9fd13e3c4c387e",
+      "chest pain": "user-text:urgent-boundary:63e6a266b82b5595",
+      "confused": "user-text:urgent-boundary:c86f9b08f86d2c20",
+      "difficulty breathing": "user-text:urgent-boundary:8c1f2fea8234e2cb",
+      "fall": "user-text:urgent-boundary:5a4c18ee22a9200b",
+      "fell": "user-text:urgent-boundary:789738da52f8bb3a",
+      "loss of consciousness": "user-text:urgent-boundary:213b7e4555e3a556",
+      "severe difficulty breathing": "user-text:urgent-boundary:4317d62a18df6e8a",
+      "shortness of breath": "user-text:urgent-boundary:556618db1f546878",
+      "unconscious": "user-text:urgent-boundary:7751fa582481934a",
+      "严重呼吸困难": "user-text:urgent-boundary:516648d95e753da1",
+      "呼吸困难": "user-text:urgent-boundary:08f7a3d4bd6a6d22",
+      "喘不上气": "user-text:urgent-boundary:a90bc2b9ef278562",
+      "意识不清": "user-text:urgent-boundary:91f9771e0384a6a0",
+      "摔倒": "user-text:urgent-boundary:94978ebe545fdecd",
+      "昏迷": "user-text:urgent-boundary:85bf0230b805157c",
+      "胸痛": "user-text:urgent-boundary:fbe691594023ae2a",
+      "跌倒": "user-text:urgent-boundary:d37e721447fd54b5"
+    },
+    "watch_signals": {
+      "low_quality_vital_signal": "watch",
+      "vital_fluctuation_signal": "watch"
+    }
+  },
+  "trend_analysis": {
+    "claim_count": 7,
+    "claim_source_kinds": ["trend_tool"],
+    "latest_night": "2026-07-10",
+    "metrics": {
+      "breath_rate_bpm": {
+        "absolute_delta": 3.0,
+        "baseline_value": 15.0,
+        "confidence": 0.88,
+        "direction": "increased",
+        "percent_delta": 20.0,
+        "status": "computed",
+        "value": 18.0
+      },
+      "data_coverage_ratio": {
+        "absolute_delta": -0.08,
+        "baseline_value": 0.96,
+        "confidence": 0.88,
+        "direction": "decreased",
+        "percent_delta": -8.33,
+        "status": "computed",
+        "value": 0.88
+      },
+      "heart_rate_bpm": {
+        "absolute_delta": 10.0,
+        "baseline_value": 64.0,
+        "confidence": 0.88,
+        "direction": "increased",
+        "percent_delta": 15.62,
+        "status": "computed",
+        "value": 74.0
+      },
+      "in_bed_minutes": {
+        "absolute_delta": -70.0,
+        "baseline_value": 465.0,
+        "confidence": 0.88,
+        "direction": "decreased",
+        "percent_delta": -15.05,
+        "status": "computed",
+        "value": 395.0
+      },
+      "movement_count": {
+        "absolute_delta": 10.0,
+        "baseline_value": 8.0,
+        "confidence": 0.88,
+        "direction": "increased",
+        "percent_delta": 125.0,
+        "status": "computed",
+        "value": 18.0
+      },
+      "out_of_bed_count": {
+        "absolute_delta": 3.0,
+        "baseline_value": 1.0,
+        "confidence": 0.88,
+        "direction": "increased",
+        "percent_delta": 300.0,
+        "status": "computed",
+        "value": 4.0
+      },
+      "sleep_minutes": {
+        "absolute_delta": -70.0,
+        "baseline_value": 430.0,
+        "confidence": 0.88,
+        "direction": "decreased",
+        "percent_delta": -16.28,
+        "status": "computed",
+        "value": 360.0
+      }
+    },
+    "windows": {
+      "30": {
+        "evidence_ref_count": 50,
+        "evidence_refs_sha256": "705c07b8ae62f97ea3b091788c2c11565bab5cab416ab4a539e7b977a67e9279",
+        "required_sample_count": 7,
+        "sample_count": 30
+      },
+      "7": {
+        "evidence_ref_count": 27,
+        "evidence_refs_sha256": "1b4ac9ac0f039737836ee840d3ff9ba77b165be408d26b0139f4bbf77bc90823",
+        "required_sample_count": 3,
+        "sample_count": 7
+      },
+      "90": {
+        "evidence_ref_count": 110,
+        "evidence_refs_sha256": "23fd76c04048b659b8f825b735037f1c801fbf7dca36022c2a4dd06108610e5c",
+        "required_sample_count": 14,
+        "sample_count": 90
+      }
+    }
+  }
+}

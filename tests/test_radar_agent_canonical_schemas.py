@@ -10,19 +10,12 @@ from sleepagent.product_device.schemas import (
     RawVendorEvent as ProductRawVendorEvent,
 )
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
-    AgentResult,
-    ConflictRecord,
     ContextPacket,
     EvidenceClaim,
     EvidenceLedger,
     EvidencePacket,
     HumanConfirmationRequest,
-    MemoryCandidate,
-    QuestionnaireBank,
     QuestionnaireEntry,
-    QuestionnairePolicy,
-    RadarAgentName,
     RadarBedPresence,
     RadarDevice,
     RadarDeviceStatus,
@@ -109,19 +102,6 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
         answer="mild",
         evidence_ref="questionnaire:q-daytime-sleepiness",
     )
-    bank = QuestionnaireBank(
-        bank_id="bank-v1",
-        version="2026-07-10",
-        questions={"q-daytime-sleepiness": "白天是否明显困倦？"},
-        reviewed=True,
-    )
-    policy = QuestionnairePolicy(
-        policy_id="policy-watch-v1",
-        version="2026-07-10",
-        trigger="watch_risk_signal",
-        allowed_question_ids=["q-daytime-sleepiness"],
-        applicable_roles=["family"],
-    )
     document = SupplementaryDocument(
         document_id="doc-001",
         subject_id="elder-001",
@@ -147,25 +127,6 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
         claims=[claim],
         confidence=0.9,
     )
-    message = A2AMessage(
-        message_id="a2a-001",
-        sender="trend",
-        receiver="risk_signal",
-        task_id="task-001",
-        intent="review_watch_signal",
-        evidence_refs=[claim.claim_id],
-        confidence=0.8,
-        risk_level=RiskLevel.WATCH,
-    )
-    conflict = ConflictRecord(
-        conflict_id="conflict-001",
-        task_id="task-001",
-        sources=["radar_data", "risk_signal"],
-        summary="数据质量和风险线索表达冲突。",
-        decision="数据质量优先，风险表达降级为 watch。",
-        final_status="downgraded",
-        evidence_refs=[claim.claim_id],
-    )
     report = RoleReportArtifact(
         artifact_id="report-family-001",
         task_id="task-001",
@@ -183,14 +144,6 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
         reason="导出医生材料前需要家属确认。",
         evidence_refs=[report.artifact_id],
     )
-    memory = MemoryCandidate(
-        candidate_id="memory-001",
-        subject_id="elder-001",
-        task_id="task-001",
-        memory_type="trend",
-        summary="近 7 天夜间离床次数需继续观察。",
-        evidence_refs=[claim.claim_id],
-    )
     context = ContextPacket(
         task_context=TaskContext(
             task_id="task-001",
@@ -205,15 +158,6 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
             supplementary_documents=[document],
             data_quality={"coverage": summary.data_coverage_ratio},
         ),
-        a2a_messages=[message],
-    )
-    result = AgentResult(
-        agent_name=RadarAgentName.RISK_SIGNAL,
-        claims=[claim],
-        evidence_refs=[claim.claim_id],
-        confidence=0.8,
-        next_requests=[message],
-        output_payload={"risk_level": RiskLevel.WATCH.value},
     )
 
     instances = [
@@ -222,18 +166,12 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
         snapshot,
         summary,
         questionnaire,
-        bank,
-        policy,
         document,
         claim,
         ledger,
-        message,
-        conflict,
         report,
         confirmation,
-        memory,
         context,
-        result,
     ]
 
     for item in instances:
@@ -262,15 +200,6 @@ def test_all_named_canonical_models_validate_and_serialize() -> None:
                 "data_coverage_ratio": 1.2,
             },
             "less than or equal to 1",
-        ),
-        (
-            QuestionnaireBank,
-            {
-                "bank_id": "empty-reviewed-bank",
-                "version": "2026-07-10",
-                "reviewed": True,
-            },
-            "require questions",
         ),
         (
             RadarRawEvent,
@@ -307,14 +236,8 @@ def test_business_context_rejects_direct_raw_event_reads(purpose: str) -> None:
         )
 
 
-def test_agent_result_and_ledger_reject_direct_raw_payloads_but_allow_refs() -> None:
+def test_ledger_rejects_direct_raw_payloads_but_allows_refs() -> None:
     raw = _raw_event()
-
-    with pytest.raises(ValueError, match="raw vendor payloads"):
-        AgentResult(
-            agent_name=RadarAgentName.REPORT,
-            output_payload={"direct_raw_read": raw},
-        )
 
     with pytest.raises(ValueError, match="raw vendor payloads"):
         EvidenceLedger(

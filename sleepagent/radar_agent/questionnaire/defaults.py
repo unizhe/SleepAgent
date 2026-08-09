@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-from sleepagent.radar_agent.schemas import (
-    QuestionnaireBank,
-    QuestionnairePolicy,
-    QuestionnaireQuestion,
-)
-from sleepagent.radar_agent.skills import DIALOGUE_SKILL
-
 from .contracts import (
     HabitAnswerDisposition,
     HabitAnswerType,
@@ -14,101 +7,6 @@ from .contracts import (
     HabitPersistenceEligibility,
     HabitQuestionTrigger,
     HabitRespondentRule,
-    QuestionnaireTrigger,
-    SkillQuestionPack,
-)
-
-
-DEFAULT_QUESTIONNAIRE_BANK = QuestionnaireBank(
-    bank_id="radar-care-micro-questionnaire",
-    version="1.0.0",
-    reviewed=True,
-    questions={
-        "q-device-placement": QuestionnaireQuestion(
-            question_id="q-device-placement",
-            text="昨晚设备位置是否有变化？",
-            answer_type="choice",
-            options=["没有", "可能移动过", "不清楚"],
-            applicable_roles=["elder", "family"],
-            role_text={
-                "elder": "昨晚床边的小设备动过吗？",
-                "family": "昨晚雷达设备位置或遮挡情况是否变化？",
-            },
-            triggers=[QuestionnaireTrigger.DATA_QUALITY_INSUFFICIENT.value],
-        ),
-        "q-slept-away-from-bed": QuestionnaireQuestion(
-            question_id="q-slept-away-from-bed",
-            text="昨晚是否有较长时间不在床上？",
-            answer_type="choice",
-            options=["没有", "有", "不清楚"],
-            applicable_roles=["elder", "family"],
-            triggers=[QuestionnaireTrigger.DATA_QUALITY_INSUFFICIENT.value],
-        ),
-        "q-night-bathroom": QuestionnaireQuestion(
-            question_id="q-night-bathroom",
-            text="昨晚起夜上卫生间大约几次？",
-            answer_type="scale",
-            options=["0次", "1次", "2次", "3次及以上"],
-            applicable_roles=["elder", "family", "doctor"],
-            triggers=[QuestionnaireTrigger.TREND_CAUSE_UNKNOWN.value, QuestionnaireTrigger.WATCH_OR_ESCALATE.value],
-        ),
-        "q-daytime-sleepiness": QuestionnaireQuestion(
-            question_id="q-daytime-sleepiness",
-            text="今天白天是否比平时更困？",
-            answer_type="scale",
-            options=["没有", "轻微", "明显", "很严重"],
-            applicable_roles=["elder", "family", "doctor"],
-            role_text={
-                "elder": "今天白天有没有比平时更想睡？",
-                "family": "老人今天白天是否比平时更困倦？",
-                "doctor": "近期是否出现较基线加重的日间困倦？",
-            },
-            triggers=[QuestionnaireTrigger.TREND_CAUSE_UNKNOWN.value, QuestionnaireTrigger.WATCH_OR_ESCALATE.value, QuestionnaireTrigger.RECENT_WORSENING_QUESTION.value, QuestionnaireTrigger.DOCTOR_BACKGROUND_MISSING.value],
-        ),
-        "q-snoring-or-gasping": QuestionnaireQuestion(
-            question_id="q-snoring-or-gasping",
-            text="近期是否有人观察到明显打鼾或憋醒？",
-            answer_type="choice",
-            options=["没有", "偶尔", "多次", "不清楚"],
-            applicable_roles=["family", "doctor"],
-            triggers=[QuestionnaireTrigger.WATCH_OR_ESCALATE.value, QuestionnaireTrigger.DOCTOR_BACKGROUND_MISSING.value],
-        ),
-    },
-)
-
-
-DEFAULT_SKILL_QUESTION_PACK = SkillQuestionPack(
-    skill_id=DIALOGUE_SKILL.skill_id,
-    version=DIALOGUE_SKILL.version,
-    questions={
-        "q-sleep-schedule-change": QuestionnaireQuestion(
-            question_id="q-sleep-schedule-change",
-            text="最近一周作息时间是否有明显变化？",
-            answer_type="choice",
-            options=["没有", "睡得更晚", "起得更早", "变化不固定"],
-            applicable_roles=["elder", "family", "doctor"],
-            role_text={
-                "elder": "最近一周睡觉或起床时间变了吗？",
-                "family": "老人最近一周的入睡或起床时间是否明显变化？",
-                "doctor": "近一周睡眠时相是否较个人基线发生变化？",
-            },
-            triggers=[QuestionnaireTrigger.TREND_CAUSE_UNKNOWN.value, QuestionnaireTrigger.RECENT_WORSENING_QUESTION.value, QuestionnaireTrigger.DOCTOR_BACKGROUND_MISSING.value],
-        )
-    },
-)
-
-
-DEFAULT_QUESTIONNAIRE_POLICIES = tuple(
-    QuestionnairePolicy(
-        policy_id=f"micro-{trigger.value}",
-        version="1.0.0",
-        trigger=trigger.value,
-        allowed_question_ids=[],
-        applicable_roles=["elder", "family", "doctor"],
-        max_questions_per_turn=3,
-        cooldown_hours=24,
-    )
-    for trigger in QuestionnaireTrigger
 )
 
 
@@ -483,7 +381,4 @@ HABIT_CONCEPT_REGISTRY = {
 __all__ = [
     "DEFAULT_HABIT_CONCEPTS",
     "HABIT_CONCEPT_REGISTRY",
-    "DEFAULT_QUESTIONNAIRE_BANK",
-    "DEFAULT_QUESTIONNAIRE_POLICIES",
-    "DEFAULT_SKILL_QUESTION_PACK",
 ]

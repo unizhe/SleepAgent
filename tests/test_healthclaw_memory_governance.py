@@ -409,12 +409,7 @@ def test_production_build_contains_one_memory_read_registry_definition() -> None
     assert definition_sites == [
         Path("sleepagent/radar_agent/product_agent/registry.py")
     ]
-    assert "memory.read" not in Path(
-        "sleepagent/radar_agent/tools/handlers.py"
-    ).read_text(encoding="utf-8")
-    assert "memory.read" not in Path(
-        "sleepagent/radar_agent/tools/registry.py"
-    ).read_text(encoding="utf-8")
+    assert not Path("sleepagent/radar_agent/tools").exists()
 
 
 def test_unbound_product_tool_executor_has_no_memory_read_fallback() -> None:

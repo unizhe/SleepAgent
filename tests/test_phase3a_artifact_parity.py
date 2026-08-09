@@ -4,12 +4,6 @@ from datetime import date
 
 import pytest
 
-from sleepagent.radar_agent.agents import (
-    ContextPacket,
-    EvidencePacket,
-    ReportAgent,
-    TaskContext,
-)
 from sleepagent.radar_agent.product_agent.contracts import AgentId
 from sleepagent.radar_agent.product_agent.skill_methods.role_material import (
     RoleMaterialExpressionDraft,
@@ -20,9 +14,10 @@ from sleepagent.radar_agent.product_agent.tools.artifact_rendering import (
     ArtifactRenderingTool,
 )
 from sleepagent.radar_agent.schemas import (
-    A2AMessage,
+    ContextPacket,
     EvidenceClaim,
     EvidenceLedger,
+    EvidencePacket,
     QuestionnaireEntry,
     RadarDataQualityStatus,
     RadarDeviceStatus,
@@ -30,7 +25,11 @@ from sleepagent.radar_agent.schemas import (
     RagContext,
     ReviewStatus,
     RiskLevel,
-    RoleReportArtifact,
+    TaskContext,
+)
+from tests.golden_fixtures import (
+    canonical_json_sha256,
+    load_phase3a_capability_goldens,
 )
 
 
@@ -43,10 +42,7 @@ def test_single_audience_artifact_render_matches_no_model_report_agent(
 ) -> None:
     context = _context()
     ledger = _ledger(context)
-    legacy = {
-        item["role"]: RoleReportArtifact.model_validate(item)
-        for item in ReportAgent().run(context).output_payload["reports"]
-    }[audience_role]
+    expected = load_phase3a_capability_goldens()["artifact_rendering"][audience_role]
 
     rendered = ArtifactRenderingTool().render(
         ArtifactRenderRequest(
@@ -57,12 +53,27 @@ def test_single_audience_artifact_render_matches_no_model_report_agent(
     )
 
     assert rendered.audience_role == audience_role
-    assert rendered.artifact.model_dump(
-        mode="json", exclude={"generated_at"}
-    ) == legacy.model_dump(mode="json", exclude={"generated_at"})
-    assert rendered.source_refs == legacy.source_refs
+    artifact_payload = _without_volatile_timestamps(
+        rendered.artifact.model_dump(mode="json")
+    )
+    assert canonical_json_sha256(artifact_payload) == expected["sha256"]
+    assert rendered.artifact.claim_ids == expected["claim_ids"]
+    assert rendered.artifact.risk_level.value == expected["risk_level"]
+    assert rendered.source_refs == expected["source_refs"]
     assert rendered.committed is False
     assert rendered.exported is False
+
+
+def _without_volatile_timestamps(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_volatile_timestamps(item)
+            for key, item in value.items()
+            if key not in {"generated_at", "collected_at"}
+        }
+    if isinstance(value, list):
+        return [_without_volatile_timestamps(item) for item in value]
+    return value
 
 
 def test_artifact_render_preserves_doctor_completeness_and_safety_boundaries() -> None:
@@ -136,27 +147,12 @@ def test_artifact_render_rejects_unbound_rag_context() -> None:
         )
 
 
-def test_artifact_render_rejects_legacy_a2a_context() -> None:
-    context = _context().model_copy(
-        update={
-            "a2a_messages": [
-                A2AMessage(
-                    message_id="legacy-a2a:artifact",
-                    sender="trend",
-                    receiver="report",
-                    task_id="task-phase3a-role-material",
-                    intent="inject_report_context",
-                )
-            ]
-        }
-    )
+def test_context_contract_rejects_retired_collaboration_payloads() -> None:
+    payload = _context().model_dump(mode="python")
+    payload["a2a_messages"] = []
 
-    with pytest.raises(ValueError, match="legacy A2A"):
-        ArtifactRenderRequest(
-            context=context,
-            evidence_ledger=_ledger(context),
-            audience_role="family",
-        )
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ContextPacket.model_validate(payload)
 
 
 @pytest.mark.parametrize("generated_by", ("trend", "risk_signal", "report"))

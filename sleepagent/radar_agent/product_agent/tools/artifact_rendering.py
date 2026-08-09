@@ -56,8 +56,6 @@ class ArtifactRenderRequest(StrictContract):
             )
         if self.context.task_context.task_id != self.evidence_ledger.task_id:
             raise ValueError("Context and EvidenceLedger task identities differ.")
-        if self.context.a2a_messages:
-            raise ValueError("Artifact rendering cannot consume legacy A2A messages.")
         rag = self.context.rag_context
         if any(
             (
