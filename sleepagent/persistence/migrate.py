@@ -666,6 +666,17 @@ def bootstrap_test_database_roles(
         _grant_tables(connection, sql, "SELECT", api_read_tables, api_role)
         _grant_tables(connection, sql, "INSERT", api_insert_tables, api_role)
         _grant_tables(connection, sql, "SELECT", worker_tables, worker_role)
+        # PostgreSQL row-locking SELECTs require UPDATE on at least one column.
+        # The worker may lock the subject epoch row through its immutable RLS
+        # scope anchor, but it receives no write privilege on governance state.
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.Identifier("namespace_id"),
+                sql.Identifier("public", "backend_subject_epochs"),
+                sql.Identifier(worker_role),
+            ),
+        )
         worker_insert_tables = (
             "sleep_domain_processing_receipts",
             "sleep_domain_adapter_candidates",

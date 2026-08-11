@@ -70,6 +70,7 @@ from sleepagent.worker_runtime import (
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,
+    WorkResult,
 )
 
 
@@ -1050,3 +1051,153 @@ def test_prepared_product_attempt_is_not_query_visible_before_commit() -> None:
         product_attempt_id=committed.product_attempt_id,
         analysis_status=committed.analysis_status,
     )
+
+
+def test_worker_epoch_lock_privilege_is_column_scoped_and_rls_bounded() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    api_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_API_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"epoch-lock-worker-{uuid4().hex}",
+        )
+        scope = store.uow_scope_for_claim(claim)
+
+        with factory.begin(scope) as uow:
+            repository = PostgresProductAgentRepository(uow.connection, scope)
+            assert repository._lock_and_validate_epochs() == (1, 1, 1)
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT
+                      has_table_privilege(
+                        current_user, 'public.backend_subject_epochs', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'namespace_id', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'authorization_epoch', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'privacy_epoch', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'retrieval_policy_epoch', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'cas_version', 'UPDATE'
+                      ),
+                      has_column_privilege(
+                        current_user, 'public.backend_subject_epochs',
+                        'updated_at', 'UPDATE'
+                      )
+                    """
+                )
+                assert cursor.fetchone() == (
+                    False,
+                    True,
+                    False,
+                    False,
+                    False,
+                    False,
+                    False,
+                )
+            finally:
+                cursor.close()
+            uow.commit()
+
+        with factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    cursor.execute(
+                        """
+                        UPDATE public.backend_subject_epochs
+                        SET authorization_epoch = authorization_epoch + 1
+                        WHERE namespace_id = %s AND data_mode = %s
+                          AND subject_id = %s
+                        """,
+                        (scope.namespace_id, scope.data_mode, scope.subject_id),
+                    )
+            finally:
+                cursor.close()
+
+        with factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    cursor.execute(
+                        """
+                        UPDATE public.backend_subject_epochs
+                        SET namespace_id = %s
+                        WHERE namespace_id = %s AND data_mode = %s
+                          AND subject_id = %s
+                        """,
+                        (
+                            f"replay:forbidden-{uuid4().hex}",
+                            scope.namespace_id,
+                            scope.data_mode,
+                            scope.subject_id,
+                        ),
+                    )
+            finally:
+                cursor.close()
+
+        assert store.finalize(
+            claim,
+            WorkResult(
+                disposition=WorkDisposition.TERMINAL,
+                error_code="permission_invariant_complete",
+            ),
+        ) is True
+    finally:
+        provider.close()
+
+    with psycopg.connect(api_dsn) as api:
+        assert api.execute(
+            """
+            SELECT
+              has_table_privilege(
+                current_user, 'public.backend_subject_epochs', 'UPDATE'
+              ),
+              has_column_privilege(
+                current_user, 'public.backend_subject_epochs',
+                'namespace_id', 'UPDATE'
+              )
+            """
+        ).fetchone() == (False, False)
+
+    with psycopg.connect(admin_dsn) as admin:
+        assert admin.execute(
+            """
+            SELECT authorization_epoch, privacy_epoch,
+                   retrieval_policy_epoch, namespace_id
+            FROM public.backend_subject_epochs
+            WHERE namespace_id = %s AND data_mode = 'replay'
+              AND subject_id = %s
+            """,
+            (seed.namespace_id, seed.subject_id),
+        ).fetchone() == (1, 1, 1, seed.namespace_id)
