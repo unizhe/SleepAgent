@@ -4,7 +4,7 @@ import json
 import sqlite3
 from datetime import date, datetime, timezone
 from threading import RLock
-from typing import Any
+from typing import Any, cast
 
 from sleepagent.persistence.migrations import (
     apply_sqlite_schema,
@@ -2929,10 +2929,10 @@ def connect_postgres_store(database_url: str) -> RadarPersistenceStore:
     except ImportError as exc:  # pragma: no cover - exercised only without extra.
         raise RuntimeError("psycopg is required for radar PostgreSQL persistence.") from exc
     connection = psycopg.connect(database_url)
-    from sleepagent.persistence.migrate import PostgresMigrationRunner
+    from sleepagent.persistence.migrate import ConnectionLike, PostgresMigrationRunner
 
     PostgresMigrationRunner(
-        connection,
+        cast(ConnectionLike, connection),
         applied_by="sleepagent-application-bootstrap",
     ).apply()
     return RadarPersistenceStore(connection, dialect="postgres")

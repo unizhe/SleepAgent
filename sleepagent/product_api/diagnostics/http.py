@@ -7,7 +7,7 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from threading import RLock
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -2460,7 +2460,7 @@ async def get_radar_task_events(
             task_id,
             after_sequence=after_sequence,
         )
-        return events
+        return cast(list[RadarTaskEvent], events)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
 

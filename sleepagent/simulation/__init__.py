@@ -4,6 +4,8 @@ This package may construct synthetic external-world facts.  It is not an
 alternate risk, readiness, Agent, or Memory implementation.
 """
 
+from typing import Any
+
 __all__ = [
     "CanonicalReplayGenerator",
     "ComponentVersionPin",
@@ -39,7 +41,7 @@ _CONTRACT_EXPORTS = frozenset(__all__) - {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     """Load the canonical generator lazily so replay catalogs stay leaf modules."""
 
     if name in _CONTRACT_EXPORTS:
