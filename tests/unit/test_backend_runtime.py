@@ -93,7 +93,7 @@ def _runtime(
         or DatabaseAttestation(
             database_identity=settings.database_identity,
             database_role=settings.database_role,
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
         services=(RuntimeServices(product=object()) if role == ProcessRole.API else None),
@@ -163,7 +163,7 @@ def test_attestation_mismatch_fails_closed_and_closes_pool() -> None:
         attestation=DatabaseAttestation(
             database_identity="wrong_database",
             database_role="sleepagent_api_replay",
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
     )

@@ -241,7 +241,7 @@ def test_production_openapi_excludes_demo_and_legacy_surfaces(
         attestor=lambda: DatabaseAttestation(
             database_identity="sleepagent_live",
             database_role="sleepagent_api_live",
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
         services=build_api_runtime_services(settings, uow_factory=object()),

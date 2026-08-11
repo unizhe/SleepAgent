@@ -199,7 +199,7 @@ def _runtime(queues: tuple[str, ...]) -> SleepBackendRuntime:
         attestor=lambda: DatabaseAttestation(
             database_identity="replay_db",
             database_role="sleepagent_worker_replay",
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
         worker_handlers={queue: object() for queue in queues},

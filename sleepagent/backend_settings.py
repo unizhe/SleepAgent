@@ -85,8 +85,8 @@ class SleepBackendSettings(BaseModel):
     encryption_key_ref: str = Field(min_length=1)
     internal_auth_token: SecretStr | None = None
     demo_controller_token: SecretStr | None = None
-    supported_schema_min: int = Field(default=25, ge=1)
-    supported_schema_max: int = Field(default=25, ge=1)
+    supported_schema_min: int = Field(default=1, ge=1)
+    supported_schema_max: int = Field(default=1, ge=1)
     pool_min_size: int = Field(default=1, ge=0, le=50)
     pool_max_size: int = Field(default=8, ge=1, le=100)
     pool_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
@@ -265,12 +265,12 @@ class SleepBackendSettings(BaseModel):
             supported_schema_min=_integer(
                 env,
                 "SUPPORTED_SCHEMA_MIN",
-                25,
+                1,
             ),
             supported_schema_max=_integer(
                 env,
                 "SUPPORTED_SCHEMA_MAX",
-                25,
+                1,
             ),
             pool_min_size=_integer(env, "POOL_MIN_SIZE", 1),
             pool_max_size=_integer(env, "POOL_MAX_SIZE", 8),

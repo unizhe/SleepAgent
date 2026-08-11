@@ -167,7 +167,7 @@ def _runtime(
         attestor=lambda: DatabaseAttestation(
             database_identity="replay_db",
             database_role="sleepagent_api_replay",
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
         services=RuntimeServices(product=product, demo=Demo()),

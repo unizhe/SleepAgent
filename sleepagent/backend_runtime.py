@@ -295,7 +295,7 @@ def _attest_postgres(provider: object) -> DatabaseAttestation:
                          status IN ('applied', 'legacy_attested')
                          AND finished_at IS NOT NULL
                        ), false)
-                FROM radar_agent_schema_migrations_v2
+                FROM sleepagent_schema_migrations
                 """
             )
             schema_version, migrations_clean = cursor.fetchone()

@@ -78,7 +78,7 @@ def test_non_owner_api_runtime_can_attest_the_migration_ledger() -> None:
         asyncio.run(runtime.start())
         assert runtime.readiness()["ready"] is True
         assert runtime.attestation is not None
-        assert runtime.attestation.schema_version >= 25
+        assert runtime.attestation.schema_version == 1
     finally:
         asyncio.run(runtime.close())
         reset_active_runtime_for_tests()

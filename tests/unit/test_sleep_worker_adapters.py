@@ -243,7 +243,7 @@ def _runtime(settings: SleepBackendSettings) -> SleepBackendRuntime:
         attestor=lambda: DatabaseAttestation(
             database_identity=settings.database_identity,
             database_role=settings.database_role,
-            schema_version=25,
+            schema_version=1,
             migrations_clean=True,
         ),
         worker_handlers={queue: object() for queue in settings.worker_queues},
