@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         CommitFrozenConfirmedAction,
         ProductEpisodeRunRequest,
         ProductEpisodeRunResult,
+        ReexecuteWithAddedFact,
     )
 
 
@@ -30,10 +31,34 @@ class PublicationPublisher(Protocol):
     def publish(self, draft: CommunicationDraft) -> bool: ...
 
 
+class MemoryPublicationGate(Protocol):
+    def validate_prepublication(
+        self,
+        receipt_outputs: tuple[dict[str, Any], ...],
+        *,
+        subject_id: str,
+        actor_id: str,
+    ) -> None: ...
+
+
 class PublicationJournalEntryPort(Protocol):
-    intent_id: str
-    state: str
-    delivered: bool | None
+    @property
+    def intent_id(self) -> str: ...
+
+    @property
+    def episode_id(self) -> str: ...
+
+    @property
+    def command_hash(self) -> str | None: ...
+
+    @property
+    def draft_hash(self) -> str: ...
+
+    @property
+    def state(self) -> Literal["reserved", "delivered", "failed"]: ...
+
+    @property
+    def delivered(self) -> bool | None: ...
 
 
 class ProductEpisodeResultStore(Protocol):
@@ -59,6 +84,7 @@ class ProductEpisodeResultStore(Protocol):
     def reserve_publication(
         self,
         *,
+        command_hash: str,
         episode_id: str,
         draft_hash: str,
         now: datetime | None = None,
@@ -84,6 +110,11 @@ class ProductEpisodeRunnerPort(Protocol):
     def commit_frozen_confirmations(
         self,
         command: CommitFrozenConfirmedAction,
+    ) -> ProductEpisodeRunResult: ...
+
+    def reexecute_with_added_fact(
+        self,
+        command: ReexecuteWithAddedFact,
     ) -> ProductEpisodeRunResult: ...
 
     def process_induction_jobs(
@@ -154,6 +185,7 @@ FactSnapshotRevalidator = Callable[[FactSnapshot], bool]
 __all__ = [
     "ExternalActionExecutor",
     "FactSnapshotRevalidator",
+    "MemoryPublicationGate",
     "ProductEpisodeResultStore",
     "ProductEpisodeRunnerPort",
     "ProductToolExecutionContext",

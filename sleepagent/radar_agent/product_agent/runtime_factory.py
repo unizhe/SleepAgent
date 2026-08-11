@@ -16,6 +16,13 @@ from sleepagent.radar_agent.product_agent.agents import (
     ProductAgentFactory,
     ProductAgentRoster,
 )
+from sleepagent.radar_agent.product_agent.agent_invocation_coordinator import (
+    AgentInvocationCoordinator,
+    ProviderInputBudgetLedger,
+)
+from sleepagent.radar_agent.product_agent.confirmed_action_coordinator import (
+    ConfirmedActionCoordinator,
+)
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     CommunicationDraft,
@@ -24,6 +31,9 @@ from sleepagent.radar_agent.product_agent.contracts import (
 from sleepagent.radar_agent.product_agent.external_actions import (
     ConfiguredExternalActionExecutor,
     UnconfiguredExternalActionExecutor,
+)
+from sleepagent.radar_agent.product_agent.episode_result_finalizer import (
+    EpisodeResultFinalizer,
 )
 from sleepagent.radar_agent.product_agent.governance import (
     CareActionCatalog,
@@ -78,6 +88,9 @@ from sleepagent.radar_agent.product_agent.product_persistence import (
     PersistentMemoryContextStore,
     PersistentProductEpisodeResultStore,
 )
+from sleepagent.radar_agent.product_agent.publication_service import (
+    PublicationService,
+)
 from sleepagent.radar_agent.product_agent.provider import (
     OpenAICompatibleStructuredAgentModel,
 )
@@ -107,6 +120,9 @@ from sleepagent.radar_agent.product_agent.services.runtime_capabilities import (
 from sleepagent.radar_agent.product_agent.tooling import (
     CoreProductToolService,
     ProductToolExecutor,
+)
+from sleepagent.radar_agent.product_agent.tool_execution_coordinator import (
+    ToolExecutionCoordinator,
 )
 from sleepagent.radar_agent.questionnaire import (
     HabitQuestionnaireService,
@@ -168,6 +184,11 @@ class ProductRuntimeBundle:
     skill_resolver: SkillResolver
     prompt_compiler: PromptCompiler
     agent_profiles: Mapping[AgentId, AgentProfile]
+    agent_invocation_coordinator: AgentInvocationCoordinator
+    tool_execution_coordinator: ToolExecutionCoordinator
+    confirmed_action_coordinator: ConfirmedActionCoordinator
+    publication_service: PublicationService
+    episode_result_finalizer: EpisodeResultFinalizer
     human_decisions: HumanDecisionService
     longitudinal_memory: LongitudinalMemoryService
     habit_runtime: HabitProfileRuntimeService
@@ -178,7 +199,7 @@ class ProductRuntimeBundle:
     external_executor: ExternalActionExecutor
     publisher: PublicationPublisher
     policies: ProductRuntimePolicies
-    provider_input_ledger: dict[tuple[str, AgentId], int]
+    provider_input_ledger: ProviderInputBudgetLedger
     persistence_store: RadarPersistenceStore | None
     core_tool_service: CoreProductToolService
     runtime_read_service: ProductRuntimeReadService
@@ -197,6 +218,11 @@ class ProductRuntimeBundle:
             raise ValueError("Product runtime Skill resolver registry mismatch")
         if set(self.agent_profiles) != set(AgentId):
             raise ValueError("Product runtime requires one profile per Agent")
+        if (
+            self.roster.sleepcare.control_invoker
+            is not self.agent_invocation_coordinator
+        ):
+            raise ValueError("SleepCare control coordinator binding mismatch")
 
         runner_bindings = (
             (self.runner.agent_roster, self.roster, "roster"),
@@ -226,7 +252,32 @@ class ProductRuntimeBundle:
                 "external executor",
             ),
             (
-                self.runner._provider_input_tokens,
+                self.runner.agent_invocation_coordinator,
+                self.agent_invocation_coordinator,
+                "Agent invocation coordinator",
+            ),
+            (
+                self.runner.tool_execution_coordinator,
+                self.tool_execution_coordinator,
+                "Tool execution coordinator",
+            ),
+            (
+                self.runner.confirmed_action_coordinator,
+                self.confirmed_action_coordinator,
+                "confirmed-action coordinator",
+            ),
+            (
+                self.runner.publication_service,
+                self.publication_service,
+                "publication service",
+            ),
+            (
+                self.runner.episode_result_finalizer,
+                self.episode_result_finalizer,
+                "Episode result finalizer",
+            ),
+            (
+                self.runner.provider_input_budget,
                 self.provider_input_ledger,
                 "provider ledger",
             ),
@@ -236,6 +287,39 @@ class ProductRuntimeBundle:
                 raise ValueError(f"Product Runner {label} binding mismatch")
         if self.runner.agent_profiles is not self.agent_profiles:
             raise ValueError("Product Runner Agent profile binding mismatch")
+        if (
+            self.agent_invocation_coordinator.tool_execution_coordinator
+            is not self.tool_execution_coordinator
+        ):
+            raise ValueError("Agent invocation Tool coordinator mismatch")
+        if (
+            self.confirmed_action_coordinator.commit_controller
+            is not self.commit_controller
+            or self.confirmed_action_coordinator.human_decisions
+            is not self.human_decisions
+            or self.confirmed_action_coordinator.external_executor
+            is not self.external_executor
+        ):
+            raise ValueError("confirmed-action authority graph mismatch")
+        if (
+            self.publication_service.publisher is not self.publisher
+            or self.publication_service.result_store
+            is not self.stores.episode_results
+            or self.publication_service.longitudinal_memory
+            is not self.longitudinal_memory
+            or self.publication_service.revalidator
+            is not self.policies.fact_snapshot_revalidator
+        ):
+            raise ValueError("publication service authority graph mismatch")
+        if (
+            self.episode_result_finalizer.result_store
+            is not self.stores.episode_results
+            or self.episode_result_finalizer.tool_execution_coordinator
+            is not self.tool_execution_coordinator
+            or self.episode_result_finalizer.provider_input_budget_ledger
+            is not self.provider_input_ledger
+        ):
+            raise ValueError("Episode finalizer authority graph mismatch")
         if (
             self.runner.fact_snapshot_revalidator
             is not self.policies.fact_snapshot_revalidator
@@ -534,7 +618,33 @@ def build_product_runtime_bundle(
     profiles: Mapping[AgentId, AgentProfile] = MappingProxyType(
         default_agent_profiles()
     )
-    provider_ledger: dict[tuple[str, AgentId], int] = {}
+    provider_ledger = ProviderInputBudgetLedger()
+    tool_execution_coordinator = ToolExecutionCoordinator(executor)
+    agent_invocation_coordinator = AgentInvocationCoordinator(
+        tool_execution_coordinator=tool_execution_coordinator,
+        longitudinal_memory=memory,
+        skill_resolver=resolver,
+        prompt_compiler=compiler,
+        agent_profiles=profiles,
+        provider_input_budget=provider_ledger,
+    )
+    roster.sleepcare.bind_control_invoker(agent_invocation_coordinator)
+    confirmed_action_coordinator = ConfirmedActionCoordinator(
+        commit_controller=controller,
+        human_decisions=decision_service,
+        external_executor=resolved_external_executor,
+    )
+    publication_service = PublicationService(
+        publisher=resolved_publisher,
+        result_store=result_store,
+        longitudinal_memory=memory,
+        revalidator=fact_snapshot_revalidator,
+    )
+    episode_result_finalizer = EpisodeResultFinalizer(
+        result_store=result_store,
+        tool_execution_coordinator=tool_execution_coordinator,
+        provider_input_budget_ledger=provider_ledger,
+    )
     policies = ProductRuntimePolicies(
         care_catalog=catalog,
         human_decision_policy=decision_service.policy,
@@ -544,22 +654,15 @@ def build_product_runtime_bundle(
     )
     runner = ProductEpisodeRunner(
         agent_roster=roster,
-        tool_executor=executor,
-        publisher=resolved_publisher,
-        result_store=result_store,
         care_catalog=catalog,
         habit_runtime=habit_runtime,
         skill_registry=registry,
-        skill_resolver=resolver,
-        prompt_compiler=compiler,
-        agent_profiles=profiles,
-        commit_controller=controller,
-        human_decisions=decision_service,
-        longitudinal_memory=memory,
+        agent_invocation_coordinator=agent_invocation_coordinator,
+        tool_execution_coordinator=tool_execution_coordinator,
+        confirmed_action_coordinator=confirmed_action_coordinator,
+        publication_service=publication_service,
+        episode_result_finalizer=episode_result_finalizer,
         induction_worker=induction_worker,
-        external_executor=resolved_external_executor,
-        fact_snapshot_revalidator=fact_snapshot_revalidator,
-        provider_input_ledger=provider_ledger,
     )
     return ProductRuntimeBundle(
         runner=runner,
@@ -569,6 +672,11 @@ def build_product_runtime_bundle(
         skill_resolver=resolver,
         prompt_compiler=compiler,
         agent_profiles=profiles,
+        agent_invocation_coordinator=agent_invocation_coordinator,
+        tool_execution_coordinator=tool_execution_coordinator,
+        confirmed_action_coordinator=confirmed_action_coordinator,
+        publication_service=publication_service,
+        episode_result_finalizer=episode_result_finalizer,
         human_decisions=decision_service,
         longitudinal_memory=memory,
         habit_runtime=habit_runtime,

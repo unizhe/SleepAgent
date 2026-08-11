@@ -56,6 +56,7 @@ from sleepagent.radar_agent.product_agent.product_persistence import (
     PersistentProductEpisodeResultStore,
 )
 from sleepagent.radar_agent.product_agent.runtime_contracts import (
+    PendingUserInputTarget,
     ProductEpisodeRunResult,
 )
 from sleepagent.radar_agent.product_agent.runtime_factory import (
@@ -527,6 +528,208 @@ def test_product_episode_result_history_survives_restart(tmp_path: Path) -> None
 
     assert restarted.latest("episode:persistent-result") == result
     assert restarted.history("episode:persistent-result") == [result]
+
+
+def test_publication_journal_fences_logical_command_across_episode_recreation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "publication-command-journal.sqlite3"
+    command_hash = stable_hash("logical-publication-command")
+    draft_hash = stable_hash("first-exact-draft")
+    first = PersistentProductEpisodeResultStore(_persistence(database))
+
+    reserved, created = first.reserve_publication(
+        command_hash=command_hash,
+        episode_id="episode:publication:first",
+        draft_hash=draft_hash,
+        now=NOW,
+    )
+    assert created is True
+    delivered = first.complete_publication(
+        intent_id=reserved.intent_id,
+        delivered=True,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert delivered.delivered is True
+
+    restarted = PersistentProductEpisodeResultStore(_persistence(database))
+    replayed, replay_created = restarted.reserve_publication(
+        command_hash=command_hash,
+        episode_id="episode:publication:worker-retry",
+        draft_hash=draft_hash,
+        now=NOW + timedelta(minutes=1),
+    )
+    conflicting, conflict_created = restarted.reserve_publication(
+        command_hash=command_hash,
+        episode_id="episode:publication:worker-retry",
+        draft_hash=stable_hash("different-retry-draft"),
+        now=NOW + timedelta(minutes=2),
+    )
+
+    assert replay_created is False
+    assert replayed == delivered
+    assert conflict_created is False
+    assert conflicting == delivered
+    assert conflicting.draft_hash == draft_hash
+
+
+def _waiting_episode_result(
+    *,
+    episode_id: str = "episode:visible-result",
+) -> ProductEpisodeRunResult:
+    snapshot = _snapshot()
+    return ProductEpisodeRunResult(
+        registry_hash="c" * 64,
+        continuation_request_hash="d" * 64,
+        receipt=EpisodeReceipt(
+            episode_id=episode_id,
+            episode_type=EpisodeType.MORNING_REVIEW,
+            receipt_revision=1,
+            terminal=False,
+            execution_mode=ExecutionMode.INTELLIGENT,
+            status=EpisodeStatus.WAITING_USER,
+            goal_achieved=False,
+            fact_snapshot_id=snapshot.fact_snapshot_id,
+            fact_snapshot_hash=snapshot.fact_snapshot_hash,
+            source_scope=snapshot.source_scope,
+            final_episode_state_revision=1,
+            trace_ref=f"trace:{episode_id}:waiting",
+        ),
+        pending_user_input=PendingUserInputTarget(
+            request_id=f"request:{episode_id}",
+            question_text="昨晚是否比平时更晚入睡？",
+            why_needed="补齐当前证据缺口。",
+            decision_scope="current_night",
+            target_role="elder",
+            source_agent=AgentId.EVIDENCE_REASONING,
+            expires_at=NOW + timedelta(days=1),
+        ),
+    )
+
+
+def _terminal_episode_result(
+    *,
+    episode_id: str = "episode:visible-result",
+) -> ProductEpisodeRunResult:
+    snapshot = _snapshot()
+    return ProductEpisodeRunResult(
+        registry_hash="c" * 64,
+        receipt=EpisodeReceipt(
+            episode_id=episode_id,
+            episode_type=EpisodeType.MORNING_REVIEW,
+            receipt_revision=2,
+            terminal=True,
+            execution_mode=ExecutionMode.INTELLIGENT,
+            status=EpisodeStatus.COMPLETE,
+            goal_achieved=True,
+            fact_snapshot_id=snapshot.fact_snapshot_id,
+            fact_snapshot_hash=snapshot.fact_snapshot_hash,
+            source_scope=snapshot.source_scope,
+            final_episode_state_revision=2,
+            trace_ref=f"trace:{episode_id}:complete",
+        ),
+        publication_delivered=True,
+    )
+
+
+def test_product_episode_result_live_instances_refresh_durable_history(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "live-episode-results.sqlite3"
+    writer_persistence = _persistence(database)
+    peer_persistence = _persistence(database)
+    writer = PersistentProductEpisodeResultStore(writer_persistence)
+    peer = PersistentProductEpisodeResultStore(peer_persistence)
+    waiting = _waiting_episode_result()
+    terminal = _terminal_episode_result()
+
+    writer.append_nonterminal(waiting, subject_id="subject-1")
+
+    assert peer.history(waiting.receipt.episode_id) == [waiting]
+    assert peer.latest(waiting.receipt.episode_id) == waiting
+
+    writer.append_terminal_bundle(
+        terminal,
+        subject_id="subject-1",
+        now=NOW,
+    )
+
+    assert peer.history(waiting.receipt.episode_id) == [waiting, terminal]
+    assert peer.latest(waiting.receipt.episode_id) == terminal
+    replayed_bundle = peer.append_terminal_bundle(
+        terminal,
+        subject_id="subject-1",
+        now=NOW + timedelta(minutes=1),
+    )
+    assert replayed_bundle.terminal_result_id == stable_hash(
+        terminal.model_dump(mode="json")
+    )
+    assert len(peer_persistence.list_product_terminal_result_rows()) == 1
+
+
+def test_nonterminal_persistence_failure_discards_in_memory_phantom(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "failed-nonterminal-result.sqlite3"
+    persistence = _persistence(database)
+    store = PersistentProductEpisodeResultStore(persistence)
+    result = _waiting_episode_result(episode_id="episode:failed-nonterminal")
+
+    def fail_append(**_kwargs: object) -> None:
+        raise RuntimeError("durable nonterminal append failed")
+
+    monkeypatch.setattr(
+        persistence,
+        "append_product_nonterminal_result",
+        fail_append,
+    )
+
+    with pytest.raises(RuntimeError, match="durable nonterminal append failed"):
+        store.append_nonterminal(result, subject_id="subject-1")
+
+    assert store._results.get(result.receipt.episode_id, []) == []
+    assert not any(
+        episode_id == result.receipt.episode_id
+        for episode_id, _ in store._result_identity
+    )
+    assert persistence.list_product_episode_result_json(
+        result.receipt.episode_id
+    ) == []
+
+
+def test_v38_waiting_result_without_continuation_hash_hydrates(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "legacy-v38-waiting-result.sqlite3"
+    persistence = _persistence(database)
+    current = _waiting_episode_result(
+        episode_id="episode:legacy-v38-waiting"
+    )
+    payload = current.model_dump(mode="json")
+    payload["schema_version"] = "ProductEpisodeRunResult.v38"
+    payload["runner_version"] = "sleepagent-product-runner.v45"
+    payload.pop("continuation_request_hash", None)
+    payload.pop("continuation_checkpoint_hash", None)
+    persistence.append_product_nonterminal_result(
+        result_id=stable_hash(payload),
+        episode_id=current.receipt.episode_id,
+        result_json=json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+        recorded_at=NOW,
+    )
+
+    restarted = PersistentProductEpisodeResultStore(persistence)
+    hydrated = restarted.latest(current.receipt.episode_id)
+
+    assert hydrated.schema_version == "ProductEpisodeRunResult.v38"
+    assert hydrated.receipt.status == EpisodeStatus.WAITING_USER
+    assert hydrated.continuation_request_hash is None
+    assert hydrated.continuation_checkpoint_hash is None
 
 
 def test_configured_external_executor_posts_exact_target_and_keeps_receipt(

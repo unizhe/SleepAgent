@@ -27,7 +27,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
 )
 
 
-LONGITUDINAL_MEMORY_VERSION = "sleepagent-longitudinal-memory.v1"
+LONGITUDINAL_MEMORY_VERSION = "sleepagent-longitudinal-memory.v2"
 INDUCTION_VERSION = "sleepagent-deterministic-induction.v2"
 INDUCTION_PROJECTOR_VERSION = "sleepagent-induction-projector.v2"
 MEMORY_QUERY_POLICY_VERSION = "sleepagent-memory-query-policy.v1"
@@ -737,6 +737,11 @@ class DeploymentControlAttestation(StrictContract):
 class PublicationJournalEntry(StrictContract):
     intent_id: str = Field(..., min_length=1)
     episode_id: str = Field(..., min_length=1)
+    command_hash: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+    )
     draft_hash: str = Field(..., min_length=64, max_length=64)
     state: Literal["reserved", "delivered", "failed"]
     delivered: bool | None = None
@@ -1285,12 +1290,13 @@ class InMemoryLongitudinalResultStore:
     def reserve_publication(
         self,
         *,
+        command_hash: str,
         episode_id: str,
         draft_hash: str,
         now: datetime | None = None,
     ) -> tuple[PublicationJournalEntry, bool]:
         created_at = now or datetime.now(timezone.utc)
-        intent_id = f"publication:{stable_hash((episode_id, draft_hash))}"
+        intent_id = f"publication:{command_hash}"
         with self.lock:
             existing = self._publication_journal.get(intent_id)
             if existing is not None:
@@ -1298,6 +1304,7 @@ class InMemoryLongitudinalResultStore:
             entry = PublicationJournalEntry(
                 intent_id=intent_id,
                 episode_id=episode_id,
+                command_hash=command_hash,
                 draft_hash=draft_hash,
                 state="reserved",
                 created_at=created_at,

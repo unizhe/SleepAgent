@@ -2,7 +2,7 @@
 
 This directory is synthetic development data, not release evidence.
 
-- release identity: `7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`
+- release identity: `5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0`
 - Habit catalog: `d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903`
 - usability interactions: simulated, with synthetic attestation
 - reviewers and signatures: simulated identities and synthetic credentials

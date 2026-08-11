@@ -4,7 +4,7 @@
     {
       "observation_id": "observation:simulated-v24-current:normal_morning:1",
       "scenario": "normal_morning",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -19,7 +19,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:normal_morning:1",
-        "receipt_hash": "3de1958f6d0ae587e3f09b300fbe72d7d53a44adee16b08568cc080363e3c4aa",
+        "receipt_hash": "18f4a36a8ff2340ae4449ee69aff3e6dbe645c38468cd25913d8f7885b7e5fad",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -44,7 +44,7 @@
     {
       "observation_id": "observation:simulated-v24-current:normal_morning:2",
       "scenario": "normal_morning",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -59,7 +59,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:normal_morning:2",
-        "receipt_hash": "01816cec0f9dabb266ddd0259a5202bf943551d404c595aa2648028bbc1cc970",
+        "receipt_hash": "51e98a822763385ba94f92cdfcc0e981b0751f97660e7d329c58a2495e302626",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -84,7 +84,7 @@
     {
       "observation_id": "observation:simulated-v24-current:normal_morning:3",
       "scenario": "normal_morning",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -99,7 +99,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:normal_morning:3",
-        "receipt_hash": "8bd998125c2f89bb4bd84cc81b426fed0bedd9d994eff2ec98ad7b999569c25f",
+        "receipt_hash": "624fb821fbca78813e7e3dda00c5b653d3a2a3b312663618548d89a9465b6a2a",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -124,7 +124,7 @@
     {
       "observation_id": "observation:simulated-v24-current:data_quality:1",
       "scenario": "data_quality",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -147,7 +147,7 @@
     {
       "observation_id": "observation:simulated-v24-current:trend:1",
       "scenario": "trend",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -162,7 +162,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:trend:1",
-        "receipt_hash": "e05a8e4dd175a90394b07dc85cb0dc435d92915ecc9240c190c4d88c66e245a6",
+        "receipt_hash": "ce8efceb4b52f0af3c7804a3d290511ba23c355976d097dc5933d5cdc45f3463",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -187,7 +187,7 @@
     {
       "observation_id": "observation:simulated-v24-current:trend:2",
       "scenario": "trend",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -202,7 +202,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:trend:2",
-        "receipt_hash": "e59b63e1995fa9b7ed01de71a71a16af0af2a45fab743178a21afed0ce9b09ad",
+        "receipt_hash": "6d4813ae2917becc5b70451a17c3cc2e55a3c991dae680ffc942162d348a57ed",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -227,7 +227,7 @@
     {
       "observation_id": "observation:simulated-v24-current:trend:3",
       "scenario": "trend",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -242,7 +242,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:trend:3",
-        "receipt_hash": "a340c351e74faf19056d31904b3ab76ea8561f61fb25fa7213a15549a4540f36",
+        "receipt_hash": "15b06d118f49e350852556a19297619132420b7ca24e49935870dca94fb0cad7",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -267,7 +267,7 @@
     {
       "observation_id": "observation:simulated-v24-current:general_knowledge:1",
       "scenario": "general_knowledge",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -282,7 +282,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:general_knowledge:1",
-        "receipt_hash": "772e92ece4ca4d96dcd3cd323540f6b239d74b441a46baa8396c77bacae484a0",
+        "receipt_hash": "eb883fed660ec96da98ef898ba4d8630f6678ce5410efb0a93028895b5b1cef2",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -307,7 +307,7 @@
     {
       "observation_id": "observation:simulated-v24-current:general_knowledge:2",
       "scenario": "general_knowledge",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -322,7 +322,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:general_knowledge:2",
-        "receipt_hash": "ab90ab735fee71f3c55f7d40eef545c6bea747a747039383035c6a69662e3361",
+        "receipt_hash": "60d6dc75c61aeacc074de5eefa99c8202cb16f8475b6ebe326fee149fc8c6f0d",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -347,7 +347,7 @@
     {
       "observation_id": "observation:simulated-v24-current:general_knowledge:3",
       "scenario": "general_knowledge",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -362,7 +362,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:general_knowledge:3",
-        "receipt_hash": "e859bae02aba0a0248575850b4dde868c4f8f1bc973febb33eda6071c936d6db",
+        "receipt_hash": "e4d2f680e3fedb9083c12a33830cecee7c788923fb09d41bf6204ca60d510130",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -387,7 +387,7 @@
     {
       "observation_id": "observation:simulated-v24-current:personal_dialogue:1",
       "scenario": "personal_dialogue",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -402,7 +402,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:personal_dialogue:1",
-        "receipt_hash": "f2ee483cdd21c4d337b0a5ff130963b5a1b005ff9004a930371e02db3d80c272",
+        "receipt_hash": "fa9b8a064e3bf0326e3cbee7068121cd837895a15b10e50ef4ea355f76888c76",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -427,7 +427,7 @@
     {
       "observation_id": "observation:simulated-v24-current:personal_dialogue:2",
       "scenario": "personal_dialogue",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -442,7 +442,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:personal_dialogue:2",
-        "receipt_hash": "1c9af093f92b49447647d1bd4529ad2a9c644a9cc3721efe84bc6c15926fd4b5",
+        "receipt_hash": "0bfa1344c5001a6dcce60326cb2b5760ad1ac38710e6cc2b2aa58dbc9d54fc16",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -467,7 +467,7 @@
     {
       "observation_id": "observation:simulated-v24-current:personal_dialogue:3",
       "scenario": "personal_dialogue",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -482,7 +482,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:personal_dialogue:3",
-        "receipt_hash": "ed94c327775fc2227238a2552593a3b1b2150bd5620594be9c5b8d0fc7707352",
+        "receipt_hash": "4f91eabe069998fd3e5db01482d3499a3b6885247ac7d04cc92553423e2d89d8",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -507,7 +507,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_plan:1",
       "scenario": "care_plan",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -523,7 +523,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_plan:1",
-        "receipt_hash": "f0ca72fbd31ca46eadf08119f5f31fd8c9bd3af101c7e2a07b22bf1ef776694d",
+        "receipt_hash": "0127b88119694da01bd6cac5d40dd4031d296184d50a0dc5f2fe33142d2871a5",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -548,7 +548,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_plan:2",
       "scenario": "care_plan",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -564,7 +564,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_plan:2",
-        "receipt_hash": "5db1a463bd4bbb445354becc4c72c06dc5ae243ef9ba144711bf2d3d356828f0",
+        "receipt_hash": "243d7bcc139a39838bb2b14332d4e6c3e2fce3decfe511ab157056cbdc54ee7d",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -589,7 +589,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_plan:3",
       "scenario": "care_plan",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -605,7 +605,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_plan:3",
-        "receipt_hash": "b86fd88cc32e568475b7387106ff5f5638fe37863526bc0ce8aaac30e161a0d4",
+        "receipt_hash": "882f20abf2df2a5e3ed02c7f68dd91f1a0e8e79074cd43c8972864ac9d91fa5c",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -630,7 +630,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_followup:1",
       "scenario": "care_followup",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -646,7 +646,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_followup:1",
-        "receipt_hash": "1e3c81e97fe68a8d307df0d36a47867f1adcc127c57c72cc910cd1c6fd2af068",
+        "receipt_hash": "cb73239e1b8d524ba6d792396b7c1ddab9bd19b5a281799cbd508c9069353883",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -671,7 +671,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_followup:2",
       "scenario": "care_followup",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -687,7 +687,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_followup:2",
-        "receipt_hash": "b82cc413c8b6b7792444f6c9c9725e1266a29066be7e2559db07d1df63a2070a",
+        "receipt_hash": "4233a1e051759b297dfafaa2e4a3df3745a8ac238d9868e9db8ec268914ee5fe",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -712,7 +712,7 @@
     {
       "observation_id": "observation:simulated-v24-current:care_followup:3",
       "scenario": "care_followup",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -728,7 +728,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:care_followup:3",
-        "receipt_hash": "176b5e691b00dd0e40679aa885fbd3f2ce9871700bd2cd3c80e46310ccc0d613",
+        "receipt_hash": "b769837d0196e0ce33bdc7499ac0b20fb5b8338ce8d827f29d36ba38dea0ddb1",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -753,7 +753,7 @@
     {
       "observation_id": "observation:simulated-v24-current:doctor_material:1",
       "scenario": "doctor_material",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -769,7 +769,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:doctor_material:1",
-        "receipt_hash": "1f25a2d97b4c52e21c663f6213bea64ad30325f93df5059395ae553ed3ec6c15",
+        "receipt_hash": "fc5d460d4ded59b61f00e779dbca0cd90f2aaf75e8235826c23cc8390913cd41",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -794,7 +794,7 @@
     {
       "observation_id": "observation:simulated-v24-current:doctor_material:2",
       "scenario": "doctor_material",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -810,7 +810,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:doctor_material:2",
-        "receipt_hash": "214aeedeab184505821631f3cda22ad2b4cc27b65fac11b07e6cc22341dae7f3",
+        "receipt_hash": "00b93dd29d8dea220c378bc1fc4c1376b1ec9f605f3f417ca0a54c6bfced0ca3",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -835,7 +835,7 @@
     {
       "observation_id": "observation:simulated-v24-current:doctor_material:3",
       "scenario": "doctor_material",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -851,7 +851,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:doctor_material:3",
-        "receipt_hash": "897b57adc95f20b3dea34552c34559ac8ada496a396f126f49d78d58fc3afe88",
+        "receipt_hash": "2a2b144612edbc3341f0eaefe98703866400fd18dee48709b725dd57290d397b",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -876,7 +876,7 @@
     {
       "observation_id": "observation:simulated-v24-current:external_action:1",
       "scenario": "external_action",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -892,7 +892,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:external_action:1",
-        "receipt_hash": "e704e6f5a301ce34b6ea925a489e048dc347479018d15f5993ff1efa932196ce",
+        "receipt_hash": "73273e16e82330d03e21f4fc6f418819e45f0e3ade78354a518dbf77656407af",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -917,7 +917,7 @@
     {
       "observation_id": "observation:simulated-v24-current:external_action:2",
       "scenario": "external_action",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -933,7 +933,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:external_action:2",
-        "receipt_hash": "e0891a161a431910186ffd68ba4985b773217caf1a7d6ec8da04d44b014154a9",
+        "receipt_hash": "25cc4a92a709facf81ae068f25adfe58acfa34c1615ed72a62e88adfbc9c97e6",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -958,7 +958,7 @@
     {
       "observation_id": "observation:simulated-v24-current:external_action:3",
       "scenario": "external_action",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -974,7 +974,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:external_action:3",
-        "receipt_hash": "6be1f92dd8e529fdda08b4f3b3ed5cb7abd7042edb110580a946db81ae99b785",
+        "receipt_hash": "291b4cf2d375eee833b68e6dc64e721fcc78d05cfa7bc7ca5dc97e2314408a83",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -999,7 +999,7 @@
     {
       "observation_id": "observation:simulated-v24-current:urgent:1",
       "scenario": "urgent",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1023,7 +1023,7 @@
     {
       "observation_id": "observation:simulated-v24-current:evidence_conflict:1",
       "scenario": "evidence_conflict",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1038,7 +1038,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:evidence_conflict:1",
-        "receipt_hash": "61862004385e3c4ca5e0de74c67b0e276ba9c3e284c8232fd52150a2f26e679e",
+        "receipt_hash": "8a11ee652236cd48af961a449eed1b982cd0c6df39948fd958935951179d08ea",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1063,7 +1063,7 @@
     {
       "observation_id": "observation:simulated-v24-current:evidence_conflict:2",
       "scenario": "evidence_conflict",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1078,7 +1078,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:evidence_conflict:2",
-        "receipt_hash": "c06b27ecc18aa9fe0abb097aff2ea1edb65a216b2abc6b59fcde17393ddf385f",
+        "receipt_hash": "d95b79c0af6001d7d2d233db6c9bbf3b3624e22ba801e494a81afa101e5ad605",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1103,7 +1103,7 @@
     {
       "observation_id": "observation:simulated-v24-current:evidence_conflict:3",
       "scenario": "evidence_conflict",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1118,7 +1118,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:evidence_conflict:3",
-        "receipt_hash": "6b1331aee778008cf8beacb7ca9adc01f5a626051999e8951f548a1414aaa6ca",
+        "receipt_hash": "c4244d8fa7d0871f4b4a5ff95184364a7b74e2b446715873044796fa7e25ffae",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1143,7 +1143,7 @@
     {
       "observation_id": "observation:simulated-v24-current:safety_revision:1",
       "scenario": "safety_revision",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1159,7 +1159,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:safety_revision:1",
-        "receipt_hash": "cc60e603517df56f1fc3ba737edc2418711bdbccb493c60a33490bfe52cf1248",
+        "receipt_hash": "892ee564fbd9001e5c6d37fc1807b432660f9dad7a42343ce9ca030888fa52e8",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1184,7 +1184,7 @@
     {
       "observation_id": "observation:simulated-v24-current:safety_revision:2",
       "scenario": "safety_revision",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1200,7 +1200,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:safety_revision:2",
-        "receipt_hash": "83ea6f981a1650277916127247e39b112d1b79ec1804b34f1c25589589522154",
+        "receipt_hash": "5a3ac84d35fd79ceef6bbd5f8e41ee65ed13839d1692601ffc75034a8d692eb4",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1225,7 +1225,7 @@
     {
       "observation_id": "observation:simulated-v24-current:safety_revision:3",
       "scenario": "safety_revision",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1241,7 +1241,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:safety_revision:3",
-        "receipt_hash": "dfb72d4968f934115e90b536dc75b1cac7ac4fbc44abe090827e937d1bd99a0c",
+        "receipt_hash": "cc8b426abcb7790bd902a7067f54d6c60866379aa07e76bf5bb0097510f43bf2",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1266,7 +1266,7 @@
     {
       "observation_id": "observation:simulated-v24-current:agent_failure:1",
       "scenario": "agent_failure",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1281,7 +1281,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:agent_failure:1",
-        "receipt_hash": "d7b0ff5409f20d0947d1dfcd1c208e0e8d0a701ead281b7eae14d6ed9b9f5cf5",
+        "receipt_hash": "01c0f780618690af38bff43ea69dfed92fa4d637bb5d3312c459828eba7dd9f1",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1306,7 +1306,7 @@
     {
       "observation_id": "observation:simulated-v24-current:agent_failure:2",
       "scenario": "agent_failure",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1321,7 +1321,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:agent_failure:2",
-        "receipt_hash": "6fb15cb30515c262cd76ceba9e9675e737e498b6ac6fcd3c92b219db89de2e15",
+        "receipt_hash": "702cc4763e86c60131f0228a90d2bd20f98fcb0292eb0c817abbc585e3a419f8",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1346,7 +1346,7 @@
     {
       "observation_id": "observation:simulated-v24-current:agent_failure:3",
       "scenario": "agent_failure",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1361,7 +1361,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:agent_failure:3",
-        "receipt_hash": "62e348eef123ea6304fbe669ce76c6ba0ca8deca3e0bbee23ec177fd1cb78e13",
+        "receipt_hash": "eed70727f4124def8c5dad2b6a4d2827b4f8559e2870e1fd12355b8879c61823",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1386,7 +1386,7 @@
     {
       "observation_id": "observation:simulated-v24-current:authorization:1",
       "scenario": "authorization",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1401,7 +1401,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:authorization:1",
-        "receipt_hash": "6b345f57888863f13651ac7e094e51be83ce83b93bdc3e196892fb15b34eca5b",
+        "receipt_hash": "8a167ab30766a5a11fc12c30c42f95dfc7aaf9416255c8719b4ab9926a96dc8a",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1426,7 +1426,7 @@
     {
       "observation_id": "observation:simulated-v24-current:authorization:2",
       "scenario": "authorization",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1441,7 +1441,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:authorization:2",
-        "receipt_hash": "b3faa3122aa4e67efe4b0960843240e1c335736d8b856abc6b61b42004f9a82a",
+        "receipt_hash": "8edaf2d3858eaace22c9a0cd8aba3e7ea92cc4ff5ae9ee3e795f85906472b407",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1466,7 +1466,7 @@
     {
       "observation_id": "observation:simulated-v24-current:authorization:3",
       "scenario": "authorization",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1481,7 +1481,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:authorization:3",
-        "receipt_hash": "d39160982c4b24a870adcbe9daeaea39d351c81bbf5c400380d10d8031a40429",
+        "receipt_hash": "6921fca956e4a01adcf958f18b07bb0fecc2cbe59d184fe1f4f10e08bd89e365",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1506,7 +1506,7 @@
     {
       "observation_id": "observation:simulated-v24-current:memory:1",
       "scenario": "memory",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1521,7 +1521,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:memory:1",
-        "receipt_hash": "44a58291f9e63bfdf564170de21d3bdcda7efa82826c47dd42c21a88bd5c5f7d",
+        "receipt_hash": "8d0bd8c698f57fc0cf087771b79777875c7120a35a6753ed7f7823fab8812118",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1546,7 +1546,7 @@
     {
       "observation_id": "observation:simulated-v24-current:memory:2",
       "scenario": "memory",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1561,7 +1561,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:memory:2",
-        "receipt_hash": "9ff7a88e007084183bef950bae53eb139df468b143a93277002ae45b4654e613",
+        "receipt_hash": "55b7064870a8e3f87f2ae83dd3a3f8d205aecf226af57ae2655aaa01c0293366",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1586,7 +1586,7 @@
     {
       "observation_id": "observation:simulated-v24-current:memory:3",
       "scenario": "memory",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1601,7 +1601,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:memory:3",
-        "receipt_hash": "67296fa628dd1b3a23d56f41a026edcbf4a52879d2e7b63d5178b8724a9c91f4",
+        "receipt_hash": "98613546b32e9ba480ae79fa6d3d75831930c894dd3591e0a5aa933bce590c63",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1626,7 +1626,7 @@
     {
       "observation_id": "observation:simulated-v24-current:confirmation_replay:1",
       "scenario": "confirmation_replay",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1641,7 +1641,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:confirmation_replay:1",
-        "receipt_hash": "078a5c60e781f55c4ff001575ce39686b63574f2703911af5955a51ba7dd3a5f",
+        "receipt_hash": "84aae7ca871f9c0fc8fd61ab464f1ad2122d045bc3ae167a08c720ff57c6bb06",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1666,7 +1666,7 @@
     {
       "observation_id": "observation:simulated-v24-current:confirmation_replay:2",
       "scenario": "confirmation_replay",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1681,7 +1681,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:confirmation_replay:2",
-        "receipt_hash": "3635e10ddcd0bcb61f00050a7f83873271943b5c10fb3b481dfc80dbfbcd4b26",
+        "receipt_hash": "78b86fe3b04a416e8dfa2176acd8ad9cf32fa6815f94061f7386aa3ff383f5d3",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1706,7 +1706,7 @@
     {
       "observation_id": "observation:simulated-v24-current:confirmation_replay:3",
       "scenario": "confirmation_replay",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1721,7 +1721,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:confirmation_replay:3",
-        "receipt_hash": "629f83f20ec2029464efad8d419be5367c645903d437e5ee0d3c157751dc21a3",
+        "receipt_hash": "3a2eba5a9d8362e35f0067f69289f3dedfedcc87d2591ec82da931647c08f491",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1746,7 +1746,7 @@
     {
       "observation_id": "observation:simulated-v24-current:concurrency:1",
       "scenario": "concurrency",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1761,7 +1761,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:concurrency:1",
-        "receipt_hash": "18784ef9bd9272ab993be1d4948a4d0cc898ea3a6abec4b81e0afe4746f0e877",
+        "receipt_hash": "adcf2d422402734e4bacc5396a2424b8af9c513cbdf62ebb2585472d4497c9f2",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1786,7 +1786,7 @@
     {
       "observation_id": "observation:simulated-v24-current:concurrency:2",
       "scenario": "concurrency",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1801,7 +1801,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:concurrency:2",
-        "receipt_hash": "f137a815bd7bbe9434a0674670e9d67bd3e159cccb6f452e7149a6b76ef90336",
+        "receipt_hash": "24ca3fd247124156383a7ed560460d3f9b97c6c764a059c157a3ef6f99149039",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1826,7 +1826,7 @@
     {
       "observation_id": "observation:simulated-v24-current:concurrency:3",
       "scenario": "concurrency",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1841,7 +1841,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:concurrency:3",
-        "receipt_hash": "9919febbfec28db352495e3b892dabf06e541bd68193087929099e55b74228b4",
+        "receipt_hash": "deeffae64c29d602a2dec3bd733781c3c4b119f8757d22617163216cf1752b18",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1866,7 +1866,7 @@
     {
       "observation_id": "observation:simulated-v24-current:resume:1",
       "scenario": "resume",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -1881,7 +1881,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:resume:1",
-        "receipt_hash": "7921a4071cb821dba47e6399387de37b54caedf80b274b3d00221f9ba26e5282",
+        "receipt_hash": "59fccfc29a4a65dadc25bd8aa6e497b451984aa22d97593d3bc9aadcdb5579ff",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1906,7 +1906,7 @@
     {
       "observation_id": "observation:simulated-v24-current:resume:2",
       "scenario": "resume",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -1921,7 +1921,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:resume:2",
-        "receipt_hash": "ee7ad30035521976eea41e4c58da51bdb9d491ef3aae93f5db4e9be369f5475c",
+        "receipt_hash": "14eedca4c59fe185d4e9b97bc4fb1a1c23611c91a85c5e922ca998c54ecf3cbe",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1946,7 +1946,7 @@
     {
       "observation_id": "observation:simulated-v24-current:resume:3",
       "scenario": "resume",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -1961,7 +1961,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:resume:3",
-        "receipt_hash": "4251056f0f2279d53f0f0bca48732d0c99fade875b453cf2a53eae20a7bb1421",
+        "receipt_hash": "fb42958935c4d38bde4ca3039a435ca349e3fa1ae3acbb588c168430c10396ed",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -1986,7 +1986,7 @@
     {
       "observation_id": "observation:simulated-v24-current:injection:1",
       "scenario": "injection",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2001,7 +2001,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:injection:1",
-        "receipt_hash": "6db644e7a13a92e35d173b36926fa60d1c173a6ae4bd7b3e7cd6c3def40f956b",
+        "receipt_hash": "eeed5bda04ce4f7cbeb6b058f96b2fe1a174c41c06f2e4a332fbb8c31c68b027",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2026,7 +2026,7 @@
     {
       "observation_id": "observation:simulated-v24-current:injection:2",
       "scenario": "injection",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2041,7 +2041,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:injection:2",
-        "receipt_hash": "4eee8c004ea69fe1f027b06dcbda864c7f38b340df13eb3fe8a03fd267c24544",
+        "receipt_hash": "828f95edcd1784f80d96a3d9c7f7677eb302bd1daa2820eda6794cf42d20b12e",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2066,7 +2066,7 @@
     {
       "observation_id": "observation:simulated-v24-current:injection:3",
       "scenario": "injection",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2081,7 +2081,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:injection:3",
-        "receipt_hash": "822f2d2c23baf4efb365545194cfba41afc33dd88205d337eff39ad21a47c7be",
+        "receipt_hash": "ce907d2463d0555f5730d26e5c9969c6b80d7bcd01b86a6d414be9e0f4021488",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2106,7 +2106,7 @@
     {
       "observation_id": "observation:simulated-v24-current:publication_drift:1",
       "scenario": "publication_drift",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2121,7 +2121,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:publication_drift:1",
-        "receipt_hash": "17c547ce6b69fad82152827f14844788165ca1287b0aca30b9849b4c47362aab",
+        "receipt_hash": "1596576b20c7cdeb0ee056eadc9f141587f12c0f9715e4b2392afdf2783c30a7",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2146,7 +2146,7 @@
     {
       "observation_id": "observation:simulated-v24-current:publication_drift:2",
       "scenario": "publication_drift",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2161,7 +2161,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:publication_drift:2",
-        "receipt_hash": "9d76cc88ff9c857b0f16f9e2d0705305ab98727594e49bff1912d6feab4f4971",
+        "receipt_hash": "278413f328a9675c6ec9912503585a56ed3b4cbf36230905a38852eed63bd735",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2186,7 +2186,7 @@
     {
       "observation_id": "observation:simulated-v24-current:publication_drift:3",
       "scenario": "publication_drift",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2201,7 +2201,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:publication_drift:3",
-        "receipt_hash": "5a80d37d2893121190c9b59278e01b2565f5d8a3551c07fce51bd0227aa6216c",
+        "receipt_hash": "b34037c382973cc298251cdcb75a49f9a904e551af3e912fe71e0dd3ca587dec",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2226,7 +2226,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_optional_intake:1",
       "scenario": "habit_optional_intake",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2241,7 +2241,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_optional_intake:1",
-        "receipt_hash": "47fe44de8a4d026b69a1df27d13f01c2f61216b98fbad90b58f1092addd68d2a",
+        "receipt_hash": "0e583dc3063fc66469f2dd8c875b23d11fed25de4002a156e6debff1083bbc3f",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2266,7 +2266,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_optional_intake:2",
       "scenario": "habit_optional_intake",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2281,7 +2281,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_optional_intake:2",
-        "receipt_hash": "262596552419cc44893ec002c89155200adbe095e64d5fe0e7e0eb485e1e76d3",
+        "receipt_hash": "663beac0d3b5b71ef9caa3e729207cdefa7ff7eca133f22993abdf474547e389",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2306,7 +2306,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_optional_intake:3",
       "scenario": "habit_optional_intake",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2321,7 +2321,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_optional_intake:3",
-        "receipt_hash": "b3d4690bf3fad34d9d55f0cb9802f2512c8224927e41cab1c8d384b70e29cf48",
+        "receipt_hash": "cb56bbaedcaf363c10a7a3682f3f93869b8f6eadd3cd415061c80fa41fcbf1d0",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2346,7 +2346,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_profile_persistence:1",
       "scenario": "habit_profile_persistence",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2361,7 +2361,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_profile_persistence:1",
-        "receipt_hash": "b761aed6a11f40e00b39371554b5e0f7d77fd3d08cbb5f46ebe40c45b477ba97",
+        "receipt_hash": "586f1d39178dac8fe7d389c190b17f4aedc4838354ebb803fd963a9792936f37",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2386,7 +2386,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_profile_persistence:2",
       "scenario": "habit_profile_persistence",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2401,7 +2401,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_profile_persistence:2",
-        "receipt_hash": "a24b110bee2a4221cd5dd1da25cbcf6dcd02630bf05caf8c3d3359189b8b31ce",
+        "receipt_hash": "e9ad9c6594726d4d9c5380d1ad90edf573d2e27912312a3b891c9a6710bc7042",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2426,7 +2426,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_profile_persistence:3",
       "scenario": "habit_profile_persistence",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2441,7 +2441,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_profile_persistence:3",
-        "receipt_hash": "25570aebf934b6b7078a739cf03c0b5e89d15b3469c38c5c390582e1e4b8aa7d",
+        "receipt_hash": "0fe5a1ec90c2967d0463b1881ff7487fb72bba7babc62b27e4349a76da9f13ae",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2466,7 +2466,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_observer_origin:1",
       "scenario": "habit_observer_origin",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2481,7 +2481,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_observer_origin:1",
-        "receipt_hash": "a10f63ffcde24eb1dc7ff7a38ab78f57b0d07f5d2defe0ce55244696444815e3",
+        "receipt_hash": "c0358fcab92311f67e82d7c1140bab75f970d6cab51c9a85a02c281102e42be8",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2506,7 +2506,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_observer_origin:2",
       "scenario": "habit_observer_origin",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2521,7 +2521,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_observer_origin:2",
-        "receipt_hash": "3811de72304a77b29f1f0c162cba4c6bb0def7fc3e0f7ad9cd2ed03d003f02eb",
+        "receipt_hash": "c35448b757c12bec5b53dbb1a37cf0b9a29e34266cb43a2394f0550f2141fbcc",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2546,7 +2546,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_observer_origin:3",
       "scenario": "habit_observer_origin",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2561,7 +2561,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_observer_origin:3",
-        "receipt_hash": "ede5ebadaa9269854fdf18949b4b12c2d7e975960d618d787c4439626a059056",
+        "receipt_hash": "41b26f9b3cd9d48c81d7a4a5b6bb6f6a05de27bf96796ac003b598711f603c33",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2586,7 +2586,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_safety_preemption:1",
       "scenario": "habit_safety_preemption",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 1,
       "role": "elder",
       "observed_agents": [
@@ -2602,7 +2602,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_safety_preemption:1",
-        "receipt_hash": "fae44feeea70d8beefa533bfcbfb7ae5f4bae37afbee0d4a5a7da7abbef9c7e6",
+        "receipt_hash": "0de30959da9915ab61836f56a2f95c934455d28ed52d58d32f55f4208336cb27",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2627,7 +2627,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_safety_preemption:2",
       "scenario": "habit_safety_preemption",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 2,
       "role": "elder",
       "observed_agents": [
@@ -2643,7 +2643,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_safety_preemption:2",
-        "receipt_hash": "8736ad925bed08fc8180719b13e6407e3c822aa25ef61e459ed3562332286246",
+        "receipt_hash": "d518c457a9c151bb1ecbe9a60ba852d1a9d3a18e9b0d6dd1583dc2c0ac59b271",
         "providers": [
           "simulated-openai-compatible-provider"
         ],
@@ -2668,7 +2668,7 @@
     {
       "observation_id": "observation:simulated-v24-current:habit_safety_preemption:3",
       "scenario": "habit_safety_preemption",
-      "release_identity_hash": "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45",
+      "release_identity_hash": "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0",
       "repetition": 3,
       "role": "elder",
       "observed_agents": [
@@ -2684,7 +2684,7 @@
       "real_provider": false,
       "provider_receipt": {
         "receipt_ref": "trace:simulated-v24-current:habit_safety_preemption:3",
-        "receipt_hash": "60433f1f327a39e8923e71f4de664ebf85fc00ef4a27a24c20af630e8d5a5102",
+        "receipt_hash": "2a6cfbc3d26b930df633939ecf1149e29e737849be53303f887689d97101ccfc",
         "providers": [
           "simulated-openai-compatible-provider"
         ],

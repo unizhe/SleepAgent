@@ -1,18 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from enum import Enum
-from typing import TypeVar
-
-from pydantic import Field, model_validator
+from pydantic import model_validator
 
 from sleepagent.radar_agent.product_agent.agents.ports import (
     AgentControlPortBoundary,
+    EpisodePlanProposal,
+    EvaluationDecision,
     PurposeScopedReceipt,
     RoleContextBoundary,
     RoleInvocationInput,
     RoleInvocationOutput,
     RuntimeRoleInvocation,
+    SLEEPCARE_CONTROL_CONTEXT_BOUNDARY,
+    SleepCareControlInvocationPort,
+    SleepCareEvaluation,
+    SleepCareEvaluationContext,
+    SleepCareEvaluationInput,
+    SleepCareEvaluationOutput,
+    SleepCarePlanContext,
+    SleepCarePlanInput,
+    SleepCarePlanOutput,
     _ModelBackedRole,
     build_implementation_boundary,
     validate_role_output,
@@ -20,54 +27,17 @@ from sleepagent.radar_agent.product_agent.agents.ports import (
 from sleepagent.radar_agent.product_agent.contracts import (
     AgentId,
     CommunicationDraft,
-    ContextPacket,
-    EpisodeBudget,
     EpisodeType,
-    FactSnapshot,
-    FrozenContract,
-    SourceScope,
-    StrictContract,
     TrustLabel,
-    TrustedContextItem,
     WorkProductKind,
-    stable_hash,
 )
-from sleepagent.radar_agent.product_agent.invocation import (
-    AgentInvocationRecord,
-    StructuredAgentModel,
-)
+from sleepagent.radar_agent.product_agent.invocation import StructuredAgentModel
 from sleepagent.radar_agent.product_agent.registry import (
     TOOL_INVOCATION_ALLOWLIST,
 )
 from sleepagent.radar_agent.product_agent.skills import (
     SkillRegistry,
 )
-
-
-class EvaluationDecision(str, Enum):
-    CONTINUE = "continue"
-    REPLAN = "replan"
-    WAIT_USER = "wait_user"
-    WAIT_CONFIRMATION = "wait_confirmation"
-    FINISH = "finish"
-    BLOCK = "block"
-
-
-class EpisodePlanProposal(StrictContract):
-    objective: str = Field(..., min_length=1, max_length=1200)
-    required_work_products: list[WorkProductKind]
-    conditional_work_products: list[WorkProductKind] = Field(default_factory=list)
-    safety_checkpoints: list[str] = Field(default_factory=list)
-    exit_conditions: list[str]
-    expected_agent_calls: int = Field(..., ge=0)
-    expected_tool_calls: int = Field(..., ge=0)
-
-
-class SleepCareEvaluation(StrictContract):
-    decision: EvaluationDecision
-    summary: str = Field(..., min_length=1, max_length=1000)
-    replan_reason: str | None = None
-    missing_work_products: list[WorkProductKind] = Field(default_factory=list)
 
 
 class SleepCareInvocationInput(RoleInvocationInput):
@@ -119,87 +89,6 @@ class SleepCareInvocationOutput(RoleInvocationOutput):
         return self
 
 
-class SleepCarePlanContext(FrozenContract):
-    episode_id: str = Field(..., min_length=1)
-    episode_type: EpisodeType
-    objective: str = Field(..., min_length=1, max_length=1200)
-    fact_snapshot_id: str = Field(..., min_length=1)
-    fact_snapshot_hash: str = Field(..., min_length=64, max_length=64)
-    source_scope: SourceScope
-    registry_required_work_products: tuple[WorkProductKind, ...]
-    request_required_work_products: tuple[WorkProductKind, ...]
-    allowed_work_products: tuple[WorkProductKind, ...]
-    required_tools: tuple[str, ...]
-    allowed_agents: tuple[AgentId, ...]
-    available_safety_checkpoints: tuple[str, ...]
-    request_required_safety_checkpoints: tuple[str, ...]
-    exit_conditions: tuple[str, ...]
-    budget: EpisodeBudget
-
-
-class SleepCareEvaluationContext(FrozenContract):
-    episode_id: str = Field(..., min_length=1)
-    episode_state_revision: int = Field(..., ge=0)
-    latest_kind: WorkProductKind
-    latest_ref: str | None = Field(default=None, min_length=1)
-    failure_code: str | None = Field(default=None, min_length=1)
-    accepted_work_products: tuple[WorkProductKind, ...]
-    required_work_products: tuple[WorkProductKind, ...]
-    remaining_agent_calls: int
-    remaining_replans: int
-
-
-class _SleepCareDecisionInput(FrozenContract):
-    episode_id: str = Field(..., min_length=1)
-    episode_type: EpisodeType
-    fact_snapshot: FactSnapshot
-    episode_state_revision: int = Field(..., ge=0)
-    invocation_ordinal: int = Field(..., ge=1)
-    repair_attempt: int = Field(..., ge=0, le=1)
-    previous_error_type: str | None = None
-
-
-class SleepCarePlanInput(_SleepCareDecisionInput):
-    runtime_context: SleepCarePlanContext
-
-    @model_validator(mode="after")
-    def validate_plan_binding(self) -> "SleepCarePlanInput":
-        context = self.runtime_context
-        if (
-            context.episode_id != self.episode_id
-            or context.episode_type is not self.episode_type
-            or context.fact_snapshot_id != self.fact_snapshot.fact_snapshot_id
-            or context.fact_snapshot_hash != self.fact_snapshot.fact_snapshot_hash
-            or context.source_scope != self.fact_snapshot.source_scope
-        ):
-            raise ValueError("SleepCare plan Context binding mismatch")
-        return self
-
-
-class SleepCareEvaluationInput(_SleepCareDecisionInput):
-    runtime_context: SleepCareEvaluationContext
-
-    @model_validator(mode="after")
-    def validate_evaluation_binding(self) -> "SleepCareEvaluationInput":
-        context = self.runtime_context
-        if (
-            context.episode_id != self.episode_id
-            or context.episode_state_revision != self.episode_state_revision
-        ):
-            raise ValueError("SleepCare evaluation Context binding mismatch")
-        return self
-
-
-class SleepCarePlanOutput(FrozenContract):
-    proposal: EpisodePlanProposal
-    record: AgentInvocationRecord
-
-
-class SleepCareEvaluationOutput(FrozenContract):
-    evaluation: SleepCareEvaluation
-    record: AgentInvocationRecord
-
-
 SLEEPCARE_CONTEXT_BOUNDARY = RoleContextBoundary(
     allowed_trust_labels=(
         TrustLabel.SYSTEM_POLICY,
@@ -249,16 +138,6 @@ SLEEPCARE_CONTEXT_BOUNDARY = RoleContextBoundary(
     audience_visible=True,
     memory_intent_visible=True,
 )
-
-
-SLEEPCARE_CONTROL_CONTEXT_BOUNDARY = RoleContextBoundary(
-    allowed_trust_labels=(TrustLabel.SYSTEM_POLICY,),
-    allowed_context_keys=("runtime_episode_context",),
-    required_context_keys=("runtime_episode_context",),
-)
-
-
-DecisionT = TypeVar("DecisionT", bound=StrictContract)
 
 
 class SleepCareAgent(
@@ -320,6 +199,21 @@ class SleepCareAgent(
     ) -> None:
         super().__init__(model, skill_registry=skill_registry)
         self.planning_model = planning_model or model
+        self._control_invoker: SleepCareControlInvocationPort | None = None
+
+    @property
+    def control_invoker(self) -> SleepCareControlInvocationPort | None:
+        return self._control_invoker
+
+    def bind_control_invoker(
+        self,
+        invoker: SleepCareControlInvocationPort,
+    ) -> None:
+        if self._control_invoker is not None and self._control_invoker is not invoker:
+            raise RuntimeError(
+                "SleepCareAgent is already bound to another control coordinator"
+            )
+        self._control_invoker = invoker
 
     @staticmethod
     def select_skill(
@@ -353,15 +247,14 @@ class SleepCareAgent(
     def plan(self, command: SleepCarePlanInput) -> SleepCarePlanOutput:
         if type(command) is not SleepCarePlanInput:
             raise TypeError("SleepCareAgent.plan requires SleepCarePlanInput")
-        proposal, record = self._invoke_decision(
+        if self._control_invoker is None:
+            raise RuntimeError(
+                "SleepCareAgent control calls require AgentInvocationCoordinator"
+            )
+        return self._control_invoker.invoke_sleepcare_plan(
             command=command,
-            schema=EpisodePlanProposal,
-            skill_id="plan_episode",
-            prompt_version="sleepcare.plan.v1",
-            invocation_kind="plan",
-            safe_summary=f"planned {command.episode_type.value}",
+            model=self.planning_model,
         )
-        return SleepCarePlanOutput(proposal=proposal, record=record)
 
     def evaluate(
         self,
@@ -371,147 +264,14 @@ class SleepCareAgent(
             raise TypeError(
                 "SleepCareAgent.evaluate requires SleepCareEvaluationInput"
             )
-        evaluation, record = self._invoke_decision(
+        if self._control_invoker is None:
+            raise RuntimeError(
+                "SleepCareAgent control calls require AgentInvocationCoordinator"
+            )
+        return self._control_invoker.invoke_sleepcare_evaluation(
             command=command,
-            schema=SleepCareEvaluation,
-            skill_id="evaluate_work_product",
-            prompt_version="sleepcare.evaluate.v1",
-            invocation_kind="evaluate",
+            model=self.planning_model,
         )
-        return SleepCareEvaluationOutput(evaluation=evaluation, record=record)
-
-    def _invoke_decision(
-        self,
-        *,
-        command: SleepCarePlanInput | SleepCareEvaluationInput,
-        schema: type[DecisionT],
-        skill_id: str,
-        prompt_version: str,
-        invocation_kind: str,
-        safe_summary: str | None = None,
-    ) -> tuple[DecisionT, AgentInvocationRecord]:
-        context = self._decision_context(command, skill_id=skill_id)
-        bundle, lock = self.skill_resolver.resolve(
-            episode_id=command.episode_id,
-            episode_type=command.episode_type,
-            agent_id=AgentId.SLEEP_CARE,
-            mandatory_skill_ids=[skill_id],
-            subject_id=command.fact_snapshot.binding.subject_id,
-        )
-        package = bundle.packages[0]
-        compiled = self.prompt_compiler.compile(
-            global_policy=(
-                "Runtime owns Episode state, completion and budgets.",
-                "SleepCare may propose plans but cannot skip required work.",
-            ),
-            profile=self.profile,
-            bundle=bundle,
-            context=context,
-        )
-        output = self.planning_model.generate(
-            messages=list(compiled.messages),
-            schema=schema,
-            prompt_version=f"{prompt_version}:{package.version}",
-            context_packet_id=context.context_packet_id,
-        )
-        if not isinstance(output, schema):
-            raise TypeError(
-                f"SleepCare model returned {type(output).__name__}, "
-                f"expected {schema.__name__}"
-            )
-        now = datetime.now(timezone.utc)
-        record = AgentInvocationRecord(
-            invocation_id=(
-                f"sleepcare:{invocation_kind}:{command.episode_id}:"
-                f"{command.invocation_ordinal}"
-            ),
-            episode_id=command.episode_id,
-            agent_id=AgentId.SLEEP_CARE,
-            agent_version="sleepcare.v1",
-            profile_version=self.profile.version,
-            profile_hash=self.profile.profile_hash,
-            skill_id=skill_id,
-            skill_version=package.version,
-            skill_package_hash=package.package_hash,
-            skill_lock_hash=lock.lock_hash,
-            prompt_bundle_hash=compiled.receipt.prompt_bundle_hash,
-            schema_version=f"{schema.__name__}.v1",
-            prompt_version=prompt_version,
-            policy_version="product-safety.v3",
-            context_packet_id=context.context_packet_id,
-            context_hash=stable_hash(context),
-            target_hash=stable_hash(
-                {
-                    "episode_id": command.episode_id,
-                    "kind": invocation_kind,
-                    "context": command.runtime_context.model_dump(mode="json"),
-                    "output": output.model_dump(mode="json"),
-                    "skill_lock_hash": lock.lock_hash,
-                }
-            ),
-            provider=self.planning_model.provider,
-            model_id=self.planning_model.model_id,
-            provider_request_id=getattr(
-                self.planning_model,
-                "last_provider_request_id",
-                None,
-            ),
-            started_at=now,
-            ended_at=now,
-            latency_ms=0,
-            validation_status="runtime_validated",
-            safe_summary=(safe_summary or getattr(output, "summary", skill_id))[:500],
-        )
-        return output, record
-
-    def _decision_context(
-        self,
-        command: SleepCarePlanInput | SleepCareEvaluationInput,
-        *,
-        skill_id: str,
-    ) -> ContextPacket:
-        invocation_id = (
-            f"sleepcare:{skill_id}:{command.episode_id}:"
-            f"{command.invocation_ordinal}:{command.repair_attempt}"
-        )
-        runtime_context = command.runtime_context.model_dump(mode="json")
-        packet = ContextPacket(
-            context_packet_id=f"context:{invocation_id}",
-            episode_id=command.episode_id,
-            invocation_id=invocation_id,
-            agent_id=AgentId.SLEEP_CARE,
-            objective=str(runtime_context.get("objective", skill_id)),
-            fact_snapshot_id=command.fact_snapshot.fact_snapshot_id,
-            fact_snapshot_hash=command.fact_snapshot.fact_snapshot_hash,
-            episode_state_revision=command.episode_state_revision,
-            care_context_version=command.fact_snapshot.care_context_version,
-            source_scope=command.fact_snapshot.source_scope,
-            authorization_scope=command.fact_snapshot.binding.authorization_scope,
-            items=(
-                TrustedContextItem(
-                    key="runtime_episode_context",
-                    trust_label=TrustLabel.SYSTEM_POLICY,
-                    value={
-                        **runtime_context,
-                        "repair_attempt": command.repair_attempt,
-                        "previous_error": command.previous_error_type,
-                    },
-                ),
-            ),
-        )
-        boundary = SLEEPCARE_CONTROL_CONTEXT_BOUNDARY
-        if (
-            packet.agent_id is not AgentId.SLEEP_CARE
-            or tuple(item.key for item in packet.items)
-            != boundary.required_context_keys
-            or any(
-                item.trust_label not in boundary.allowed_trust_labels
-                or not boundary.allows_context_key(item.key)
-                for item in packet.items
-            )
-        ):
-            raise ValueError("SleepCare control Context exceeds its boundary")
-        return packet
 
 
 __all__ = [
@@ -520,6 +280,7 @@ __all__ = [
     "SLEEPCARE_CONTROL_CONTEXT_BOUNDARY",
     "SLEEPCARE_CONTEXT_BOUNDARY",
     "SleepCareAgent",
+    "SleepCareControlInvocationPort",
     "SleepCareEvaluation",
     "SleepCareEvaluationContext",
     "SleepCareEvaluationInput",

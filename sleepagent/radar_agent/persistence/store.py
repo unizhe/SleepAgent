@@ -319,70 +319,116 @@ class RadarPersistenceStore:
         )
 
     def save_user_input_response(self, value: UserInputResponse) -> UserInputResponse:
-        request = self.get_user_input_request(value.request_id)
-        if request.task_id != value.task_id:
-            raise ValueError("user input response belongs to another task")
-        if request.status != "pending":
-            row = self._fetchone(
-                "SELECT response_json FROM radar_user_input_requests WHERE request_id = ?",
-                (value.request_id,),
+        def same_answer(existing: UserInputResponse) -> bool:
+            return (
+                existing.response_id == value.response_id
+                and existing.request_id == value.request_id
+                and existing.task_id == value.task_id
+                and existing.answer == value.answer
+                and existing.answered_by_user_id
+                == value.answered_by_user_id
+                and existing.answered_by_role == value.answered_by_role
             )
-            if row is not None and row[0] == _dump_json(value):
-                return value
-            raise ValueError("user input request is no longer pending")
-        if request.target_role != value.answered_by_role:
-            raise ValueError("answering role does not match the reviewed request")
-        if request.expires_at is not None and value.created_at > request.expires_at:
-            raise ValueError("user input request has expired")
-        if request.answer_options and value.answer not in request.answer_options:
-            raise ValueError("answer is not one of the reviewed options")
-        resolved_at = value.created_at
-        updated = request.model_copy(update={"status": "answered", "resolved_at": resolved_at})
-        self._execute(
-            """
-            UPDATE radar_user_input_requests
-            SET status = ?, request_json = ?, response_json = ?, resolved_at = ?
-            WHERE request_id = ?
-            """,
-            (
-                "answered",
-                _dump_json(updated),
-                _dump_json(value),
-                _dump_datetime(resolved_at),
-                value.request_id,
-            ),
-        )
-        return value
+
+        with self._lock:
+            request = self.get_user_input_request(value.request_id)
+            if request.task_id != value.task_id:
+                raise ValueError("user input response belongs to another task")
+            if request.status != "pending":
+                existing = self.get_user_input_response(value.request_id)
+                if existing is not None and same_answer(existing):
+                    return existing
+                raise ValueError("user input request is no longer pending")
+            if request.target_role != value.answered_by_role:
+                raise ValueError("answering role does not match the reviewed request")
+            if request.expires_at is not None and value.created_at > request.expires_at:
+                raise ValueError("user input request has expired")
+            if request.answer_options and value.answer not in request.answer_options:
+                raise ValueError("answer is not one of the reviewed options")
+            resolved_at = value.created_at
+            updated = request.model_copy(
+                update={"status": "answered", "resolved_at": resolved_at}
+            )
+            cursor = None
+            try:
+                cursor = self.connection.execute(
+                    self._sql(
+                        """
+                        UPDATE radar_user_input_requests
+                        SET status = ?, request_json = ?, response_json = ?, resolved_at = ?
+                        WHERE request_id = ? AND status = 'pending'
+                        """
+                    ),
+                    (
+                        "answered",
+                        _dump_json(updated),
+                        _dump_json(value),
+                        _dump_datetime(resolved_at),
+                        value.request_id,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    self.connection.commit()
+                    return value
+                self.connection.rollback()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                if cursor is not None:
+                    cursor.close()
+            existing = self.get_user_input_response(value.request_id)
+            if existing is not None and same_answer(existing):
+                return existing
+            raise ValueError("user input request was answered concurrently")
 
     def decline_user_input_request(
         self,
         request_id: str,
         *,
         declined_at: datetime | None = None,
-    ) -> UserInputRequest:
-        request = self.get_user_input_request(request_id)
-        if request.status == "declined":
-            return request
-        if request.status != "pending":
-            raise ValueError("user input request is no longer pending")
-        resolved_at = declined_at or datetime.now(timezone.utc)
-        updated = request.model_copy(
-            update={"status": "declined", "resolved_at": resolved_at}
-        )
-        self._execute(
-            """
-            UPDATE radar_user_input_requests
-            SET status = ?, request_json = ?, resolved_at = ?
-            WHERE request_id = ?
-            """,
-            (
-                "declined",
-                _dump_json(updated),
-                _dump_datetime(resolved_at),
-                request_id,
-            ),
-        )
-        return updated
+    ) -> tuple[UserInputRequest, bool]:
+        with self._lock:
+            request = self.get_user_input_request(request_id)
+            if request.status == "declined":
+                return request, False
+            if request.status != "pending":
+                raise ValueError("user input request is no longer pending")
+            resolved_at = declined_at or datetime.now(timezone.utc)
+            updated = request.model_copy(
+                update={"status": "declined", "resolved_at": resolved_at}
+            )
+            cursor = None
+            try:
+                cursor = self.connection.execute(
+                    self._sql(
+                        """
+                        UPDATE radar_user_input_requests
+                        SET status = ?, request_json = ?, resolved_at = ?
+                        WHERE request_id = ? AND status = 'pending'
+                        """
+                    ),
+                    (
+                        "declined",
+                        _dump_json(updated),
+                        _dump_datetime(resolved_at),
+                        request_id,
+                    ),
+                )
+                if cursor.rowcount == 1:
+                    self.connection.commit()
+                    return updated, True
+                self.connection.rollback()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                if cursor is not None:
+                    cursor.close()
+            winner = self.get_user_input_request(request_id)
+            if winner.status == "declined":
+                return winner, False
+            raise ValueError("user input request was resolved concurrently")
 
     def get_user_input_response(self, request_id: str) -> UserInputResponse | None:
         row = self._fetchone(

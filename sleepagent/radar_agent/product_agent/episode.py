@@ -8,6 +8,7 @@ from sleepagent.radar_agent.product_agent.agents.sleepcare import (
     EpisodePlanProposal,
     EvaluationDecision,
     SleepCareAgent,
+    SleepCareControlInvocationPort,
     SleepCareEvaluation,
     SleepCareEvaluationContext,
     SleepCareEvaluationInput,
@@ -31,7 +32,6 @@ from sleepagent.radar_agent.product_agent.contracts import (
 from sleepagent.radar_agent.product_agent.governance import AcceptedWorkProduct
 from sleepagent.radar_agent.product_agent.invocation import (
     AgentInvocationRecord,
-    StructuredAgentModel,
 )
 from sleepagent.radar_agent.product_agent.policies.workflow import (
     CANONICAL_WORKFLOW_POLICY,
@@ -43,7 +43,6 @@ from sleepagent.radar_agent.product_agent.registry import (
 )
 from sleepagent.radar_agent.product_agent.skills import (
     SkillRegistry,
-    default_skill_packages,
 )
 
 
@@ -111,35 +110,29 @@ class ProductEpisodeRuntime:
         *,
         episode_id: str,
         fact_snapshot: FactSnapshot,
-        sleepcare_agent: SleepCareAgent | None = None,
-        sleepcare_model: StructuredAgentModel | None = None,
+        sleepcare_agent: SleepCareAgent,
+        sleepcare_control_invoker: SleepCareControlInvocationPort | None = None,
         started_at: datetime | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
-        if sleepcare_agent is None and sleepcare_model is None:
+        if type(sleepcare_agent) is not SleepCareAgent:
             raise TypeError("ProductEpisodeRuntime requires SleepCareAgent")
-        resolved_registry = skill_registry or (
-            sleepcare_agent.skill_registry
-            if sleepcare_agent is not None
-            else SkillRegistry(default_skill_packages())
-        )
-        if sleepcare_agent is None:
-            assert sleepcare_model is not None
-            sleepcare_agent = SleepCareAgent(
-                sleepcare_model,
-                planning_model=sleepcare_model,
-                skill_registry=resolved_registry,
-            )
-        elif (
+        resolved_registry = skill_registry or sleepcare_agent.skill_registry
+        if (
             skill_registry is not None
             and sleepcare_agent.skill_registry.snapshot()
             != skill_registry.snapshot()
         ):
             raise ValueError("SleepCareAgent and Runtime Skill registries differ")
+        if sleepcare_control_invoker is not None:
+            sleepcare_agent.bind_control_invoker(sleepcare_control_invoker)
+        if sleepcare_agent.control_invoker is None:
+            raise TypeError(
+                "ProductEpisodeRuntime requires a coordinator-bound SleepCareAgent"
+            )
         self.episode_id = episode_id
         self.fact_snapshot = fact_snapshot
         self.sleepcare_agent = sleepcare_agent
-        self.sleepcare_model = sleepcare_agent.planning_model
         self.started_at = started_at or datetime.now(timezone.utc)
         self.plan: EpisodePlan | None = None
         self.episode_state_revision = 0
@@ -456,15 +449,15 @@ class ProductEpisodeRuntime:
         cls,
         snapshot: EpisodeRuntimeSnapshot,
         *,
-        sleepcare_agent: SleepCareAgent | None = None,
-        sleepcare_model: StructuredAgentModel | None = None,
+        sleepcare_agent: SleepCareAgent,
+        sleepcare_control_invoker: SleepCareControlInvocationPort | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> "ProductEpisodeRuntime":
         runtime = cls(
             episode_id=snapshot.episode_id,
             fact_snapshot=snapshot.fact_snapshot,
             sleepcare_agent=sleepcare_agent,
-            sleepcare_model=sleepcare_model,
+            sleepcare_control_invoker=sleepcare_control_invoker,
             started_at=snapshot.started_at,
             skill_registry=skill_registry,
         )

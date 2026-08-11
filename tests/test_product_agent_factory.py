@@ -26,6 +26,9 @@ from sleepagent.radar_agent.product_agent.contracts import (
 from sleepagent.radar_agent.product_agent.acceptance import (
     current_acceptance_release_identity,
 )
+from sleepagent.radar_agent.product_agent.agent_invocation_coordinator import (
+    AgentInvocationCoordinator,
+)
 from sleepagent.radar_agent.product_agent.registry import product_agent_manifest
 from sleepagent.radar_agent.product_agent.runner import ProductEpisodeRunner
 from sleepagent.radar_agent.product_agent.skills import (
@@ -108,7 +111,7 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         "2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3"
     )
     assert current_acceptance_release_identity().identity_hash == (
-        "7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45"
+        "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0"
     )
     assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
 
@@ -147,14 +150,16 @@ def test_concrete_roles_declare_distinct_context_and_permission_boundaries() -> 
     )
 
 
-def test_runner_delegates_provider_calls_through_typed_agent_port() -> None:
+def test_runner_delegates_provider_calls_through_invocation_coordinator() -> None:
     runner = build_product_runtime_bundle(agent_roster=build_roster()).runner
     assert tuple(runner.agent_roster.as_mapping()) == PRODUCT_AGENT_ROSTER
-    source = inspect.getsource(ProductEpisodeRunner._invoke_and_accept)
-    assert "agent.bind(" in source
-    assert "agent.invoke_bound(" in source
-    assert "agent_id: AgentId" not in source
-    assert "self.invokers[" not in source
+    runner_source = inspect.getsource(ProductEpisodeRunner._invoke_and_accept)
+    coordinator_source = inspect.getsource(AgentInvocationCoordinator.invoke_turn)
+    assert "agent_invocation_coordinator.invoke_turn(" in runner_source
+    assert "agent.bind(" in coordinator_source
+    assert "agent.invoke_bound(" in coordinator_source
+    assert "agent_id: AgentId" not in runner_source
+    assert "self.invokers[" not in runner_source
     assert not hasattr(runner, "invokers")
     assert not hasattr(runner, "sleepcare_model")
 

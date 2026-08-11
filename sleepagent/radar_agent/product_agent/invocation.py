@@ -115,6 +115,9 @@ class AgentInvocationRecord(StrictContract):
     provider: str = Field(..., min_length=1)
     model_id: str = Field(..., min_length=1)
     provider_request_id: str | None = None
+    # ``None`` distinguishes a pre-Phase-D persisted record from a measured
+    # zero. Continuation recovery charges legacy unknowns conservatively.
+    provider_input_tokens: int | None = Field(default=None, ge=0)
     started_at: datetime
     ended_at: datetime
     latency_ms: int = Field(..., ge=0)

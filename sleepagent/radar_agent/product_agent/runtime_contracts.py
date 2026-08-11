@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
@@ -16,6 +17,7 @@ from sleepagent.radar_agent.product_agent.contracts import (
     EpisodeReceipt,
     EpisodeStatus,
     EpisodeType,
+    ExecutionMode,
     ExternalActionTarget,
     FactSnapshot,
     OnlineReasoningEvent,
@@ -39,8 +41,15 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v45"
-PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
+PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v47"
+PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v40"
+LEGACY_UNBOUND_WAITING_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
+
+
+def product_episode_request_hash(request: "ProductEpisodeRunRequest") -> str:
+    """Bind a continuation to the exact request persisted at its checkpoint."""
+
+    return stable_hash(request.model_dump(mode="json"))
 
 
 class ProductUserFactResponse(StrictContract):
@@ -61,6 +70,18 @@ class ProductUserFactResponse(StrictContract):
         return f"{prefix}:{stable_hash(self.model_dump(mode='json'))[:24]}"
 
 
+class ProductContinuationLineage(StrictContract):
+    kind: Literal[
+        "reexecute_with_added_fact",
+        "commit_frozen_confirmed_action",
+    ]
+    parent_checkpoint_hash: str = Field(
+        ...,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    command_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
 class ProductEpisodeRunRequest(StrictContract):
     episode_id: str = Field(..., min_length=1)
     episode_type: EpisodeType
@@ -78,6 +99,7 @@ class ProductEpisodeRunRequest(StrictContract):
     external_action: bool = False
     external_action_target: ExternalActionTarget | None = None
     idempotency_key: str | None = None
+    continuation_lineage: ProductContinuationLineage | None = None
     profile_purpose: Literal[
         "evidence",
         "care",
@@ -243,6 +265,26 @@ class ProductEpisodeRunResult(StrictContract):
     schema_version: str = PRODUCT_EPISODE_RESULT_SCHEMA_VERSION
     runner_version: str = PRODUCT_EPISODE_RUNNER_VERSION
     registry_hash: str
+    continuation_request_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    continuation_checkpoint_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    continuation_kind: Literal[
+        "reexecute_with_added_fact",
+        "commit_frozen_confirmed_action",
+    ] | None = None
+    continuation_parent_checkpoint_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    continuation_command_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     receipt: EpisodeReceipt
     publication: CommunicationDraft | None = None
     publication_delivered: bool = False
@@ -273,6 +315,16 @@ class ProductEpisodeRunResult(StrictContract):
 
     @model_validator(mode="after")
     def pending_state_matches_receipt(self) -> ProductEpisodeRunResult:
+        if (
+            self.receipt.status
+            in {EpisodeStatus.WAITING_USER, EpisodeStatus.WAITING_CONFIRMATION}
+            and self.continuation_request_hash is None
+            and self.schema_version
+            != LEGACY_UNBOUND_WAITING_RESULT_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "waiting Episode result requires an exact continuation request hash"
+            )
         if len(self.declined_confirmation_ids) != len(
             set(self.declined_confirmation_ids)
         ):
@@ -323,7 +375,105 @@ class ProductEpisodeRunResult(StrictContract):
             raise ValueError(
                 "an Episode cannot wait for confirmation and user input together"
             )
+        if (
+            self.continuation_checkpoint_hash is not None
+            and self.continuation_checkpoint_hash
+            != product_episode_checkpoint_hash(self)
+        ):
+            raise ValueError("continuation checkpoint hash mismatch")
+        lineage_fields = (
+            self.continuation_kind,
+            self.continuation_parent_checkpoint_hash,
+            self.continuation_command_hash,
+        )
+        if any(item is not None for item in lineage_fields) and not all(
+            item is not None for item in lineage_fields
+        ):
+            raise ValueError("continuation lineage must be complete")
         return self
+
+
+def product_episode_checkpoint_hash(result: ProductEpisodeRunResult) -> str:
+    """Hash the exact frozen continuation result without self-reference."""
+
+    return stable_hash(
+        result.model_dump(
+            mode="json",
+            exclude={"continuation_checkpoint_hash"},
+        )
+    )
+
+
+def product_episode_frozen_identity_hash(
+    result: ProductEpisodeRunResult,
+) -> str:
+    """Hash frozen semantics while ignoring API-added HDS binding metadata."""
+
+    payload = result.model_dump(
+        mode="json",
+        exclude={"continuation_checkpoint_hash"},
+    )
+    for target in payload.get("pending_confirmations", []):
+        target["decision_id"] = None
+        target["proposal_id"] = None
+    return stable_hash(payload)
+
+
+def bind_product_episode_checkpoint(
+    result: ProductEpisodeRunResult,
+) -> ProductEpisodeRunResult:
+    """Return a validated result bound to its exact continuation checkpoint."""
+
+    unbound = result.model_copy(
+        update={"continuation_checkpoint_hash": None}
+    )
+    return ProductEpisodeRunResult.model_validate(
+        unbound.model_copy(
+            update={
+                "continuation_checkpoint_hash": (
+                    product_episode_checkpoint_hash(unbound)
+                )
+            }
+        ).model_dump(mode="python")
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmedActionOutcome:
+    """Typed deltas produced by committing frozen, HDS-authorized targets."""
+
+    additional_tool_receipts: tuple[ToolReceipt, ...] = ()
+    committed_memory_candidate_ids: tuple[str, ...] = ()
+    committed_care_candidate_id: str | None = None
+    committed_habit_change_set_id: str | None = None
+    declined_confirmation_ids: tuple[str, ...] = ()
+    external_action_receipt_id: str | None = None
+    external_action_delivery_status: Literal["pending", "delivered"] | None = None
+
+    def __post_init__(self) -> None:
+        if bool(self.external_action_receipt_id) != bool(
+            self.external_action_delivery_status
+        ):
+            raise ValueError(
+                "external action outcome requires receipt and delivery status"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalEpisodeDecision:
+    """Runner-owned terminal decision consumed by the result finalizer."""
+
+    status: EpisodeStatus
+    goal_achieved: bool
+    execution_mode: ExecutionMode | None = None
+    failure_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.status in {
+            EpisodeStatus.WAITING_USER,
+            EpisodeStatus.WAITING_CONFIRMATION,
+        }:
+            raise ValueError("terminal decision cannot use a waiting status")
 
 
 class ReexecuteWithAddedFact(StrictContract):
@@ -349,6 +499,20 @@ class ReexecuteWithAddedFact(StrictContract):
             != self.request.fact_snapshot.fact_snapshot_hash
         ):
             raise ValueError("added-fact checkpoint binding mismatch")
+        if (
+            self.frozen_result.continuation_request_hash is None
+            or self.frozen_result.continuation_request_hash
+            != product_episode_request_hash(self.request)
+        ):
+            raise ValueError("added-fact base request does not match checkpoint")
+        if (
+            self.frozen_result.continuation_checkpoint_hash is None
+            or self.frozen_result.continuation_checkpoint_hash
+            != product_episode_checkpoint_hash(self.frozen_result)
+        ):
+            raise ValueError("added-fact frozen checkpoint hash mismatch")
+        if self.added_fact.observed_at > pending.expires_at:
+            raise ValueError("added-fact request expired")
         if self.added_fact.request_id != pending.request_id:
             raise ValueError("added fact does not answer the frozen request")
         if any(
@@ -375,7 +539,18 @@ class ReexecuteWithAddedFact(StrictContract):
                 update={
                     "user_fact_responses": tuple(
                         responses[key] for key in sorted(responses)
-                    )
+                    ),
+                    "continuation_lineage": ProductContinuationLineage(
+                        kind="reexecute_with_added_fact",
+                        parent_checkpoint_hash=(
+                            product_episode_frozen_identity_hash(
+                                self.frozen_result
+                            )
+                        ),
+                        command_hash=stable_hash(
+                            self.model_dump(mode="json")
+                        ),
+                    ),
                 }
             ).model_dump(mode="python")
         )
@@ -404,6 +579,18 @@ class CommitFrozenConfirmedAction(StrictContract):
             != self.request.fact_snapshot.fact_snapshot_hash
         ):
             raise ValueError("frozen confirmed commit checkpoint binding mismatch")
+        if (
+            self.frozen_result.continuation_request_hash is None
+            or self.frozen_result.continuation_request_hash
+            != product_episode_request_hash(self.request)
+        ):
+            raise ValueError("frozen confirmed commit request mismatch")
+        if (
+            self.frozen_result.continuation_checkpoint_hash is None
+            or self.frozen_result.continuation_checkpoint_hash
+            != product_episode_checkpoint_hash(self.frozen_result)
+        ):
+            raise ValueError("frozen confirmed commit checkpoint hash mismatch")
         if any(
             target.decision_id is None or target.proposal_id is None
             for target in self.frozen_result.pending_confirmations
@@ -447,14 +634,21 @@ def doctor_safety_checkpoint(episode_type: EpisodeType) -> str | None:
 
 __all__ = [
     "CommitFrozenConfirmedAction",
+    "ConfirmedActionOutcome",
     "PRODUCT_EPISODE_RESULT_SCHEMA_VERSION",
     "PRODUCT_EPISODE_RUNNER_VERSION",
     "PendingConfirmationTarget",
     "PendingUserInputTarget",
     "ProductEpisodeRunRequest",
     "ProductEpisodeRunResult",
+    "ProductContinuationLineage",
     "ProductUserFactResponse",
     "ReexecuteWithAddedFact",
+    "TerminalEpisodeDecision",
+    "bind_product_episode_checkpoint",
+    "product_episode_checkpoint_hash",
+    "product_episode_frozen_identity_hash",
+    "product_episode_request_hash",
     "doctor_safety_checkpoint",
     "effective_audience_role",
     "uses_doctor_material_semantics",

@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from backend.legacy_main import app
 from sleepagent.radar_agent.api.http import (
+    PRODUCT_EPISODE_CHECKPOINT_ARTIFACT,
+    PRODUCT_EPISODE_REQUEST_ARTIFACT,
     RADAR_AGENT_API_KEY_ENV,
     RADAR_AGENT_DEV_MODE_ENV,
     RadarApiRuntime,
@@ -29,6 +31,9 @@ from sleepagent.radar_agent.product_agent.runtime_contracts import (
     PendingConfirmationTarget,
     PendingUserInputTarget,
     ProductEpisodeRunResult,
+    ReexecuteWithAddedFact,
+    product_episode_frozen_identity_hash,
+    product_episode_request_hash,
 )
 from sleepagent.radar_agent.product_agent.hitl import HumanDecisionStatus
 from sleepagent.radar_agent.product_agent.runtime_factory import (
@@ -86,6 +91,7 @@ class _RecordingRuntimeBundleAdapter:
         self.runner = runner
         runner.commit_controller = bundle.commit_controller
         runner.human_decisions = bundle.human_decisions
+        runner.result_store = bundle.stores.episode_results
 
     def __getattr__(self, name: str):
         return getattr(self._bundle, name)
@@ -170,11 +176,71 @@ def test_product_routes_task_and_chat_only_to_product_runner(
         "morning_review",
         "grounded_dialogue",
     ]
+    assert runner.requests[0].idempotency_key == "product-task"
+    assert runner.requests[1].idempotency_key is not None
+    assert runner.requests[1].idempotency_key.startswith("product-task:chat:")
+    assert runner.requests[1].idempotency_key != runner.requests[0].idempotency_key
     assert all(item.runtime_readiness_decisions for item in runner.requests)
     assert all(
         item.fact_snapshot.readiness_decision_refs
         for item in runner.requests
     )
+
+
+def test_product_chat_command_key_binds_the_audience_role(monkeypatch) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = RecordingProductRunner()
+    reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner),
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "audience-bound-chat",
+            },
+            json={
+                "goal_type": "night_review",
+                "question": "请准备复盘材料。",
+            },
+        )
+        task_id = created.json()["task"]["task_id"]
+        family_chat = client.post(
+            "/radar-agent/chat",
+            headers=_headers(),
+            json={
+                "task_id": task_id,
+                "message": "请解释昨晚的睡眠情况。",
+                "actor_id": ACTOR_ID,
+                "actor_role": "family",
+                "role": "family",
+            },
+        )
+        elder_chat = client.post(
+            "/radar-agent/chat",
+            headers=_headers(),
+            json={
+                "task_id": task_id,
+                "message": "请解释昨晚的睡眠情况。",
+                "actor_id": ACTOR_ID,
+                "actor_role": "family",
+                "role": "elder",
+            },
+        )
+
+    assert created.status_code == 200
+    assert family_chat.status_code == 200
+    assert elder_chat.status_code == 200
+    [family_request, elder_request] = runner.requests
+    assert family_request.user_text == elder_request.user_text
+    assert family_request.audience_role == "family"
+    assert elder_request.audience_role == "elder"
+    assert family_request.idempotency_key is not None
+    assert elder_request.idempotency_key is not None
+    assert family_request.idempotency_key.startswith("audience-bound-chat:chat:")
+    assert elder_request.idempotency_key.startswith("audience-bound-chat:chat:")
+    assert family_request.idempotency_key != elder_request.idempotency_key
 
 
 def test_radar_agent_routes_are_hidden_outside_explicit_dev_transport(
@@ -236,6 +302,84 @@ def test_radar_agent_routes_are_hidden_outside_explicit_dev_transport(
     assert runner.requests == []
 
 
+def test_product_run_recovers_durable_result_without_rerun_after_checkpoint_crash(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = PersistingTerminalProductRunner()
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner),
+    )
+    original_save_checkpoint = runtime._save_product_checkpoint
+    checkpoint_attempts = 0
+
+    def fail_once_before_checkpoint(**kwargs) -> None:
+        nonlocal checkpoint_attempts
+        checkpoint_attempts += 1
+        if checkpoint_attempts == 1:
+            raise RuntimeError("crash before API checkpoint")
+        original_save_checkpoint(**kwargs)
+
+    monkeypatch.setattr(
+        runtime,
+        "_save_product_checkpoint",
+        fail_once_before_checkpoint,
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "product-durable-result-recovery",
+            },
+            json={"goal_type": "night_review"},
+        )
+        task_id = created.json()["task"]["task_id"]
+        with pytest.raises(RuntimeError, match="crash before API checkpoint"):
+            client.post(
+                f"/radar-agent/tasks/{task_id}/run",
+                headers=_headers(),
+            )
+        assert runtime.service.get_task(task_id).status.value == "running"
+        recovered = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        internal_request = client.get(
+            f"/radar-agent/tasks/{task_id}",
+            params={"artifact_id": f"product-request:{task_id}"},
+            headers=_headers(),
+        )
+
+    artifacts = runtime.service.list_artifacts(task_id)
+    assert recovered.status_code == 200
+    assert internal_request.status_code == 404
+    assert recovered.json()["task"]["status"] == "completed"
+    assert len(runner.requests) == 1
+    assert runner.publication_attempts == 1
+    assert len(
+        [
+            item
+            for item in artifacts
+            if item.artifact_type == "product_episode_result"
+        ]
+    ) == 1
+    assert len(
+        [
+            item
+            for item in artifacts
+            if item.artifact_type == PRODUCT_EPISODE_CHECKPOINT_ARTIFACT
+        ]
+    ) == 1
+    assert len(
+        [
+            item
+            for item in artifacts
+            if item.artifact_type == PRODUCT_EPISODE_REQUEST_ARTIFACT
+        ]
+    ) == 1
+
+
 def test_product_confirmation_resumes_frozen_episode_and_records_execution(
     monkeypatch,
 ) -> None:
@@ -285,6 +429,16 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
                 "actor_role": "doctor",
             },
         )
+        replayed = client.post(
+            f"/radar-agent/tasks/{task_id}/confirm",
+            headers=_headers(actor_id="elder-user", role="elder"),
+            json={
+                "confirmation_id": pending["confirmation_id"],
+                "approved": True,
+                "actor_id": "untrusted-body-actor",
+                "actor_role": "doctor",
+            },
+        )
         detail = client.get(
             f"/radar-agent/tasks/{task_id}",
             headers=_headers(),
@@ -307,11 +461,85 @@ def test_product_confirmation_resumes_frozen_episode_and_records_execution(
     assert resolved.status_code == 200
     assert resolved.json()["status"] == "approved"
     assert resolved.json()["execution_status"] == "completed"
+    assert replayed.status_code == 200
+    assert replayed.json() == resolved.json()
     assert detail.json()["task"]["status"] == "completed"
     assert detail.json()["decisions"][0]["status"] == "committed"
     assert "active_grant" not in detail.json()["decisions"][0]
     assert len(runner.requests) == 1
     assert runner.confirmation_commits == 1
+
+
+def test_product_confirmation_projection_failure_recovers_without_recommit(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = ConfirmationProductRunner()
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "product-confirmation-projection-retry",
+            },
+            json={"goal_type": "night_review"},
+        )
+        task_id = created.json()["task"]["task_id"]
+        first = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        pending = first.json()["confirmations"][0]
+        original_projection = runtime._complete_product_confirmation_actions
+        failed_projection = False
+
+        def fail_first_projection(**kwargs):
+            nonlocal failed_projection
+            if not failed_projection:
+                failed_projection = True
+                raise RuntimeError("confirmation projection failed")
+            return original_projection(**kwargs)
+
+        monkeypatch.setattr(
+            runtime,
+            "_complete_product_confirmation_actions",
+            fail_first_projection,
+        )
+        confirmation_payload = {
+            "confirmation_id": pending["confirmation_id"],
+            "approved": True,
+            "actor_id": "ignored-body-actor",
+            "actor_role": "elder",
+        }
+        with pytest.raises(RuntimeError, match="confirmation projection failed"):
+            client.post(
+                f"/radar-agent/tasks/{task_id}/confirm",
+                headers=_headers(actor_id="elder-user", role="elder"),
+                json=confirmation_payload,
+            )
+        task_after_failure = runtime.service.get_task(task_id)
+        artifact_versions_before_recovery = [
+            (item.artifact_type, item.version)
+            for item in runtime.service.list_artifacts(task_id)
+        ]
+        recovered = client.post(
+            f"/radar-agent/tasks/{task_id}/confirm",
+            headers=_headers(actor_id="elder-user", role="elder"),
+            json=confirmation_payload,
+        )
+
+    assert failed_projection
+    assert task_after_failure.status.value == "running"
+    assert recovered.status_code == 200
+    assert runtime.service.get_task(task_id).status.value == "completed"
+    assert runner.confirmation_commits == 1
+    assert [
+        (item.artifact_type, item.version)
+        for item in runtime.service.list_artifacts(task_id)
+    ] == artifact_versions_before_recovery
 
 
 def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
@@ -349,10 +577,30 @@ def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
             f"/radar-agent/tasks/{task_id}",
             headers=_headers(),
         )
+        replayed = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={
+                "request_id": pending["request_id"],
+                "answer": "是，昨晚比平时晚睡。",
+            },
+        )
+        conflicting_replay = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={
+                "request_id": pending["request_id"],
+                "answer": "不同的终态重试内容。",
+            },
+        )
 
     assert first.json()["task"]["status"] == "waiting_for_user_input"
     assert answered.status_code == 202
+    assert replayed.status_code == 202
+    assert conflicting_replay.status_code == 409
     assert detail.json()["task"]["status"] == "completed"
+    assert len(runner.reexecute_commands) == 1
+    assert runner.reexecute_commands[0].request == runner.requests[0]
     assert len(runner.requests) == 2
     response = runner.requests[1].user_fact_responses[0]
     assert response.request_id == runner.request_id
@@ -364,6 +612,251 @@ def test_product_user_fact_resumes_frozen_episode_with_reviewed_answer(
         runner.requests[1].fact_snapshot.fact_snapshot_hash
         == runner.requests[0].fact_snapshot.fact_snapshot_hash
     )
+
+
+def test_product_user_fact_retry_reuses_authoritative_answer_after_runner_error(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = FailOnceUserInputProductRunner()
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
+    answer = "是，昨晚比平时晚睡。"
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "product-user-input-runner-retry",
+            },
+            json={"goal_type": "night_review"},
+        )
+        task_id = created.json()["task"]["task_id"]
+        first = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        pending = first.json()["user_input_requests"][0]
+        with pytest.raises(
+            RuntimeError,
+            match="first user-input Runner attempt failed",
+        ):
+            client.post(
+                f"/radar-agent/tasks/{task_id}/user-input",
+                headers=_headers(),
+                json={"request_id": pending["request_id"], "answer": answer},
+            )
+        task_after_failure = runtime.service.get_task(task_id)
+        persisted_request = runtime.store.get_user_input_request(
+            pending["request_id"]
+        )
+        persisted_response = runtime.store.get_user_input_response(
+            pending["request_id"]
+        )
+        misrouted_run_retry = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        conflicting = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={
+                "request_id": pending["request_id"],
+                "answer": "不同的重试内容。",
+            },
+        )
+        recovered = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={"request_id": pending["request_id"], "answer": answer},
+        )
+        detail = client.get(
+            f"/radar-agent/tasks/{task_id}",
+            headers=_headers(),
+        )
+
+    assert created.status_code == 200
+    assert first.status_code == 200
+    assert task_after_failure.status.value == "running"
+    assert persisted_request.status == "answered"
+    assert persisted_response is not None
+    assert persisted_response.answer == answer
+    assert misrouted_run_retry.status_code == 409
+    assert conflicting.status_code == 409
+    assert recovered.status_code == 202
+    assert detail.json()["task"]["status"] == "completed"
+    assert len(runner.resume_attempts) == 2
+    first_attempt, retry_attempt = runner.resume_attempts
+    assert first_attempt.added_fact == retry_attempt.added_fact
+    assert first_attempt.added_fact.observed_at == persisted_response.created_at
+    assert retry_attempt.added_fact.observed_at == persisted_response.created_at
+    assert product_episode_request_hash(
+        first_attempt.reexecution_request()
+    ) == product_episode_request_hash(retry_attempt.reexecution_request())
+    assert len(
+        [
+            event
+            for event in runtime.service.list_events(task_id)
+            if event.event_type == "user_input.submitted"
+        ]
+    ) == 1
+
+
+def test_product_user_fact_retry_projects_terminal_checkpoint_without_rerun(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = UserInputProductRunner()
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
+    original_transition = runtime.service.transition_task
+    failed_terminal_projection = False
+
+    def fail_first_terminal_projection(task_id, status, **kwargs):
+        nonlocal failed_terminal_projection
+        if status.value == "completed" and not failed_terminal_projection:
+            failed_terminal_projection = True
+            raise RuntimeError("terminal checkpoint projection failed")
+        return original_transition(task_id, status, **kwargs)
+
+    monkeypatch.setattr(
+        runtime.service,
+        "transition_task",
+        fail_first_terminal_projection,
+    )
+    answer = "是，昨晚比平时晚睡。"
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "product-terminal-projection-retry",
+            },
+            json={"goal_type": "night_review"},
+        )
+        task_id = created.json()["task"]["task_id"]
+        first = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        pending = first.json()["user_input_requests"][0]
+        with pytest.raises(
+            RuntimeError,
+            match="terminal checkpoint projection failed",
+        ):
+            client.post(
+                f"/radar-agent/tasks/{task_id}/user-input",
+                headers=_headers(),
+                json={"request_id": pending["request_id"], "answer": answer},
+            )
+        task_after_failure = runtime.service.get_task(task_id)
+        terminal_checkpoint = runtime._latest_product_checkpoint(task_id)
+        artifact_versions_before_recovery = [
+            (item.artifact_type, item.version)
+            for item in runtime.service.list_artifacts(task_id)
+        ]
+        recovered = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={"request_id": pending["request_id"], "answer": answer},
+        )
+
+    assert failed_terminal_projection
+    assert task_after_failure.status.value == "running"
+    assert terminal_checkpoint.payload["result"]["receipt"]["terminal"] is True
+    assert recovered.status_code == 202
+    assert runtime.service.get_task(task_id).status.value == "completed"
+    assert len(runner.reexecute_commands) == 1
+    assert [
+        (item.artifact_type, item.version)
+        for item in runtime.service.list_artifacts(task_id)
+    ] == artifact_versions_before_recovery
+    assert len(
+        [
+            event
+            for event in runtime.service.list_events(task_id)
+            if event.event_type == "user_input.submitted"
+        ]
+    ) == 1
+
+
+def test_product_user_fact_decline_retry_finishes_failed_projection_once(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "true")
+    runner = UserInputProductRunner()
+    runtime = reset_radar_api_runtime_for_tests(
+        product_runtime=_product_runtime_with_runner(runner)
+    )
+    original_transition = runtime.service.transition_task
+    failed_projection = False
+
+    def fail_first_failed_projection(task_id, status, **kwargs):
+        nonlocal failed_projection
+        if status.value == "failed" and not failed_projection:
+            failed_projection = True
+            raise RuntimeError("decline task projection failed")
+        return original_transition(task_id, status, **kwargs)
+
+    monkeypatch.setattr(
+        runtime.service,
+        "transition_task",
+        fail_first_failed_projection,
+    )
+    with TestClient(app) as client:
+        created = client.post(
+            "/radar-agent/tasks",
+            headers={
+                **_headers(),
+                "Idempotency-Key": "product-user-input-decline-retry",
+            },
+            json={"goal_type": "night_review"},
+        )
+        task_id = created.json()["task"]["task_id"]
+        first = client.post(
+            f"/radar-agent/tasks/{task_id}/run",
+            headers=_headers(),
+        )
+        pending = first.json()["user_input_requests"][0]
+        with pytest.raises(
+            RuntimeError,
+            match="decline task projection failed",
+        ):
+            client.post(
+                f"/radar-agent/tasks/{task_id}/user-input",
+                headers=_headers(),
+                json={"request_id": pending["request_id"], "declined": True},
+            )
+        request_after_failure = runtime.store.get_user_input_request(
+            pending["request_id"]
+        )
+        task_after_failure = runtime.service.get_task(task_id)
+        recovered = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={"request_id": pending["request_id"], "declined": True},
+        )
+        replayed = client.post(
+            f"/radar-agent/tasks/{task_id}/user-input",
+            headers=_headers(),
+            json={"request_id": pending["request_id"], "declined": True},
+        )
+
+    assert failed_projection
+    assert request_after_failure.status == "declined"
+    assert task_after_failure.status.value == "waiting_for_user_input"
+    assert recovered.status_code == 202
+    assert replayed.status_code == 202
+    assert runtime.service.get_task(task_id).status.value == "failed"
+    assert len(
+        [
+            event
+            for event in runtime.service.list_events(task_id)
+            if event.event_type == "user_input.decline_submitted"
+        ]
+    ) == 1
 
 
 def test_create_contract_rejects_legacy_and_dynamic_agent_paths(
@@ -418,6 +911,27 @@ class RecordingProductRunner:
         )
 
 
+class PersistingTerminalProductRunner(RecordingProductRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.publication_attempts = 0
+
+    def run(self, request) -> ProductEpisodeRunResult:
+        result = super().run(request).model_copy(
+            update={
+                "continuation_request_hash": product_episode_request_hash(
+                    request
+                )
+            }
+        )
+        self.publication_attempts += 1
+        self.result_store.append_terminal_bundle(
+            result,
+            subject_id=request.fact_snapshot.binding.subject_id,
+        )
+        return result
+
+
 class ConfirmationProductRunner(RecordingProductRunner):
     candidate_id = "care-candidate-api"
     target_hash = stable_hash(
@@ -459,6 +973,7 @@ class ConfirmationProductRunner(RecordingProductRunner):
         ]
         return ProductEpisodeRunResult(
             registry_hash=stable_hash("confirmation-product-runner"),
+            continuation_request_hash=product_episode_request_hash(request),
             receipt=receipt,
             publication=CommunicationDraft(
                 draft_id=f"draft:{request.episode_id}",
@@ -509,6 +1024,14 @@ class ConfirmationProductRunner(RecordingProductRunner):
         )
         committed = frozen_result.model_copy(
             update={
+                "continuation_checkpoint_hash": None,
+                "continuation_kind": "commit_frozen_confirmed_action",
+                "continuation_parent_checkpoint_hash": (
+                    product_episode_frozen_identity_hash(frozen_result)
+                ),
+                "continuation_command_hash": stable_hash(
+                    command.model_dump(mode="json")
+                ),
                 "receipt": receipt,
                 "committed_care_candidate_id": self.candidate_id,
                 "pending_confirmations": [],
@@ -551,6 +1074,7 @@ class UserInputProductRunner(RecordingProductRunner):
         )
         return ProductEpisodeRunResult(
             registry_hash=stable_hash("user-input-product-runner"),
+            continuation_request_hash=product_episode_request_hash(request),
             receipt=receipt,
             publication=(
                 CommunicationDraft(
@@ -578,3 +1102,26 @@ class UserInputProductRunner(RecordingProductRunner):
                 )
             ),
         )
+
+    def reexecute_with_added_fact(
+        self,
+        command: ReexecuteWithAddedFact,
+    ) -> ProductEpisodeRunResult:
+        self.reexecute_commands = getattr(self, "reexecute_commands", [])
+        self.reexecute_commands.append(command)
+        return self.run(command.reexecution_request())
+
+
+class FailOnceUserInputProductRunner(UserInputProductRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resume_attempts: list[ReexecuteWithAddedFact] = []
+
+    def reexecute_with_added_fact(
+        self,
+        command: ReexecuteWithAddedFact,
+    ) -> ProductEpisodeRunResult:
+        self.resume_attempts.append(command)
+        if len(self.resume_attempts) == 1:
+            raise RuntimeError("first user-input Runner attempt failed")
+        return super().reexecute_with_added_fact(command)

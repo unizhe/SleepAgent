@@ -4,6 +4,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from sleepagent.radar_agent.product_agent.agent_invocation_coordinator import (
+    ProviderInputBudgetLedger,
+)
 from sleepagent.radar_agent.product_agent.agents import (
     CareStrategyAgent,
     CareStrategyInput,
@@ -14,6 +17,7 @@ from sleepagent.radar_agent.product_agent.agents import (
     EvidenceReasoningInput,
     EvidenceReasoningOutput,
     ReviewTargetBinding,
+    RuntimeAgentPort,
     RuntimeRoleInvocation,
     SafetyReviewAgent,
     SafetyReviewInput,
@@ -45,6 +49,9 @@ from sleepagent.radar_agent.product_agent.contracts import (
     TrustedContextItem,
     WorkProductKind,
     WorkProductStatus,
+)
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    build_product_runtime_bundle,
 )
 
 
@@ -181,9 +188,18 @@ def test_sleepcare_agent_has_typed_communication_plan_and_evaluation_ports() -> 
         )
     )
     decision_model = SleepCareDecisionModel()
-    agent = SleepCareAgent(
-        communication_model,
-        planning_model=decision_model,
+    bundle = build_product_runtime_bundle(
+        sleepcare_model=communication_model,
+        evidence_reasoning_model=communication_model,
+        care_strategy_model=communication_model,
+        safety_review_model=communication_model,
+        sleepcare_planning_model=decision_model,
+    )
+    agent = bundle.roster.sleepcare
+    assert all(
+        not hasattr(role, "skill_resolver")
+        and not hasattr(role, "prompt_compiler")
+        for role in bundle.roster
     )
     audience = TrustedContextItem(
         key="requested_audience_role",
@@ -248,6 +264,11 @@ def test_sleepcare_agent_has_typed_communication_plan_and_evaluation_ports() -> 
         )
     )
     assert plan.proposal.objective == "解释昨夜"
+    planned_tokens = bundle.provider_input_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    )
+    assert planned_tokens > 0
+    assert plan.record.provider_input_tokens == planned_tokens
     evaluation = agent.evaluate(
         SleepCareEvaluationInput(
             episode_id="episode-1",
@@ -269,6 +290,70 @@ def test_sleepcare_agent_has_typed_communication_plan_and_evaluation_ports() -> 
         )
     )
     assert evaluation.evaluation.decision is EvaluationDecision.CONTINUE
+    assert (
+        bundle.provider_input_ledger.episode_total(
+            "episode-1", AgentId.SLEEP_CARE
+        )
+        > planned_tokens
+    )
+    assert evaluation.record.provider_input_tokens > 0
+    restarted_ledger = ProviderInputBudgetLedger()
+    restarted_ledger.restore_from_invocations(
+        "episode-1",
+        (plan.record, evaluation.record),
+    )
+    expected_total = (
+        plan.record.provider_input_tokens
+        + evaluation.record.provider_input_tokens
+    )
+    assert restarted_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    ) == expected_total
+    legacy_payload = plan.record.model_dump(mode="python")
+    legacy_payload.pop("provider_input_tokens")
+    legacy_record = type(plan.record).model_validate(legacy_payload)
+    assert legacy_record.provider_input_tokens is None
+    legacy_ledger = ProviderInputBudgetLedger()
+    legacy_ledger.restore_from_invocations(
+        "episode-1",
+        (legacy_record,),
+    )
+    assert legacy_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    ) == legacy_ledger.per_call_limit
+    restarted_ledger.restore_from_invocations(
+        "episode-1",
+        (plan.record, evaluation.record),
+    )
+    assert restarted_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    ) == expected_total
+
+
+def test_terminal_provider_budget_cleanup_releases_all_process_participants() -> None:
+    episode_id = "episode-provider-cross-bundle-cleanup"
+    first = ProviderInputBudgetLedger()
+    second = ProviderInputBudgetLedger()
+    first.reserve(episode_id, AgentId.SLEEP_CARE, 100)
+    second.reserve(episode_id, AgentId.SLEEP_CARE, 200)
+
+    second.release_episode(episode_id)
+
+    assert first.episode_total(episode_id) == 0
+    assert second.episode_total(episode_id) == 0
+
+
+def test_four_concrete_agents_nominally_implement_runtime_agent_port() -> None:
+    implementations = (
+        SleepCareAgent,
+        EvidenceReasoningAgent,
+        CareStrategyAgent,
+        SafetyReviewAgent,
+    )
+    assert all(
+        RuntimeAgentPort in implementation.__mro__
+        for implementation in implementations
+    )
 
 
 def test_evidence_reasoning_agent_owns_typed_evidence_contract() -> None:

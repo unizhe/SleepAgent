@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     )
 
 
-PRODUCT_STATE_PERSISTENCE_VERSION = "sleepagent-product-state-persistence.v3"
+PRODUCT_STATE_PERSISTENCE_VERSION = "sleepagent-product-state-persistence.v4"
 MANIFEST_KEK_ENV = "SLEEPAGENT_MANIFEST_KEK"
 
 
@@ -319,6 +319,98 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
     def latest_terminal_revision(self, episode_id: str) -> int:
         return self.persistence.latest_product_terminal_revision(episode_id)
 
+    def latest(self, episode_id: str) -> ProductEpisodeRunResult:
+        """Return the latest durable revision, including peer-process writes."""
+
+        history = self.history(episode_id)
+        if not history:
+            raise KeyError(f"unknown Episode result: {episode_id}")
+        return history[-1]
+
+    def history(self, episode_id: str) -> list[ProductEpisodeRunResult]:
+        """Refresh one Episode from durable storage before exposing history.
+
+        A Product runtime bundle keeps an in-memory projection for longitudinal
+        work, but that projection cannot be the authority for Episode revisions:
+        another already-running worker may have appended a result through a
+        different store instance.  Refreshing the requested Episode keeps the
+        fast in-memory projection while making continuation and revision checks
+        observe those durable peer writes.
+        """
+
+        self._refresh_episode_results(episode_id)
+        with self.lock:
+            return [
+                item.model_copy(deep=True)
+                for item in self._results.get(episode_id, [])
+            ]
+
+    def _refresh_episode_results(self, episode_id: str) -> None:
+        if not episode_id:
+            raise ValueError("episode_id is required")
+
+        from sleepagent.radar_agent.product_agent.runtime_contracts import (
+            ProductEpisodeRunResult,
+        )
+
+        with self.lock:
+            durable: list[tuple[str, ProductEpisodeRunResult]] = []
+            for raw in self.persistence.list_product_episode_result_json(
+                episode_id
+            ):
+                result = ProductEpisodeRunResult.model_validate_json(raw)
+                if result.receipt.episode_id != episode_id:
+                    raise ValueError(
+                        "persisted nonterminal Episode identity mismatch"
+                    )
+                result_id = stable_hash(result.model_dump(mode="json"))
+                durable.append((result_id, result))
+
+            for result_id, raw in (
+                self.persistence.list_product_terminal_result_rows()
+            ):
+                result = ProductEpisodeRunResult.model_validate_json(raw)
+                if result.receipt.episode_id != episode_id:
+                    continue
+                canonical_id = stable_hash(result.model_dump(mode="json"))
+                if result_id != canonical_id:
+                    raise ValueError(
+                        "persisted terminal Result identity mismatch"
+                    )
+                durable.append((result_id, result))
+
+            by_revision: dict[int, tuple[str, ProductEpisodeRunResult]] = {}
+            for result_id, result in durable:
+                revision = result.receipt.receipt_revision
+                existing = by_revision.get(revision)
+                if existing is not None:
+                    if existing[0] != result_id:
+                        raise ValueError(
+                            "episode receipt revision already binds different "
+                            "durable content"
+                        )
+                    continue
+                by_revision[revision] = (result_id, result)
+
+            for key in [
+                key for key in self._result_identity if key[0] == episode_id
+            ]:
+                del self._result_identity[key]
+            if by_revision:
+                ordered = [
+                    by_revision[revision]
+                    for revision in sorted(by_revision)
+                ]
+                self._results[episode_id] = [
+                    result.model_copy(deep=True) for _, result in ordered
+                ]
+                for result_id, result in ordered:
+                    self._result_identity[
+                        (episode_id, result.receipt.receipt_revision)
+                    ] = result_id
+            else:
+                self._results.pop(episode_id, None)
+
     def _refresh_authoritative_records(self) -> None:
         self._digests = {
             item.digest_id: item
@@ -367,6 +459,19 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
         subject_id: str,
         now: datetime | None = None,
     ) -> TerminalBundle:
+        self._refresh_episode_results(result.receipt.episode_id)
+        result_id = stable_hash(result.model_dump(mode="json"))
+        key = (result.receipt.episode_id, result.receipt.receipt_revision)
+        with self.lock:
+            existing_id = self._result_identity.get(key)
+            missing_external_bundle = (
+                existing_id == result_id and result_id not in self._bundles
+            )
+        if missing_external_bundle:
+            # The Result was appended through another live store instance.
+            # Hydrate its atomic Manifest/Job bundle before taking the normal
+            # idempotent in-memory path below.
+            self._reset_from_persistence()
         bundle = super().append_terminal_bundle(
             result,
             subject_id=subject_id,
@@ -433,14 +538,22 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
         *,
         subject_id: str,
     ) -> None:
+        self._refresh_episode_results(result.receipt.episode_id)
         super().append_nonterminal(result, subject_id=subject_id)
-        self.persistence.append_product_nonterminal_result(
-            result_id=stable_hash(result.model_dump(mode="json")),
-            episode_id=result.receipt.episode_id,
-            result_json=result.model_dump_json(),
-            recorded_at=datetime.now(timezone.utc),
-        )
-        self._save_state()
+        try:
+            self.persistence.append_product_nonterminal_result(
+                result_id=stable_hash(result.model_dump(mode="json")),
+                episode_id=result.receipt.episode_id,
+                result_json=result.model_dump_json(),
+                recorded_at=datetime.now(timezone.utc),
+            )
+            self._save_state()
+        except Exception:
+            # Discard the speculative in-memory append.  If the durable outcome
+            # was actually committed before an acknowledgement failure, hydrate
+            # will recover it; otherwise no phantom revision remains.
+            self._reset_from_persistence()
+            raise
 
     def append(self, result: ProductEpisodeRunResult) -> None:
         raise ValueError(
@@ -451,6 +564,7 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
         self,
         **kwargs: object,
     ) -> tuple[PublicationJournalEntry, bool]:
+        command_hash = str(kwargs["command_hash"])
         episode_id = str(kwargs["episode_id"])
         draft_hash = str(kwargs["draft_hash"])
         raw_now = kwargs.get("now")
@@ -459,10 +573,11 @@ class PersistentProductEpisodeResultStore(InMemoryLongitudinalResultStore):
             if isinstance(raw_now, datetime)
             else datetime.now(timezone.utc)
         )
-        intent_id = f"publication:{stable_hash((episode_id, draft_hash))}"
+        intent_id = f"publication:{command_hash}"
         entry = PublicationJournalEntry(
             intent_id=intent_id,
             episode_id=episode_id,
+            command_hash=command_hash,
             draft_hash=draft_hash,
             state="reserved",
             created_at=created_at,

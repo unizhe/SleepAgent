@@ -29,6 +29,7 @@ from sleepagent.radar_agent.product_agent.runtime_contracts import (
     CommitFrozenConfirmedAction,
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
+    ReexecuteWithAddedFact,
 )
 from sleepagent.radar_agent.product_agent.runtime_factory import (
     ProductRuntimeBundle,
@@ -291,6 +292,13 @@ class _Runner:
     def commit_frozen_confirmations(
         self,
         command: CommitFrozenConfirmedAction,
+    ) -> ProductEpisodeRunResult:
+        del command
+        raise AssertionError("worker fake only supports run()")
+
+    def reexecute_with_added_fact(
+        self,
+        command: ReexecuteWithAddedFact,
     ) -> ProductEpisodeRunResult:
         del command
         raise AssertionError("worker fake only supports run()")

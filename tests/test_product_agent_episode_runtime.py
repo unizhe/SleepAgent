@@ -7,6 +7,7 @@ import pytest
 from sleepagent.radar_agent.product_agent.agents.sleepcare import (
     EpisodePlanProposal,
     EvaluationDecision,
+    SleepCareAgent,
     SleepCareEvaluation,
 )
 from sleepagent.radar_agent.product_agent.contracts import (
@@ -25,6 +26,13 @@ from sleepagent.radar_agent.product_agent.episode import (
     ResumeRequiresReplan,
 )
 from sleepagent.radar_agent.product_agent.governance import AcceptedWorkProduct
+from sleepagent.radar_agent.product_agent.longitudinal_memory import (
+    canonical_token_count,
+)
+from sleepagent.radar_agent.product_agent.runtime_factory import (
+    ProductRuntimeBundle,
+    build_product_runtime_bundle,
+)
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -59,9 +67,11 @@ class SleepCareModel:
     def __init__(self, *, evaluation=EvaluationDecision.CONTINUE):
         self.evaluation = evaluation
         self.calls = []
+        self.provider_messages: list[list[dict[str, str]]] = []
 
     def generate(self, *, messages, schema, prompt_version, context_packet_id):
         self.calls.append(schema)
+        self.provider_messages.append(messages)
         if schema is EpisodePlanProposal:
             return schema(
                 objective="解释昨夜",
@@ -87,6 +97,47 @@ class SleepCareModel:
         raise AssertionError(schema)
 
 
+class RepairingSleepCareModel(SleepCareModel):
+    def __init__(self, fail_schema=EpisodePlanProposal) -> None:
+        super().__init__()
+        self.fail_schema = fail_schema
+        self.failed_once = False
+
+    def generate(self, *, messages, schema, prompt_version, context_packet_id):
+        if schema is self.fail_schema and not self.failed_once:
+            self.failed_once = True
+            self.calls.append(schema)
+            self.provider_messages.append(messages)
+            return object()
+        return super().generate(
+            messages=messages,
+            schema=schema,
+            prompt_version=prompt_version,
+            context_packet_id=context_packet_id,
+        )
+
+
+def episode_runtime(
+    model: SleepCareModel,
+    *,
+    snapshot: FactSnapshot | None = None,
+) -> tuple[ProductEpisodeRuntime, ProductRuntimeBundle]:
+    bundle = build_product_runtime_bundle(
+        sleepcare_model=model,
+        evidence_reasoning_model=model,
+        care_strategy_model=model,
+        safety_review_model=model,
+        sleepcare_planning_model=model,
+    )
+    runtime = ProductEpisodeRuntime(
+        episode_id="episode-1",
+        fact_snapshot=snapshot or fact_snapshot(),
+        sleepcare_agent=bundle.roster.sleepcare,
+        skill_registry=bundle.skill_registry,
+    )
+    return runtime, bundle
+
+
 def accepted(kind: WorkProductKind, snapshot: FactSnapshot) -> AcceptedWorkProduct:
     agent = {
         WorkProductKind.EVIDENCE_PACKET: AgentId.EVIDENCE_REASONING,
@@ -108,27 +159,83 @@ def accepted(kind: WorkProductKind, snapshot: FactSnapshot) -> AcceptedWorkProdu
 
 def test_runtime_sleepcare_plans_but_registry_owns_minimum_path() -> None:
     model = SleepCareModel()
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=fact_snapshot(),
-        sleepcare_model=model,
-    )
+    runtime, bundle = episode_runtime(model)
     plan = runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",
     )
     assert WorkProductKind.EVIDENCE_PACKET in plan.required_work_products
     assert runtime.invocation_records[0].agent_id == AgentId.SLEEP_CARE
+    assert (
+        bundle.provider_input_ledger.episode_total(
+            "episode-1", AgentId.SLEEP_CARE
+        )
+        > 0
+    )
+
+
+def test_episode_runtime_rejects_uncoordinated_sleepcare_agent() -> None:
+    model = SleepCareModel()
+    with pytest.raises(TypeError, match="coordinator-bound"):
+        ProductEpisodeRuntime(
+            episode_id="episode-1",
+            fact_snapshot=fact_snapshot(),
+            sleepcare_agent=SleepCareAgent(model, planning_model=model),
+        )
+
+
+def test_sleepcare_plan_repair_reserves_every_provider_attempt() -> None:
+    model = RepairingSleepCareModel()
+    runtime, bundle = episode_runtime(model)
+
+    runtime.create_plan(
+        episode_type=EpisodeType.MORNING_REVIEW,
+        objective="解释昨夜",
+    )
+
+    assert model.calls.count(EpisodePlanProposal) == 2
+    assert runtime.counters.model_calls == 2
+    assert runtime.counters.agent_calls == 1
+    expected_tokens = sum(
+        canonical_token_count(messages) for messages in model.provider_messages
+    )
+    assert bundle.provider_input_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    ) == expected_tokens
+
+
+def test_sleepcare_evaluation_repair_uses_the_same_coordinator_ledger() -> None:
+    model = RepairingSleepCareModel(fail_schema=SleepCareEvaluation)
+    snap = fact_snapshot()
+    runtime, bundle = episode_runtime(model, snapshot=snap)
+    runtime.create_plan(
+        episode_type=EpisodeType.MORNING_REVIEW,
+        objective="解释昨夜",
+    )
+    product = accepted(WorkProductKind.EVIDENCE_PACKET, snap)
+    runtime.accept(WorkProductKind.EVIDENCE_PACKET, product)
+
+    decision = runtime.evaluate(
+        latest_kind=WorkProductKind.EVIDENCE_PACKET,
+        latest=product,
+    )
+
+    assert decision.decision is EvaluationDecision.CONTINUE
+    assert model.calls.count(SleepCareEvaluation) == 2
+    assert runtime.counters.model_calls == 3
+    assert runtime.counters.agent_calls == 2
+    expected_tokens = sum(
+        canonical_token_count(messages) for messages in model.provider_messages
+    )
+    assert bundle.provider_input_ledger.episode_total(
+        "episode-1", AgentId.SLEEP_CARE
+    ) == expected_tokens
 
 
 def test_runtime_accepts_revisioned_work_and_evaluates_afterward() -> None:
     model = SleepCareModel()
     snap = fact_snapshot()
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=snap,
-        sleepcare_model=model,
-    )
+    runtime, _ = episode_runtime(model, snapshot=snap)
     runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",
@@ -146,11 +253,7 @@ def test_runtime_accepts_revisioned_work_and_evaluates_afterward() -> None:
 def test_runtime_does_not_allow_sleepcare_to_finish_missing_work() -> None:
     model = SleepCareModel(evaluation=EvaluationDecision.FINISH)
     snap = fact_snapshot()
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=snap,
-        sleepcare_model=model,
-    )
+    runtime, _ = episode_runtime(model, snapshot=snap)
     runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",
@@ -167,11 +270,7 @@ def test_runtime_does_not_allow_sleepcare_to_finish_missing_work() -> None:
 def test_waiting_checkpoint_resume_revalidates_identity_and_snapshot() -> None:
     model = SleepCareModel()
     snap = fact_snapshot()
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=snap,
-        sleepcare_model=model,
-    )
+    runtime, _ = episode_runtime(model, snapshot=snap)
     runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",
@@ -187,18 +286,15 @@ def test_waiting_checkpoint_resume_revalidates_identity_and_snapshot() -> None:
 
 def test_snapshot_restore_is_strict_and_preserves_counters() -> None:
     model = SleepCareModel()
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=fact_snapshot(),
-        sleepcare_model=model,
-    )
+    runtime, bundle = episode_runtime(model)
     runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",
     )
     restored = ProductEpisodeRuntime.restore(
         runtime.snapshot(),
-        sleepcare_model=model,
+        sleepcare_agent=bundle.roster.sleepcare,
+        skill_registry=bundle.skill_registry,
     )
     assert restored.plan == runtime.plan
     assert restored.counters == runtime.counters
@@ -210,15 +306,15 @@ def test_snapshot_restore_is_strict_and_preserves_counters() -> None:
         }
     )
     with pytest.raises(EpisodeStateConflict, match="counters"):
-        ProductEpisodeRuntime.restore(tampered, sleepcare_model=model)
+        ProductEpisodeRuntime.restore(
+            tampered,
+            sleepcare_agent=bundle.roster.sleepcare,
+            skill_registry=bundle.skill_registry,
+        )
 
 
 def test_receipt_truth_distinguishes_waiting_and_terminal() -> None:
-    runtime = ProductEpisodeRuntime(
-        episode_id="episode-1",
-        fact_snapshot=fact_snapshot(),
-        sleepcare_model=SleepCareModel(),
-    )
+    runtime, _ = episode_runtime(SleepCareModel())
     runtime.create_plan(
         episode_type=EpisodeType.MORNING_REVIEW,
         objective="解释昨夜",

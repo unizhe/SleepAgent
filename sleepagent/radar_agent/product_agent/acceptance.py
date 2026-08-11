@@ -29,6 +29,21 @@ from sleepagent.radar_agent.product_agent.runtime_contracts import (
     PRODUCT_EPISODE_RUNNER_VERSION,
     ProductEpisodeRunResult,
 )
+from sleepagent.radar_agent.product_agent.agent_invocation_coordinator import (
+    AGENT_INVOCATION_COORDINATOR_VERSION,
+)
+from sleepagent.radar_agent.product_agent.confirmed_action_coordinator import (
+    CONFIRMED_ACTION_COORDINATOR_VERSION,
+)
+from sleepagent.radar_agent.product_agent.episode_result_finalizer import (
+    EPISODE_RESULT_FINALIZER_VERSION,
+)
+from sleepagent.radar_agent.product_agent.publication_service import (
+    PUBLICATION_SERVICE_VERSION,
+)
+from sleepagent.radar_agent.product_agent.tool_execution_coordinator import (
+    TOOL_EXECUTION_COORDINATOR_VERSION,
+)
 from sleepagent.radar_agent.product_agent.tooling import PRODUCT_TOOL_RUNTIME_VERSION
 from sleepagent.radar_agent.product_agent.skills import SKILL_FOUNDATION_VERSION
 from sleepagent.radar_agent.product_agent.habit_profile import HABIT_PROFILE_VERSION
@@ -61,7 +76,7 @@ from sleepagent.radar_agent.questionnaire import (
 )
 
 
-ACCEPTANCE_MANIFEST_VERSION = "sleepagent-product-agent-acceptance.v25"
+ACCEPTANCE_MANIFEST_VERSION = "sleepagent-product-agent-acceptance.v26"
 
 
 class AcceptanceScenario(str, Enum):
@@ -397,6 +412,11 @@ class AcceptanceReleaseIdentity(StrictContract):
     episode_runtime_version: str
     episode_runner_version: str
     episode_result_schema_version: str
+    agent_invocation_coordinator_version: str
+    tool_execution_coordinator_version: str
+    confirmed_action_coordinator_version: str
+    publication_service_version: str
+    episode_result_finalizer_version: str
     tool_runtime_version: str
     governance_version: str
     skill_foundation_version: str
@@ -426,6 +446,17 @@ def current_acceptance_release_identity(
         "episode_runtime_version": EPISODE_RUNTIME_VERSION,
         "episode_runner_version": PRODUCT_EPISODE_RUNNER_VERSION,
         "episode_result_schema_version": PRODUCT_EPISODE_RESULT_SCHEMA_VERSION,
+        "agent_invocation_coordinator_version": (
+            AGENT_INVOCATION_COORDINATOR_VERSION
+        ),
+        "tool_execution_coordinator_version": (
+            TOOL_EXECUTION_COORDINATOR_VERSION
+        ),
+        "confirmed_action_coordinator_version": (
+            CONFIRMED_ACTION_COORDINATOR_VERSION
+        ),
+        "publication_service_version": PUBLICATION_SERVICE_VERSION,
+        "episode_result_finalizer_version": EPISODE_RESULT_FINALIZER_VERSION,
         "tool_runtime_version": PRODUCT_TOOL_RUNTIME_VERSION,
         "governance_version": GOVERNANCE_VERSION,
         "skill_foundation_version": SKILL_FOUNDATION_VERSION,

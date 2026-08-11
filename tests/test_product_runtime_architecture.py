@@ -313,7 +313,12 @@ def test_runtime_bundle_is_frozen_slotted_and_shares_one_object_graph() -> None:
     assert runner.induction_worker is bundle.induction_worker
     assert runner.external_executor is bundle.external_executor
     assert runner.fact_snapshot_revalidator is bundle.policies.fact_snapshot_revalidator
-    assert runner._provider_input_tokens is bundle.provider_input_ledger
+    assert runner.provider_input_budget is bundle.provider_input_ledger
+    assert runner.agent_invocation_coordinator is bundle.agent_invocation_coordinator
+    assert runner.tool_execution_coordinator is bundle.tool_execution_coordinator
+    assert runner.confirmed_action_coordinator is bundle.confirmed_action_coordinator
+    assert runner.publication_service is bundle.publication_service
+    assert runner.episode_result_finalizer is bundle.episode_result_finalizer
 
     assert bundle.commit_controller.care_store is bundle.stores.care_context
     assert bundle.commit_controller.memory_store is bundle.stores.memory_context

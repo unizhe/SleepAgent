@@ -145,7 +145,7 @@ class ProductToolExecutor:
         handler = self.handlers.get(tool_name)
         if handler is None:
             raise ProductToolError(f"no handler registered for {tool_name}")
-        input_hash = stable_hash(arguments)
+        input_hash = canonical_tool_input_hash(tool_name, arguments)
         if tool_name in RUNTIME_INTERACTION_TOOLS:
             if not context.episode_id:
                 raise ProductToolError(
@@ -155,26 +155,18 @@ class ProductToolExecutor:
                 tool_name,
                 arguments,
             )
-            interaction_payload_hash = _runtime_interaction_payload_hash(
-                tool_name,
-                arguments,
-            )
+            interaction_payload_hash = input_hash
             interaction_key = (
                 context.episode_id,
                 context.fact_snapshot.fact_snapshot_hash,
                 tool_name,
                 interaction_identity_hash,
             )
-            idempotency_key = (
-                "runtime-interaction:"
-                + stable_hash(
-                    {
-                        "episode_id": interaction_key[0],
-                        "fact_snapshot_hash": interaction_key[1],
-                        "tool_name": interaction_key[2],
-                        "interaction_identity_hash": interaction_key[3],
-                    }
-                )
+            idempotency_key = canonical_runtime_interaction_idempotency_key(
+                tool_name,
+                arguments,
+                episode_id=context.episode_id,
+                fact_snapshot_hash=context.fact_snapshot.fact_snapshot_hash,
             )
             with self._runtime_interaction_lock:
                 cached = self._runtime_interaction_results.get(interaction_key)
@@ -265,7 +257,10 @@ class ProductToolExecutor:
             outcome = InvocationOutcome.FAILED
             error_code = type(exc).__name__
         receipt = ToolReceipt(
-            tool_invocation_id=f"tool:{tool_name}:{input_hash[:16]}",
+            tool_invocation_id=canonical_tool_invocation_id(
+                tool_name,
+                input_hash,
+            ),
             tool_name=tool_name,
             tool_version=f"{tool_name}.{definition.version}",
             caller=(
@@ -318,7 +313,10 @@ class ProductToolExecutor:
     ) -> ProductToolResult:
         definition = TOOL_DEFINITIONS[tool_name]
         receipt = ToolReceipt(
-            tool_invocation_id=f"tool:{tool_name}:{input_hash[:16]}",
+            tool_invocation_id=canonical_tool_invocation_id(
+                tool_name,
+                input_hash,
+            ),
             tool_name=tool_name,
             tool_version=f"{tool_name}.{definition.version}",
             caller="runtime",
@@ -845,6 +843,43 @@ def _runtime_interaction_payload_hash(
     return stable_hash(material)
 
 
+def canonical_tool_input_hash(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    """Hash the exact payload material owned by the Product Tool runtime."""
+
+    if tool_name in RUNTIME_INTERACTION_TOOLS:
+        return _runtime_interaction_payload_hash(tool_name, arguments)
+    return stable_hash(arguments)
+
+
+def canonical_tool_invocation_id(tool_name: str, input_hash: str) -> str:
+    return f"tool:{tool_name}:{input_hash[:16]}"
+
+
+def canonical_runtime_interaction_idempotency_key(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    episode_id: str,
+    fact_snapshot_hash: str,
+) -> str:
+    if tool_name not in RUNTIME_INTERACTION_TOOLS:
+        raise ValueError("Tool is not a runtime interaction")
+    return "runtime-interaction:" + stable_hash(
+        {
+            "episode_id": episode_id,
+            "fact_snapshot_hash": fact_snapshot_hash,
+            "tool_name": tool_name,
+            "interaction_identity_hash": _runtime_interaction_identity_hash(
+                tool_name,
+                arguments,
+            ),
+        }
+    )
+
+
 def _runtime_interaction_cache_expired(
     tool_name: str,
     result: ProductToolResult,
@@ -897,5 +932,8 @@ __all__ = [
     "ProductToolExecutor",
     "ProductToolResult",
     "ToolHandler",
+    "canonical_runtime_interaction_idempotency_key",
+    "canonical_tool_input_hash",
+    "canonical_tool_invocation_id",
     "context_item_from_tool_receipt",
 ]

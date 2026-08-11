@@ -94,6 +94,7 @@ from sleepagent.radar_agent.product_agent.runtime_contracts import (
     ProductEpisodeRunRequest,
     ProductUserFactResponse,
     ReexecuteWithAddedFact,
+    bind_product_episode_checkpoint,
 )
 from sleepagent.radar_agent.product_agent.runtime_factory import (
     ProductRuntimeBundle,
@@ -301,15 +302,17 @@ def bind_frozen_target(
             "proposal_id": decision.proposal.proposal_id,
         }
     )
-    return result.model_copy(
-        update={
-            "pending_confirmations": [
-                bound
-                if item.confirmation_id == target.confirmation_id
-                else item
-                for item in result.pending_confirmations
-            ]
-        }
+    return bind_product_episode_checkpoint(
+        result.model_copy(
+            update={
+                "pending_confirmations": [
+                    bound
+                    if item.confirmation_id == target.confirmation_id
+                    else item
+                    for item in result.pending_confirmations
+                ]
+            }
+        )
     )
 
 
@@ -2577,7 +2580,7 @@ def test_user_fact_request_waits_with_exact_request_and_resumes_with_feedback() 
             observed_at=NOW,
         ),
     )
-    resumed = instance.run(continued.reexecution_request())
+    resumed = instance.reexecute_with_added_fact(continued)
 
     assert resumed.receipt.status == EpisodeStatus.COMPLETE
     assert resumed.pending_user_input is None
@@ -2590,6 +2593,115 @@ def test_user_fact_request_waits_with_exact_request_and_resumes_with_feedback() 
         item["key"] == "user_fact_response:user-fact-bedtime"
         for item in evidence_contexts[-1]["items"]
     )
+
+
+def test_persistent_waiting_continuation_restores_provider_budget() -> None:
+    persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    initial_model = UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
+    initial_bundle = runtime_bundle(
+        initial_model,
+        persistence_store=persistence,
+    )
+    initial = request(EpisodeType.MORNING_REVIEW)
+    frozen = initial_bundle.runner.run(initial)
+    assert frozen.pending_user_input is not None
+    assert frozen.agent_invocations
+    assert all(
+        record.provider_input_tokens > 0
+        for record in frozen.agent_invocations
+    )
+
+    added_fact = ProductUserFactResponse(
+        request_id=frozen.pending_user_input.request_id,
+        answer="是，比平时晚约一小时。",
+        actor_id="actor-1",
+        actor_role="elder",
+        subject_id="subject-1",
+        observed_at=NOW,
+    )
+    command = ReexecuteWithAddedFact(
+        request=initial,
+        frozen_result=frozen,
+        added_fact=added_fact,
+    )
+    resumed_request = command.reexecution_request()
+    assert resumed_request.continuation_lineage is not None
+
+    restarted_bundle = runtime_bundle(
+        UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW),
+        persistence_store=persistence,
+    )
+    assert restarted_bundle.provider_input_ledger.episode_total(
+        initial.episode_id
+    ) == 0
+    recovered = (
+        restarted_bundle.episode_result_finalizer.resolve_frozen_checkpoint(
+            frozen,
+            request=initial,
+            result_request=resumed_request,
+            lineage=resumed_request.continuation_lineage,
+        )
+    )
+
+    assert recovered is None
+    for agent_id in AgentId:
+        assert restarted_bundle.provider_input_ledger.episode_total(
+            initial.episode_id,
+            agent_id,
+        ) == sum(
+            record.provider_input_tokens
+            for record in frozen.agent_invocations
+            if record.agent_id is agent_id
+        )
+
+
+def test_real_runner_rejects_self_rebound_tampered_waiting_user_checkpoint() -> None:
+    model = UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
+    instance = product_runner(model)
+    initial = request(EpisodeType.MORNING_REVIEW)
+    trusted = instance.run(initial)
+    assert trusted.pending_user_input is not None
+    calls_before_resume = list(model.calls)
+    tampered = bind_product_episode_checkpoint(
+        trusted.model_copy(
+            update={
+                "pending_user_input": trusted.pending_user_input.model_copy(
+                    update={
+                        "question_text": (
+                            "Tampered question that was never persisted."
+                        )
+                    }
+                )
+            }
+        )
+    )
+    command = ReexecuteWithAddedFact(
+        request=initial,
+        frozen_result=tampered,
+        added_fact=ProductUserFactResponse(
+            request_id=tampered.pending_user_input.request_id,
+            answer="Yes, later than usual.",
+            actor_id="actor-1",
+            actor_role="elder",
+            subject_id="subject-1",
+            observed_at=NOW,
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="frozen continuation does not match the latest persisted lineage",
+    ):
+        instance.reexecute_with_added_fact(command)
+
+    assert model.calls == calls_before_resume
+    [persisted] = instance.episode_result_finalizer.result_store.history(
+        initial.episode_id
+    )
+    assert persisted == trusted
+    assert persisted != tampered
 
 
 def test_every_model_invocation_is_profile_skill_and_prompt_locked() -> None:
@@ -2682,9 +2794,180 @@ def test_memory_candidate_requires_bound_confirmation_then_commits() -> None:
     assert instance.commit_controller.memory_store.get("subject-1").version == 1
 
 
-def test_executing_confirmation_recovery_uses_frozen_policy_binding(
-    monkeypatch,
-) -> None:
+def test_real_runner_rejects_self_rebound_tampered_confirmation_checkpoint() -> None:
+    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
+    instance = product_runner(model)
+    episode_request = request(
+        EpisodeType.MORNING_REVIEW,
+        user_text="请记住我周末希望晚起半小时",
+        idempotency_key="tampered-confirmation-checkpoint",
+    )
+    trusted = instance.run(episode_request)
+    target = trusted.pending_confirmations[0]
+    decision = authorize_target(
+        instance.human_decisions,
+        episode_id=episode_request.episode_id,
+        fact_snapshot=episode_request.fact_snapshot,
+        target_kind=target.target_kind,
+        target_id=target.candidate_id,
+        target_hash=target.candidate_hash,
+        action_scope=target.action_scope,
+        expires_at=target.expires_at,
+    )
+    bound = bind_frozen_target(trusted, target, decision)
+    [bound_target] = bound.pending_confirmations
+    tampered = bind_product_episode_checkpoint(
+        bound.model_copy(
+            update={
+                "pending_confirmations": [
+                    bound_target.model_copy(
+                        update={
+                            "reason": (
+                                "Tampered confirmation reason never persisted."
+                            )
+                        }
+                    )
+                ]
+            }
+        )
+    )
+    command = CommitFrozenConfirmedAction(
+        request=episode_request,
+        frozen_result=tampered,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="frozen continuation does not match the latest persisted lineage",
+    ):
+        instance.commit_frozen_confirmations(command)
+
+    assert instance.commit_controller.memory_store.get("subject-1").version == 0
+    [persisted] = instance.episode_result_finalizer.result_store.history(
+        episode_request.episode_id
+    )
+    assert persisted == trusted
+    assert persisted != tampered
+
+
+def test_unrelated_same_request_terminal_cannot_impersonate_confirmed_descendant() -> None:
+    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
+    instance = product_runner(model)
+    episode_request = request(
+        EpisodeType.MORNING_REVIEW,
+        user_text="请记住我周末希望晚起半小时",
+        idempotency_key="unrelated-same-request-rerun",
+    )
+    frozen = instance.run(episode_request)
+    target = frozen.pending_confirmations[0]
+    decision = authorize_target(
+        instance.human_decisions,
+        episode_id=episode_request.episode_id,
+        fact_snapshot=episode_request.fact_snapshot,
+        target_kind=target.target_kind,
+        target_id=target.candidate_id,
+        target_hash=target.candidate_hash,
+        action_scope=target.action_scope,
+        expires_at=target.expires_at,
+    )
+    bound = bind_frozen_target(frozen, target, decision)
+    unrelated_rerun = frozen.model_copy(
+        update={
+            "continuation_checkpoint_hash": None,
+            "receipt": frozen.receipt.model_copy(
+                update={
+                    "receipt_revision": frozen.receipt.receipt_revision + 1,
+                    "terminal": True,
+                    "status": EpisodeStatus.COMPLETE,
+                    "goal_achieved": True,
+                    "trace_ref": "trace:unrelated-same-request-rerun",
+                }
+            ),
+            "pending_confirmations": [],
+        }
+    )
+    unrelated_terminal = instance.episode_result_finalizer.finalize(
+        unrelated_rerun,
+        subject_id=episode_request.fact_snapshot.binding.subject_id,
+        request=episode_request,
+    )
+    assert unrelated_terminal.receipt.terminal
+    assert unrelated_terminal.continuation_kind is None
+
+    with pytest.raises(
+        ValueError,
+        match="frozen continuation does not match the latest persisted lineage",
+    ):
+        instance.commit_frozen_confirmations(
+            CommitFrozenConfirmedAction(
+                request=episode_request,
+                frozen_result=bound,
+            )
+        )
+
+    assert instance.commit_controller.memory_store.get("subject-1").version == 0
+    assert (
+        instance.episode_result_finalizer.result_store.latest(
+            episode_request.episode_id
+        )
+        == unrelated_terminal
+    )
+
+
+def test_exact_confirmed_terminal_retry_returns_one_durable_result_and_effect() -> None:
+    persistence = RadarPersistenceStore.connect_sqlite(
+        sqlite3.connect(":memory:", check_same_thread=False)
+    )
+    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
+    bundle = runtime_bundle(model, persistence_store=persistence)
+    instance = bundle.runner
+    episode_request = request(
+        EpisodeType.MORNING_REVIEW,
+        user_text="请记住我周末希望晚起半小时",
+        idempotency_key="exact-confirmed-terminal-retry",
+    )
+    frozen = instance.run(episode_request)
+    target = frozen.pending_confirmations[0]
+    decision = authorize_target(
+        instance.human_decisions,
+        episode_id=episode_request.episode_id,
+        fact_snapshot=episode_request.fact_snapshot,
+        target_kind=target.target_kind,
+        target_id=target.candidate_id,
+        target_hash=target.candidate_hash,
+        action_scope=target.action_scope,
+        expires_at=target.expires_at,
+    )
+    bound = bind_frozen_target(frozen, target, decision)
+    command = CommitFrozenConfirmedAction(
+        request=episode_request,
+        frozen_result=bound,
+    )
+
+    first_terminal = instance.commit_frozen_confirmations(command)
+    version_after_first = instance.commit_controller.memory_store.get(
+        "subject-1"
+    ).version
+    retried_terminal = instance.commit_frozen_confirmations(command)
+
+    assert retried_terminal == first_terminal
+    assert (
+        instance.episode_result_finalizer.result_store.latest(
+            episode_request.episode_id
+        )
+        == first_terminal
+    )
+    assert len(
+        instance.episode_result_finalizer.result_store.history(
+            episode_request.episode_id
+        )
+    ) == 2
+    assert len(persistence.list_product_terminal_result_rows()) == 1
+    assert version_after_first == 1
+    assert instance.commit_controller.memory_store.get("subject-1").version == 1
+
+
+def test_executing_confirmation_recovery_uses_frozen_policy_binding() -> None:
     model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
     instance = product_runner(model)
     episode_request = request(
@@ -2716,11 +2999,6 @@ def test_executing_confirmation_recovery_uses_frozen_policy_binding(
     frozen = bind_frozen_target(frozen, target, decision)
 
     upgraded_policy_version = "hitl-policy.test-upgraded"
-    monkeypatch.setattr(
-        runner_module,
-        "HITL_POLICY_VERSION",
-        upgraded_policy_version,
-    )
     instance.human_decisions.policy.version = upgraded_policy_version
 
     resumed = instance.commit_frozen_confirmations(
@@ -2874,7 +3152,10 @@ def test_external_action_has_separate_safety_confirmation_and_commit_target() ->
     )
 
     declined_request = base_request.model_copy(
-        update={"episode_id": "external-declined"}
+        update={
+            "episode_id": "external-declined",
+            "idempotency_key": "external-declined",
+        }
     )
     declined_frozen = instance.run(declined_request)
     declined_target = declined_frozen.pending_confirmations[0]
@@ -3242,6 +3523,37 @@ def test_online_care_escalation_receipt_reaches_care_and_safety() -> None:
     assert AgentId.SAFETY_REVIEW in {
         item.agent_id for item in result.envelopes
     }
+    assert [item.agent_id for item in result.envelopes] == [
+        AgentId.EVIDENCE_REASONING,
+        AgentId.CARE_STRATEGY,
+        AgentId.SAFETY_REVIEW,
+        AgentId.SLEEP_CARE,
+    ]
+    assert [
+        (item.agent_id, item.skill_id) for item in result.agent_invocations
+    ] == [
+        (AgentId.SLEEP_CARE, "plan_episode"),
+        (AgentId.EVIDENCE_REASONING, "interpret_scoped_evidence"),
+        (AgentId.SLEEP_CARE, "evaluate_work_product"),
+        (AgentId.CARE_STRATEGY, "propose_single_care_action"),
+        (AgentId.SLEEP_CARE, "evaluate_work_product"),
+        (AgentId.SAFETY_REVIEW, "review_action_and_publication"),
+        (AgentId.SLEEP_CARE, "evaluate_work_product"),
+        (AgentId.SLEEP_CARE, "explain_for_elder"),
+        (AgentId.SLEEP_CARE, "evaluate_work_product"),
+    ]
+    assert [item.tool_name for item in result.tool_receipts] == [
+        "care.read_catalog",
+        "care.read_state",
+        "policy.read",
+        "runtime.build_fact_snapshot",
+        "reasoning.resolve_event_context",
+        "profile.read",
+        "baseline.read",
+        "device.read_delivery_policy",
+        "risk.classify_signal",
+        "coordination.read_policy",
+    ]
 
 
 def test_online_urgent_red_flag_preempts_all_model_agents() -> None:

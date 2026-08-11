@@ -9,7 +9,7 @@ The collection target is `real-evidence-v23-collection`. It is bound to:
   `7ece39290333119ff221286b415934a7306f0e58c23b4b10c61488b5db424f45`
 - Habit catalog:
   `d4477443c4b3691afc99f5833958e31a98e4d5caa1c68aa129b8f4a7bf5d6903`
-- acceptance schema: `sleepagent-product-agent-acceptance.v25`
+- acceptance schema: `sleepagent-product-agent-acceptance.v26`
 
 If code changes any bound identity component or any Habit catalog entry, stop
 collection and regenerate a new empty template package. Never relabel evidence

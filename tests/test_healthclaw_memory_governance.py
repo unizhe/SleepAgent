@@ -1115,11 +1115,13 @@ def test_persistent_job_lease_and_publication_reservation_are_cross_process_cas(
     assert durable_replay.processing_generation == 2
 
     first_entry, first_created = first.reserve_publication(
+        command_hash="b" * 64,
         episode_id="episode:cas",
         draft_hash="a" * 64,
         now=NOW,
     )
     second_entry, second_created = second.reserve_publication(
+        command_hash="b" * 64,
         episode_id="episode:cas",
         draft_hash="a" * 64,
         now=NOW,

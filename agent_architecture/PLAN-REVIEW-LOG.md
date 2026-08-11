@@ -4066,3 +4066,209 @@ blocker and explicitly retained the three P1 items above.
 
 Phase C remains uncommitted. No push, release, production mutation or Phase D
 work was performed, and execution is paused for user acceptance.
+
+## Act 3 — Build
+
+### Round 68 — Codex build: Phase D responsibility-oriented Runner contraction
+
+Date: 2026-08-09
+
+Spec: `agent_architecture/PRODUCT-RUNTIME-CLEANUP-PLAN.md`, Phase D only.
+Phases B and C were accepted before this build. Phase E was not started.
+
+### Implemented
+
+- Added the five ordered, independently versioned runtime components and made
+  `runtime_factory.py` their sole production composition root:
+  `AgentInvocationCoordinator`, `ToolExecutionCoordinator`,
+  `ConfirmedActionCoordinator`, `PublicationService` and
+  `EpisodeResultFinalizer`. The Runner retains only their high-level ordering
+  and exposes read-only compatibility properties for the canonical bundle.
+- Routed all four role invocations plus SleepCare plan/evaluate/repair through
+  one coordinator-owned Context, Skill lock, prompt, provider-call, feedback
+  and provider-budget pipeline. Concrete Agents no longer resolve Skills or
+  compile prompts; lower layers import neither the Runner, Episode runtime nor
+  concrete Agent implementations.
+- Made Tool execution a typed provenance boundary: canonical input hash,
+  registry version, invocation ID, caller, snapshot, effect and applicable
+  idempotency are independently checked before output becomes context. A
+  process-wide per-Episode lease serializes same-process bundles, and terminal
+  cleanup reaches every participating executor without assuming adapters are
+  hashable or weak-referenceable.
+- Moved verified-capability acquisition and frozen target commits to
+  `ConfirmedActionCoordinator`. `CommitFrozenConfirmedAction` never re-enters
+  reasoning or publication; `ReexecuteWithAddedFact` carries an authenticated
+  fact and exact parent/request/command lineage into a deliberate re-execution.
+- Moved source revalidation, Memory gating, publication reservation/outcome and
+  fail-closed journal handling to `PublicationService`. Known failed delivery
+  is not retried as degraded publication, and indeterminate/non-boolean
+  publisher outcomes cannot be recorded as success or ordinary failure. The
+  journal is keyed by the stable logical command rather than a worker Episode:
+  exact same-draft retries can reuse a prior outcome after Episode recreation,
+  while draft drift fails before the publisher. Authorization scopes are
+  canonicalized and API chat command keys include the resolved audience role.
+- Moved receipt revisioning, lineage binding, terminal bundle persistence and
+  transient Tool/provider cleanup to `EpisodeResultFinalizer`. Persisted
+  provider token counts restore a restarted continuation; pre-Phase-D unknown
+  counts are conservatively charged at the per-call maximum. Terminal cleanup
+  now releases all same-process provider-ledger participants.
+- Hardened the API/persistence seam exposed by fault injection. The exact
+  Product request intent is durable before Runner work; if the Runner has
+  already finalized/published but API checkpointing crashes, retry projects the
+  authoritative stored result without rerunning, republishing, duplicating
+  events/interactions or creating duplicate result/checkpoint artifacts.
+  WAITING authority is reprojected only while still active, and exact
+  confirmation, answer and decline retries remain idempotent after terminal
+  projection. Internal request/checkpoint artifacts are not exposed by the
+  task API.
+- Refreshed persistent Episode stores from durable rows before revision checks
+  and rolled back in-memory phantom entries after append failures. Current
+  result/checkpoint bindings are self-hashed and cannot be rebound to an
+  unrelated request or terminal result.
+- Evaluated the Phase D6 candidates and deliberately retained them: Habit
+  selection/capture remains part of the Runner's Episode plan and budget;
+  deterministic preflight remains the entry gate; induction already has its
+  own worker and the Runner exposes only the processing facade. No
+  deterministic policy moved into an Agent.
+
+### Runner contraction measurement
+
+- `runner.py`: 2,908 -> 2,214 lines; `ProductEpisodeRunner` class span:
+  2,648 -> 1,962 lines.
+- Direct non-property methods: 24 -> 18. The current class also exposes 12
+  read-only bundle compatibility properties, so raw direct method count is 30.
+- `run()` remains the explicit state-machine orchestration method as required:
+  813 -> 867 lines; a documented AST McCabe-style decision count is 77 -> 78.
+  Phase D intentionally had no line or complexity target. The contraction is
+  the removal of raw model, Tool, commit, publication and persistence ownership,
+  enforced by dependency/call-site tests, rather than hiding the Episode state
+  machine in another facade.
+- Remaining Runner responsibilities are: Episode lifecycle and budgets,
+  Evidence -> Care -> Safety -> SleepCare ordering, deterministic entry and
+  data-quality gates, Habit routing, work-product acceptance/Safety repair,
+  wait/degrade/terminal decisions, and orchestration of the five components.
+
+### Codex verification
+
+- Phase D Runner/coordinator/publication/persistence/API matrix:
+  `194 passed in 10.58s`.
+- Full working-tree regression: `1094 passed, 5 skipped in 67.80s`.
+- Acceptance/factory material suite: `32 passed`; the five extracted modules
+  pass isolated strict mypy, and `compileall` plus `git diff --check` pass.
+- The wheel builds with 212 entries, contains all five components and no
+  `skill_methods`; an isolated wheel install imports every component and keeps
+  the exact 25-symbol package-root public API.
+- Product Contract remains v14 and Registry v13 with manifest hash
+  `2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3`.
+  Runner is v47, result schema is v40, and acceptance schema v26 now binds all
+  five component versions. Release identity is
+  `5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0`.
+  All 68 observations remain simulated/template evidence,
+  `release_evidence_eligible=false`, and the rebuilt v24 archive hash is
+  `3f069f722d4c6df43878b17919ab3d63fd864d97a217c8a2099f9bda5c64b3e6`.
+
+### Explicit remaining P1 follow-up
+
+- Multi-process revision authority still needs one unified CAS ledger across
+  nonterminal and terminal result tables. The production worker operation lease
+  narrows the normal deployment window, but direct API/Runner execution does
+  not yet have a cross-process fence; a UNIQUE constraint on only one table
+  would not solve the split-table conflict.
+- Provider input reservations become durable with a completed/WAITING result,
+  not before each provider attempt. A process crash after reservation or a
+  successful provider call but before result finalization can therefore lose
+  that attempt's budget charge. A durable per-attempt reservation journal is
+  still required if the 48k limit must survive arbitrary process death.
+- The Phase C retention and legacy questionnaire namespace/RLS follow-ups are
+  unchanged; Phase D did not broaden its scope into a storage-policy migration.
+
+Fix rounds used: 2. The first performed the ordered component extraction and
+composition wiring. The second adversarial pass closed receipt provenance,
+continuation lineage, publication ambiguity, cross-bundle transient cleanup,
+durable recovery and HTTP exact-retry gaps. Independent final review found no
+Phase D P0 blocker and retained the explicit P1 items above.
+
+Phase D remains uncommitted. No commit, push, release, production mutation or
+Phase E work was performed, and execution is paused for user acceptance.
+
+## Act 3 — Build
+
+### Round 69 — Codex build: Phase E final acceptance
+
+Date: 2026-08-11
+
+Spec: `agent_architecture/PRODUCT-RUNTIME-CLEANUP-PLAN.md`, Phase E only.
+Phase D was explicitly accepted before this verification. Phase E changed no
+Product code and relaxed no earlier gate.
+
+### Final architecture acceptance
+
+1. The executable roster remains exactly `SleepCareAgent`,
+   `EvidenceReasoningAgent`, `CareStrategyAgent` and `SafetyReviewAgent`.
+2. `ProductEpisodeRunner` remains the only executable Product Agent runtime
+   facade. The only production constructor call is in `runtime_factory.py`.
+3. `ProductEpisodeRuntime` still owns lifecycle/state-machine transitions and
+   is instantiated only by the Runner; the Episode ordering was not rewritten.
+4. `HumanDecisionService` remains the sole approval authority. Product run and
+   continuation contracts expose no raw confirmation token or grant bypass;
+   standalone Habit confirmation is verified through the same authority.
+5. `runtime_factory` is the sole Product composition root. API and worker use
+   the same frozen `ProductRuntimeBundle` object graph.
+6. Every registered production Tool matches the explicit real-owner inventory.
+   `_passthrough` and `state.commit_evidence` are absent from production source
+   and the built wheel.
+7. The locked Agent -> typed Tool -> Service/domain/integration direction and
+   Persistence/runtime contract boundaries pass the static dependency suite.
+8. The package-root public API remains the exact intentional 25-symbol
+   allowlist with no wildcard export or internal Store/Controller exposure.
+9. Hash-locked install, collect-only, full pytest, compileall, diff check,
+   wheel build/inspection and isolated wheel imports all pass from a new clean
+   checkout.
+10. The wheel contains no `skill_methods`, fake Tool handler or dependency on
+    ignored/local dirty files. It includes the five Phase D components,
+    backend, 25 migrations and exactly the intended four console entry points.
+
+### Clean-checkout proof
+
+- Built a temporary candidate commit from repository `HEAD`, the complete
+  binary working-tree diff and every non-ignored untracked file, then cloned it
+  again into `/tmp/sleepagent-phase-e-proof.yy33eE`. The source candidate and
+  proof clone controlled-file manifest hashes both equal
+  `b4d4ed2144ac12800a88ccc19cc4784e3972d24b389f1ec198e85d68760ed494`.
+  The proof clone started and ended with an empty `git status`.
+- A new CPython 3.11.15 environment installed `requirements/dev.lock` with
+  `pip --require-hashes`, then `pip install --no-deps .` succeeded from the
+  proof clone. `pytest --collect-only -q` collected 1,099 tests with no errors.
+- Full clean-clone regression: `1094 passed, 5 skipped in 67.13s`. The focused
+  frozen architecture/HITL/Tool/composition/public-boundary suite reports
+  `175 passed in 14.21s`.
+- The five extracted modules pass isolated strict mypy. `compileall`,
+  `git diff --check`, Docker Compose configuration, frontend `npm ci`,
+  TypeScript typecheck and the six-page Next.js production build all pass.
+- The clean wheel contains 212 entries, all five extracted components,
+  backend and 25 migrations; it contains no `skill_methods`, `_passthrough` or
+  `state.commit_evidence`. A clean `pip --target` install imports the wheel copy
+  of all five components, exposes exactly 25 Product public symbols and records
+  the intended `radar-agent`, `real-perceptor-acceptance`, `sleepagent-demo` and
+  `sleepagent-migrate` entry points.
+- Release identity and manifest remain
+  `5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0`.
+  All 68 provider observations remain simulated with `real_provider=false`,
+  the release verifier remains `eligible=false`, and the evidence ZIP SHA-256
+  remains
+  `3f069f722d4c6df43878b17919ab3d63fd864d97a217c8a2099f9bda5c64b3e6`.
+
+### Review result
+
+No Phase E P0 or new P1 was found. The explicitly recorded cross-process
+revision CAS, durable provider per-attempt ledger, questionnaire retention and
+legacy namespace/RLS follow-ups remain unchanged; Phase E is verification, not
+a silent scope expansion. There was no deviation from the frozen spec.
+
+Fix rounds used: 0. The only reruns supplied the repository's known CPython
+3.11 path and required non-secret Compose test variables; no product or test
+fix was needed.
+
+Phase E final acceptance is complete and remains uncommitted. No commit, push,
+release or production mutation was performed; commit requires explicit user
+approval.
