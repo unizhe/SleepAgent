@@ -31,7 +31,7 @@ from sleepagent.backend_settings import (
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.radar_agent.persistence.uow import (
+from sleepagent.persistence.uow import (
     UnitOfWorkFactory,
     UowScope,
     WorkerClaimScope,
@@ -2020,7 +2020,7 @@ def build_worker_parser() -> argparse.ArgumentParser:
 def _cli_handlers(settings: SleepBackendSettings) -> dict[str, WorkHandler]:
     # Import lazily: the adapters implement WorkHandler and therefore depend on
     # this module's public runtime contracts.
-    from sleepagent.radar_agent.product_agent.postgres_worker import (
+    from sleepagent.product_runtime.postgres_worker import (
         build_product_agent_worker_handlers,
     )
     from sleepagent.sleep_domain.worker_adapters import build_b3_worker_handlers

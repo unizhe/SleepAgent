@@ -242,7 +242,7 @@ def build_backend_runtime(
     worker_handlers: Mapping[str, object] | None = None,
 ) -> SleepBackendRuntime:
     try:
-        from sleepagent.radar_agent.persistence.uow import (
+        from sleepagent.persistence.uow import (
             PoolConfiguration,
             PsycopgPoolProvider,
             UnitOfWorkFactory,

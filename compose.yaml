@@ -42,7 +42,7 @@ services:
     entrypoint:
       - python
       - -m
-      - sleepagent.radar_agent.persistence.migrate
+      - sleepagent.persistence.migrate
     command:
       - apply
     environment:

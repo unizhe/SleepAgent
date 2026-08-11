@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterator, Mapping
 
-from sleepagent.radar_agent.persistence import RadarPersistenceStore
+from sleepagent.persistence import RadarPersistenceStore
 from sleepagent.sleep_api.auth import AssertionReplayStore
 from sleepagent.sleep_api.contracts import PublicActorRole
 from sleepagent.sleep_domain import (

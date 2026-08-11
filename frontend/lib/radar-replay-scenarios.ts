@@ -1,4 +1,4 @@
-import scenarioCatalog from "../../sleepagent/radar_agent/replay/scenario_catalog.json";
+import scenarioCatalog from "../../sleepagent/simulation/replay/scenario_catalog.json";
 import type {
   RadarDataQuality,
   RadarPublicAlertEvent,

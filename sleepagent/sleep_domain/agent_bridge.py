@@ -16,22 +16,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sleepagent.radar_agent.product_agent.contracts import (
+from sleepagent.product_runtime.contracts import (
     AuthenticatedBinding,
     EpisodeStatus,
     EpisodeType,
     ExecutionMode,
     stable_hash,
 )
-from sleepagent.radar_agent.product_agent.cold_start import (
+from sleepagent.product_runtime.cold_start import (
     ClaimKind,
     build_unavailable_entry_decisions,
 )
-from sleepagent.radar_agent.product_agent.runtime_contracts import (
+from sleepagent.product_runtime.runtime_contracts import (
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
 )
-from sleepagent.radar_agent.product_agent.runtime_ports import (
+from sleepagent.product_runtime.runtime_ports import (
     ProductEpisodeRunnerPort,
 )
 from sleepagent.sleep_domain.contracts import (
@@ -671,7 +671,7 @@ def _degraded_role_view(
 
 
 def _runner_is_configured(runner: ProductEpisodeRunnerPort) -> bool:
-    from sleepagent.radar_agent.product_agent.agents import ProductAgentRoster
+    from sleepagent.product_runtime.agents import ProductAgentRoster
 
     roster = getattr(runner, "agent_roster", None)
     if type(roster) is not ProductAgentRoster:

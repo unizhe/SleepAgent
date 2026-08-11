@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
-from sleepagent.radar_agent.persistence import (
+from sleepagent.persistence import (
     RadarPersistenceStore,
     connect_postgres_store,
 )

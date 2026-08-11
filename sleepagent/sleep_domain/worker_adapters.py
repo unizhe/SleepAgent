@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping, Protocol, cast
 
 from sleepagent.backend_keys import BackendKeyProvider
 from sleepagent.backend_settings import DataMode, ProcessRole, SleepBackendSettings
-from sleepagent.radar_agent.persistence.uow import UnitOfWorkFactory, UowScope
+from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 from sleepagent.sleep_domain.postgres_slice import (
     FastPathCommitResult,
     FastPathHandler,

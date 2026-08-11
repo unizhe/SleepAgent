@@ -12,14 +12,14 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from sleepagent.radar_agent.product_agent.contracts import (
+from sleepagent.product_runtime.contracts import (
     AuthenticatedBinding,
     FactSnapshot,
     SourceScope,
     SourceScopeKind,
     stable_hash,
 )
-from sleepagent.radar_agent.product_agent.cold_start import (
+from sleepagent.product_runtime.cold_start import (
     CapabilityEligibilityReceipt,
     MetricReadinessDecision,
     snapshot_binding_material,
