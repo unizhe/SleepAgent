@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Iterable, Mapping
 
-from sleepagent.radar_agent.persistence.models import RadarSubject
-from sleepagent.radar_agent.schemas import (
+from sleepagent.persistence.models import RadarSubject
+from sleepagent.product_runtime.schemas import (
     RadarDataQualityStatus,
     RadarDevice,
     RadarDeviceStatus,

@@ -22,7 +22,7 @@ from sleepagent.backend_persistence import (
 from sleepagent.backend_settings import SleepBackendSettings
 from sleepagent.product_api.contracts import ProductRole
 from sleepagent.product_api.service import ProductApiError
-from sleepagent.radar_agent.persistence.uow import UnitOfWorkFactory, UowScope
+from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 from sleepagent.sleep_api.auth import (
     AuthenticatedActorContext,
     AuthoritativeRoleBinding,

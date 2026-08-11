@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping
 
-from sleepagent.radar_agent.persistence import RadarPersistenceStore
+from sleepagent.persistence import RadarPersistenceStore
 from sleepagent.sleep_domain.contracts import (
     AdapterDeploymentEvent,
     AdapterDescriptor,

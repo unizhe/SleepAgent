@@ -11,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Mapping
 
-from sleepagent.radar_agent.persistence import (
+from sleepagent.persistence import (
     RadarPersistenceStore,
     connect_postgres_store,
 )

@@ -28,7 +28,7 @@ from sleepagent.product_api.service import (
     ProductIdentityResolver,
     ProductRequestContext,
 )
-from sleepagent.radar_agent.persistence.uow import (
+from sleepagent.persistence.uow import (
     AuthorityResolutionScope,
     UnitOfWorkFactory,
     UowScope,

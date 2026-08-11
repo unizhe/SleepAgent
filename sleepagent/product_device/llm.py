@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from sleepagent.observability import log_event, record_error
-from sleepagent.radar_agent.llm import (
+from sleepagent.integrations.llm import (
     CloudLLMClient,
     CloudLLMConfig,
     CloudLLMError,

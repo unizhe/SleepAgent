@@ -23,7 +23,7 @@ from sleepagent.product_device.schemas import (
     RadarSourceMetadata,
     RadarVitalSnapshot,
 )
-from sleepagent.radar_agent.replay import (
+from sleepagent.simulation.replay import (
     ReplayScenario,
     default_replay_scenario_id,
     get_replay_scenario,

@@ -27,7 +27,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import ConfigDict, Field, model_validator
 
-from sleepagent.radar_agent.persistence.uow import (
+from sleepagent.persistence.uow import (
     TransactionBoundConnection,
     UnitOfWorkFactory,
     UowScope,
