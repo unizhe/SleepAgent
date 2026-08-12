@@ -80,6 +80,9 @@ class SleepBackendSettings(BaseModel):
     namespace_prefixes: tuple[str, ...]
     enabled_surfaces: frozenset[ApiSurface] = frozenset()
     worker_queues: tuple[str, ...] = ()
+    # Connector/data-provider authority and model implementation are separate
+    # deployment dimensions. Replay may therefore use a fake data provider
+    # with an explicitly opted-in live Product model.
     provider_mode: ProviderMode = ProviderMode.DISABLED
     model_mode: ModelMode = ModelMode.DISABLED
     service_credential_ref: str = Field(default="unconfigured", min_length=1)

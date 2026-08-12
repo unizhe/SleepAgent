@@ -7,12 +7,14 @@ from typing import Any, Literal, cast
 
 import pytest
 
+from sleepagent.backend_settings import ModelMode
 from sleepagent.persistence.uow import UowScope
 from sleepagent.product_runtime.contracts import (
     CommunicationDraft,
     EpisodeReceipt,
     EpisodeStatus,
     ExecutionMode,
+    stable_hash,
 )
 from sleepagent.product_runtime.postgres_worker import (
     LoadedProductAgentSource,
@@ -33,6 +35,10 @@ from sleepagent.product_runtime.runtime_contracts import (
 )
 from sleepagent.product_runtime.runtime_factory import (
     ProductRuntimeBundle,
+    build_product_runtime_bundle,
+)
+from sleepagent.product_runtime.provider import (
+    OpenAICompatibleStructuredAgentModel,
 )
 from sleepagent.product_runtime.runtime_ports import (
     ProductEpisodeRunnerPort,
@@ -516,6 +522,19 @@ class _Store:
         return True
 
 
+class _InvalidStructuredProvider:
+    is_configured = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def create_chat_completion(self, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "id": f"invalid-provider-response-{self.calls}",
+            "choices": [{"message": {"content": "not-json"}}],
+        }
+
 class _AdapterProcessor:
     def __init__(self, failure: Exception | None = None) -> None:
         self.failure = failure
@@ -613,12 +632,80 @@ def test_real_product_processor_journals_model_artifact_before_commit() -> None:
     assert result.disposition == WorkDisposition.SUCCEEDED
     assert store.invocation is not None
     assert store.invocation.state == InvocationState.RESPONSE_RECEIVED
+    deterministic_request = {
+        "schema_version": "product_agent_model_request.v1",
+        "operation_id": "product-operation-1",
+        "night_episode_id": state.source.night_episode_id,
+        "night_episode_revision_id": "night-revision-1",
+        "source_state_version": 2,
+        "observation_set_sha256": "a" * 64,
+        "policy_sha256": "p" * 64,
+        "model_mode": "deterministic",
+    }
+    assert store.invocation.invocation_key == (
+        "product-agent:product-operation-1:night-revision-1:deterministic.v1"
+    )
+    assert store.invocation.request_sha256 == stable_hash(
+        deterministic_request
+    )
+    assert store.invocation.provider_request_id == (
+        "deterministic:" + stable_hash(deterministic_request)[:24]
+    )
     assert store.invocation.response is not None
     assert store.invocation.response["artifact"]["operation_id"] == (
         "product-operation-1"
     )
     assert state.prepared is not None
     assert state.committed is state.prepared
+
+
+def test_live_model_failure_keeps_existing_safe_degraded_journal_semantics() -> None:
+    trace = _TransactionTrace()
+    state = _RepositoryState(trace=trace, source=_source())
+    times = iter((NOW, NOW + timedelta(seconds=1)))
+    factory = _UnitOfWorkFactory(trace)
+    provider = _InvalidStructuredProvider()
+    model = OpenAICompatibleStructuredAgentModel(provider=provider)
+    runtime_bundle = build_product_runtime_bundle(
+        sleepcare_model=model,
+        sleepcare_planning_model=model,
+        evidence_reasoning_model=model,
+        care_strategy_model=model,
+        safety_review_model=model,
+    )
+    processor = ProductAgentProcessor(
+        factory,  # type: ignore[arg-type]
+        runtime_bundle=runtime_bundle,
+        id_generator=_sequential_id_generator(),
+        now_factory=lambda: next(times),
+        repository_factory=lambda _connection, _scope_value: _Repository(state),  # type: ignore[arg-type,return-value]
+    )
+    store = _Store(uow_factory=factory)
+
+    result = ProductAgentWorkHandlerAdapter(
+        processor=processor,
+        model_mode=ModelMode.LIVE,
+    )(_context(store=store))
+
+    assert result.disposition is WorkDisposition.SUCCEEDED
+    assert result.result["analysis_status"] == "degraded"
+    assert store.invocation is not None
+    assert store.invocation.invocation_key.endswith(":live.v1")
+    assert store.invocation.state is InvocationState.RESPONSE_RECEIVED
+    assert store.invocation.provider_request_id is None
+    assert provider.calls == 2 * len(AnalysisRole)
+    artifact = state.committed
+    assert artifact is not None
+    assert artifact.analysis.execution_mode == "safe_degraded"
+    assert artifact.analysis.failure_codes == (
+        "sleepcare_planning_failed:PlanningFailed",
+    )
+    assert all(
+        role_run.result.receipt.execution_mode
+        is ExecutionMode.SAFE_DEGRADED
+        and not role_run.result.agent_invocations
+        for role_run in artifact.role_runs
+    )
 
 
 @pytest.mark.parametrize(

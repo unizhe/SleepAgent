@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sleepagent.demo_cli import (
     ActorAssertionSigner,
     DemoCliError,
+    render_product_demo,
+    show_product_demo,
     verify_abnormal_backend,
     verify_backend,
     verify_bounded_retention_backend,
@@ -24,6 +26,210 @@ from sleepagent.demo_cli import (
 
 
 pytestmark = pytest.mark.unit
+
+
+class ProductDemoHttp:
+    def __init__(self, scenario_id: str) -> None:
+        self.scenario_id = scenario_id
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def request(self, method: str, path: str, **kwargs):
+        self.calls.append((method, path, kwargs))
+        replay = {"data_mode": "replay", "synthetic_non_release": True}
+        if path == "/livez":
+            return {"status": "alive"}
+        if path == "/demo/v1/seed":
+            assert kwargs["payload"] == {
+                "artifact_family": "canonical-replay-fixtures",
+                "scenario_id": self.scenario_id,
+                "batch_size": 100,
+            }
+            return {**replay, "operation_id": "root-1", "generation": 1}
+        if path == "/demo/v1/operations/root-1":
+            if self.scenario_id == "urgent-zero-model":
+                return {
+                    **replay,
+                    "operation_id": "root-1",
+                    "state": "failed",
+                    "error_code": "unexpected_urgent_route",
+                }
+            subject = (
+                "synthetic-subject-normal-001"
+                if self.scenario_id == "normal-one-night"
+                else "synthetic-subject-lin-001"
+            )
+            return {
+                **replay,
+                "operation_id": "root-1",
+                "state": "succeeded",
+                "result": {
+                    **replay,
+                    "subject_ref": subject,
+                    "night_episode_id": "episode-1",
+                    "night_episode_revision_id": "revision-1",
+                    "analysis_revision_id": "analysis-1",
+                },
+            }
+        if path == "/demo/v1/advance":
+            return {**replay, "operation_id": "advance-1", "generation": 1}
+        if path == "/demo/v1/operations/advance-1":
+            return {
+                **replay,
+                "operation_id": "advance-1",
+                "state": "succeeded",
+                "result": {**replay, "released_fact_count": 1491},
+            }
+        if path == "/demo/v1/trace":
+            return {
+                **replay,
+                "generation": 1,
+                "entries": [
+                    {
+                        "sequence": 1,
+                        "event_type": "journey_reserved",
+                        "state": "accepted",
+                        "operation_id": "root-1",
+                    },
+                    {
+                        "sequence": 2,
+                        "event_type": "journey_checkpoint",
+                        "state": (
+                            "failed"
+                            if self.scenario_id == "urgent-zero-model"
+                            else "succeeded"
+                        ),
+                        "operation_id": "root-1",
+                        "night_episode_revision_id": "revision-1",
+                        "fast_path_operation_id": "fast-1",
+                        "product_operation_id": (
+                            None
+                            if self.scenario_id == "urgent-zero-model"
+                            else "product-1"
+                        ),
+                        "analysis_revision_id": (
+                            None
+                            if self.scenario_id == "urgent-zero-model"
+                            else "analysis-1"
+                        ),
+                    },
+                ],
+                "next_cursor": None,
+            }
+        raise AssertionError((method, path, kwargs))
+
+
+class ProductDemoProduct:
+    def __init__(self, *, night_count: int, urgent: bool = False) -> None:
+        self.night_count = night_count
+        self.urgent = urgent
+        self.calls: list[tuple[str, str]] = []
+
+    def night_episodes(self, *, subject_id, **kwargs):
+        del kwargs
+        self.calls.append(("night_episodes", subject_id))
+        return (
+            {
+                "schema_version": "night_episode_page_response.v1",
+                "items": [
+                    {
+                        "night_episode_id": f"episode-{index}",
+                        "subject_id": subject_id,
+                        "local_sleep_date": f"2026-03-{index:02d}",
+                        "episode_local_date": f"2026-03-{index:02d}",
+                        "assignment_basis": "observed_wake",
+                        "lifecycle_state": "finalized",
+                        "data_sufficiency": "sufficient",
+                        "quality_flags": ["synthetic_replay"],
+                        "current_revision_number": 1,
+                    }
+                    for index in range(1, self.night_count + 1)
+                ],
+                "page": {"next_cursor": None},
+            },
+            {
+                "X-SleepAgent-Data-Mode": "replay",
+                "X-SleepAgent-Synthetic-Non-Release": "true",
+            },
+        )
+
+    def today(self, *, subject_id, role, **kwargs):
+        del kwargs
+        self.calls.append(("today:" + role, subject_id))
+        if self.urgent:
+            return {
+                "schema_version": "product_sleep_today.v1",
+                "data_mode": "replay",
+                "synthetic_non_release": True,
+                "state": "no_data",
+                "subject_ref": subject_id,
+                "role": role,
+                "content": None,
+            }
+        content = {
+            "audience": role,
+            "summary_text": f"{role} public summary",
+            "context_notice": "Public Product projection.",
+        }
+        if role == "doctor":
+            content["evidence_refs"] = ["evidence:public-1"]
+        return {
+            "schema_version": "product_sleep_today.v1",
+            "data_mode": "replay",
+            "synthetic_non_release": True,
+            "state": "ready",
+            "subject_ref": subject_id,
+            "role": role,
+            "content": content,
+        }
+
+    def read_model(self, *, kind, subject_id, role, **kwargs):
+        del kwargs
+        self.calls.append((kind, subject_id))
+        if kind == "trends":
+            items = [
+                {
+                    "episode_local_date": f"2026-03-{index:02d}",
+                    "projection_state": "ready",
+                    "sleep_window_minutes": 480,
+                }
+                for index in range(1, self.night_count + 1)
+            ]
+        else:
+            items = []
+        return {
+            "schema_version": {
+                "trends": "product_sleep_trends.v1",
+                "care": "product_sleep_care.v1",
+            }[kind],
+            "data_mode": "replay",
+            "synthetic_non_release": True,
+            "subject_ref": subject_id,
+            "role": role,
+            "items": items,
+            "next_cursor": None,
+        }
+
+    def current_risk(self, *, subject_id, **kwargs):
+        del kwargs
+        self.calls.append(("risk", subject_id))
+        risk_state = (
+            "reviewed_urgent_signal" if self.urgent else "no_reviewed_signal"
+        )
+        return (
+            {
+                "schema_version": "current_risk_response.v1",
+                "subject_id": subject_id,
+                "risk_state": risk_state,
+                "data_sufficiency": "sufficient",
+                "reason_codes": ["reviewed_vendor_alert"] if self.urgent else [],
+                "health_escalation_allowed": self.urgent,
+            },
+            {
+                "X-SleepAgent-Data-Mode": "replay",
+                "X-SleepAgent-Synthetic-Non-Release": "true",
+            },
+            200,
+        )
 
 
 class Client:
@@ -123,6 +329,121 @@ class ProductClient:
                 "X-SleepAgent-Data-Mode": "replay",
                 "X-SleepAgent-Synthetic-Non-Release": "true",
             },
+        )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "night_count"),
+    [
+        ("normal-one-night", 1),
+        ("worsening-vital-trend", 4),
+    ],
+)
+def test_product_show_uses_only_public_http_and_registry_summary(
+    scenario_id: str,
+    night_count: int,
+) -> None:
+    demo = ProductDemoHttp(scenario_id)
+    product = ProductDemoProduct(night_count=night_count)
+
+    result = show_product_demo(
+        demo,
+        product,
+        scenario_id=scenario_id,
+        wait_seconds=0.1,
+        include_trace=True,
+    )
+    rendered = render_product_demo(result)
+
+    assert result["scenario"]["night_count"] == night_count
+    assert result["scenario"]["observation_count"] == (
+        497 if night_count == 1 else 1988
+    )
+    assert "expected" not in json.dumps(result)
+    assert "SleepAgent Terminal Product Demo" in rendered
+    assert "Role Product outputs" in rendered
+    assert "replay seed -> normalization -> NightEpisode" in rendered
+    if night_count > 1:
+        assert any(path == "/demo/v1/advance" for _, path, _ in demo.calls)
+        assert "Trends" in rendered
+    else:
+        assert all(path != "/demo/v1/advance" for _, path, _ in demo.calls)
+    assert {call[0] for call in product.calls} >= {
+        "night_episodes",
+        "today:elder",
+        "today:family",
+        "today:doctor",
+        "care",
+        "risk",
+    }
+
+
+def test_product_show_presents_urgent_zero_model_without_fake_projections() -> None:
+    demo = ProductDemoHttp("urgent-zero-model")
+    product = ProductDemoProduct(night_count=1, urgent=True)
+
+    result = show_product_demo(
+        demo,
+        product,
+        scenario_id="urgent-zero-model",
+        wait_seconds=0.1,
+        include_trace=True,
+    )
+    rendered = render_product_demo(result)
+
+    assert result["root_operation"]["error_code"] == "unexpected_urgent_route"
+    assert "deterministic urgent boundary; zero-model Product path" in rendered
+    assert rendered.count("Current public contract provides no Product output.") == 3
+    assert "product=product-1" not in rendered
+    assert "Product Runtime and role projections were not invoked" in rendered
+    assert "Product Runtime -> role projections" not in rendered
+
+
+def test_product_show_default_omits_trace_http_and_section() -> None:
+    demo = ProductDemoHttp("normal-one-night")
+
+    result = show_product_demo(
+        demo,
+        ProductDemoProduct(night_count=1),
+        scenario_id="normal-one-night",
+        wait_seconds=0.1,
+        include_trace=False,
+    )
+
+    assert result["trace"] is None
+    assert all(path != "/demo/v1/trace" for _, path, _ in demo.calls)
+    assert "Public execution trace" not in render_product_demo(result)
+
+
+def test_product_show_marks_public_risk_scope_limitation() -> None:
+    class RiskDeniedProduct(ProductDemoProduct):
+        def current_risk(self, *, subject_id, **kwargs):
+            del kwargs
+            self.calls.append(("risk", subject_id))
+            return ({"code": "authorization_denied"}, {}, 403)
+
+    result = show_product_demo(
+        ProductDemoHttp("normal-one-night"),
+        RiskDeniedProduct(night_count=1),
+        scenario_id="normal-one-night",
+        wait_seconds=0.1,
+        include_trace=False,
+    )
+
+    assert (
+        "current public authorization/contract did not provide it (HTTP 403)"
+        in render_product_demo(result)
+    )
+
+
+def test_product_show_rejects_scenarios_outside_phase_one() -> None:
+    with pytest.raises(DemoCliError, match="show supports only"):
+        show_product_demo(
+            ProductDemoHttp("device-abnormal"),
+            ProductDemoProduct(night_count=1),
+            scenario_id="device-abnormal",
+            wait_seconds=0.1,
+            include_trace=False,
         )
 
 

@@ -6,9 +6,9 @@ source Episode revision and governance epochs before atomically publishing the
 AnalysisRevision, all three role views, the terminal Operation and outbox
 event.  Prepared attempts are durable but never query-visible.
 
-This first vertical slice deliberately supports deterministic replay only.
-External model invocation journaling and interactive Product state machines
-remain separate later gates; neither is simulated by this adapter.
+Replay keeps one durable Product path while model selection is explicit:
+deterministic mode remains the reproducible baseline and live mode reuses the
+configured OpenAI-compatible structured Agent runtime.
 """
 
 from __future__ import annotations
@@ -1272,11 +1272,15 @@ class ProductAgentWorkHandlerAdapter:
             [UnitOfWorkFactory[Any]], ProductAgentProcessor
         ]
         | None = None,
+        model_mode: ModelMode = ModelMode.DETERMINISTIC,
     ) -> None:
         if (processor is None) == (processor_factory is None):
             raise ValueError("provide exactly one Product processor source")
         self._processor = processor
         self._processor_factory = processor_factory
+        if model_mode not in {ModelMode.DETERMINISTIC, ModelMode.LIVE}:
+            raise ValueError("Product Agent adapter requires a model mode")
+        self._model_mode = model_mode
 
     def __call__(self, context: WorkContext) -> WorkResult:
         try:
@@ -1312,11 +1316,12 @@ class ProductAgentWorkHandlerAdapter:
                     "source_state_version": source.night_episode_revision_number,
                     "observation_set_sha256": source.observation_set_sha256,
                     "policy_sha256": source.policy_sha256,
-                    "model_mode": "deterministic",
+                    "model_mode": self._model_mode.value,
                 }
                 invocation_key = (
                     f"product-agent:{source.operation_id}:"
-                    f"{source.night_episode_revision_id}:deterministic.v1"
+                    f"{source.night_episode_revision_id}:"
+                    f"{self._model_mode.value}.v1"
                 )
 
                 def invoke_model() -> tuple[Mapping[str, Any], str | None]:
@@ -1331,8 +1336,11 @@ class ProductAgentWorkHandlerAdapter:
                             "schema_version": "product_agent_model_response.v1",
                             "artifact": artifact.model_dump(mode="json"),
                         },
-                        "deterministic:"
-                        + stable_hash(request)[:24],
+                        (
+                            "deterministic:" + stable_hash(request)[:24]
+                            if self._model_mode is ModelMode.DETERMINISTIC
+                            else None
+                        ),
                     )
 
                 response = context.invocation_dispatcher().dispatch(
@@ -1393,7 +1401,7 @@ class ProductAgentWorkHandlerAdapter:
 def build_product_agent_worker_handlers(
     settings: SleepBackendSettings,
 ) -> dict[str, WorkHandler]:
-    """Compose the real Product handler only for deterministic replay."""
+    """Compose one replay Product handler with explicit model selection."""
 
     if "product_agent" not in settings.worker_queues:
         return {}
@@ -1401,27 +1409,48 @@ def build_product_agent_worker_handlers(
         raise ProductAgentCompositionError(
             "Product Agent handlers require a worker profile"
         )
-    if (
-        settings.data_mode != BackendDataMode.REPLAY
-        or settings.model_mode != ModelMode.DETERMINISTIC
-    ):
+    if settings.data_mode != BackendDataMode.REPLAY:
         raise ProductAgentCompositionError(
-            "the current Product Agent vertical slice requires deterministic replay"
+            "the current Product Agent vertical slice requires replay data"
+        )
+    if settings.model_mode is ModelMode.DETERMINISTIC:
+        from sleepagent.product_runtime.deterministic_model import (
+            DeterministicReplayStructuredAgentModel,
+        )
+        from sleepagent.product_runtime.runtime_factory import (
+            build_deterministic_product_runtime_bundle,
         )
 
-    from sleepagent.product_runtime.deterministic_model import (
-        DeterministicReplayStructuredAgentModel,
-    )
-    from sleepagent.product_runtime.runtime_factory import (
-        build_deterministic_product_runtime_bundle,
-    )
-
-    runtime_bundle = build_deterministic_product_runtime_bundle(
-        model=DeterministicReplayStructuredAgentModel(
-            deployment_mode=settings.deployment_mode.value,
-            data_mode=settings.data_mode.value,
+        runtime_bundle = build_deterministic_product_runtime_bundle(
+            model=DeterministicReplayStructuredAgentModel(
+                deployment_mode=settings.deployment_mode.value,
+                data_mode=settings.data_mode.value,
+            )
         )
-    )
+    elif settings.model_mode is ModelMode.LIVE:
+        from sleepagent.product_device.llm import (
+            PRODUCT_LLM_API_KEY_ENV,
+            ProductLLMConfigurationError,
+        )
+        from sleepagent.product_runtime.runtime_factory import (
+            _build_postgres_worker_product_runtime_bundle_from_env,
+            product_episode_runner_is_configured,
+        )
+
+        try:
+            runtime_bundle = (
+                _build_postgres_worker_product_runtime_bundle_from_env()
+            )
+        except ProductLLMConfigurationError as exc:
+            raise ProductAgentCompositionError(str(exc)) from exc
+        if not product_episode_runner_is_configured(runtime_bundle.runner):
+            raise ProductAgentCompositionError(
+                "live Product Agent requires " + PRODUCT_LLM_API_KEY_ENV
+            )
+    else:
+        raise ProductAgentCompositionError(
+            "Product Agent model mode must be deterministic or live"
+        )
 
     def processor_factory(
         uow_factory: UnitOfWorkFactory[Any],
@@ -1433,7 +1462,8 @@ def build_product_agent_worker_handlers(
 
     return {
         "product_agent": ProductAgentWorkHandlerAdapter(
-            processor_factory=processor_factory
+            processor_factory=processor_factory,
+            model_mode=settings.model_mode,
         )
     }
 

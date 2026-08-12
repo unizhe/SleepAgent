@@ -324,6 +324,20 @@ class EpisodeRevisionMutation:
     conflicting_episode_id: str | None = None
 
     @property
+    def new_membership_observation_ids(self) -> tuple[str, ...]:
+        """Return only memberships introduced relative to the parent revision."""
+
+        current = self.snapshot.episode
+        if current is None:
+            return self.observation_ids
+        parent_ids = frozenset(current.observation_ids)
+        return tuple(
+            observation_id
+            for observation_id in self.observation_ids
+            if observation_id not in parent_ids
+        )
+
+    @property
     def enqueues_fast_path(self) -> bool:
         return self.closes_episode and not self.episode.date_conflict
 
@@ -2900,6 +2914,9 @@ class PostgresSleepSliceRepository:
                 episode.date_conflict,
             ),
         )
+        new_membership_ids = mutation.new_membership_observation_ids
+        if not new_membership_ids:
+            return
         cursor.execute(
             """
             INSERT INTO public.sleep_domain_episode_observation_memberships (
@@ -2958,26 +2975,40 @@ class PostgresSleepSliceRepository:
                 self.scope.namespace_id,
                 self.scope.data_mode,
                 self.scope.subject_id,
-                list(mutation.observation_ids),
+                list(new_membership_ids),
             ),
         )
         cursor.execute(
             """
-            SELECT COALESCE(
-              array_agg(membership.observation_id
-                        ORDER BY membership.observation_id),
-              ARRAY[]::text[]
-            ) = %s::text[]
-            FROM public.sleep_domain_episode_observation_memberships AS membership
-            WHERE membership.namespace_id = %s
-              AND membership.data_mode = %s
-              AND membership.night_episode_id = %s
+            SELECT count(*) = cardinality(%s::text[])
+              AND count(*) = count(DISTINCT membership.observation_id)
+              AND COALESCE(bool_and(
+                membership.night_episode_id = %s
+                AND membership.subject_id = canonical.subject_id
+                AND membership.device_binding_id = canonical.device_binding_id
+                AND membership.binding_version = canonical.binding_version
+                AND membership.event_at IS NOT DISTINCT FROM COALESCE(
+                  canonical.measurement_at, canonical.event_occurred_at
+                )
+                AND membership.received_at = canonical.received_at
+              ), FALSE)
+            FROM public.sleep_domain_canonical_observations AS canonical
+            JOIN public.sleep_domain_episode_observation_memberships AS membership
+              ON membership.namespace_id = canonical.namespace_id
+             AND membership.data_mode = canonical.data_mode
+             AND membership.observation_id = canonical.observation_id
+            WHERE canonical.namespace_id = %s
+              AND canonical.data_mode = %s
+              AND canonical.subject_id = %s
+              AND canonical.observation_id = ANY(%s::text[])
             """,
             (
-                sorted(mutation.observation_ids),
+                list(new_membership_ids),
+                episode.night_episode_id,
                 self.scope.namespace_id,
                 self.scope.data_mode,
-                episode.night_episode_id,
+                self.scope.subject_id,
+                list(new_membership_ids),
             ),
         )
         membership_match = cursor.fetchone()

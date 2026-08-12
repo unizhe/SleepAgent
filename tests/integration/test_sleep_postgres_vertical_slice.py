@@ -346,6 +346,8 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert closed.enqueues_fast_path is False
     assert closed.promotes_revision is False
     assert closed.revision_cause == "observed_wake_date_conflict"
+    assert len(closed.observation_ids) == 2
+    assert len(closed.new_membership_observation_ids) == 1
     assert (
         closed.domain_event_type
         == "NIGHT_EPISODE_DATE_RECONCILIATION_REQUIRED"
@@ -360,7 +362,7 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
 
         def execute(self, query: str, params: Any = None) -> None:
             self.statements.append((query, params))
-            if "array_agg(membership.observation_id" in query:
+            if "count(*) = cardinality" in query:
                 self._row = (True,)
 
         def fetchone(self) -> tuple[bool] | None:
@@ -387,9 +389,9 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert "date_conflict" not in set_clause
     assert "current_revision_id = %s" in aggregate_update
     assert "current_revision_number = %s" in aggregate_update
-    membership_insert = next(
-        statement
-        for statement, _params in cursor.statements
+    membership_insert, membership_insert_params = next(
+        (statement, params)
+        for statement, params in cursor.statements
         if "INSERT INTO public.sleep_domain_episode_observation_memberships"
         in statement
     )
@@ -398,8 +400,24 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert "ON CONFLICT (namespace_id, data_mode, observation_id) DO NOTHING" in (
         membership_insert
     )
-    assert any(
-        "array_agg(membership.observation_id" in statement
+    assert membership_insert_params[-1] == list(
+        closed.new_membership_observation_ids
+    )
+    membership_check, membership_check_params = next(
+        (statement, params)
+        for statement, params in cursor.statements
+        if "count(*) = cardinality" in statement
+    )
+    assert membership_check_params[0] == list(
+        closed.new_membership_observation_ids
+    )
+    assert membership_check_params[-1] == list(
+        closed.new_membership_observation_ids
+    )
+    assert "array_agg" not in membership_check
+    assert "membership.night_episode_id = %s" in membership_check
+    assert all(
+        "array_agg(membership.observation_id" not in statement
         for statement, _params in cursor.statements
     )
 
@@ -452,6 +470,36 @@ def test_episode_without_wake_closes_on_estimated_deadline_date() -> None:
     assert closed.episode.publication_status == EpisodePublicationStatus.COMMITTED
     assert closed.revision_cause == "deadline_fallback"
     assert closed.enqueues_fast_path is True
+    assert closed.new_membership_observation_ids == ()
+
+    class RecordingCursor:
+        rowcount = 1
+
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, query: str, _params: Any = None) -> None:
+            self.statements.append(query)
+
+    cursor = RecordingCursor()
+    PostgresSleepSliceRepository(
+        object(),  # type: ignore[arg-type]
+        _scope(),
+        id_generator=ids,
+    )._write_episode_mutation(
+        cursor,
+        closed,
+        _policy(),
+        deadline,
+    )
+    assert any(
+        "INSERT INTO public.sleep_domain_night_episode_revisions" in statement
+        for statement in cursor.statements
+    )
+    assert all(
+        "sleep_domain_episode_observation_memberships" not in statement
+        for statement in cursor.statements
+    )
 
     with pytest.raises(
         SleepSliceInvariantError,

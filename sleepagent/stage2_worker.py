@@ -2133,10 +2133,12 @@ def build_stage2_worker_handlers(
         raise Stage2InvariantError("Stage-2 handlers require a worker profile")
     if (
         settings.data_mode != DataMode.REPLAY
-        or settings.model_mode != ModelMode.DETERMINISTIC
+        or settings.model_mode
+        not in {ModelMode.DETERMINISTIC, ModelMode.LIVE}
     ):
         raise Stage2InvariantError(
-            "the current Stage-2 implementation requires deterministic replay"
+            "the current Stage-2 implementation requires replay data with an "
+            "enabled model mode"
         )
     return {queue: Stage2WorkHandler(queue=queue) for queue in selected}
 

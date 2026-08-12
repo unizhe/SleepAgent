@@ -87,7 +87,7 @@ class CloudLLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_url: str = Field(..., min_length=1)
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False, exclude=True)
     model_id: str = Field(..., min_length=1)
     timeout: float = Field(default=30.0, gt=0)
     retry: int = Field(default=1, ge=0, le=5)

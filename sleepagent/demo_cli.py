@@ -26,8 +26,19 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
 )
 
+from sleepagent.simulation.seed_registry import (
+    ReplaySeedDefinition,
+    ReplaySeedRegistryError,
+    load_replay_seed_registry,
+)
+
 
 MAX_RESPONSE_BYTES = 1_048_576
+PRODUCT_DEMO_SCENARIOS = (
+    "normal-one-night",
+    "worsening-vital-trend",
+    "urgent-zero-model",
+)
 
 
 class DemoCliError(RuntimeError):
@@ -224,6 +235,24 @@ class ProductHttpClient:
             accepted_statuses=(200,),
         )
         return value, headers
+
+    def current_risk(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str,
+    ) -> tuple[dict[str, Any], Mapping[str, str], int]:
+        value, headers, status = self.signed_json(
+            method="GET",
+            path=f"/api/v1/subjects/{subject_id}/risk",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("sleep:risk:read",),
+            accepted_statuses=(200, 403, 404),
+        )
+        return value, headers, status
 
     def read_model(
         self,
@@ -526,6 +555,526 @@ def verify_backend(
         "stage3": stage3_result,
         "stage4": stage4_result,
     }
+
+
+def show_product_demo(
+    demo_client: DemoHttpClient | Any,
+    product_client: ProductHttpClient | Any,
+    *,
+    scenario_id: str,
+    wait_seconds: float,
+    include_trace: bool,
+) -> dict[str, Any]:
+    """Run one allowlisted Product demo using public HTTP surfaces only."""
+
+    if scenario_id not in PRODUCT_DEMO_SCENARIOS:
+        raise DemoCliError(
+            "show supports only " + ", ".join(PRODUCT_DEMO_SCENARIOS)
+        )
+    if wait_seconds <= 0:
+        raise DemoCliError("show wait time must be greater than zero")
+    try:
+        registry = load_replay_seed_registry()
+        seed = registry.lookup("canonical-replay-fixtures", scenario_id)
+    except ReplaySeedRegistryError as exc:
+        raise DemoCliError(f"packaged replay registry is unavailable: {exc}") from exc
+
+    live = demo_client.request("GET", "/livez")
+    if live.get("status") != "alive":
+        raise DemoCliError("backend liveness check failed")
+    accepted = demo_client.request(
+        "POST",
+        "/demo/v1/seed",
+        payload={
+            "artifact_family": "canonical-replay-fixtures",
+            "scenario_id": scenario_id,
+            "batch_size": 100,
+        },
+        idempotency_key=f"show-{scenario_id}-{uuid4()}",
+    )
+    _require_replay_watermark(accepted)
+    operation_id = _required_public_text(
+        accepted.get("operation_id"), "show seed Operation"
+    )
+    root_operation = _poll_product_demo_operation(
+        demo_client,
+        operation_id=operation_id,
+        wait_seconds=wait_seconds,
+    )
+    root_state = str(root_operation.get("state") or "")
+    if scenario_id == "urgent-zero-model":
+        if (
+            root_state != "failed"
+            or root_operation.get("error_code") != "unexpected_urgent_route"
+        ):
+            raise DemoCliError(
+                "urgent demo did not terminate on its public zero-model boundary"
+            )
+    elif root_state != "succeeded":
+        raise DemoCliError(f"show seed Operation ended as {root_state or 'unknown'}")
+
+    root_result = root_operation.get("result")
+    if root_state == "succeeded":
+        if not isinstance(root_result, Mapping):
+            raise DemoCliError("successful show seed omitted its public result")
+        if root_result.get("subject_ref") != seed.subject_id:
+            raise DemoCliError("show seed result subject does not match replay registry")
+
+    advance_operation: dict[str, Any] | None = None
+    if seed.night_count > 1:
+        advance_seconds = int(
+            (seed.last_received_at - seed.scenario_clock_start).total_seconds()
+        )
+        if advance_seconds < 1 or advance_seconds > 604_800:
+            raise DemoCliError("replay registry requires an invalid demo clock advance")
+        advance_accepted = demo_client.request(
+            "POST",
+            "/demo/v1/advance",
+            payload={"seconds": advance_seconds},
+            idempotency_key=f"show-advance-{scenario_id}-{uuid4()}",
+        )
+        _require_replay_watermark(advance_accepted)
+        advance_operation = _poll_product_demo_operation(
+            demo_client,
+            operation_id=_required_public_text(
+                advance_accepted.get("operation_id"), "show advance Operation"
+            ),
+            wait_seconds=wait_seconds,
+        )
+        if advance_operation.get("state") != "succeeded":
+            raise DemoCliError(
+                "show clock advance ended as "
+                f"{advance_operation.get('state', 'unknown')}"
+            )
+        _wait_for_product_demo_trends(
+            product_client,
+            seed=seed,
+            wait_seconds=wait_seconds,
+        )
+
+    public = _read_product_demo_public_views(product_client, seed=seed)
+    trace = (
+        _read_product_demo_trace(demo_client, operation_id=operation_id)
+        if include_trace
+        else None
+    )
+    return {
+        "schema_version": "terminal_product_demo.v1",
+        "scenario": {
+            "scenario_id": seed.scenario_id,
+            "night_count": seed.night_count,
+            "observation_count": seed.observation_count,
+            "first_received_at": seed.first_received_at.isoformat(),
+            "last_received_at": seed.last_received_at.isoformat(),
+            "data_mode": "replay",
+            "synthetic_non_release": True,
+        },
+        "root_operation": root_operation,
+        "advance_operation": advance_operation,
+        "public": public,
+        "trace": trace,
+    }
+
+
+def _poll_product_demo_operation(
+    client: DemoHttpClient | Any,
+    *,
+    operation_id: str,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        value = client.request("GET", f"/demo/v1/operations/{operation_id}")
+        _require_replay_watermark(value)
+        state = str(value.get("state") or "")
+        if state in {"succeeded", "failed", "blocked", "reconciliation_required"}:
+            return value
+        if time.monotonic() >= deadline:
+            raise DemoCliError("show Operation did not reach a terminal state")
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def _wait_for_product_demo_trends(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    wait_seconds: float,
+) -> None:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        value = client.read_model(
+            kind="trends",
+            actor_id=seed.actor_aliases["elder"],
+            subject_id=seed.subject_id,
+            role="elder",
+            limit=90,
+        )
+        _verify_read_model_page(
+            value,
+            kind="trends",
+            role="elder",
+            subject_id=seed.subject_id,
+        )
+        if len(value["items"]) >= seed.night_count:
+            return
+        if time.monotonic() >= deadline:
+            raise DemoCliError("Product trends did not reach the scenario night count")
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def _read_product_demo_public_views(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+) -> dict[str, Any]:
+    episodes, episode_headers = client.night_episodes(
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        role="elder",
+    )
+    _require_v1_replay_headers(episode_headers)
+    if (
+        episodes.get("schema_version") != "night_episode_page_response.v1"
+        or not isinstance(episodes.get("items"), list)
+        or any(
+            not isinstance(item, Mapping)
+            or item.get("subject_id") != seed.subject_id
+            for item in episodes.get("items", ())
+        )
+    ):
+        raise DemoCliError("NightEpisode page violated its public contract")
+
+    today: dict[str, dict[str, Any]] = {}
+    for role in ("elder", "family", "doctor"):
+        value = client.today(
+            actor_id=seed.actor_aliases[role],
+            subject_id=seed.subject_id,
+            role=role,
+        )
+        _verify_product_demo_today(
+            value,
+            role=role,
+            subject_id=seed.subject_id,
+        )
+        today[role] = value
+
+    care = client.read_model(
+        kind="care",
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        role="elder",
+        limit=100,
+    )
+    _verify_read_model_page(
+        care,
+        kind="care",
+        role="elder",
+        subject_id=seed.subject_id,
+    )
+
+    trends: dict[str, Any] | None = None
+    if seed.night_count > 1:
+        trends = client.read_model(
+            kind="trends",
+            actor_id=seed.actor_aliases["elder"],
+            subject_id=seed.subject_id,
+            role="elder",
+            limit=90,
+        )
+        _verify_read_model_page(
+            trends,
+            kind="trends",
+            role="elder",
+            subject_id=seed.subject_id,
+        )
+
+    risk, risk_headers, risk_status = client.current_risk(
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        role="elder",
+    )
+    if risk_status == 200:
+        _require_v1_replay_headers(risk_headers)
+        if (
+            risk.get("schema_version") != "current_risk_response.v1"
+            or risk.get("subject_id") != seed.subject_id
+        ):
+            raise DemoCliError("current-risk response violated its public contract")
+    return {
+        "night_episodes": episodes,
+        "today": today,
+        "trends": trends,
+        "care": care,
+        "risk": {"http_status": risk_status, "body": risk},
+    }
+
+
+def _verify_product_demo_today(
+    value: Mapping[str, Any],
+    *,
+    role: str,
+    subject_id: str,
+) -> None:
+    _require_replay_watermark(value)
+    if (
+        value.get("schema_version") != "product_sleep_today.v1"
+        or value.get("role") != role
+        or value.get("subject_ref") != subject_id
+        or value.get("state") not in {"ready", "degraded", "blocked", "no_data"}
+    ):
+        raise DemoCliError(f"{role} /today violated its public contract")
+    content = value.get("content")
+    if value.get("state") == "no_data":
+        if content is not None:
+            raise DemoCliError(f"{role} no-data /today exposed content")
+    elif not isinstance(content, Mapping) or content.get("audience") != role:
+        raise DemoCliError(f"{role} /today content violated its role contract")
+    forbidden = {
+        "claim_refs",
+        "source_refs",
+        "failure_codes",
+        "product_agent_episode_id",
+        "execution_mode",
+        "prompt",
+        "tool",
+        "model_versions",
+        "policy_sha256",
+    }
+    if forbidden.intersection(_recursive_keys(value)):
+        raise DemoCliError(f"{role} /today leaked internal fields")
+
+
+def _read_product_demo_trace(
+    client: DemoHttpClient | Any,
+    *,
+    operation_id: str,
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    cursor: str | None = None
+    generation: object = None
+    while True:
+        query = {"operation_id": operation_id, "limit": "200"}
+        if cursor is not None:
+            query["cursor"] = cursor
+        page = client.request("GET", "/demo/v1/trace", query=query)
+        _require_replay_watermark(page)
+        generation = page.get("generation")
+        page_entries = page.get("entries")
+        if not isinstance(page_entries, list) or any(
+            not isinstance(item, dict) for item in page_entries
+        ):
+            raise DemoCliError("Demo trace violated its public contract")
+        entries.extend(page_entries)
+        next_cursor = page.get("next_cursor")
+        if next_cursor is None:
+            break
+        cursor = _required_public_text(next_cursor, "trace cursor")
+    return {
+        "schema_version": "demo_trace.v1",
+        "data_mode": "replay",
+        "synthetic_non_release": True,
+        "generation": generation,
+        "entries": entries,
+    }
+
+
+def render_product_demo(value: Mapping[str, Any]) -> str:
+    """Render already-committed public DTOs without deriving Product decisions."""
+
+    scenario = _mapping(value.get("scenario"))
+    public = _mapping(value.get("public"))
+    root = _mapping(value.get("root_operation"))
+    episodes = _mapping(public.get("night_episodes"))
+    episode_items = _mapping_items(episodes.get("items"))
+    today = _mapping(public.get("today"))
+    care = _mapping(public.get("care"))
+    risk_envelope = _mapping(public.get("risk"))
+    risk = _mapping(risk_envelope.get("body"))
+
+    lines = [
+        "SleepAgent Terminal Product Demo",
+        "================================",
+        f"Scenario: {scenario.get('scenario_id', 'unavailable')}",
+        "Data: synthetic replay; non-clinical; non-release",
+        (
+            f"Input summary: {scenario.get('night_count', 'unavailable')} night(s), "
+            f"{scenario.get('observation_count', 'unavailable')} observations"
+        ),
+        (
+            f"Observation window: {scenario.get('first_received_at', 'unavailable')} "
+            f"-> {scenario.get('last_received_at', 'unavailable')}"
+        ),
+        "",
+        "NightEpisode",
+        "------------",
+    ]
+    if not episode_items:
+        lines.append("Current public contract returned no NightEpisode.")
+    for item in episode_items:
+        flags = item.get("quality_flags")
+        quality_flags = (
+            ", ".join(str(flag) for flag in flags)
+            if isinstance(flags, list)
+            else "none"
+        )
+        lines.extend(
+            [
+                (
+                    f"- {item.get('episode_local_date') or item.get('local_sleep_date')}: "
+                    f"state={item.get('lifecycle_state', 'unavailable')}, "
+                    f"quality={item.get('data_sufficiency', 'unavailable')}"
+                ),
+                (
+                    f"  revision={item.get('current_revision_number', 'unavailable')} "
+                    f"assignment={item.get('assignment_basis', 'unavailable')} "
+                    f"flags={quality_flags}"
+                ),
+            ]
+        )
+
+    lines.extend(["", "Analysis and risk", "-----------------"])
+    elder = _mapping(today.get("elder"))
+    lines.append(f"Product analysis state: {elder.get('state', 'unavailable')}")
+    risk_status = risk_envelope.get("http_status")
+    if risk_status == 200:
+        lines.extend(
+            [
+                f"Risk state: {risk.get('risk_state', 'unavailable')}",
+                f"Data sufficiency: {risk.get('data_sufficiency', 'unavailable')}",
+                "Reason codes: " + _joined(risk.get("reason_codes")),
+                (
+                    "Health escalation allowed: "
+                    f"{risk.get('health_escalation_allowed', 'unavailable')}"
+                ),
+            ]
+        )
+    else:
+        lines.append(
+            "Risk detail: current public authorization/contract did not provide it "
+            f"(HTTP {risk_status or 'unavailable'})."
+        )
+
+    lines.extend(["", "Evidence, Care, Safety", "----------------------"])
+    doctor = _mapping(today.get("doctor"))
+    doctor_content = _mapping(doctor.get("content"))
+    evidence_refs = doctor_content.get("evidence_refs")
+    if isinstance(evidence_refs, list) and evidence_refs:
+        lines.append("Evidence references: " + ", ".join(map(str, evidence_refs)))
+    elif isinstance(evidence_refs, list):
+        lines.append("Evidence references: public doctor projection returned none.")
+    else:
+        lines.append("Evidence detail: current public contract does not provide it.")
+    care_items = _mapping_items(care.get("items"))
+    if care_items:
+        for item in care_items:
+            lines.append(
+                f"Care: {item.get('record_type', 'record')} "
+                f"state={item.get('state', 'unavailable')}"
+            )
+    else:
+        lines.append("Care: no public confirmed Care records.")
+    if (
+        scenario.get("scenario_id") == "urgent-zero-model"
+        and root.get("state") == "failed"
+        and root.get("error_code") == "unexpected_urgent_route"
+    ):
+        lines.append(
+            "Safety: deterministic urgent boundary; zero-model Product path "
+            "(public root error=unexpected_urgent_route)."
+        )
+    else:
+        lines.append("Safety detail: current public contract does not provide it.")
+
+    lines.extend(["", "Role Product outputs", "--------------------"])
+    for role in ("elder", "family", "doctor"):
+        projection = _mapping(today.get(role))
+        content = _mapping(projection.get("content"))
+        lines.append(f"[{role}] state={projection.get('state', 'unavailable')}")
+        summary = content.get("summary_text")
+        notice = content.get("context_notice")
+        if isinstance(summary, str) and summary:
+            lines.append(f"  {summary}")
+            lines.append(f"  Context: {notice or 'unavailable'}")
+        else:
+            lines.append("  Current public contract provides no Product output.")
+
+    trends = public.get("trends")
+    if isinstance(trends, Mapping):
+        lines.extend(["", "Trends", "------"])
+        trend_items = _mapping_items(trends.get("items"))
+        if not trend_items:
+            lines.append("No public trend points.")
+        for item in reversed(trend_items):
+            lines.append(
+                f"- {item.get('episode_local_date', 'unavailable')}: "
+                f"state={item.get('projection_state', 'unavailable')}, "
+                f"sleep_window_minutes={item.get('sleep_window_minutes', 'unavailable')}"
+            )
+
+    trace = value.get("trace")
+    if isinstance(trace, Mapping):
+        lines.extend(["", "Public execution trace", "----------------------"])
+        trace_items = _mapping_items(trace.get("entries"))
+        if not trace_items:
+            lines.append("No public trace entries.")
+        for entry in trace_items:
+            refs = [
+                f"episode={entry['night_episode_revision_id']}"
+                if entry.get("night_episode_revision_id")
+                else "",
+                f"fast_path={entry['fast_path_operation_id']}"
+                if entry.get("fast_path_operation_id")
+                else "",
+                f"product={entry['product_operation_id']}"
+                if entry.get("product_operation_id")
+                else "",
+                f"analysis={entry['analysis_revision_id']}"
+                if entry.get("analysis_revision_id")
+                else "",
+            ]
+            suffix = (
+                " " + " ".join(item for item in refs if item)
+                if any(refs)
+                else ""
+            )
+            lines.append(
+                f"{entry.get('sequence', '?'):>3} "
+                f"{entry.get('event_type', 'event')} -> "
+                f"{entry.get('state', 'unavailable')}{suffix}"
+            )
+        if (
+            scenario.get("scenario_id") == "urgent-zero-model"
+            and root.get("error_code") == "unexpected_urgent_route"
+        ):
+            lines.append(
+                "Chain: replay seed -> normalization -> NightEpisode -> "
+                "deterministic urgent fast path; Product Runtime and role "
+                "projections were not invoked."
+            )
+        else:
+            lines.append(
+                "Chain: replay seed -> normalization -> NightEpisode -> "
+                "Product Runtime -> role projections, as exposed by Demo trace."
+            )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _mapping_items(value: object) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _joined(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "none"
+    return ", ".join(str(item) for item in value)
 
 
 def verify_stage2_backend(
@@ -1464,6 +2013,38 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--family-actor-id", default=None)
     backend.add_argument("--doctor-actor-id", default=None)
 
+    show = subcommands.add_parser(
+        "show",
+        help="run and present one Phase-1 Product replay scenario",
+    )
+    show.add_argument("scenario", choices=PRODUCT_DEMO_SCENARIOS)
+    show.add_argument(
+        "--trace",
+        action="store_true",
+        help="also show the public replay execution trace",
+    )
+    show.add_argument("--wait-seconds", type=float, default=60.0)
+    show.add_argument(
+        "--product-base-url",
+        default=os.environ.get(
+            "SLEEPAGENT_PRODUCT_BASE_URL", "http://127.0.0.1:18000"
+        ),
+    )
+    show.add_argument(
+        "--service-credential",
+        default=os.environ.get(
+            "SLEEPAGENT_DEMO_SERVICE_CREDENTIAL",
+            os.environ.get("SLEEPAGENT_VERIFIER_SERVICE_CREDENTIAL", ""),
+        ),
+    )
+    show.add_argument(
+        "--actor-private-key",
+        default=os.environ.get(
+            "SLEEPAGENT_DEMO_ACTOR_PRIVATE_KEY",
+            os.environ.get("SLEEPAGENT_VERIFIER_ACTOR_PRIVATE_KEY", ""),
+        ),
+    )
+
     seed = subcommands.add_parser("seed")
     seed.add_argument("scenario")
     seed.add_argument("--artifact-family", default="canonical-replay-fixtures")
@@ -1483,6 +2064,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     client = DemoHttpClient(args.base_url, args.demo_token)
     try:
+        if args.command == "show":
+            if not args.service_credential or not args.actor_private_key:
+                raise DemoCliError(
+                    "show requires Product service and actor credentials"
+                )
+            signer = ActorAssertionSigner.from_private_file(
+                args.actor_private_key,
+                issuer=os.environ.get(
+                    "SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER",
+                    "sleepagent-bff-v1",
+                ),
+                audience=os.environ.get(
+                    "SLEEPAGENT_BACKEND_ACTOR_ASSERTION_AUDIENCE",
+                    "sleepagent-backend",
+                ),
+                key_id=os.environ.get(
+                    "SLEEPAGENT_BACKEND_ACTOR_ASSERTION_KEY_ID",
+                    "primary",
+                ),
+            )
+            result = show_product_demo(
+                client,
+                ProductHttpClient(
+                    args.product_base_url,
+                    args.service_credential,
+                    signer,
+                ),
+                scenario_id=args.scenario,
+                wait_seconds=args.wait_seconds,
+                include_trace=args.trace,
+            )
+            print(render_product_demo(result), end="")
+            return 0
         if args.command == "verify":
             if args.restart_stage2_worker and not (
                 args.stage2

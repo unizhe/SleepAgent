@@ -94,6 +94,9 @@ from sleepagent.product_runtime.publication_service import (
 from sleepagent.product_runtime.provider import (
     OpenAICompatibleStructuredAgentModel,
 )
+from sleepagent.product_device.llm import (
+    openai_compatible_provider_config_from_env,
+)
 from sleepagent.product_runtime.registry import (
     COMMIT_CONTROLLER_TOOLS,
     RUNTIME_INTERACTION_TOOLS,
@@ -715,12 +718,51 @@ def build_product_runtime_bundle_from_env(
             "storage"
         )
     persistence = persistence_store or _persistence_store_from_env()
-    return build_product_runtime_bundle(
-        sleepcare_model=OpenAICompatibleStructuredAgentModel(),
-        evidence_reasoning_model=OpenAICompatibleStructuredAgentModel(),
-        care_strategy_model=OpenAICompatibleStructuredAgentModel(),
-        safety_review_model=OpenAICompatibleStructuredAgentModel(),
+    return _build_openai_compatible_product_runtime_bundle(
         persistence_store=persistence,
+        source_resolvers=source_resolvers,
+        human_decisions=human_decisions,
+        authority_validator=authority_validator,
+        fact_snapshot_revalidator=fact_snapshot_revalidator,
+    )
+
+
+def _build_postgres_worker_product_runtime_bundle_from_env(
+) -> ProductRuntimeBundle:
+    """Build live models whose durable result is owned by the Worker UoW."""
+
+    return _build_openai_compatible_product_runtime_bundle(
+        persistence_store=None,
+        source_resolvers=None,
+        human_decisions=None,
+        authority_validator=None,
+        fact_snapshot_revalidator=None,
+    )
+
+
+def _build_openai_compatible_product_runtime_bundle(
+    *,
+    persistence_store: RadarPersistenceStore | None,
+    source_resolvers: Mapping[str, CanonicalSourceResolver] | None,
+    human_decisions: HumanDecisionService | None,
+    authority_validator: DecisionAuthorityValidator | None,
+    fact_snapshot_revalidator: FactSnapshotRevalidator | None,
+) -> ProductRuntimeBundle:
+    provider_config = openai_compatible_provider_config_from_env()
+    return build_product_runtime_bundle(
+        sleepcare_model=OpenAICompatibleStructuredAgentModel(
+            config=provider_config
+        ),
+        evidence_reasoning_model=OpenAICompatibleStructuredAgentModel(
+            config=provider_config
+        ),
+        care_strategy_model=OpenAICompatibleStructuredAgentModel(
+            config=provider_config
+        ),
+        safety_review_model=OpenAICompatibleStructuredAgentModel(
+            config=provider_config
+        ),
+        persistence_store=persistence_store,
         source_resolvers=source_resolvers,
         human_decisions=human_decisions,
         authority_validator=authority_validator,

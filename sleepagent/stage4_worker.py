@@ -924,8 +924,14 @@ def build_stage4_worker_handlers(
         return {}
     if settings.process_role != ProcessRole.WORKER:
         raise Stage4Error("Stage-4 handlers require a worker profile")
-    if settings.data_mode != DataMode.REPLAY or settings.model_mode != ModelMode.DETERMINISTIC:
-        raise Stage4Error("Stage-4 handlers require deterministic replay")
+    if (
+        settings.data_mode != DataMode.REPLAY
+        or settings.model_mode
+        not in {ModelMode.DETERMINISTIC, ModelMode.LIVE}
+    ):
+        raise Stage4Error(
+            "Stage-4 handlers require replay data with an enabled model mode"
+        )
     handlers: dict[str, WorkHandler] = {}
     if INDUCTION_QUEUE in selected:
         handlers[INDUCTION_QUEUE] = InductionWorkHandler()

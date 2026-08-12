@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from ipaddress import ip_address
+from typing import Any, Mapping, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -21,6 +24,10 @@ from sleepagent.integrations.llm import (
 DEFAULT_PRODUCT_LLM_MODEL = "deepseek-v4-flash"
 DEFAULT_PRODUCT_LLM_BASE_URL = "https://api.deepseek.com"
 PRODUCT_LLM_API_KEY_ENV = "DEEPSEEK_API_KEY"
+PRODUCT_LLM_MODEL_ENV = "SLEEPAGENT_PRODUCT_LLM_MODEL"
+PRODUCT_LLM_BASE_URL_ENV = "SLEEPAGENT_PRODUCT_LLM_BASE_URL"
+PRODUCT_LLM_TIMEOUT_SECONDS_ENV = "SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS"
+PRODUCT_LLM_MAX_TOKENS_ENV = "SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS"
 LLM_NOT_CONFIGURED_MESSAGE = "LLM is not configured"
 
 
@@ -30,6 +37,10 @@ class ProductLLMProviderError(RuntimeError):
 
 class ProductLLMNotConfiguredError(ProductLLMProviderError):
     """Raised when no API key is configured for the product dialogue provider."""
+
+
+class ProductLLMConfigurationError(ValueError):
+    """Raised when explicit Product LLM environment configuration is invalid."""
 
 
 @dataclass(frozen=True)
@@ -42,6 +53,41 @@ class OpenAICompatibleProviderConfig:
     retry: int = 1
     max_output_tokens: int = 1200
     thinking_type: str | None = "disabled"
+
+
+def openai_compatible_provider_config_from_env(
+    environment: Mapping[str, str] | None = None,
+) -> OpenAICompatibleProviderConfig:
+    """Resolve the documented Product LLM settings without reading the secret."""
+
+    env = os.environ if environment is None else environment
+    model = _optional_setting(
+        env,
+        PRODUCT_LLM_MODEL_ENV,
+        DEFAULT_PRODUCT_LLM_MODEL,
+    )
+    base_url = _optional_setting(
+        env,
+        PRODUCT_LLM_BASE_URL_ENV,
+        DEFAULT_PRODUCT_LLM_BASE_URL,
+    ).rstrip("/")
+    _validate_base_url(base_url)
+    timeout_seconds = _positive_float_setting(
+        env,
+        PRODUCT_LLM_TIMEOUT_SECONDS_ENV,
+        30.0,
+    )
+    max_output_tokens = _positive_int_setting(
+        env,
+        PRODUCT_LLM_MAX_TOKENS_ENV,
+        1200,
+    )
+    return OpenAICompatibleProviderConfig(
+        model=model,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 class ProductChatProvider(Protocol):
@@ -70,7 +116,8 @@ class OpenAICompatibleChatProvider:
         timeout_seconds: float = 30.0,
         http_client: httpx.Client | None = None,
     ) -> None:
-        self.api_key = api_key or os.environ.get(api_key_env)
+        candidate = os.environ.get(api_key_env) if api_key is None else api_key
+        self._api_key = _usable_secret(candidate)
         self.api_key_env = api_key_env
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
@@ -78,7 +125,7 @@ class OpenAICompatibleChatProvider:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.api_key)
+        return self._api_key is not None
 
     def create_json_completion(
         self,
@@ -86,7 +133,7 @@ class OpenAICompatibleChatProvider:
         messages: list[dict[str, str]],
         config: OpenAICompatibleProviderConfig,
     ) -> str:
-        if not self.api_key:
+        if self._api_key is None:
             error = ProductLLMNotConfiguredError(
                 f"LLM API key is missing. Set {self.api_key_env}."
             )
@@ -119,7 +166,7 @@ class OpenAICompatibleChatProvider:
         thinking_type: str | None = "disabled",
         retry: int = 1,
     ) -> dict[str, Any]:
-        if not self.api_key:
+        if self._api_key is None:
             error = ProductLLMNotConfiguredError(
                 f"LLM API key is missing. Set {self.api_key_env}."
             )
@@ -140,7 +187,7 @@ class OpenAICompatibleChatProvider:
         cloud = CloudLLMClient(
             CloudLLMConfig(
                 base_url=self.base_url,
-                api_key=self.api_key,
+                api_key=self._api_key,
                 model_id=model,
                 timeout=self.timeout_seconds,
                 retry=retry,
@@ -214,4 +261,156 @@ def _extract_message_content(response: dict[str, Any]) -> str:
 
 def _provider_host(base_url: str) -> str:
     parsed = urlparse(base_url)
-    return parsed.netloc or parsed.path
+    host = parsed.hostname
+    if host is None:
+        return "invalid"
+    try:
+        port = parsed.port
+    except ValueError:
+        return host
+    return host if port is None else f"{host}:{port}"
+
+
+def _optional_setting(
+    env: Mapping[str, str],
+    name: str,
+    default: str,
+) -> str:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value or _looks_like_placeholder(value):
+        raise ProductLLMConfigurationError(f"{name} must be a concrete value")
+    return value
+
+
+def _positive_float_setting(
+    env: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise ProductLLMConfigurationError(
+            f"{name} must be a positive finite number"
+        ) from None
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ProductLLMConfigurationError(
+            f"{name} must be a positive finite number"
+        )
+    return parsed
+
+
+def _positive_int_setting(
+    env: Mapping[str, str],
+    name: str,
+    default: int,
+) -> int:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise ProductLLMConfigurationError(
+            f"{name} must be a positive integer"
+        ) from None
+    if parsed <= 0:
+        raise ProductLLMConfigurationError(
+            f"{name} must be a positive integer"
+        )
+    return parsed
+
+
+def _validate_base_url(base_url: str) -> None:
+    if any(
+        character.isspace()
+        or ord(character) < 0x20
+        or ord(character) == 0x7F
+        for character in base_url
+    ) or re.search(r"%(?![0-9A-Fa-f]{2})", base_url):
+        raise ProductLLMConfigurationError(
+            f"{PRODUCT_LLM_BASE_URL_ENV} must be a valid absolute HTTP(S) URL"
+        )
+    try:
+        parsed = urlparse(base_url)
+        normalized = httpx.URL(base_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (ValueError, httpx.InvalidURL):
+        raise ProductLLMConfigurationError(
+            f"{PRODUCT_LLM_BASE_URL_ENV} must be an absolute HTTP(S) URL"
+        ) from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or port is not None
+        and not 1 <= port <= 65535
+    ):
+        raise ProductLLMConfigurationError(
+            f"{PRODUCT_LLM_BASE_URL_ENV} must be an absolute HTTP(S) URL "
+            "without credentials, query, or fragment"
+        )
+    if not normalized.host or not _is_valid_provider_host(hostname):
+        raise ProductLLMConfigurationError(
+            f"{PRODUCT_LLM_BASE_URL_ENV} must contain a valid host"
+        )
+    if parsed.scheme == "http" and not _is_loopback_host(hostname):
+        raise ProductLLMConfigurationError(
+            f"{PRODUCT_LLM_BASE_URL_ENV} must use HTTPS outside loopback"
+        )
+
+
+def _usable_secret(value: str | None) -> str | None:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate or _looks_like_placeholder(candidate):
+        return None
+    return candidate
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    return value.startswith("<") and value.endswith(">")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_valid_provider_host(hostname: str) -> bool:
+    candidate = hostname.rstrip(".")
+    if not candidate:
+        return False
+    try:
+        ip_address(candidate)
+        return True
+    except ValueError:
+        pass
+    try:
+        ascii_hostname = candidate.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(ascii_hostname) > 253:
+        return False
+    label_pattern = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+    return all(
+        label_pattern.fullmatch(label) is not None
+        for label in ascii_hostname.split(".")
+    )

@@ -64,6 +64,26 @@ docker compose --env-file .env.test up -d --wait api demo-api worker
 scripts/verify_backend_first_slice.sh
 ```
 
+With the replay services running, the Phase-1 terminal Product demo can run
+the three allowlisted canonical scenarios through the Demo and Product HTTP
+APIs. Configure `SLEEPAGENT_DEMO_CONTROLLER_TOKEN`,
+`SLEEPAGENT_DEMO_SERVICE_CREDENTIAL`, and an absolute 0600 Ed25519 private-key
+path in `SLEEPAGENT_DEMO_ACTOR_PRIVATE_KEY`, then run:
+
+```bash
+sleepagent-demo show normal-one-night
+sleepagent-demo show worsening-vital-trend --trace
+sleepagent-demo show urgent-zero-model --trace
+```
+
+Run each scenario against a clean isolated replay deployment, matching the
+existing backend proof scripts; ScenarioClock advancement deliberately fails
+closed when more than one completed replay authority is visible.
+
+The command presents only public committed responses. If a Safety, Evidence,
+or Agent-internal detail is absent from the public contract, it reports that
+limitation instead of reading verifier or database state.
+
 See the [backend operations runbook](docs/runbooks/backend-operations.md) for
 migrations, queue recovery, retention/reset, permissions, and troubleshooting.
 

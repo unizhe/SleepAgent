@@ -83,6 +83,37 @@ def test_committed_first_slice_has_one_exact_causal_product_chain() -> None:
             )
             assert cursor.fetchone() == (1,)
             cursor.execute(
+                "SELECT episode.current_revision_number, "
+                "revision.revision_number, "
+                "jsonb_array_length(revision.revision_json -> "
+                "'observation_ids'), "
+                "(SELECT count(*) FROM "
+                "public.sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.namespace_id = episode.namespace_id "
+                "AND member.data_mode = episode.data_mode "
+                "AND member.night_episode_id = episode.night_episode_id), "
+                "(SELECT count(DISTINCT member.observation_id) FROM "
+                "public.sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.namespace_id = episode.namespace_id "
+                "AND member.data_mode = episode.data_mode "
+                "AND member.night_episode_id = episode.night_episode_id) "
+                "FROM public.sleep_domain_night_episodes AS episode "
+                "JOIN public.sleep_domain_night_episode_revisions AS revision "
+                "ON revision.night_episode_revision_id = "
+                "episode.current_revision_id "
+                "WHERE episode.night_episode_id = %s",
+                (result["night_episode_id"],),
+            )
+            assert cursor.fetchone() == (494, 494, 494, 494, 494)
+            cursor.execute(
+                "SELECT count(*) FROM "
+                "public.sleep_domain_night_episode_revisions "
+                "WHERE namespace_id = %s AND data_mode = 'replay' "
+                "AND night_episode_id = %s",
+                (scope[0], result["night_episode_id"]),
+            )
+            assert cursor.fetchone() == (494,)
+            cursor.execute(
                 "SELECT (SELECT array_agg(member.observation_id ORDER BY "
                 "member.observation_id) FROM "
                 "public.sleep_domain_episode_observation_memberships AS member "
