@@ -14,8 +14,9 @@ x-runtime-environment: &runtime-environment
   SLEEPAGENT_BACKEND_DATABASE_SCOPE: replay
   SLEEPAGENT_BACKEND_DATABASE_IDENTITY: ${SLEEPAGENT_TEST_POSTGRES_DB:?required}
   SLEEPAGENT_BACKEND_NAMESPACE_PREFIXES: ${SLEEPAGENT_BACKEND_NAMESPACE_PREFIXES:?copy .env.test.example to .env.test}
-  SLEEPAGENT_BACKEND_SIGNING_KEY_REF: test:key-provider/signing
+  SLEEPAGENT_BACKEND_SIGNING_KEY_REF: file:/run/sleepagent/actor-public.pem
   SLEEPAGENT_BACKEND_ENCRYPTION_KEY_REF: test:key-provider/encryption
+  SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER: ${SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER:-sleepagent-bff-v1}
 
 services:
   postgres:
@@ -55,17 +56,42 @@ services:
       SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/migration-service-credential
       SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_MIGRATION_POOL_MIN_SIZE:-1}
       SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_MIGRATION_POOL_MAX_SIZE:-1}
-      # The migration-only role provisions/grants these test-only roles. API and
-      # Worker containers never receive the migration credential.
-      SLEEPAGENT_BOOTSTRAP_API_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}
-      SLEEPAGENT_BOOTSTRAP_API_DATABASE_PASSWORD: ${SLEEPAGENT_TEST_POSTGRES_API_PASSWORD:?required}
-      SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_WORKER_USER:?required}
-      SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_PASSWORD: ${SLEEPAGENT_TEST_POSTGRES_WORKER_PASSWORD:?required}
-      SLEEPAGENT_BOOTSTRAP_API_SERVICE_PRINCIPAL_ID: sleepagent-api-test
-      SLEEPAGENT_BOOTSTRAP_WORKER_SERVICE_PRINCIPAL_ID: sleepagent-worker-test
+    volumes:
+      - ${SLEEPAGENT_TEST_ACTOR_PUBLIC_KEY_PATH:-./tests/fixtures/keys/replay_actor_public.pem}:/run/sleepagent/actor-public.pem:ro
     depends_on:
       postgres:
         condition: service_healthy
+    restart: "no"
+
+  test-bootstrap:
+    <<: *backend-image
+    entrypoint:
+      - python
+      - -m
+      - sleepagent.persistence.test_bootstrap
+    environment:
+      <<: *runtime-environment
+      SLEEPAGENT_BACKEND_PROCESS_ROLE: migration
+      SLEEPAGENT_BACKEND_ENABLED_SURFACES: ""
+      SLEEPAGENT_BACKEND_DATABASE_DSN: postgresql://${SLEEPAGENT_TEST_POSTGRES_ADMIN_USER:?required}:${SLEEPAGENT_TEST_POSTGRES_ADMIN_PASSWORD:?required}@postgres:5432/${SLEEPAGENT_TEST_POSTGRES_DB:?required}
+      SLEEPAGENT_BACKEND_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_ADMIN_USER:?required}
+      SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-test-bootstrap
+      SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/migration-service-credential
+      SLEEPAGENT_BOOTSTRAP_API_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}
+      SLEEPAGENT_BOOTSTRAP_API_DATABASE_PASSWORD: ${SLEEPAGENT_TEST_POSTGRES_API_PASSWORD:?required}
+      SLEEPAGENT_BOOTSTRAP_DEMO_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_DEMO_USER:?required}
+      SLEEPAGENT_BOOTSTRAP_DEMO_DATABASE_PASSWORD: ${SLEEPAGENT_TEST_POSTGRES_DEMO_PASSWORD:?required}
+      SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_WORKER_USER:?required}
+      SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_PASSWORD: ${SLEEPAGENT_TEST_POSTGRES_WORKER_PASSWORD:?required}
+      SLEEPAGENT_BOOTSTRAP_API_SERVICE_PRINCIPAL_ID: sleepagent-bff-test
+      SLEEPAGENT_BOOTSTRAP_DEMO_SERVICE_PRINCIPAL_ID: sleepagent-demo-test
+      SLEEPAGENT_BOOTSTRAP_WORKER_SERVICE_PRINCIPAL_ID: sleepagent-worker-test
+      SLEEPAGENT_BOOTSTRAP_ACTOR_VERIFICATION_KEY_SHA256: ${SLEEPAGENT_TEST_ACTOR_PUBLIC_KEY_SHA256:?required}
+    volumes:
+      - ${SLEEPAGENT_TEST_ACTOR_PUBLIC_KEY_PATH:-./tests/fixtures/keys/replay_actor_public.pem}:/run/sleepagent/actor-public.pem:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
 
   api:
@@ -80,19 +106,19 @@ services:
     environment:
       <<: *runtime-environment
       SLEEPAGENT_BACKEND_PROCESS_ROLE: api
-      SLEEPAGENT_BACKEND_ENABLED_SURFACES: public_v1,product,internal,demo
+      SLEEPAGENT_BACKEND_ENABLED_SURFACES: public_v1,product
       SLEEPAGENT_BACKEND_DATABASE_DSN: postgresql://${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}:${SLEEPAGENT_TEST_POSTGRES_API_PASSWORD:?required}@postgres:5432/${SLEEPAGENT_TEST_POSTGRES_DB:?required}
       SLEEPAGENT_BACKEND_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}
-      SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-api-test
+      SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-bff-test
       SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/api-service-credential
       SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_API_POOL_MIN_SIZE:-1}
       SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_API_POOL_MAX_SIZE:-5}
-      SLEEPAGENT_BACKEND_INTERNAL_AUTH_TOKEN: ${SLEEPAGENT_BACKEND_INTERNAL_AUTH_TOKEN:?required}
-      SLEEPAGENT_BACKEND_DEMO_CONTROLLER_TOKEN: ${SLEEPAGENT_BACKEND_DEMO_CONTROLLER_TOKEN:?required}
+    volumes:
+      - ${SLEEPAGENT_TEST_ACTOR_PUBLIC_KEY_PATH:-./tests/fixtures/keys/replay_actor_public.pem}:/run/sleepagent/actor-public.pem:ro
     ports:
       - "18000:18000"
     depends_on:
-      migrate:
+      test-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test:
@@ -105,6 +131,80 @@ services:
       retries: 30
       start_period: 10s
 
+  demo-api:
+    <<: *backend-image
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18001"
+    environment:
+      <<: *runtime-environment
+      SLEEPAGENT_BACKEND_PROFILE: test-postgres-demo
+      SLEEPAGENT_BACKEND_PROCESS_ROLE: api
+      SLEEPAGENT_BACKEND_ENABLED_SURFACES: demo
+      SLEEPAGENT_BACKEND_DATABASE_DSN: postgresql://${SLEEPAGENT_TEST_POSTGRES_DEMO_USER:?required}:${SLEEPAGENT_TEST_POSTGRES_DEMO_PASSWORD:?required}@postgres:5432/${SLEEPAGENT_TEST_POSTGRES_DB:?required}
+      SLEEPAGENT_BACKEND_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_DEMO_USER:?required}
+      SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-demo-test
+      SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/demo-service-credential
+      SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_DEMO_POOL_MIN_SIZE:-1}
+      SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_DEMO_POOL_MAX_SIZE:-2}
+      SLEEPAGENT_BACKEND_DEMO_CONTROLLER_TOKEN: ${SLEEPAGENT_BACKEND_DEMO_CONTROLLER_TOKEN:?required}
+    ports:
+      - "18001:18001"
+    depends_on:
+      test-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:18001/livez', timeout=3).read()
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  internal-api:
+    <<: *backend-image
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18002"
+    environment:
+      <<: *runtime-environment
+      SLEEPAGENT_BACKEND_PROFILE: test-postgres-internal
+      SLEEPAGENT_BACKEND_PROCESS_ROLE: api
+      SLEEPAGENT_BACKEND_ENABLED_SURFACES: internal
+      SLEEPAGENT_BACKEND_DATABASE_DSN: postgresql://${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}:${SLEEPAGENT_TEST_POSTGRES_API_PASSWORD:?required}@postgres:5432/${SLEEPAGENT_TEST_POSTGRES_DB:?required}
+      SLEEPAGENT_BACKEND_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}
+      SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-bff-test
+      SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/internal-service-credential
+      SLEEPAGENT_BACKEND_INTERNAL_AUTH_TOKEN: ${SLEEPAGENT_BACKEND_INTERNAL_AUTH_TOKEN:?required}
+      SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_INTERNAL_POOL_MIN_SIZE:-1}
+      SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_INTERNAL_POOL_MAX_SIZE:-2}
+    ports:
+      - "18002:18002"
+    depends_on:
+      test-bootstrap:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:18002/livez', timeout=3).read()
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
   worker:
     <<: *backend-image
     command:
@@ -112,6 +212,10 @@ services:
       - -m
       - sleepagent.worker_runtime
       - run
+      - --lease-seconds
+      - ${SLEEPAGENT_TEST_WORKER_LEASE_SECONDS:-30}
+      - --heartbeat-seconds
+      - ${SLEEPAGENT_TEST_WORKER_HEARTBEAT_SECONDS:-10}
     environment:
       <<: *runtime-environment
       SLEEPAGENT_BACKEND_PROCESS_ROLE: worker
@@ -126,7 +230,7 @@ services:
       SLEEPAGENT_BACKEND_PROVIDER_MODE: fake
       SLEEPAGENT_BACKEND_MODEL_MODE: deterministic
     depends_on:
-      migrate:
+      test-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test:

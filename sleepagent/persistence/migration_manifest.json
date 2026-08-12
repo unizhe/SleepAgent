@@ -1,0 +1,55 @@
+{
+  "schema_version": "sleepagent_migration_manifest.v1",
+  "target_version": 7,
+  "migrations": [
+    {
+      "version": 1,
+      "filename": "001_initial_schema.sql",
+      "sha256": "c62168ddb802f975dd2afdeb5ca7854fed380695c7295061f72133af099a023f",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 2,
+      "filename": "002_replay_journey_and_today.sql",
+      "sha256": "400f2c8b75a7189e58618aeffaf704647c88a73df0aac4f949bb2d526e920b7d",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 3,
+      "filename": "003_stage2_commands_and_interactions.sql",
+      "sha256": "43e409849c6830668ceec2ce4b64f5aff84ae63f2faca34f04622c5a645f786d",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 4,
+      "filename": "004_stage3_reads_and_scenario_clock.sql",
+      "sha256": "bdf8e6570a8ae134180e0c7c7c56d45a988ec53b66e51281f3300fa6a33bb290",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 5,
+      "filename": "005_stage4_induction_delivery_reconciliation.sql",
+      "sha256": "2ff2b099f96d66db62a316001ab3b295a3ce0bd38a4bb1e2591c77fc4328409d",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 6,
+      "filename": "006_stage5_bounded_retention_and_reset.sql",
+      "sha256": "830fa812897dba7cb9a754422fc7b7dee4a854b1982e3ef3e97cfadd9cd1fe56",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 7,
+      "filename": "007_stage6_system_hardening.sql",
+      "sha256": "08bd381723afd3c533d27d6a01596619f7ecf33619f2a76c03b6ecdfba1be0dc",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    }
+  ]
+}

@@ -25,9 +25,12 @@ from sleepagent.simulation.contracts import (
     NightRecipe,
     OfflineOverlay,
     ReplayScenario,
+    VendorAlertOverlay,
 )
 from sleepagent.sleep_domain.contracts import (
     AlgorithmVersionValue,
+    AlertLifecycleState,
+    AlertSeverity,
     AvailabilityState,
     BedExitKind,
     BedExitPayload,
@@ -52,6 +55,7 @@ from sleepagent.sleep_domain.contracts import (
     SleepStageState,
     SourceKind,
     TimezoneStatus,
+    VendorAlertPayload,
     VendorSleepProfileMetricPayload,
 )
 
@@ -583,6 +587,31 @@ class CanonicalReplayGenerator:
                         source_revision=overlay.source_revision,
                     )
                 )
+            elif isinstance(overlay, VendorAlertOverlay):
+                event_at = window.starts_at + timedelta(
+                    minutes=overlay.offset_minutes
+                )
+                if event_at > window.ends_at:
+                    raise ValueError("vendor alert overlay exceeds its night window")
+                result.append(
+                    self._observation(
+                        scenario,
+                        window,
+                        payload=VendorAlertPayload(
+                            alert_code=overlay.alert_code,
+                            severity=AlertSeverity(overlay.severity),
+                            lifecycle_state=AlertLifecycleState(
+                                overlay.lifecycle_state
+                            ),
+                            vendor_alert_instance_id=(
+                                overlay.vendor_alert_instance_id
+                            ),
+                        ),
+                        event_at=event_at,
+                        ordinal="vendor-alert-" + overlay.vendor_alert_instance_id,
+                        scenario_sha256=scenario_sha256,
+                    )
+                )
         return result
 
     def _correction_lineage(
@@ -716,6 +745,7 @@ class CanonicalReplayGenerator:
             in {
                 ObservationType.SLEEP_STAGE_INTERVAL,
                 ObservationType.VENDOR_SLEEP_PROFILE_METRIC,
+                ObservationType.VENDOR_ALERT,
             }
             else SourceKind.DEVICE_MEASURED
         )

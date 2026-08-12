@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from sleepagent.backend_keys import BackendKeyError, BackendKeyProvider
 from sleepagent.backend_settings import DeploymentMode
@@ -43,6 +45,29 @@ def test_production_rejects_deterministic_test_key_references() -> None:
             purpose="service credential",
             minimum_bytes=16,
         )
+
+
+def test_api_verification_loader_never_derives_or_returns_a_private_key(
+    tmp_path,
+) -> None:
+    provider = BackendKeyProvider(DeploymentMode.TEST, environment={})
+    with pytest.raises(BackendKeyError, match="must not derive private key"):
+        provider.actor_verification_key("test:actor", key_id="primary")
+
+    public_path = tmp_path / "actor-public.pem"
+    public_path.write_bytes(
+        Ed25519PrivateKey.generate().public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    material = provider.actor_verification_key(
+        f"file:{public_path}",
+        key_id="primary",
+    )
+
+    assert material.private_key is None
+    assert material.public_key_pem == public_path.read_bytes()
 
 
 def test_environment_and_file_references_fail_closed(tmp_path) -> None:

@@ -17,9 +17,9 @@ from sleepagent.backend_persistence import (
 from sleepagent.backend_runtime import (
     RuntimeServices,
     build_backend_runtime,
-    reset_active_runtime_for_tests,
 )
 from sleepagent.backend_settings import (
+    ApiSurface,
     DataMode,
     DeploymentMode,
     ProcessRole,
@@ -27,10 +27,14 @@ from sleepagent.backend_settings import (
 )
 from sleepagent.product_api.contracts import ProductRole
 from sleepagent.product_api.service import ProductApiError, ProductRequestContext
+from sleepagent.persistence.migrations import LATEST_SCHEMA_VERSION
 from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
+)
+from tests.support.runtime_fixtures import (
+    reset_backend_runtime_state as reset_active_runtime_for_tests,
 )
 
 
@@ -66,7 +70,9 @@ def test_non_owner_api_runtime_can_attest_the_migration_ledger() -> None:
         service_principal_id=principal_id,
         database_scope=DataMode.LIVE,
         namespace_prefixes=("live:",),
-        enabled_surfaces=frozenset(),
+        enabled_surfaces=frozenset(
+            {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
+        ),
         signing_key_ref="test:postgres-signing",
         encryption_key_ref="test:postgres-encryption",
         pool_min_size=1,
@@ -78,7 +84,7 @@ def test_non_owner_api_runtime_can_attest_the_migration_ledger() -> None:
         asyncio.run(runtime.start())
         assert runtime.readiness()["ready"] is True
         assert runtime.attestation is not None
-        assert runtime.attestation.schema_version >= 25
+        assert runtime.attestation.schema_version == LATEST_SCHEMA_VERSION
     finally:
         asyncio.run(runtime.close())
         reset_active_runtime_for_tests()

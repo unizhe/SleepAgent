@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from sleepagent.persistence.migrations import LATEST_SCHEMA_VERSION
+
 
 SETTINGS_PREFIX = "SLEEPAGENT_BACKEND_"
 
@@ -85,8 +87,14 @@ class SleepBackendSettings(BaseModel):
     encryption_key_ref: str = Field(min_length=1)
     internal_auth_token: SecretStr | None = None
     demo_controller_token: SecretStr | None = None
-    supported_schema_min: int = Field(default=25, ge=1)
-    supported_schema_max: int = Field(default=25, ge=1)
+    supported_schema_min: int = Field(
+        default=LATEST_SCHEMA_VERSION,
+        ge=1,
+    )
+    supported_schema_max: int = Field(
+        default=LATEST_SCHEMA_VERSION,
+        ge=1,
+    )
     pool_min_size: int = Field(default=1, ge=0, le=50)
     pool_max_size: int = Field(default=8, ge=1, le=100)
     pool_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
@@ -96,6 +104,11 @@ class SleepBackendSettings(BaseModel):
         default=10_000,
         ge=1,
         le=300_000,
+    )
+    raw_retention_seconds: int = Field(
+        default=2,
+        ge=1,
+        le=31_536_000,
     )
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     max_compressed_body_bytes: int = Field(
@@ -135,8 +148,13 @@ class SleepBackendSettings(BaseModel):
             raise ValueError("namespace prefixes must be unique")
         if self.pool_min_size > self.pool_max_size:
             raise ValueError("pool_min_size cannot exceed pool_max_size")
-        if self.supported_schema_min > self.supported_schema_max:
-            raise ValueError("supported schema range is inverted")
+        if (
+            self.supported_schema_min != LATEST_SCHEMA_VERSION
+            or self.supported_schema_max != LATEST_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "supported schema range must exactly match the release target"
+            )
         if self.process_role == ProcessRole.API:
             if self.worker_queues:
                 raise ValueError("API process cannot own worker queues")
@@ -144,6 +162,24 @@ class SleepBackendSettings(BaseModel):
                 raise ValueError("API process cannot load a model")
             if self.provider_mode != ProviderMode.DISABLED:
                 raise ValueError("API process cannot load a provider")
+            if ApiSurface.DEMO in self.enabled_surfaces:
+                if self.enabled_surfaces != frozenset({ApiSurface.DEMO}):
+                    raise ValueError(
+                        "demo API profile may expose only the demo surface"
+                    )
+            elif self.enabled_surfaces.intersection(
+                {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
+            ):
+                if self.enabled_surfaces != frozenset(
+                    {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
+                ):
+                    raise ValueError(
+                        "BFF API profile must expose only public_v1 and product"
+                    )
+            elif self.enabled_surfaces != frozenset({ApiSurface.INTERNAL}):
+                raise ValueError(
+                    "API profile must be demo-only, BFF-only, or internal-only"
+                )
         elif self.process_role == ProcessRole.MIGRATION:
             if self.worker_queues or self.enabled_surfaces:
                 raise ValueError(
@@ -153,8 +189,11 @@ class SleepBackendSettings(BaseModel):
                 raise ValueError("migration process cannot load a model")
             if self.provider_mode != ProviderMode.DISABLED:
                 raise ValueError("migration process cannot load a provider")
-        elif not self.worker_queues:
-            raise ValueError("worker process requires at least one queue")
+        else:
+            if self.enabled_surfaces:
+                raise ValueError("worker process cannot expose API surfaces")
+            if not self.worker_queues:
+                raise ValueError("worker process requires at least one queue")
         if ApiSurface.DEMO in self.enabled_surfaces:
             if self.deployment_mode == DeploymentMode.PRODUCTION:
                 raise ValueError("production cannot expose the demo surface")
@@ -213,7 +252,7 @@ class SleepBackendSettings(BaseModel):
         mode = DeploymentMode(required("DEPLOYMENT_MODE"))
         data_mode = DataMode(required("DATA_MODE"))
         default_surfaces = (
-            "public_v1,product,internal" if role == ProcessRole.API else ""
+            "public_v1,product" if role == ProcessRole.API else ""
         )
         surfaces = frozenset(
             ApiSurface(value)
@@ -231,7 +270,7 @@ class SleepBackendSettings(BaseModel):
             deployment_mode=mode,
             process_role=role,
             data_mode=data_mode,
-            database_dsn=required("DATABASE_DSN"),
+            database_dsn=SecretStr(required("DATABASE_DSN")),
             database_identity=required("DATABASE_IDENTITY"),
             database_role=required("DATABASE_ROLE"),
             service_principal_id=required("SERVICE_PRINCIPAL_ID"),
@@ -265,12 +304,12 @@ class SleepBackendSettings(BaseModel):
             supported_schema_min=_integer(
                 env,
                 "SUPPORTED_SCHEMA_MIN",
-                25,
+                LATEST_SCHEMA_VERSION,
             ),
             supported_schema_max=_integer(
                 env,
                 "SUPPORTED_SCHEMA_MAX",
-                25,
+                LATEST_SCHEMA_VERSION,
             ),
             pool_min_size=_integer(env, "POOL_MIN_SIZE", 1),
             pool_max_size=_integer(env, "POOL_MAX_SIZE", 8),
@@ -285,6 +324,11 @@ class SleepBackendSettings(BaseModel):
                 env,
                 "IDLE_TRANSACTION_TIMEOUT_MS",
                 10_000,
+            ),
+            raw_retention_seconds=_integer(
+                env,
+                "RAW_RETENTION_SECONDS",
+                2,
             ),
             request_timeout_seconds=_floating(
                 env,

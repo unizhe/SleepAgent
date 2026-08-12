@@ -6,10 +6,12 @@ from pathlib import Path
 
 from pydantic import Field
 
-from .scenarios import ReplayScenarioSchema
+from sleepagent.simulation.replay.scenarios import ReplayScenarioSchema
 
 
-WORKFLOW_GOLDENS_PATH = Path(__file__).with_name("workflow_goldens.json")
+WORKFLOW_GOLDENS_PATH = (
+    Path(__file__).with_name("fixtures") / "workflow_goldens.json"
+)
 
 
 class ReplayWorkflowGolden(ReplayScenarioSchema):

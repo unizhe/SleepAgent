@@ -489,7 +489,18 @@ def _bridge(
     return NightEpisodeAgentBridge(
         repository=repository,
         data_provider=_StaticFactsProvider(repository),
-        episode_runner=runner,  # type: ignore[arg-type]
+        execute_episode=runner.run,
+        runner_configured=lambda: all(
+            bool(getattr(model, "is_configured", True))
+            for model in (
+                runner.agent_roster.sleepcare.planning_model,
+                *(item.model for item in runner.agent_roster),
+            )
+        ),
+        context_versions=lambda subject_id: (
+            runner.commit_controller.care_store.get(subject_id).version,
+            runner.commit_controller.memory_store.get(subject_id).version,
+        ),
         lease_duration=timedelta(minutes=5),
     )
 

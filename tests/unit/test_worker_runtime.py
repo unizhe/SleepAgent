@@ -17,6 +17,11 @@ from sleepagent.backend_settings import (
     ProviderMode,
     SleepBackendSettings,
 )
+from sleepagent.persistence.migrations import (
+    EXPECTED_MIGRATION_IDENTITIES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_MANIFEST_SHA256,
+)
 from sleepagent.worker_runtime import (
     DurableWorkerRuntime,
     InvocationDispatcher,
@@ -27,7 +32,9 @@ from sleepagent.worker_runtime import (
     OutcomeUnknownError,
     RetryableWorkError,
     WorkDisposition,
+    WorkKind,
     WorkResult,
+    _final_status,
 )
 
 
@@ -199,11 +206,32 @@ def _runtime(queues: tuple[str, ...]) -> SleepBackendRuntime:
         attestor=lambda: DatabaseAttestation(
             database_identity="replay_db",
             database_role="sleepagent_worker_replay",
-            schema_version=25,
+            schema_version=LATEST_SCHEMA_VERSION,
             migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
         ),
         worker_handlers={queue: object() for queue in queues},
     )
+
+
+def test_journey_retry_budget_exhaustion_uses_supported_terminal_state() -> None:
+    claim = _claim("replay_journey").model_copy(
+        update={
+            "attempt": 5,
+            "max_attempts": 5,
+            "metadata": {"work_kind": "journey"},
+        }
+    )
+
+    assert _final_status(
+        WorkKind.JOURNEY,
+        claim,
+        WorkResult(
+            disposition=WorkDisposition.RETRYABLE,
+            error_code="scenario_contract_invalid",
+        ),
+    ) == "failed"
 
 
 def test_fast_path_is_claimed_before_model_slow_path() -> None:
@@ -230,6 +258,30 @@ def test_fast_path_is_claimed_before_model_slow_path() -> None:
     assert worker.run_once() is True
     assert calls == ["fast_path"]
     assert store.claim_order == ["fast_path"]
+
+
+def test_first_slice_leaf_queues_are_claimed_before_root_journey_polling() -> None:
+    store = Store()
+    for queue in ("replay_journey", "product_agent"):
+        store.add(_claim(queue))
+    calls: list[str] = []
+    worker = DurableWorkerRuntime(
+        _runtime(("replay_journey", "product_agent")),
+        store=store,
+        handlers={
+            queue: (
+                lambda context: calls.append(context.claim.queue)
+                or WorkResult(disposition=WorkDisposition.SUCCEEDED)
+            )
+            for queue in ("replay_journey", "product_agent")
+        },
+        lease_seconds=3,
+        heartbeat_interval_seconds=0.5,
+    )
+
+    assert worker.run_once() is True
+    assert calls == ["product_agent"]
+    assert store.claim_order == ["product_agent"]
 
 
 def test_stale_worker_cannot_finalize_after_reclaim() -> None:

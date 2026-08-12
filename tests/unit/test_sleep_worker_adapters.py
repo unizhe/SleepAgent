@@ -18,6 +18,11 @@ from sleepagent.backend_settings import (
     SleepBackendSettings,
 )
 from sleepagent.persistence.uow import UowScope
+from sleepagent.persistence.migrations import (
+    EXPECTED_MIGRATION_IDENTITIES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_MANIFEST_SHA256,
+)
 from sleepagent.sleep_domain.postgres_slice import (
     FastPathCommitResult,
     NormalizationResult,
@@ -39,13 +44,11 @@ from sleepagent.worker_runtime import (
     DurableWorkStoreError,
     DurableWorkerRuntime,
     LeaseClaim,
-    ReplayNoModelHandler,
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,
     WorkResult,
     _cli_handlers,
-    _validate_replay_no_model_profile,
 )
 
 
@@ -214,6 +217,7 @@ class _NormalizationProcessor:
             night_episode_id="episode-1",
             night_episode_revision_id="revision-1",
             fast_path_operation_id="operation-fast-path",
+            reconciliation_operation_id=None,
             date_state="finalized",
         )
 
@@ -243,8 +247,10 @@ def _runtime(settings: SleepBackendSettings) -> SleepBackendRuntime:
         attestor=lambda: DatabaseAttestation(
             database_identity=settings.database_identity,
             database_role=settings.database_role,
-            schema_version=25,
+            schema_version=LATEST_SCHEMA_VERSION,
             migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
         ),
         worker_handlers={queue: object() for queue in settings.worker_queues},
     )
@@ -447,17 +453,12 @@ def test_cli_registry_uses_real_b3_and_product_handlers() -> None:
 
 def test_development_registry_fails_closed_for_unimplemented_queue() -> None:
     settings = _settings(
-        ("ingestion", "fast_path", "induction"),
+        ("ingestion", "fast_path", "unknown_queue"),
         deployment_mode=DeploymentMode.DEVELOPMENT,
     )
 
-    with pytest.raises(DurableWorkStoreError, match="induction"):
+    with pytest.raises(DurableWorkStoreError, match="unknown_queue"):
         _cli_handlers(settings)
-    with pytest.raises(DurableWorkStoreError, match="restricted"):
-        _validate_replay_no_model_profile(
-            settings,
-            {queue: ReplayNoModelHandler(queue) for queue in settings.worker_queues},
-        )
 
 
 def test_replay_normalizer_is_not_composed_for_live_ingestion() -> None:

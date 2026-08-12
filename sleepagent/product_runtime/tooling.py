@@ -382,10 +382,12 @@ class CoreProductToolService:
     def _snapshot(
         arguments: dict[str, Any], context: ProductToolExecutionContext
     ) -> dict[str, Any]:
+        source_refs = list(context.fact_snapshot.source_refs)
         return {
             "fact_snapshot_id": context.fact_snapshot.fact_snapshot_id,
             "fact_snapshot_hash": context.fact_snapshot.fact_snapshot_hash,
-            "source_refs": list(context.fact_snapshot.source_refs),
+            "source_ref_count": len(source_refs),
+            "source_refs": source_refs[:50],
         }
 
     @staticmethod
@@ -489,7 +491,7 @@ class CoreProductToolService:
             result["personalization_effect"] = fuse_multifactor_safety(
                 factors
             ).personalization_effect
-            return result
+            return _bound_output_source_refs(result)
         data = arguments.get("data")
         if isinstance(data, dict) and data.get("risk_state"):
             source_refs = tuple(
@@ -510,9 +512,9 @@ class CoreProductToolService:
                 reason_codes=tuple(data.get("reason_codes", ())),
                 source_refs=source_refs,
             )
-            return RiskClassificationTool().classify(
+            return _bound_output_source_refs(RiskClassificationTool().classify(
                 RiskClassificationInput(deterministic_snapshot=snapshot)
-            ).model_dump(mode="json")
+            ).model_dump(mode="json"))
         if "observation" in arguments or "trend_signals" in arguments:
             observation = (
                 RiskObservation.model_validate(arguments["observation"])
@@ -541,18 +543,18 @@ class CoreProductToolService:
                 raise ValueError(
                     "structured risk refs exceed FactSnapshot scope"
                 )
-            return RiskClassificationTool().classify(
+            return _bound_output_source_refs(RiskClassificationTool().classify(
                 RiskClassificationInput(
                     text_inputs=tuple(arguments.get("text_inputs", ())),
                     observation=observation,
                     trend_signals=trend_signals,
                 )
-            ).model_dump(mode="json")
-        return RiskClassificationTool().classify(
+            ).model_dump(mode="json"))
+        return _bound_output_source_refs(RiskClassificationTool().classify(
             RiskClassificationInput(
                 text_inputs=tuple(arguments.get("text_inputs", ())),
             )
-        ).model_dump(mode="json")
+        ).model_dump(mode="json"))
 
     @staticmethod
     def _reviewed_knowledge(
@@ -757,6 +759,16 @@ def _subject_matches_snapshot(
     return marker in binding_subject and (
         binding_subject.split(marker, 1)[1] == canonical_subject
     )
+
+
+def _bound_output_source_refs(output: dict[str, Any]) -> dict[str, Any]:
+    """Keep complete provenance bound by FactSnapshot, not an unbounded receipt."""
+
+    source_refs = list(output.get("source_refs", []))
+    if len(source_refs) > 50:
+        output["source_ref_count"] = len(source_refs)
+        output["source_refs"] = source_refs[:50]
+    return output
 
 
 def _caller_name(context: ProductToolExecutionContext) -> str:

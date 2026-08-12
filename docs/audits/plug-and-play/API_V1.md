@@ -1,8 +1,11 @@
 # Sleep Domain API v1
 
-The reference deployment is the standalone ASGI application
-`sleepagent.sleep_api.app:app`. Its OpenAPI document is available at
-`/openapi.json` and contains only the versioned sleep-domain surface.
+The deployed boundary is the canonical `backend.main:app` BFF profile, which
+mounts exactly `/api/v1/*` and `/product/sleep/*`. The historical
+`create_sleep_api_app(...)` symbol is a test-only compatibility factory that
+delegates to the same canonical app composition and owns no worker or global
+runtime. The committed BFF OpenAPI snapshot is
+`docs/contracts/openapi/backend-bff-v1.json`.
 
 All requests require:
 
@@ -10,7 +13,7 @@ All requests require:
 - `X-Sleep-Actor-Assertion: <compact asymmetric JWS>`;
 - a JWS `kid`, issuer, audience, assertion id, actor id, subject id, role,
   scopes, issued/expiry times, nonce, HTTP method/path, and request-body
-  SHA-256;
+  SHA-256 plus authorization, privacy, and retrieval-policy epochs;
 - an active authoritative actor/subject role binding rechecked by SleepAgent.
 
 Commands also require `Idempotency-Key` and return `202` with an

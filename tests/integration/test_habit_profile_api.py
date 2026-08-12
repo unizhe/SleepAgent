@@ -13,7 +13,9 @@ import sleepagent.product_runtime.habit_application as habit_application_module
 from sleepagent.product_runtime.contracts import AuthenticatedBinding
 from sleepagent.product_runtime.habit_api import (
     PRODUCT_API_KEY_ENV,
-    reset_habit_profile_api_for_tests,
+)
+from tests.support.runtime_fixtures import (
+    configure_test_habit_profile_runtime as reset_habit_profile_api_for_tests,
 )
 from sleepagent.product_runtime.habit_application import (
     HabitChangeSetConfirmRequest,

@@ -356,9 +356,15 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
 
         def __init__(self) -> None:
             self.statements: list[tuple[str, Any]] = []
+            self._row: tuple[bool] | None = None
 
         def execute(self, query: str, params: Any = None) -> None:
             self.statements.append((query, params))
+            if "array_agg(membership.observation_id" in query:
+                self._row = (True,)
+
+        def fetchone(self) -> tuple[bool] | None:
+            return self._row
 
     cursor = RecordingCursor()
     repository = PostgresSleepSliceRepository(
@@ -381,6 +387,21 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert "date_conflict" not in set_clause
     assert "current_revision_id = %s" in aggregate_update
     assert "current_revision_number = %s" in aggregate_update
+    membership_insert = next(
+        statement
+        for statement, _params in cursor.statements
+        if "INSERT INTO public.sleep_domain_episode_observation_memberships"
+        in statement
+    )
+    assert "'episode-membership:'" in membership_insert
+    assert "decode('00', 'hex')" in membership_insert
+    assert "ON CONFLICT (namespace_id, data_mode, observation_id) DO NOTHING" in (
+        membership_insert
+    )
+    assert any(
+        "array_agg(membership.observation_id" in statement
+        for statement, _params in cursor.statements
+    )
 
 
 def test_episode_without_wake_closes_on_estimated_deadline_date() -> None:
@@ -904,6 +925,9 @@ def _api_context() -> PostgresAuthenticatedActorContext:
         method="GET",
         path="/api/v1/subjects/subject-1/night-episodes",
         body_sha256=hashlib.sha256(b"").hexdigest(),
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
     )
     authority = ResolvedActorAuthority(
         namespace_id="replay:pytest",
@@ -1027,6 +1051,45 @@ def test_default_role_view_is_pinned_to_the_current_episode_revision() -> None:
     assert raised.value.code == PublicErrorCode.RESULT_PENDING
     assert "view.night_episode_revision_id =" in cursor.query
     assert "episode.current_revision_id" in cursor.query
+
+
+def test_public_command_adapter_reserves_a_real_sleep_command_operation() -> None:
+    class CommandBackend:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, dict[str, Any]]] = []
+
+        def reserve_command(self, context: Any, **values: Any) -> str:
+            self.calls.append((context, values))
+            return "01987654-3210-7abc-8def-0123456789ab"
+
+    backend = CommandBackend()
+    runtime = PostgresSleepApiRuntime(
+        uow_factory=object(),  # type: ignore[arg-type]
+        authenticator=object(),  # type: ignore[arg-type]
+        cursor_key=b"c" * 32,
+        command_backend=backend,  # type: ignore[arg-type]
+    )
+
+    accepted = runtime.submit_command(
+        _api_context(),
+        operation_type="sleep_api.monitoring.activate.v1",
+        route_template="/api/v1/subjects/{subject_id}/monitoring/activate",
+        target_resource_id="subject-1",
+        idempotency_key="activate-one",
+        request_payload={
+            "schema_version": "activate_monitoring_request.v1",
+            "device_binding_id": None,
+            "occurred_at": None,
+        },
+    )
+
+    assert accepted.status == "pending"
+    assert accepted.operation_id == "01987654-3210-7abc-8def-0123456789ab"
+    assert accepted.status_url.endswith(accepted.operation_id)
+    context, values = backend.calls[0]
+    assert context.purpose == "sleep_care"
+    assert values["command_type"] == "sleep_api.monitoring.activate.v1"
+    assert len(values["body_sha256"]) == 64
 
 
 class _StaticPostgresAuthenticator:

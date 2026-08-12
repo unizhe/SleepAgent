@@ -14,7 +14,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sleepagent.product_runtime.contracts import (
     AuthenticatedBinding,
@@ -30,9 +30,6 @@ from sleepagent.product_runtime.cold_start import (
 from sleepagent.product_runtime.runtime_contracts import (
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
-)
-from sleepagent.product_runtime.runtime_ports import (
-    ProductEpisodeRunnerPort,
 )
 from sleepagent.sleep_domain.contracts import (
     AgentAnalysisTrigger,
@@ -81,14 +78,20 @@ class NightEpisodeAgentBridge:
         *,
         repository: SleepDomainRepository,
         data_provider: PersistentProductDataProvider,
-        episode_runner: ProductEpisodeRunnerPort,
+        execute_episode: Callable[
+            [ProductEpisodeRunRequest], ProductEpisodeRunResult
+        ],
+        runner_configured: Callable[[], bool],
+        context_versions: Callable[[str], tuple[int, int]],
         lease_duration: timedelta = DEFAULT_AGENT_LEASE,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("Agent lease_duration must be positive")
         self.repository = repository
         self.data_provider = data_provider
-        self.episode_runner = episode_runner
+        self.execute_episode = execute_episode
+        self.runner_configured = runner_configured
+        self.context_versions = context_versions
         self.lease_duration = lease_duration
 
     def submit_analysis(
@@ -232,7 +235,7 @@ class NightEpisodeAgentBridge:
         )
 
         insufficient = _is_data_insufficient(facts)
-        runner_configured = _runner_is_configured(self.episode_runner)
+        runner_configured = self.runner_configured()
         role_views: list[AnalysisRoleView] = []
         failure_codes: set[str] = set()
         skill_versions: dict[str, str] = {}
@@ -273,7 +276,7 @@ class NightEpisodeAgentBridge:
                     request.tool_inputs,
                     expected_data_mode=namespace.data_mode,
                 )
-                result = self.episode_runner.run(request)
+                result = self.execute_episode(request)
                 role_view = _role_view_from_result(
                     analysis_id=analysis_id,
                     revision=revision,
@@ -445,12 +448,7 @@ class NightEpisodeAgentBridge:
                 "draft_material",
             ),
         )
-        care_version = self.episode_runner.commit_controller.care_store.get(
-            internal_subject_id
-        ).version
-        memory_version = self.episode_runner.commit_controller.memory_store.get(
-            internal_subject_id
-        ).version
+        care_version, memory_version = self.context_versions(internal_subject_id)
         readiness_decisions = build_unavailable_entry_decisions(
             decision_namespace=f"{run_id}:cold-start",
             claim_kind=ClaimKind.DESCRIBE_CURRENT_NIGHT,
@@ -667,22 +665,6 @@ def _degraded_role_view(
         context_notice="这是明确标记的 Agent slow-path 降级结果。",
         failure_codes=(failure_code,),
         generated_at=generated_at,
-    )
-
-
-def _runner_is_configured(runner: ProductEpisodeRunnerPort) -> bool:
-    from sleepagent.product_runtime.agents import ProductAgentRoster
-
-    roster = getattr(runner, "agent_roster", None)
-    if type(roster) is not ProductAgentRoster:
-        return False
-    models = [
-        roster.sleepcare.planning_model,
-        *(item.model for item in roster),
-    ]
-    return all(
-        model is not None and bool(getattr(model, "is_configured", True))
-        for model in models
     )
 
 

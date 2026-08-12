@@ -75,6 +75,46 @@ def test_worker_requires_a_queue_and_cannot_expose_api_surface() -> None:
     )
     assert worker.worker_queues == ("fast_path", "product_agent")
 
+    with pytest.raises(ValidationError, match="cannot expose API surfaces"):
+        _settings(
+            process_role=ProcessRole.WORKER,
+            worker_queues=("fast_path",),
+        )
+
+
+def test_demo_bff_and_internal_api_profiles_are_surface_disjoint() -> None:
+    demo = _settings(
+        enabled_surfaces=frozenset({ApiSurface.DEMO}),
+        demo_controller_token="demo-controller-token-at-least-32-bytes",
+    )
+    assert demo.enabled_surfaces == frozenset({ApiSurface.DEMO})
+
+    with pytest.raises(ValidationError, match="demo API profile"):
+        _settings(
+            enabled_surfaces=frozenset(
+                {ApiSurface.DEMO, ApiSurface.PRODUCT}
+            ),
+            demo_controller_token="demo-controller-token-at-least-32-bytes",
+        )
+    with pytest.raises(ValidationError, match="BFF API profile"):
+        _settings(
+            enabled_surfaces=frozenset(
+                {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT, ApiSurface.INTERNAL}
+            ),
+            internal_auth_token="internal-controller-token-at-least-32-bytes",
+        )
+
+    internal = _settings(
+        enabled_surfaces=frozenset({ApiSurface.INTERNAL}),
+        internal_auth_token="internal-controller-token-at-least-32-bytes",
+    )
+    assert internal.enabled_surfaces == frozenset({ApiSurface.INTERNAL})
+
+
+def test_runtime_schema_support_is_pinned_to_release_target() -> None:
+    with pytest.raises(ValidationError, match="release target"):
+        _settings(supported_schema_min=1, supported_schema_max=1)
+
 
 def test_database_scope_and_namespace_prefix_are_not_row_only_isolation() -> None:
     with pytest.raises(ValidationError, match="database_scope"):
@@ -152,6 +192,6 @@ def test_environment_parser_has_no_implicit_authority_defaults() -> None:
     )
 
     assert settings.enabled_surfaces == frozenset(
-        {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT, ApiSurface.INTERNAL}
+        {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
     )
     assert settings.namespace_prefixes == ("replay:one", "replay:two")

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from typing import Any, Mapping, Protocol
+from uuid import uuid4
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -168,6 +169,9 @@ class ActorAssertionClaims(BaseModel):
     method: str = Field(..., min_length=1, max_length=20)
     path: str = Field(..., min_length=1, max_length=1000)
     body_sha256: str
+    authorization_epoch: int = Field(ge=1)
+    privacy_epoch: int = Field(ge=1)
+    retrieval_policy_epoch: int = Field(ge=1)
 
     @field_validator("scope")
     @classmethod
@@ -564,10 +568,10 @@ class SleepApiAuthenticator:
                 "The actor assertion does not include the required scope.",
                 status_code=403,
             )
-        correlation_id = (
-            request.headers.get("x-correlation-id", "").strip()
-            or f"corr-{claims.jti}"
+        correlation_id = str(
+            getattr(request.state, "correlation_id", "") or uuid4()
         )
+        request.state.correlation_id = correlation_id
         return VerifiedActorIdentity(
             service_principal=service_principal,
             claims=claims,
@@ -598,6 +602,12 @@ class SleepApiAuthenticator:
             raise SleepApiSecurityError(
                 PublicErrorCode.AUTHORIZATION_DENIED,
                 "The authoritative role binding does not grant the required scope.",
+                status_code=403,
+            )
+        if claims.authorization_epoch != binding.authorization_epoch:
+            raise SleepApiSecurityError(
+                PublicErrorCode.AUTHORIZATION_DENIED,
+                "The actor assertion authorization epoch is stale.",
                 status_code=403,
             )
         binding = self.role_cache.remember(binding)

@@ -76,12 +76,14 @@ from sleepagent.simulation.replay import (
     list_replay_scenarios,
 )
 from sleepagent.product_api.diagnostics.http import (
-    get_radar_api_runtime,
     router as radar_agent_router,
 )
 from sleepagent.product_runtime.habit_api import (
     configure_habit_profile_runtime,
     router as habit_profile_router,
+)
+from tests.support.runtime_fixtures import (
+    configure_test_radar_runtime as reset_radar_api_runtime_for_tests,
 )
 
 DIAGNOSTIC_TRANSPORT_ENV = "SLEEPAGENT_RADAR_AGENT_DEV_MODE"
@@ -124,7 +126,7 @@ DEFAULT_CORS_ORIGINS = (
     "http://localhost:18510",
 )
 _RADAR_PRODUCT_PROVIDER: FakeRadarProductDataProvider | None = None
-_PRODUCT_RUNTIME_BUNDLE = get_radar_api_runtime().product_runtime
+_PRODUCT_RUNTIME_BUNDLE = reset_radar_api_runtime_for_tests().product_runtime
 configure_habit_profile_runtime(_PRODUCT_RUNTIME_BUNDLE)
 _PRODUCT_EPISODE_RUNNER: ProductEpisodeRunnerPort | None = None
 _PRODUCT_INDUCTION_SCHEDULER = ProductInductionScheduler(

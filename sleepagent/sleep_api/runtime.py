@@ -8,7 +8,6 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import RLock
 from typing import Any, Mapping
 
 from sleepagent.persistence import (
@@ -24,13 +23,11 @@ from sleepagent.sleep_api.auth import (
     RotatingServiceCredential,
     SleepApiAuthenticator,
 )
-from sleepagent.sleep_api.contracts import PublicActorRole, PublicErrorCode
+from sleepagent.sleep_api.contracts import PublicActorRole
 from sleepagent.sleep_api.persistence import SleepApiPersistence
 from sleepagent.sleep_api.service import (
     AuthorizationEpochRoleViewCache,
     OpaquePageCursorCodec,
-    SleepApiApplicationError,
-    SleepApiOperationWorker,
     SleepApiRuntime,
 )
 from sleepagent.sleep_domain import (
@@ -50,7 +47,6 @@ from sleepagent.sleep_domain.authority_migration import READ_AUTHORITY_ENV
 
 
 UTC = timezone.utc
-SLEEP_API_ENABLED_ENV = "SLEEPAGENT_SLEEP_API_ENABLED"
 SLEEP_API_MODE_ENV = "SLEEPAGENT_SLEEP_API_MODE"
 SLEEP_API_SERVICE_CREDENTIALS_ENV = "SLEEPAGENT_SLEEP_API_SERVICE_CREDENTIALS_JSON"
 SLEEP_API_ACTOR_KEYS_ENV = "SLEEPAGENT_SLEEP_API_ACTOR_KEYS_JSON"
@@ -69,11 +65,6 @@ SLEEP_API_VERSION_PINS_ENV = "SLEEPAGENT_SLEEP_API_VERSION_PINS_JSON"
 RADAR_DATABASE_URL_ENV = "SLEEPAGENT_RADAR_AGENT_DATABASE_URL"
 RADAR_SQLITE_PATH_ENV = "SLEEPAGENT_RADAR_AGENT_SQLITE_PATH"
 DEFAULT_SLEEP_API_SQLITE_PATH = "/tmp/sleepagent_sleep_api.sqlite3"
-
-_LOCK = RLock()
-_RUNTIME: SleepApiRuntime | None = None
-_WORKER: SleepApiOperationWorker | None = None
-
 
 def build_sleep_api_runtime_from_env(
     *,
@@ -219,57 +210,6 @@ def build_sleep_api_runtime_from_env(
     )
 
 
-def get_sleep_api_runtime() -> SleepApiRuntime:
-    global _RUNTIME
-    if os.getenv(SLEEP_API_ENABLED_ENV, "false").lower() != "true":
-        raise SleepApiApplicationError(
-            PublicErrorCode.AUTHORIZATION_UNAVAILABLE,
-            "The independent sleep API is not configured.",
-            status_code=503,
-            retryable=True,
-        )
-    with _LOCK:
-        if _RUNTIME is None:
-            try:
-                _RUNTIME = build_sleep_api_runtime_from_env()
-            except Exception as exc:
-                raise SleepApiApplicationError(
-                    PublicErrorCode.AUTHORIZATION_UNAVAILABLE,
-                    "The independent sleep API configuration is invalid.",
-                    status_code=503,
-                    retryable=True,
-                ) from exc
-        return _RUNTIME
-
-
-def start_sleep_api_worker() -> None:
-    global _WORKER
-    if os.getenv(SLEEP_API_ENABLED_ENV, "false").lower() != "true":
-        return
-    with _LOCK:
-        runtime = get_sleep_api_runtime()
-        if _WORKER is None:
-            _WORKER = SleepApiOperationWorker(runtime)
-        _WORKER.start()
-
-
-def stop_sleep_api_worker() -> None:
-    global _WORKER
-    with _LOCK:
-        if _WORKER is not None:
-            _WORKER.stop()
-        _WORKER = None
-
-
-def reset_sleep_api_runtime_for_tests() -> None:
-    global _RUNTIME, _WORKER
-    with _LOCK:
-        if _WORKER is not None:
-            _WORKER.stop()
-        _WORKER = None
-        _RUNTIME = None
-
-
 def _store_from_env(
     env: Mapping[str, str],
     *,
@@ -404,8 +344,4 @@ def _event_cursor_ttl(env: Mapping[str, str]):
 
 __all__ = [
     "build_sleep_api_runtime_from_env",
-    "get_sleep_api_runtime",
-    "reset_sleep_api_runtime_for_tests",
-    "start_sleep_api_worker",
-    "stop_sleep_api_worker",
 ]

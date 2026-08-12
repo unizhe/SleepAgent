@@ -6,7 +6,7 @@ from pathlib import Path
 import sleepagent.product_runtime as product_runtime
 from sleepagent.product_api.diagnostics import RADAR_AGENT_API_PREFIX, full_route_paths
 from sleepagent.product_device.provider import ReplayRadarProvider
-from sleepagent.product_runtime.cli import build_demo_payload, build_parser
+from tests.support.radar_cli import build_demo_payload, build_parser
 from sleepagent.product_runtime.schemas import EvidenceClaim, ReviewStatus
 
 

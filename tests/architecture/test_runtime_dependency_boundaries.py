@@ -79,7 +79,7 @@ def test_package_discovery_contains_no_skill_shadow() -> None:
 def test_executable_composition_surfaces_have_no_retired_runtime_calls() -> None:
     surfaces = (
         ROOT / "sleepagent" / "product_api" / "diagnostics" / "http.py",
-        ROOT / "sleepagent" / "product_runtime" / "cli" / "main.py",
+        ROOT / "tests" / "support" / "radar_cli.py",
         ROOT / "backend" / "main.py",
         ROOT / "sleepagent" / "backend_app.py",
         ROOT / "sleepagent" / "backend_runtime.py",

@@ -97,6 +97,9 @@ class Ed25519ActorSigner:
     role: str
     scopes: tuple[str, ...]
     private_key: ed25519.Ed25519PrivateKey
+    authorization_epoch: int = 1
+    privacy_epoch: int = 1
+    retrieval_policy_epoch: int = 1
     lifetime: timedelta = timedelta(minutes=2)
 
     @classmethod
@@ -135,6 +138,9 @@ class Ed25519ActorSigner:
             "method": method.upper(),
             "path": path,
             "body_sha256": hashlib.sha256(body).hexdigest(),
+            "authorization_epoch": self.authorization_epoch,
+            "privacy_epoch": self.privacy_epoch,
+            "retrieval_policy_epoch": self.retrieval_policy_epoch,
         }
         encoded_header = _b64url(_canonical_json(header))
         encoded_claims = _b64url(_canonical_json(claims))

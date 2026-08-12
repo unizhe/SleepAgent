@@ -152,7 +152,7 @@ def test_worker_role_enforces_fence_and_persists_unknown_invocation() -> None:
                   status, valid_from
                 ) VALUES (
                   %s, %s, %s, 'live', 'worker', '[]'::jsonb,
-                  '["interaction.start", "interaction.ask"]'::jsonb,
+                      '["product_interaction"]'::jsonb,
                   1, 'active', clock_timestamp() - interval '1 minute'
                 )
                 """,
@@ -218,7 +218,7 @@ def test_worker_role_enforces_fence_and_persists_unknown_invocation() -> None:
         service_principal_id=worker_principal,
         database_scope=DataMode.LIVE,
         namespace_prefixes=("live:",),
-        worker_queues=("product_agent",),
+        worker_queues=("product_interaction",),
         service_credential_ref="test:worker-service",
         signing_key_ref="test:worker-signing",
         encryption_key_ref="test:worker-encryption",
@@ -237,7 +237,7 @@ def test_worker_role_enforces_fence_and_persists_unknown_invocation() -> None:
         )
         assert store.healthcheck(worker_instance=f"health-{suffix}") is True
         first_claim = store.claim(
-            queue="product_agent",
+            queue="product_interaction",
             worker_instance=f"worker-{suffix}",
             lease_seconds=30,
         )
@@ -263,7 +263,7 @@ def test_worker_role_enforces_fence_and_persists_unknown_invocation() -> None:
         ) is True
 
         second_claim = store.claim(
-            queue="product_agent",
+            queue="product_interaction",
             worker_instance=f"worker-{suffix}",
             lease_seconds=30,
         )

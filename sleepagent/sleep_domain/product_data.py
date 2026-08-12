@@ -130,6 +130,7 @@ class ProductRevisionFacts(SleepDomainContract):
 
     def tool_inputs(self) -> dict[str, dict[str, Any]]:
         evidence = self.model_dump(mode="json")
+        agent_refs = list(self.agent_source_refs())
         quality = dict(self.deterministic_quality)
         coverage_ratio = quality.get("coverage_ratio", 0.0)
         risk = dict(self.deterministic_risk)
@@ -137,12 +138,12 @@ class ProductRevisionFacts(SleepDomainContract):
         return {
             "radar.get_night_evidence": {
                 "data": evidence,
-                "source_refs": list(self.provenance_references),
+                "source_refs": agent_refs,
             },
             "radar.assess_data_quality": {
                 "coverage_ratio": coverage_ratio,
                 "data": quality,
-                "source_refs": list(self.provenance_references),
+                "source_refs": agent_refs,
             },
             "radar.get_device_status": {
                 "data": {
@@ -151,12 +152,58 @@ class ProductRevisionFacts(SleepDomainContract):
                     "offline": bool(quality.get("offline", False)),
                     "stale": bool(quality.get("stale", False)),
                 },
-                "source_refs": list(self.provenance_references),
+                "source_refs": agent_refs,
             },
             "risk.classify_signal": {
                 "data": risk,
-                "source_refs": list(self.provenance_references),
+                "source_refs": agent_refs,
             },
+        }
+
+    def agent_source_refs(self) -> tuple[str, ...]:
+        """Return a bounded, hash-bound projection of complete provenance."""
+
+        if len(self.provenance_references) <= 50:
+            return self.provenance_references
+        selected = tuple(
+            ref
+            for ref in self.provenance_references
+            if ref.startswith(
+                (
+                    "night_episode_revision:",
+                    "quality_assessment:",
+                    "current_risk:",
+                    "source_report:",
+                    "observation_conflict:",
+                )
+            )
+        )
+        aggregate = (
+            "provenance_set:sha256:"
+            f"{stable_hash(self.provenance_references)}:"
+            f"count:{len(self.provenance_references)}"
+        )
+        return tuple(dict.fromkeys((*selected[:49], aggregate)))
+
+    def agent_night_evidence(self) -> dict[str, Any]:
+        """Project exact revision facts into a bounded Agent-facing summary."""
+
+        return {
+            "schema_version": "product_night_evidence.v1",
+            "data_mode": self.data_mode.value,
+            "night_episode_id": self.night_episode_id,
+            "night_episode_revision_id": self.night_episode_revision_id,
+            "night_episode_revision_number": self.night_episode_revision_number,
+            "timezone_name": self.timezone_name,
+            "local_sleep_date": self.local_sleep_date,
+            "data_sufficiency": self.data_sufficiency,
+            "canonical_observation_count": len(self.canonical_observations),
+            "conflict_count": len(self.conflict_summaries),
+            "deterministic_quality": dict(self.deterministic_quality),
+            "deterministic_risk": dict(self.deterministic_risk),
+            "canonical_data_version": self.canonical_data_version,
+            "provenance_set_sha256": stable_hash(self.provenance_references),
+            "provenance_ref_count": len(self.provenance_references),
         }
 
 

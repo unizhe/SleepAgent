@@ -85,6 +85,25 @@ class BackendKeyProvider:
         )
         return ActorKeyMaterial(key_id=key_id, public_key_pem=canonical)
 
+    def actor_verification_key(
+        self,
+        reference: str,
+        *,
+        key_id: str,
+    ) -> ActorKeyMaterial:
+        """Load public-only actor verification material for an API process."""
+
+        if reference.startswith("test:"):
+            raise BackendKeyError(
+                "actor verification reference must not derive private key material"
+            )
+        material = self.actor_key(reference, key_id=key_id)
+        if material.private_key is not None:
+            raise BackendKeyError(
+                "actor verification reference unexpectedly contained a private key"
+            )
+        return material
+
     def encryption_key(self, reference: str) -> bytes:
         raw = self._resolve(reference, purpose="encryption")
         if reference.startswith("test:"):

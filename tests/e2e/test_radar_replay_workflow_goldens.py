@@ -7,18 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from sleepagent.product_api.diagnostics.http import RadarApiRuntime
-from sleepagent.product_runtime.cli import EXIT_OK, main as cli_main
+from tests.support.radar_cli import EXIT_OK, main as cli_main
 from sleepagent.persistence import RadarPersistenceStore
 from sleepagent.product_runtime.runtime_factory import (
     build_product_runtime_bundle_from_env,
 )
 from sleepagent.simulation.replay import (
-    ReplayWorkflowGolden,
     get_replay_scenario,
-    load_workflow_goldens,
     replay_scenario_ids,
 )
+from tests.support.simulation_verifier.workflow_goldens import (
+    ReplayWorkflowGolden,
+    load_workflow_goldens,
+)
+from tests.support.runtime_fixtures import build_test_radar_runtime
 
 
 GOLDENS = load_workflow_goldens()
@@ -61,7 +63,7 @@ def test_each_replay_demo_cli_uses_canonical_product_episode(
     persistence = RadarPersistenceStore.connect_sqlite(
         sqlite3.connect(":memory:", check_same_thread=False)
     )
-    runtime = RadarApiRuntime(
+    runtime = build_test_radar_runtime(
         product_runtime=build_product_runtime_bundle_from_env(
             persistence_store=persistence,
         )

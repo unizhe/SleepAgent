@@ -1,3 +1,5 @@
+"""Test-only driver for retired Radar workflow regression coverage."""
+
 from __future__ import annotations
 
 import argparse
@@ -6,11 +8,9 @@ import sys
 from collections.abc import Sequence
 from typing import Any, TextIO
 
-from sleepagent.product_device.provider import ReplayRadarProvider
-from sleepagent.simulation.replay import (
-    default_replay_scenario_id,
-    get_replay_scenario,
-    replay_scenario_ids,
+from sleepagent.product_device.provider import (
+    SUPPORTED_REPLAY_SCENARIOS,
+    ReplayRadarProvider,
 )
 from sleepagent.product_runtime.task_runtime import (
     InvalidTaskTransition,
@@ -34,8 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_demo = subparsers.add_parser("run-demo")
     run_demo.add_argument(
         "--scenario",
-        choices=replay_scenario_ids(),
-        default=default_replay_scenario_id(),
+        choices=SUPPORTED_REPLAY_SCENARIOS,
+        default="normal_night",
     )
     run_demo.add_argument("--format", choices=("pretty", "json", "jsonl"), default="pretty")
 
@@ -63,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_goal.add_argument("--actor-id", default="cli-user")
     run_goal.add_argument(
         "--scenario",
-        choices=replay_scenario_ids(),
-        default=default_replay_scenario_id(),
+        choices=SUPPORTED_REPLAY_SCENARIOS,
+        default="normal_night",
         help="development data adapter only; never a planning input",
     )
     run_goal.add_argument("--format", choices=("pretty", "json", "jsonl"), default="pretty")
@@ -102,29 +102,27 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     *,
-    runtime: Any | None = None,
+    runtime: Any,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     out = stdout or sys.stdout
     err = stderr or sys.stderr
-    resolved_runtime = runtime or _default_runtime()
-
     try:
         if args.command == "run-demo":
             return _run_demo(
-                resolved_runtime,
+                runtime,
                 scenario_id=args.scenario,
                 output_format=args.format,
                 stdout=out,
             )
         if args.command == "run-goal":
-            return _run_goal(resolved_runtime, args=args, stdout=out)
+            return _run_goal(runtime, args=args, stdout=out)
         if args.command == "answer-input":
-            return _answer_input(resolved_runtime, args=args, stdout=out)
+            return _answer_input(runtime, args=args, stdout=out)
         return _inspect_task(
-            resolved_runtime,
+            runtime,
             task_id=args.task_id,
             output_format=args.format,
             retry=args.retry,
@@ -257,6 +255,8 @@ def _answer_input(runtime: Any, *, args: Any, stdout: TextIO) -> int:
 def build_demo_payload(scenario_id: str) -> dict[str, object]:
     """Keep the deterministic provider fixture available for adapter tests."""
 
+    from sleepagent.simulation.replay import get_replay_scenario
+
     scenario = get_replay_scenario(scenario_id)
     provider = ReplayRadarProvider(scenario=scenario_id)
     device = provider.list_devices()[0]
@@ -378,17 +378,6 @@ def _exit_for_trace(trace: dict[str, Any]) -> int:
     )
 
 
-def _default_runtime() -> Any:
-    from sleepagent.product_api.diagnostics.http import RadarApiRuntime
-    from sleepagent.product_runtime.runtime_factory import (
-        build_product_runtime_bundle_from_env,
-    )
-
-    return RadarApiRuntime(
-        product_runtime=build_product_runtime_bundle_from_env()
-    )
-
-
 __all__ = [
     "EXIT_INVALID_STATE",
     "EXIT_NOT_FOUND",
@@ -399,7 +388,3 @@ __all__ = [
     "build_parser",
     "main",
 ]
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from typing import Annotated, Any, Literal
 
@@ -30,7 +29,6 @@ from sleepagent.product_runtime.habit_profile import (
     HabitProfileReadResult,
 )
 from sleepagent.product_runtime.runtime_factory import (
-    DEPLOYMENT_MODE_ENV,
     ProductRuntimeBundle,
     build_product_runtime_bundle_from_env,
 )
@@ -53,17 +51,11 @@ def build_persistent_habit_profile_application(
 ) -> HabitProfileApplicationService:
     """Compatibility facade over the canonical Product runtime factory."""
 
-    production = (
-        os.getenv(DEPLOYMENT_MODE_ENV, "development").strip().lower()
-        == "production"
-    )
-    persistence: RadarPersistenceStore | None = None
-    if connection is not None:
-        if production:
-            raise RuntimeError(
-                "production Habit Profile authority cannot use SQLite"
-            )
-        persistence = RadarPersistenceStore.connect_sqlite(connection)
+    if connection is None:
+        raise RuntimeError(
+            "retired Habit Profile compatibility requires explicit test storage"
+        )
+    persistence = RadarPersistenceStore.connect_sqlite(connection)
     return build_product_runtime_bundle_from_env(
         persistence_store=persistence,
         human_decisions=human_decisions,
@@ -72,19 +64,26 @@ def build_persistent_habit_profile_application(
 
 _RUNTIME_BUNDLE: ProductRuntimeBundle | None = None
 _APPLICATION: HabitProfileApplicationService | None = None
+_API_KEY: str | None = None
 
 
-def configure_habit_profile_runtime(bundle: ProductRuntimeBundle) -> None:
+def configure_habit_profile_runtime(
+    bundle: ProductRuntimeBundle,
+    *,
+    api_key: str | None = None,
+) -> None:
     """Bind this transport to an already composed Product runtime bundle."""
 
-    global _APPLICATION, _RUNTIME_BUNDLE
+    global _API_KEY, _APPLICATION, _RUNTIME_BUNDLE
     _RUNTIME_BUNDLE = bundle
     _APPLICATION = bundle.habit_application
+    if api_key is not None:
+        _API_KEY = api_key
 
 
 def _runtime_bundle() -> ProductRuntimeBundle:
     if _RUNTIME_BUNDLE is None:
-        configure_habit_profile_runtime(build_product_runtime_bundle_from_env())
+        raise RuntimeError("retired Habit Profile runtime is not configured")
     assert _RUNTIME_BUNDLE is not None
     return _RUNTIME_BUNDLE
 
@@ -96,25 +95,6 @@ def _application() -> HabitProfileApplicationService:
     return application
 
 
-def reset_habit_profile_api_for_tests(
-    connection: sqlite3.Connection | None = None,
-) -> None:
-    test_connection = (
-        connection
-        if connection is not None
-        else sqlite3.connect(
-            ":memory:",
-            check_same_thread=False,
-        )
-    )
-    persistence = RadarPersistenceStore.connect_sqlite(test_connection)
-    configure_habit_profile_runtime(
-        build_product_runtime_bundle_from_env(
-            persistence_store=persistence,
-        )
-    )
-
-
 async def _authenticated_binding(
     request: Request,
     x_actor_id: Annotated[str | None, Header()] = None,
@@ -122,7 +102,7 @@ async def _authenticated_binding(
     x_subject_id: Annotated[str | None, Header()] = None,
     x_authorization_scopes: Annotated[str | None, Header()] = None,
 ) -> AuthenticatedBinding:
-    expected = os.getenv(PRODUCT_API_KEY_ENV)
+    expected = _API_KEY
     if not expected:
         raise HTTPException(
             status_code=503,
@@ -292,6 +272,5 @@ __all__ = [
     "PRODUCT_API_KEY_ENV",
     "build_persistent_habit_profile_application",
     "configure_habit_profile_runtime",
-    "reset_habit_profile_api_for_tests",
     "router",
 ]

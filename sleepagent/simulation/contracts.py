@@ -13,7 +13,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from sleepagent.sleep_domain.contracts import ObservationType, SleepObservation
+from sleepagent.sleep_domain.contracts import (
+    AlertLifecycleState,
+    AlertSeverity,
+    ObservationType,
+    SleepObservation,
+)
 
 
 NonEmptyStr = Annotated[str, Field(min_length=1)]
@@ -239,12 +244,25 @@ class CorrectionOverlay(SimulationContract):
         return self
 
 
+class VendorAlertOverlay(SimulationContract):
+    """One external vendor alert fact; it contains no risk verdict."""
+
+    overlay_type: Literal["vendor_alert"] = "vendor_alert"
+    night_index: int = Field(ge=1)
+    offset_minutes: int = Field(ge=0)
+    alert_code: NonEmptyStr
+    severity: AlertSeverity
+    lifecycle_state: AlertLifecycleState = AlertLifecycleState.ACTIVE
+    vendor_alert_instance_id: NonEmptyStr
+
+
 ScenarioOverlay: TypeAlias = Annotated[
     LowCoverageOverlay
     | MissingMetricOverlay
     | OfflineOverlay
     | LateReportOverlay
-    | CorrectionOverlay,
+    | CorrectionOverlay
+    | VendorAlertOverlay,
     Field(discriminator="overlay_type"),
 ]
 
@@ -415,4 +433,5 @@ __all__ = [
     "SyntheticActor",
     "SyntheticAuthorization",
     "SyntheticIdentity",
+    "VendorAlertOverlay",
 ]

@@ -264,6 +264,12 @@ def test_runtime_distribution_excludes_verifier_oracle_package() -> None:
     runtime_patterns = package_data["sleepagent.simulation.fixtures"]
 
     assert runtime_patterns == ["README.md", "scenarios/*/scenario.json"]
+    assert "sleepagent.simulation.replay" not in package_data
+    assert not any(
+        "golden" in pattern or "expected" in pattern or "oracle" in pattern
+        for patterns in package_data.values()
+        for pattern in patterns
+    )
     assert all("simulation_verifier" not in pattern for pattern in runtime_patterns)
     assert not any(
         "simulation_verifier" in path.read_text(encoding="utf-8")

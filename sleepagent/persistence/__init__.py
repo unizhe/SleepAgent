@@ -28,6 +28,7 @@ from sleepagent.persistence.vector_store import (
 )
 from sleepagent.persistence.uow import (
     AuthorityResolutionScope,
+    DemoControlScope,
     PoolConfiguration,
     PostgresUnitOfWork,
     PsycopgPoolProvider,
@@ -57,6 +58,7 @@ __all__ = [
     "VectorDocument",
     "VectorStore",
     "AuthorityResolutionScope",
+    "DemoControlScope",
     "UnitOfWorkFactory",
     "UowScope",
     "WorkerClaimScope",

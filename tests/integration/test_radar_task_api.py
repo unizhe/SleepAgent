@@ -14,7 +14,6 @@ from sleepagent.product_api.diagnostics.http import (
     RADAR_AGENT_DEV_MODE_ENV,
     RadarApiRuntime,
     RadarTaskCreateRequest,
-    reset_radar_api_runtime_for_tests,
 )
 from sleepagent.product_runtime.contracts import (
     CommunicationDraft,
@@ -46,6 +45,10 @@ from sleepagent.persistence import (
     RadarPersistenceStore,
     RadarSubject,
     RadarUserRoleBinding,
+)
+from tests.support.runtime_fixtures import (
+    build_test_radar_runtime,
+    configure_test_radar_runtime as reset_radar_api_runtime_for_tests,
 )
 
 
@@ -864,7 +867,7 @@ def test_create_contract_rejects_legacy_and_dynamic_agent_paths(
 ) -> None:
     monkeypatch.setenv(RADAR_AGENT_DEV_MODE_ENV, "false")
     connection = sqlite3.connect(":memory:", check_same_thread=False)
-    runtime = RadarApiRuntime(
+    runtime = build_test_radar_runtime(
         product_runtime=_product_runtime_with_runner(
             RecordingProductRunner(),
             connection=connection,

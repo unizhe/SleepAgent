@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Callable
+from typing import Annotated, Callable, cast
 
 from fastapi import APIRouter, Header, Query, Request
 
 from sleepagent.product_api.contracts import (
     AcceptedOperationResponse,
+    ErrorResponse,
     FeedbackRequest,
     InteractionAnswerRequest,
     InteractionAskRequest,
     InteractionDecisionRequest,
     InteractionStartRequest,
     InteractionStatusResponse,
-    ProjectionResponse,
+    ProductCareResponse,
+    ProductRecordsResponse,
+    ProductSleepTodayResponse,
+    ProductTrendsResponse,
 )
 from sleepagent.product_api.service import ProductApiService
 
@@ -23,72 +27,82 @@ ProductServiceProvider = Callable[[], ProductApiService]
 
 
 def create_product_router(provider: ProductServiceProvider) -> APIRouter:
-    router = APIRouter(prefix="/product/sleep", tags=["Product sleep"])
+    router = APIRouter(
+        prefix="/product/sleep",
+        tags=["Product sleep"],
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            413: {
+                "model": ErrorResponse,
+                "description": "Content Too Large",
+            },
+            422: {
+                "model": ErrorResponse,
+                "description": "Unprocessable Content",
+            },
+            501: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
 
-    @router.get("/today", response_model=ProjectionResponse)
+    @router.get("/today", response_model=ProductSleepTodayResponse)
     def today(
         request: Request,
-        limit: Annotated[int, Query(ge=1, le=31)] = 1,
-        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
-    ) -> ProjectionResponse:
-        return provider().query(
-            request,
-            kind="today",
-            limit=limit,
-            cursor=cursor,
-        )
+    ) -> ProductSleepTodayResponse:
+        return provider().today(request)
 
-    @router.get("/trends", response_model=ProjectionResponse)
+    @router.get("/trends", response_model=ProductTrendsResponse)
     def trends(
         request: Request,
         limit: Annotated[int, Query(ge=1, le=90)] = 30,
         cursor: Annotated[str | None, Query(max_length=2_000)] = None,
-    ) -> ProjectionResponse:
-        return provider().query(
+    ) -> ProductTrendsResponse:
+        return cast(ProductTrendsResponse, provider().query(
             request,
             kind="trends",
             limit=limit,
             cursor=cursor,
-        )
+        ))
 
-    @router.get("/care", response_model=ProjectionResponse)
+    @router.get("/care", response_model=ProductCareResponse)
     def care(
         request: Request,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         cursor: Annotated[str | None, Query(max_length=2_000)] = None,
-    ) -> ProjectionResponse:
-        return provider().query(
+    ) -> ProductCareResponse:
+        return cast(ProductCareResponse, provider().query(
             request,
             kind="care",
             limit=limit,
             cursor=cursor,
-        )
+        ))
 
-    @router.get("/records", response_model=ProjectionResponse)
+    @router.get("/records", response_model=ProductRecordsResponse)
     def records(
         request: Request,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         cursor: Annotated[str | None, Query(max_length=2_000)] = None,
-    ) -> ProjectionResponse:
-        return provider().query(
+    ) -> ProductRecordsResponse:
+        return cast(ProductRecordsResponse, provider().query(
             request,
             kind="records",
             limit=limit,
             cursor=cursor,
-        )
+        ))
 
     @router.post(
         "/interactions/start",
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def start(
+    async def start(
         payload: InteractionStartRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -97,6 +111,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=payload.episode_revision_id,
+            request_body=await request.body(),
         )
 
     @router.post(
@@ -104,14 +119,11 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def ask(
+    async def ask(
         interaction_id: str,
         payload: InteractionAskRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -120,6 +132,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=interaction_id,
+            request_body=await request.body(),
         )
 
     @router.get(
@@ -137,14 +150,11 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def answer(
+    async def answer(
         interaction_id: str,
         payload: InteractionAnswerRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -155,6 +165,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=interaction_id,
+            request_body=await request.body(),
         )
 
     @router.post(
@@ -162,14 +173,11 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def confirm(
+    async def confirm(
         interaction_id: str,
         payload: InteractionDecisionRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -180,6 +188,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=interaction_id,
+            request_body=await request.body(),
         )
 
     @router.post(
@@ -187,14 +196,11 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def decline(
+    async def decline(
         interaction_id: str,
         payload: InteractionDecisionRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -205,6 +211,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=interaction_id,
+            request_body=await request.body(),
         )
 
     @router.post(
@@ -212,13 +219,10 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         response_model=AcceptedOperationResponse,
         status_code=202,
     )
-    def feedback(
+    async def feedback(
         payload: FeedbackRequest,
         request: Request,
-        idempotency_key: Annotated[
-            str | None,
-            Header(alias="Idempotency-Key"),
-        ] = None,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
     ) -> AcceptedOperationResponse:
         return provider().submit(
             request,
@@ -227,6 +231,7 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=payload.interaction_id or payload.episode_revision_id,
+            request_body=await request.body(),
         )
 
     return router

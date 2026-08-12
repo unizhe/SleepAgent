@@ -29,7 +29,7 @@ from sleepagent.sleep_api.auth import (
     RotatingServiceCredential,
     SleepApiAuthenticator,
 )
-from sleepagent.sleep_api.app import create_sleep_api_app
+from tests.support.runtime_fixtures import create_test_sleep_api_app
 from sleepagent.sleep_api.contracts import PublicActorRole
 from sleepagent.sleep_api.persistence import SleepApiPersistence
 from sleepagent.sleep_api.runtime import build_sleep_api_runtime_from_env
@@ -151,9 +151,8 @@ class ApiEnvironment:
     revision_id: str | None = None
 
     def app(self) -> FastAPI:
-        return create_sleep_api_app(
+        return create_test_sleep_api_app(
             lambda: self.runtime,
-            manage_worker=False,
         )
 
 
@@ -544,6 +543,9 @@ def _headers(
         "method": method,
         "path": path,
         "body_sha256": hashlib.sha256(_body_bytes(body)).hexdigest(),
+        "authorization_epoch": 1,
+        "privacy_epoch": 1,
+        "retrieval_policy_epoch": 1,
     }
     claims.update(claim_updates or {})
     encoded_header = _b64url(
@@ -1150,6 +1152,7 @@ def test_authorization_epoch_cache_isolates_role_scope_and_revocation(
             role=PublicActorRole.FAMILY,
             scopes={"sleep:view:family"},
             jti="cache-family-epoch-2",
+            claim_updates={"authorization_epoch": 2},
         ),
     )
     assert refreshed.status_code == 200
@@ -1172,6 +1175,7 @@ def test_authorization_epoch_cache_isolates_role_scope_and_revocation(
             role=PublicActorRole.FAMILY,
             scopes={"sleep:view:family"},
             jti="cache-family-revoked",
+            claim_updates={"authorization_epoch": 3},
         ),
     )
     assert revoked.status_code == 403
@@ -1268,6 +1272,7 @@ def test_pagination_cursor_is_bound_to_actor_role_scope_and_authorization_epoch(
             role=PublicActorRole.FAMILY,
             scopes={"sleep:episode:read"},
             jti="page-stale-epoch",
+            claim_updates={"authorization_epoch": 2},
         ),
     )
     assert stale_epoch.status_code == 403

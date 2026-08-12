@@ -25,7 +25,8 @@ Final proof commands and any environment-specific exceptions are recorded in the
 - `git diff --check`: passed
 - hash-locked dependency install in a temporary environment: passed
 - isolated wheel build and install/import: passed; 185 entries, no historical namespace/shadow
-- console scripts (`radar-agent`, `sleepagent-migrate`): passed
+- console script (`sleepagent-migrate`): passed; the retired `radar-agent`
+  console entrypoint was removed during the backend engineering rebase.
 - Compose configuration: passed with `.env.test.example`
 - frontend typecheck and production build: passed
 - strict mypy: ran and reported 569 existing errors in 77 files; retained as technical debt because correcting them is outside the directory cleanup
