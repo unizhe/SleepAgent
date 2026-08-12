@@ -1,0 +1,5577 @@
+{
+  "components": {
+    "schemas": {
+      "ActivateMonitoringRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "device_binding_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Binding Id"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "schema_version": {
+            "const": "activate_monitoring_request.v1",
+            "default": "activate_monitoring_request.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "title": "ActivateMonitoringRequest",
+        "type": "object"
+      },
+      "CareActionRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "action_kind": {
+            "minLength": 1,
+            "title": "Action Kind",
+            "type": "string"
+          },
+          "care_action_id": {
+            "minLength": 1,
+            "title": "Care Action Id",
+            "type": "string"
+          },
+          "confirmed_at": {
+            "format": "date-time",
+            "title": "Confirmed At",
+            "type": "string"
+          },
+          "interaction_id": {
+            "minLength": 1,
+            "title": "Interaction Id",
+            "type": "string"
+          },
+          "record_type": {
+            "const": "care_action",
+            "default": "care_action",
+            "title": "Record Type",
+            "type": "string"
+          },
+          "source_analysis_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Analysis Revision Id"
+          },
+          "state": {
+            "enum": [
+              "confirmed_pending_delivery",
+              "active",
+              "completed",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "care_action_id",
+          "interaction_id",
+          "state",
+          "action_kind",
+          "confirmed_at",
+          "updated_at"
+        ],
+        "title": "CareActionRecord",
+        "type": "object"
+      },
+      "CareFollowupRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "night_episode_id": {
+            "minLength": 1,
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "record_type": {
+            "const": "care_followup",
+            "default": "care_followup",
+            "title": "Record Type",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending_feedback",
+              "following_up",
+              "completed",
+              "ended"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "night_episode_id",
+          "state",
+          "updated_at"
+        ],
+        "title": "CareFollowupRecord",
+        "type": "object"
+      },
+      "CurrentRiskResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "data_sufficiency": {
+            "title": "Data Sufficiency",
+            "type": "string"
+          },
+          "health_escalation_allowed": {
+            "title": "Health Escalation Allowed",
+            "type": "boolean"
+          },
+          "night_episode_id": {
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "policy_version": {
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "risk_state": {
+            "title": "Risk State",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "current_risk_response.v1",
+            "default": "current_risk_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source_scope": {
+            "$ref": "#/components/schemas/CurrentRiskSourceScope"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_id",
+          "night_episode_id",
+          "risk_state",
+          "data_sufficiency",
+          "source_scope",
+          "policy_version",
+          "observed_at",
+          "reason_codes",
+          "health_escalation_allowed",
+          "committed_at"
+        ],
+        "title": "CurrentRiskResponse",
+        "type": "object"
+      },
+      "CurrentRiskSourceScope": {
+        "additionalProperties": false,
+        "properties": {
+          "device_count": {
+            "minimum": 0.0,
+            "title": "Device Count",
+            "type": "integer"
+          },
+          "night_episode_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Night Episode Revision Id"
+          },
+          "observation_count": {
+            "minimum": 0.0,
+            "title": "Observation Count",
+            "type": "integer"
+          },
+          "observation_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Observation Types",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "current_risk_source_scope.v1",
+            "default": "current_risk_source_scope.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "window_end_at": {
+            "format": "date-time",
+            "title": "Window End At",
+            "type": "string"
+          },
+          "window_start_at": {
+            "format": "date-time",
+            "title": "Window Start At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "night_episode_revision_id",
+          "observation_types",
+          "observation_count",
+          "device_count",
+          "window_start_at",
+          "window_end_at"
+        ],
+        "title": "CurrentRiskSourceScope",
+        "type": "object"
+      },
+      "DeactivateMonitoringRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "schema_version": {
+            "const": "deactivate_monitoring_request.v1",
+            "default": "deactivate_monitoring_request.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "title": "DeactivateMonitoringRequest",
+        "type": "object"
+      },
+      "DoctorTodayContent": {
+        "additionalProperties": false,
+        "properties": {
+          "audience": {
+            "const": "doctor",
+            "default": "doctor",
+            "title": "Audience",
+            "type": "string"
+          },
+          "context_notice": {
+            "minLength": 1,
+            "title": "Context Notice",
+            "type": "string"
+          },
+          "evidence_refs": {
+            "default": [],
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "summary_text": {
+            "minLength": 1,
+            "title": "Summary Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary_text",
+          "context_notice"
+        ],
+        "title": "DoctorTodayContent",
+        "type": "object"
+      },
+      "ElderTodayContent": {
+        "additionalProperties": false,
+        "properties": {
+          "audience": {
+            "const": "elder",
+            "default": "elder",
+            "title": "Audience",
+            "type": "string"
+          },
+          "context_notice": {
+            "minLength": 1,
+            "title": "Context Notice",
+            "type": "string"
+          },
+          "summary_text": {
+            "minLength": 1,
+            "title": "Summary Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary_text",
+          "context_notice"
+        ],
+        "title": "ElderTodayContent",
+        "type": "object"
+      },
+      "EpisodeAssignmentBasis": {
+        "enum": [
+          "observed_wake",
+          "vendor_wake_date",
+          "deadline_fallback",
+          "provisional",
+          "legacy_unknown"
+        ],
+        "title": "EpisodeAssignmentBasis",
+        "type": "string"
+      },
+      "EventPollResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_expires_at": {
+            "format": "date-time",
+            "title": "Cursor Expires At",
+            "type": "string"
+          },
+          "delivery_semantics": {
+            "const": "at_least_once",
+            "default": "at_least_once",
+            "title": "Delivery Semantics",
+            "type": "string"
+          },
+          "event_schema_generation": {
+            "title": "Event Schema Generation",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ExternalDomainEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "title": "Next Cursor",
+            "type": "string"
+          },
+          "ordering_semantics": {
+            "const": "per_aggregate_sequence_only_no_global_business_order",
+            "default": "per_aggregate_sequence_only_no_global_business_order",
+            "title": "Ordering Semantics",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "event_poll_response.v1",
+            "default": "event_poll_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_schema_generation",
+          "events",
+          "next_cursor",
+          "cursor_expires_at",
+          "has_more"
+        ],
+        "title": "EventPollResponse",
+        "type": "object"
+      },
+      "ExternalDomainEvent": {
+        "additionalProperties": false,
+        "description": "Role-minimized projection of an immutable committed domain event.",
+        "properties": {
+          "aggregate_id": {
+            "title": "Aggregate Id",
+            "type": "string"
+          },
+          "aggregate_version": {
+            "minimum": 1.0,
+            "title": "Aggregate Version",
+            "type": "integer"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "title": "Event Type",
+            "type": "string"
+          },
+          "event_version": {
+            "title": "Event Version",
+            "type": "string"
+          },
+          "night_episode_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Night Episode Id"
+          },
+          "night_episode_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Night Episode Revision Id"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id"
+          },
+          "payload": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Payload",
+            "type": "object"
+          },
+          "per_aggregate_sequence": {
+            "minimum": 1.0,
+            "title": "Per Aggregate Sequence",
+            "type": "integer"
+          },
+          "persisted_at": {
+            "format": "date-time",
+            "title": "Persisted At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "sleep_domain_event.v1",
+            "default": "sleep_domain_event.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "event_type",
+          "event_version",
+          "aggregate_id",
+          "aggregate_version",
+          "per_aggregate_sequence",
+          "subject_id",
+          "occurred_at",
+          "persisted_at"
+        ],
+        "title": "ExternalDomainEvent",
+        "type": "object"
+      },
+      "FamilyTodayContent": {
+        "additionalProperties": false,
+        "properties": {
+          "audience": {
+            "const": "family",
+            "default": "family",
+            "title": "Audience",
+            "type": "string"
+          },
+          "context_notice": {
+            "minLength": 1,
+            "title": "Context Notice",
+            "type": "string"
+          },
+          "summary_text": {
+            "minLength": 1,
+            "title": "Summary Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary_text",
+          "context_notice"
+        ],
+        "title": "FamilyTodayContent",
+        "type": "object"
+      },
+      "InteractionAnswerRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Answer",
+            "type": "string"
+          },
+          "answer_handle": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Answer Handle",
+            "type": "string"
+          }
+        },
+        "required": [
+          "answer_handle",
+          "answer"
+        ],
+        "title": "InteractionAnswerRequest",
+        "type": "object"
+      },
+      "InteractionAskRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "InteractionAskRequest",
+        "type": "object"
+      },
+      "InteractionDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation_handle": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Confirmation Handle",
+            "type": "string"
+          },
+          "reason_code": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason Code"
+          }
+        },
+        "required": [
+          "confirmation_handle"
+        ],
+        "title": "InteractionDecisionRequest",
+        "type": "object"
+      },
+      "InteractionStartRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "episode_revision_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episode Revision Id"
+          },
+          "intent": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Intent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "intent"
+        ],
+        "title": "InteractionStartRequest",
+        "type": "object"
+      },
+      "InteractionStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Handle"
+          },
+          "care_action_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Care Action Id"
+          },
+          "confirmation_handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Handle"
+          },
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "delivery_intent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Intent Id"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "human_decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Human Decision Id"
+          },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Id"
+          },
+          "interaction_revision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Revision"
+          },
+          "interaction_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction State"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "product_operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Operation Id"
+          },
+          "result_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Ref"
+          },
+          "retryable": {
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": "product_interaction_status.v1",
+            "default": "product_interaction_status.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PublicOperationState"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "operation_id",
+          "state",
+          "updated_at"
+        ],
+        "title": "InteractionStatusResponse",
+        "type": "object"
+      },
+      "LifecycleResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_night_episode_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Night Episode Id"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "data_quality_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Quality State"
+          },
+          "data_sufficiency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Sufficiency"
+          },
+          "monitoring_state": {
+            "$ref": "#/components/schemas/PublicMonitoringState"
+          },
+          "schema_version": {
+            "const": "lifecycle_response.v1",
+            "default": "lifecycle_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "service_state": {
+            "$ref": "#/components/schemas/PublicServiceState"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_id",
+          "service_state",
+          "monitoring_state",
+          "active_night_episode_id",
+          "data_quality_state",
+          "data_sufficiency",
+          "committed_at"
+        ],
+        "title": "LifecycleResponse",
+        "type": "object"
+      },
+      "NightEpisodePageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/NightEpisodeSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "page": {
+            "$ref": "#/components/schemas/PageMetadata"
+          },
+          "schema_version": {
+            "const": "night_episode_page_response.v1",
+            "default": "night_episode_page_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "page"
+        ],
+        "title": "NightEpisodePageResponse",
+        "type": "object"
+      },
+      "NightEpisodeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NightEpisodeRevisionSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "const": "night_episode_response.v1",
+            "default": "night_episode_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/NightEpisodeSummary"
+          }
+        },
+        "required": [
+          "summary",
+          "revision"
+        ],
+        "title": "NightEpisodeResponse",
+        "type": "object"
+      },
+      "NightEpisodeRevisionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "assignment_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed_wake",
+                  "vendor_wake_date",
+                  "deadline_fallback"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Basis"
+          },
+          "assignment_estimated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Estimated"
+          },
+          "bed_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Local Date"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data_sufficiency": {
+            "title": "Data Sufficiency",
+            "type": "string"
+          },
+          "date_confidence": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed",
+                  "vendor_asserted",
+                  "estimated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Confidence"
+          },
+          "episode_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episode Local Date"
+          },
+          "night_episode_id": {
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "night_episode_revision_id": {
+            "title": "Night Episode Revision Id",
+            "type": "string"
+          },
+          "parent_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Revision Id"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Flags",
+            "type": "array"
+          },
+          "revision_cause": {
+            "title": "Revision Cause",
+            "type": "string"
+          },
+          "revision_number": {
+            "title": "Revision Number",
+            "type": "integer"
+          },
+          "schema_version": {
+            "const": "night_episode_revision_response.v1",
+            "default": "night_episode_revision_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "wake_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wake Local Date"
+          }
+        },
+        "required": [
+          "night_episode_id",
+          "night_episode_revision_id",
+          "subject_id",
+          "revision_number",
+          "parent_revision_id",
+          "revision_cause",
+          "data_sufficiency",
+          "quality_flags",
+          "created_at"
+        ],
+        "title": "NightEpisodeRevisionSnapshot",
+        "type": "object"
+      },
+      "NightEpisodeSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "assignment_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed_wake",
+                  "vendor_wake_date",
+                  "deadline_fallback"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Basis"
+          },
+          "assignment_estimated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Estimated"
+          },
+          "bed_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Local Date"
+          },
+          "collection_end_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collection End At"
+          },
+          "collection_start_at": {
+            "format": "date-time",
+            "title": "Collection Start At",
+            "type": "string"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "current_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision Id"
+          },
+          "current_revision_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision Number"
+          },
+          "data_sufficiency": {
+            "title": "Data Sufficiency",
+            "type": "string"
+          },
+          "date_confidence": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed",
+                  "vendor_asserted",
+                  "estimated"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date Confidence"
+          },
+          "episode_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episode Local Date"
+          },
+          "lifecycle_state": {
+            "title": "Lifecycle State",
+            "type": "string"
+          },
+          "local_sleep_date": {
+            "deprecated": true,
+            "description": "Deprecated compatibility date; use episode_local_date and assignment_basis for wake-date semantics.",
+            "format": "date",
+            "title": "Local Sleep Date",
+            "type": "string"
+          },
+          "night_episode_id": {
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "quality_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quality Flags",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "night_episode_summary.v1",
+            "default": "night_episode_summary.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "timezone_name": {
+            "title": "Timezone Name",
+            "type": "string"
+          },
+          "wake_local_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wake Local Date"
+          }
+        },
+        "required": [
+          "night_episode_id",
+          "subject_id",
+          "local_sleep_date",
+          "timezone_name",
+          "collection_start_at",
+          "collection_end_at",
+          "lifecycle_state",
+          "data_sufficiency",
+          "quality_flags",
+          "current_revision_number",
+          "current_revision_id",
+          "committed_at"
+        ],
+        "title": "NightEpisodeSummary",
+        "type": "object"
+      },
+      "OperationStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "minimum": 0.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "operation_type": {
+            "title": "Operation Type",
+            "type": "string"
+          },
+          "result_resource_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Resource Id"
+          },
+          "schema_version": {
+            "const": "operation_status_response.v1",
+            "default": "operation_status_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PublicOperationStatus"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "operation_type",
+          "subject_id",
+          "status",
+          "attempt",
+          "result_resource_id",
+          "error_code",
+          "correlation_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OperationStatusResponse",
+        "type": "object"
+      },
+      "PageMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "schema_version": {
+            "const": "page.v1",
+            "default": "page.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "title": "PageMetadata",
+        "type": "object"
+      },
+      "ProductCareResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CareActionRecord"
+                },
+                {
+                  "$ref": "#/components/schemas/CareFollowupRecord"
+                }
+              ]
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProductRole"
+          },
+          "schema_version": {
+            "const": "product_sleep_care.v1",
+            "default": "product_sleep_care.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_ref": {
+            "minLength": 1,
+            "title": "Subject Ref",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "subject_ref",
+          "role",
+          "items"
+        ],
+        "title": "ProductCareResponse",
+        "type": "object"
+      },
+      "ProductRecordsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SleepRecord"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProductRole"
+          },
+          "schema_version": {
+            "const": "product_sleep_records.v1",
+            "default": "product_sleep_records.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_ref": {
+            "minLength": 1,
+            "title": "Subject Ref",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "subject_ref",
+          "role",
+          "items"
+        ],
+        "title": "ProductRecordsResponse",
+        "type": "object"
+      },
+      "ProductRole": {
+        "enum": [
+          "elder",
+          "family",
+          "doctor"
+        ],
+        "title": "ProductRole",
+        "type": "string"
+      },
+      "ProductSleepTodayNoData": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_revision_id": {
+            "title": "Analysis Revision Id",
+            "type": "null"
+          },
+          "assignment_basis": {
+            "title": "Assignment Basis",
+            "type": "null"
+          },
+          "committed_at": {
+            "title": "Committed At",
+            "type": "null"
+          },
+          "content": {
+            "title": "Content",
+            "type": "null"
+          },
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "episode_id": {
+            "title": "Episode Id",
+            "type": "null"
+          },
+          "episode_local_date": {
+            "title": "Episode Local Date",
+            "type": "null"
+          },
+          "episode_revision_id": {
+            "title": "Episode Revision Id",
+            "type": "null"
+          },
+          "projection_id": {
+            "title": "Projection Id",
+            "type": "null"
+          },
+          "projection_version": {
+            "title": "Projection Version",
+            "type": "null"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProductRole"
+          },
+          "schema_version": {
+            "const": "product_sleep_today.v1",
+            "default": "product_sleep_today.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "no_data",
+            "default": "no_data",
+            "title": "State",
+            "type": "string"
+          },
+          "subject_ref": {
+            "minLength": 1,
+            "title": "Subject Ref",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "subject_ref",
+          "role"
+        ],
+        "title": "ProductSleepTodayNoData",
+        "type": "object"
+      },
+      "ProductSleepTodayProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_revision_id": {
+            "minLength": 1,
+            "title": "Analysis Revision Id",
+            "type": "string"
+          },
+          "assignment_basis": {
+            "$ref": "#/components/schemas/EpisodeAssignmentBasis"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "content": {
+            "discriminator": {
+              "mapping": {
+                "doctor": "#/components/schemas/DoctorTodayContent",
+                "elder": "#/components/schemas/ElderTodayContent",
+                "family": "#/components/schemas/FamilyTodayContent"
+              },
+              "propertyName": "audience"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ElderTodayContent"
+              },
+              {
+                "$ref": "#/components/schemas/FamilyTodayContent"
+              },
+              {
+                "$ref": "#/components/schemas/DoctorTodayContent"
+              }
+            ],
+            "title": "Content"
+          },
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "episode_id": {
+            "minLength": 1,
+            "title": "Episode Id",
+            "type": "string"
+          },
+          "episode_local_date": {
+            "format": "date",
+            "title": "Episode Local Date",
+            "type": "string"
+          },
+          "episode_revision_id": {
+            "minLength": 1,
+            "title": "Episode Revision Id",
+            "type": "string"
+          },
+          "projection_id": {
+            "minLength": 1,
+            "title": "Projection Id",
+            "type": "string"
+          },
+          "projection_version": {
+            "minimum": 1.0,
+            "title": "Projection Version",
+            "type": "integer"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProductRole"
+          },
+          "schema_version": {
+            "const": "product_sleep_today.v1",
+            "default": "product_sleep_today.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "degraded",
+              "blocked"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "subject_ref": {
+            "minLength": 1,
+            "title": "Subject Ref",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "state",
+          "subject_ref",
+          "role",
+          "episode_id",
+          "episode_revision_id",
+          "episode_local_date",
+          "assignment_basis",
+          "analysis_revision_id",
+          "projection_id",
+          "projection_version",
+          "committed_at",
+          "content"
+        ],
+        "title": "ProductSleepTodayProjection",
+        "type": "object"
+      },
+      "ProductTrendsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TrendPoint"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProductRole"
+          },
+          "schema_version": {
+            "const": "product_sleep_trends.v1",
+            "default": "product_sleep_trends.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_ref": {
+            "minLength": 1,
+            "title": "Subject Ref",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "subject_ref",
+          "role",
+          "items"
+        ],
+        "title": "ProductTrendsResponse",
+        "type": "object"
+      },
+      "PublicActorRole": {
+        "enum": [
+          "elder",
+          "family",
+          "caregiver",
+          "doctor"
+        ],
+        "title": "PublicActorRole",
+        "type": "string"
+      },
+      "PublicErrorCode": {
+        "enum": [
+          "AUTHENTICATION_REQUIRED",
+          "INVALID_SERVICE_CREDENTIAL",
+          "INVALID_ACTOR_ASSERTION",
+          "ACTOR_ASSERTION_REPLAYED",
+          "AUTHORIZATION_DENIED",
+          "AUTHORIZATION_UNAVAILABLE",
+          "RESOURCE_NOT_FOUND",
+          "DATA_INSUFFICIENT",
+          "RESULT_PENDING",
+          "IDEMPOTENCY_CONFLICT",
+          "INVALID_REQUEST",
+          "OPERATION_CONFLICT",
+          "OPERATION_LEASE_LOST",
+          "BINDING_REQUIRED",
+          "INVALID_LIFECYCLE_TRANSITION",
+          "PROVIDER_UNAVAILABLE",
+          "CURSOR_RESYNC_REQUIRED",
+          "INTERNAL_ERROR"
+        ],
+        "title": "PublicErrorCode",
+        "type": "string"
+      },
+      "PublicMonitoringState": {
+        "enum": [
+          "active",
+          "dormant"
+        ],
+        "title": "PublicMonitoringState",
+        "type": "string"
+      },
+      "PublicOperationState": {
+        "enum": [
+          "accepted",
+          "running",
+          "waiting_for_input",
+          "succeeded",
+          "failed",
+          "blocked",
+          "reconciliation_required"
+        ],
+        "title": "PublicOperationState",
+        "type": "string"
+      },
+      "PublicOperationStatus": {
+        "enum": [
+          "pending",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "title": "PublicOperationStatus",
+        "type": "string"
+      },
+      "PublicServiceState": {
+        "enum": [
+          "active",
+          "follow_up",
+          "dormant"
+        ],
+        "title": "PublicServiceState",
+        "type": "string"
+      },
+      "ReanalysisRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "schema_version": {
+            "const": "reanalysis_request.v1",
+            "default": "reanalysis_request.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "title": "ReanalysisRequest",
+        "type": "object"
+      },
+      "RevocationTombstone": {
+        "additionalProperties": false,
+        "properties": {
+          "action_required": {
+            "const": "delete_local_authorized_cache",
+            "default": "delete_local_authorized_cache",
+            "title": "Action Required",
+            "type": "string"
+          },
+          "aggregate_id": {
+            "title": "Aggregate Id",
+            "type": "string"
+          },
+          "aggregate_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Aggregate Version",
+            "type": "integer"
+          },
+          "effective_at": {
+            "format": "date-time",
+            "title": "Effective At",
+            "type": "string"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "ACCESS_REVOKED_TOMBSTONE",
+            "default": "ACCESS_REVOKED_TOMBSTONE",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "per_aggregate_sequence": {
+            "const": 1,
+            "default": 1,
+            "title": "Per Aggregate Sequence",
+            "type": "integer"
+          },
+          "remote_recall_possible": {
+            "const": false,
+            "default": false,
+            "title": "Remote Recall Possible",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": "revocation_tombstone.v1",
+            "default": "revocation_tombstone.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "aggregate_id",
+          "subject_id",
+          "effective_at"
+        ],
+        "title": "RevocationTombstone",
+        "type": "object"
+      },
+      "RoleViewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_epoch": {
+            "minimum": 0.0,
+            "title": "Authorization Epoch",
+            "type": "integer"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "context_notice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Notice"
+          },
+          "execution_mode": {
+            "title": "Execution Mode",
+            "type": "string"
+          },
+          "failure_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failure Codes",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "night_episode_id": {
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "night_episode_revision_id": {
+            "title": "Night Episode Revision Id",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/PublicActorRole"
+          },
+          "schema_version": {
+            "const": "role_view_response.v1",
+            "default": "role_view_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_id",
+          "night_episode_id",
+          "night_episode_revision_id",
+          "role",
+          "status",
+          "execution_mode",
+          "content",
+          "context_notice",
+          "failure_codes",
+          "generated_at",
+          "authorization_epoch"
+        ],
+        "title": "RoleViewResponse",
+        "type": "object"
+      },
+      "SleepRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_revision_id": {
+            "minLength": 1,
+            "title": "Analysis Revision Id",
+            "type": "string"
+          },
+          "analysis_revision_number": {
+            "minimum": 1.0,
+            "title": "Analysis Revision Number",
+            "type": "integer"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "is_current": {
+            "title": "Is Current",
+            "type": "boolean"
+          },
+          "night_episode_id": {
+            "minLength": 1,
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "night_episode_revision_id": {
+            "minLength": 1,
+            "title": "Night Episode Revision Id",
+            "type": "string"
+          },
+          "parent_analysis_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Analysis Revision Id"
+          },
+          "projection_id": {
+            "minLength": 1,
+            "title": "Projection Id",
+            "type": "string"
+          },
+          "projection_state": {
+            "enum": [
+              "ready",
+              "degraded",
+              "blocked"
+            ],
+            "title": "Projection State",
+            "type": "string"
+          },
+          "projection_version": {
+            "minimum": 1.0,
+            "title": "Projection Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "analysis_revision_id",
+          "analysis_revision_number",
+          "night_episode_id",
+          "night_episode_revision_id",
+          "projection_id",
+          "projection_version",
+          "projection_state",
+          "is_current",
+          "committed_at"
+        ],
+        "title": "SleepRecord",
+        "type": "object"
+      },
+      "TrendPoint": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_revision_id": {
+            "minLength": 1,
+            "title": "Analysis Revision Id",
+            "type": "string"
+          },
+          "assignment_basis": {
+            "$ref": "#/components/schemas/EpisodeAssignmentBasis"
+          },
+          "committed_at": {
+            "format": "date-time",
+            "title": "Committed At",
+            "type": "string"
+          },
+          "episode_local_date": {
+            "format": "date",
+            "title": "Episode Local Date",
+            "type": "string"
+          },
+          "night_episode_id": {
+            "minLength": 1,
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "night_episode_revision_id": {
+            "minLength": 1,
+            "title": "Night Episode Revision Id",
+            "type": "string"
+          },
+          "projection_id": {
+            "minLength": 1,
+            "title": "Projection Id",
+            "type": "string"
+          },
+          "projection_state": {
+            "enum": [
+              "ready",
+              "degraded",
+              "blocked"
+            ],
+            "title": "Projection State",
+            "type": "string"
+          },
+          "sleep_window_minutes": {
+            "anyOf": [
+              {
+                "maximum": 1440.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sleep Window Minutes"
+          }
+        },
+        "required": [
+          "night_episode_id",
+          "night_episode_revision_id",
+          "episode_local_date",
+          "assignment_basis",
+          "analysis_revision_id",
+          "projection_id",
+          "projection_state",
+          "committed_at"
+        ],
+        "title": "TrendPoint",
+        "type": "object"
+      },
+      "sleepagent__product_api__contracts__AcceptedOperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "product_accepted_operation.v1",
+            "default": "product_accepted_operation.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "State",
+            "type": "string"
+          },
+          "status_url": {
+            "minLength": 1,
+            "title": "Status Url",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "operation_id",
+          "status_url"
+        ],
+        "title": "AcceptedOperationResponse",
+        "type": "object"
+      },
+      "sleepagent__product_api__contracts__ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "correlation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Id"
+          },
+          "data_mode": {
+            "enum": [
+              "live",
+              "replay"
+            ],
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": "product_error.v1",
+            "default": "product_error.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data_mode",
+          "synthetic_non_release",
+          "code",
+          "message"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "sleepagent__product_api__contracts__FeedbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "episode_revision_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episode Revision Id"
+          },
+          "event_at": {
+            "format": "date-time",
+            "title": "Event At",
+            "type": "string"
+          },
+          "feedback": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Feedback",
+            "type": "string"
+          },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Id"
+          }
+        },
+        "required": [
+          "feedback",
+          "event_at"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      },
+      "sleepagent__sleep_api__contracts__AcceptedOperationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "accepted_operation_response.v1",
+            "default": "accepted_operation_response.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_url": {
+            "title": "Status Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "status_url",
+          "correlation_id"
+        ],
+        "title": "AcceptedOperationResponse",
+        "type": "object"
+      },
+      "sleepagent__sleep_api__contracts__ErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/PublicErrorCode"
+          },
+          "correlation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "retryable": {
+            "default": false,
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": "error.v1",
+            "default": "error.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "tombstone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RevocationTombstone"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "correlation_id"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "sleepagent__sleep_api__contracts__FeedbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "event_at": {
+            "format": "date-time",
+            "title": "Event At",
+            "type": "string"
+          },
+          "night_episode_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Night Episode Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "feedback_request.v1",
+            "default": "feedback_request.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source_text": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Text"
+          },
+          "structured_answer": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Structured Answer"
+          }
+        },
+        "required": [
+          "night_episode_id",
+          "event_at"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "SleepActorAssertion": {
+        "description": "Asymmetric JWS assertion bound to this HTTP request.",
+        "in": "header",
+        "name": "X-Sleep-Actor-Assertion",
+        "type": "apiKey"
+      },
+      "SleepServiceCredential": {
+        "description": "Rotating HTTPS Bearer credential for the calling service.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "SleepAgent Backend",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/operations/{operation_id}": {
+      "get": {
+        "operationId": "getSleepOperationV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Get Operation",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/events": {
+      "get": {
+        "operationId": "pollSleepDomainEventsV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPollResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Poll Events",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/feedback/elder": {
+      "post": {
+        "operationId": "submitElderSleepFeedbackV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Submit Elder Feedback",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/feedback/family": {
+      "post": {
+        "operationId": "submitFamilyCaregiverSleepFeedbackV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Submit Family Feedback",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/lifecycle": {
+      "get": {
+        "operationId": "getSleepLifecycleV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Get Lifecycle",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/monitoring/activate": {
+      "post": {
+        "operationId": "activateSleepMonitoringV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivateMonitoringRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Activate Monitoring",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/monitoring/deactivate": {
+      "post": {
+        "operationId": "deactivateSleepMonitoringV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeactivateMonitoringRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Deactivate Monitoring",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/night-episodes": {
+      "get": {
+        "operationId": "listNightEpisodesV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 3000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightEpisodePageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "List Night Episodes",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/night-episodes/{night_episode_id}": {
+      "get": {
+        "operationId": "getNightEpisodeV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "night_episode_id",
+            "required": true,
+            "schema": {
+              "title": "Night Episode Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Revision Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NightEpisodeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Get Night Episode",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/night-episodes/{night_episode_id}/reanalysis": {
+      "post": {
+        "operationId": "requestNightEpisodeReanalysisV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "night_episode_id",
+            "required": true,
+            "schema": {
+              "title": "Night Episode Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReanalysisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Request Reanalysis",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/night-episodes/{night_episode_id}/view": {
+      "get": {
+        "operationId": "getAuthorizedSleepViewV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "night_episode_id",
+            "required": true,
+            "schema": {
+              "title": "Night Episode Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Revision Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleViewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Get Role View",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/api/v1/subjects/{subject_id}/risk": {
+      "get": {
+        "operationId": "getCurrentSleepRiskV1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurrentRiskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "SleepServiceCredential": []
+          },
+          {
+            "SleepActorAssertion": []
+          }
+        ],
+        "summary": "Get Risk",
+        "tags": [
+          "Sleep domain v1"
+        ]
+      }
+    },
+    "/product/sleep/care": {
+      "get": {
+        "operationId": "care_product_sleep_care_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductCareResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Care",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/feedback": {
+      "post": {
+        "operationId": "feedback_product_sleep_interactions_feedback_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/sleepagent__product_api__contracts__FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Feedback",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/start": {
+      "post": {
+        "operationId": "start_product_sleep_interactions_start_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Start",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/status/{operation_id}": {
+      "get": {
+        "operationId": "status_product_sleep_interactions_status__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "title": "Operation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InteractionStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Status",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/{interaction_id}/answer": {
+      "post": {
+        "operationId": "answer_product_sleep_interactions__interaction_id__answer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Answer",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/{interaction_id}/ask": {
+      "post": {
+        "operationId": "ask_product_sleep_interactions__interaction_id__ask_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionAskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Ask",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/{interaction_id}/confirm": {
+      "post": {
+        "operationId": "confirm_product_sleep_interactions__interaction_id__confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Confirm",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/interactions/{interaction_id}/decline": {
+      "post": {
+        "operationId": "decline_product_sleep_interactions__interaction_id__decline_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "interaction_id",
+            "required": true,
+            "schema": {
+              "title": "Interaction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InteractionDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Decline",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/records": {
+      "get": {
+        "operationId": "records_product_sleep_records_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductRecordsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Records",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/today": {
+      "get": {
+        "operationId": "today_product_sleep_today_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "blocked": "#/components/schemas/ProductSleepTodayProjection",
+                      "degraded": "#/components/schemas/ProductSleepTodayProjection",
+                      "no_data": "#/components/schemas/ProductSleepTodayNoData",
+                      "ready": "#/components/schemas/ProductSleepTodayProjection"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ProductSleepTodayNoData"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ProductSleepTodayProjection"
+                    }
+                  ],
+                  "title": "Response Today Product Sleep Today Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Today",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    },
+    "/product/sleep/trends": {
+      "get": {
+        "operationId": "trends_product_sleep_trends_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProductTrendsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Trends",
+        "tags": [
+          "Product sleep"
+        ]
+      }
+    }
+  }
+}

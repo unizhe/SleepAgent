@@ -1,33 +1,38 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-
 import pytest
-from fastapi import FastAPI
+
+from sleepagent.backend_app import create_sleep_backend_app
+from sleepagent.backend_settings import ApiSurface
+from tests.integration.test_backend_app import _runtime
+from tests.support.runtime_fixtures import (
+    reset_backend_runtime_state as reset_active_runtime_for_tests,
+)
 
 
 pytestmark = pytest.mark.asgi_lifespan
 
 
-def test_real_lifespan_client_executes_startup_and_shutdown(
+def test_real_lifespan_client_runs_the_canonical_backend_graph(
     real_lifespan_client,
 ) -> None:
-    events: list[str] = []
+    reset_active_runtime_for_tests()
+    runtime, pool, _ = _runtime(
+        surfaces=frozenset({ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT})
+    )
+    app = create_sleep_backend_app(
+        runtime,
+        enabled_surfaces={ApiSurface.PRODUCT},
+    )
 
-    @asynccontextmanager
-    async def lifespan(_: FastAPI):
-        events.append("startup")
-        yield
-        events.append("shutdown")
+    try:
+        with real_lifespan_client(app) as client:
+            assert pool.calls == ["open"]
+            response = client.get("/livez")
+            assert response.status_code == 200
+            assert response.json() == {"status": "alive"}
+            assert runtime.worker_handlers == {}
+    finally:
+        reset_active_runtime_for_tests()
 
-    app = FastAPI(lifespan=lifespan)
-
-    @app.get("/ping")
-    async def ping() -> dict[str, bool]:
-        return {"ok": True}
-
-    with real_lifespan_client(app) as client:
-        assert events == ["startup"]
-        assert client.get("/ping").json() == {"ok": True}
-
-    assert events == ["startup", "shutdown"]
+    assert pool.calls == ["open", "close"]

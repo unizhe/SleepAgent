@@ -16,12 +16,13 @@ from typing import Any, Callable, Mapping
 
 from sleepagent.backend_persistence import (
     PostgresAuthorityStore,
+    PostgresProductBackend,
     ResolvedActorAuthority,
     build_product_authenticator,
 )
 from sleepagent.backend_settings import SleepBackendSettings
 from sleepagent.product_api.contracts import ProductRole
-from sleepagent.product_api.service import ProductApiError
+from sleepagent.product_api.service import ProductApiError, ProductRequestContext
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 from sleepagent.sleep_api.auth import (
     AuthenticatedActorContext,
@@ -58,7 +59,7 @@ from sleepagent.sleep_domain.contracts import CurrentRisk
 
 
 UTC = timezone.utc
-PUBLIC_PURPOSE = "read_sleep"
+PUBLIC_PURPOSE = "sleep_care"
 EVENT_SCHEMA_GENERATION = "sleep-domain-events-v2"
 
 
@@ -133,6 +134,20 @@ class PostgresPublicAuthenticator:
         effective = frozenset(identity.claims.scope).intersection(
             resolved.effective_scopes
         )
+        if (
+            identity.claims.authorization_epoch,
+            identity.claims.privacy_epoch,
+            identity.claims.retrieval_policy_epoch,
+        ) != (
+            resolved.authorization_epoch,
+            resolved.privacy_epoch,
+            resolved.retrieval_policy_epoch,
+        ):
+            raise SleepApiSecurityError(
+                PublicErrorCode.AUTHORIZATION_DENIED,
+                "The actor assertion governance epochs are stale.",
+                status_code=403,
+            )
         if not required_scopes.issubset(effective):
             raise SleepApiSecurityError(
                 PublicErrorCode.AUTHORIZATION_DENIED,
@@ -165,12 +180,17 @@ class PostgresSleepApiRuntime:
         uow_factory: UnitOfWorkFactory[Any],
         authenticator: PostgresPublicAuthenticator,
         cursor_key: bytes,
+        command_backend: PostgresProductBackend | None = None,
         purpose: str = PUBLIC_PURPOSE,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         self.uow_factory = uow_factory
         self.authenticator = authenticator
         self.cursor_codec = OpaquePageCursorCodec(cursor_key)
+        self.command_backend = command_backend or PostgresProductBackend(
+            uow_factory,
+            cursor_key=cursor_key,
+        )
         self.purpose = purpose
         self.now_factory = now_factory
 
@@ -521,9 +541,9 @@ class PostgresSleepApiRuntime:
                       AND COALESCE(view.arm_id, '') = COALESCE(%s, '')
                       AND view.night_episode_id = %s AND view.role = %s
                       AND (
-                        (%s IS NULL AND view.night_episode_revision_id =
+                        (%s::text IS NULL AND view.night_episode_revision_id =
                           episode.current_revision_id)
-                        OR (%s IS NOT NULL AND
+                        OR (%s::text IS NOT NULL AND
                           view.night_episode_revision_id = %s)
                       )
                       AND view.protocol_version >= 2
@@ -640,13 +660,53 @@ class PostgresSleepApiRuntime:
             updated_at=row[7],
         )
 
-    def submit_command(self, *args: Any, **kwargs: Any) -> AcceptedOperationResponse:
-        del args, kwargs
-        raise SleepApiApplicationError(
-            PublicErrorCode.PROVIDER_UNAVAILABLE,
-            "Public command persistence is not installed in the B3 read adapter.",
-            status_code=503,
-            retryable=True,
+    def submit_command(
+        self,
+        context: AuthenticatedActorContext,
+        *,
+        operation_type: str,
+        route_template: str,
+        target_resource_id: str | None,
+        idempotency_key: str,
+        request_payload: Mapping[str, Any],
+    ) -> AcceptedOperationResponse:
+        typed = self._context(context, context.claims.subject_id)
+        product_context = self._product_context(typed)
+        body = json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        try:
+            operation_id = self.command_backend.reserve_command(
+                product_context,
+                route_template=route_template,
+                command_type=operation_type,
+                idempotency_key=idempotency_key,
+                body_sha256=hashlib.sha256(body).hexdigest(),
+                payload=request_payload,
+                target_id=target_resource_id,
+            )
+        except ProductApiError as exc:
+            code = {
+                "idempotency_conflict": PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                "idempotency_scope_conflict": PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                "idempotency_authority_conflict": PublicErrorCode.IDEMPOTENCY_CONFLICT,
+                "authorization_denied": PublicErrorCode.AUTHORIZATION_DENIED,
+            }.get(exc.code, PublicErrorCode.INTERNAL_ERROR)
+            raise SleepApiApplicationError(
+                code,
+                str(exc),
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+            ) from exc
+        return AcceptedOperationResponse(
+            operation_id=operation_id,
+            status="pending",
+            status_url=f"/api/v1/operations/{operation_id}",
+            correlation_id=operation_id,
         )
 
     def poll_events(
@@ -779,6 +839,54 @@ class PostgresSleepApiRuntime:
             authorization_epoch=authority.authorization_epoch,
             privacy_epoch=authority.privacy_epoch,
             retrieval_policy_epoch=authority.retrieval_policy_epoch,
+        )
+
+    def _product_context(
+        self,
+        context: PostgresAuthenticatedActorContext,
+    ) -> ProductRequestContext:
+        authority = context.authority
+        role = ProductRole(
+            "family"
+            if context.claims.role == PublicActorRole.CAREGIVER
+            else context.claims.role.value
+        )
+        policy_material = {
+            "schema_version": "authorization_policy.v1",
+            "principal_id": context.service_principal.principal_id,
+            "binding_id": authority.binding_id,
+            "role": role.value,
+            "effective_scopes": sorted(authority.effective_scopes),
+            "namespace_id": authority.namespace_id,
+            "namespace_generation": authority.namespace_generation,
+            "purpose": self.purpose,
+            "authorization_epoch": authority.authorization_epoch,
+            "privacy_epoch": authority.privacy_epoch,
+            "retrieval_policy_epoch": authority.retrieval_policy_epoch,
+        }
+        return ProductRequestContext(
+            service_principal_id=context.service_principal.principal_id,
+            actor_id=context.claims.actor_id,
+            binding_id=authority.binding_id,
+            subject_id=context.claims.subject_id,
+            role=role,
+            effective_scopes=frozenset(context.binding.scopes),
+            namespace_id=authority.namespace_id,
+            namespace_generation=authority.namespace_generation,
+            data_mode=authority.data_mode,
+            run_id=authority.run_id,
+            arm_id=authority.arm_id,
+            purpose=self.purpose,
+            authorization_epoch=authority.authorization_epoch,
+            privacy_epoch=authority.privacy_epoch,
+            retrieval_epoch=authority.retrieval_policy_epoch,
+            policy_sha256=hashlib.sha256(
+                json.dumps(
+                    policy_material,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
         )
 
     @staticmethod

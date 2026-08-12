@@ -45,6 +45,8 @@ from sleepagent.sleep_domain.episode_v2 import (
 )
 from sleepagent.sleep_domain.product_data import ProductRevisionFacts
 from sleepagent.worker_runtime import (
+    InvocationRecord,
+    InvocationState,
     LeaseClaim,
     WorkContext,
     WorkDisposition,
@@ -252,6 +254,8 @@ class _Repository:
                 item.role_view.role_view_id for item in artifact.role_runs
             ),
             analysis_status=artifact.analysis.status.value,
+            induction_operation_id="induction-operation-1",
+            induction_manifest_id="induction-manifest-1",
         )
 
 
@@ -452,13 +456,64 @@ def _claim(
 
 
 class _Store:
-    def __init__(self, *, scope: UowScope | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        scope: UowScope | None = None,
+        uow_factory: Any = None,
+    ) -> None:
         self.scope = scope or _scope()
-        self.uow_factory = object()
+        self.uow_factory = object() if uow_factory is None else uow_factory
+        self.invocation: InvocationRecord | None = None
 
     def uow_scope_for_claim(self, claim: LeaseClaim) -> UowScope:
         del claim
         return self.scope
+
+    def reserve_invocation(
+        self,
+        claim: LeaseClaim,
+        *,
+        invocation_kind: Any,
+        invocation_key: str,
+        request_sha256: str,
+    ) -> InvocationRecord:
+        if self.invocation is not None:
+            return self.invocation
+        self.invocation = InvocationRecord(
+            invocation_id="invocation-product-1",
+            invocation_key=invocation_key,
+            invocation_kind=invocation_kind,
+            work_id=claim.work_id,
+            lease_generation=claim.lease_generation,
+            request_sha256=request_sha256,
+            state=InvocationState.RESERVED,
+        )
+        return self.invocation
+
+    def mark_invocation_send_started(self, claim, record) -> bool:
+        del claim, record
+        return True
+
+    def finalize_invocation(
+        self,
+        claim,
+        record,
+        *,
+        state,
+        provider_request_id,
+        response,
+        error_code,
+    ) -> bool:
+        del claim, error_code
+        self.invocation = record.model_copy(
+            update={
+                "state": state,
+                "provider_request_id": provider_request_id,
+                "response": dict(response or {}),
+            }
+        )
+        return True
 
 
 class _AdapterProcessor:
@@ -480,6 +535,8 @@ class _AdapterProcessor:
             analysis_revision_id="analysis-1",
             role_view_ids=("elder-view", "family-view", "doctor-view"),
             analysis_status="ready",
+            induction_operation_id="induction-operation-1",
+            induction_manifest_id="induction-manifest-1",
         )
 
 
@@ -487,10 +544,11 @@ def _context(
     *,
     claim: LeaseClaim | None = None,
     scope: UowScope | None = None,
+    store: _Store | None = None,
 ) -> WorkContext:
     return WorkContext(
         claim=claim or _claim(),
-        store=_Store(scope=scope),  # type: ignore[arg-type]
+        store=store or _Store(scope=scope),  # type: ignore[arg-type]
         _lease_lost=threading.Event(),
     )
 
@@ -529,7 +587,38 @@ def test_adapter_success_is_handler_owned_and_returns_all_committed_views() -> N
         "analysis_revision_id": "analysis-1",
         "role_view_ids": ["elder-view", "family-view", "doctor-view"],
         "analysis_status": "ready",
+        "induction_operation_id": "induction-operation-1",
+        "induction_manifest_id": "induction-manifest-1",
     }
+
+
+def test_real_product_processor_journals_model_artifact_before_commit() -> None:
+    trace = _TransactionTrace()
+    state = _RepositoryState(trace=trace, source=_source())
+    times = iter((NOW, NOW + timedelta(seconds=1)))
+    factory = _UnitOfWorkFactory(trace)
+    processor = ProductAgentProcessor(
+        factory,  # type: ignore[arg-type]
+        runtime_bundle=_runtime_bundle(_Runner(trace)),
+        id_generator=_sequential_id_generator(),
+        now_factory=lambda: next(times),
+        repository_factory=lambda _connection, _scope_value: _Repository(state),  # type: ignore[arg-type,return-value]
+    )
+    store = _Store(uow_factory=factory)
+
+    result = ProductAgentWorkHandlerAdapter(processor=processor)(
+        _context(store=store)
+    )
+
+    assert result.disposition == WorkDisposition.SUCCEEDED
+    assert store.invocation is not None
+    assert store.invocation.state == InvocationState.RESPONSE_RECEIVED
+    assert store.invocation.response is not None
+    assert store.invocation.response["artifact"]["operation_id"] == (
+        "product-operation-1"
+    )
+    assert state.prepared is not None
+    assert state.committed is state.prepared
 
 
 @pytest.mark.parametrize(

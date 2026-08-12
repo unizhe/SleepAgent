@@ -27,9 +27,13 @@ from pydantic import (
 from sleepagent.backend_runtime import SleepBackendRuntime, build_backend_runtime
 from sleepagent.backend_settings import (
     DataMode,
-    DeploymentMode,
     ProcessRole,
     SleepBackendSettings,
+)
+from sleepagent.observability import (
+    log_event,
+    record_backend_queue,
+    record_backend_signal,
 )
 from sleepagent.persistence.uow import (
     UnitOfWorkFactory,
@@ -41,12 +45,19 @@ from sleepagent.sleep_domain.episode_v2 import UUID7Generator
 
 UTC = timezone.utc
 DEFAULT_QUEUE_ORDER = (
-    "fast_path",
     "ingestion",
+    "fast_path",
     "product_agent",
+    "sleep_command",
+    "product_interaction",
+    "demo_advance",
+    # Root journeys poll durable child state.  They must run after every
+    # Stage-1 leaf queue so one due root cannot repeatedly starve its children.
+    "replay_journey",
     "induction",
     "delivery",
     "retention",
+    "demo_reset",
     "reconciliation",
 )
 
@@ -82,6 +93,7 @@ class InvocationKind(str, Enum):
 
 
 class WorkKind(str, Enum):
+    JOURNEY = "journey"
     NORMALIZATION = "normalization"
     OPERATION = "operation"
     DELIVERY = "delivery"
@@ -140,10 +152,12 @@ class WorkResult(BaseModel):
     def handler_owned_result_is_committed_success(self) -> Self:
         if (
             self.finalization_mode == WorkFinalizationMode.HANDLER_OWNED
-            and self.disposition != WorkDisposition.SUCCEEDED
+            and self.disposition
+            not in {WorkDisposition.SUCCEEDED, WorkDisposition.RETRYABLE}
         ):
             raise ValueError(
-                "handler-owned finalization requires a committed successful result"
+                "handler-owned finalization requires a committed successful "
+                "result or committed retry wait"
             )
         return self
 
@@ -368,6 +382,12 @@ class InvocationDispatcher:
             )
             raise RetryableWorkError(exc.code) from exc
         except Exception as exc:
+            log_event(
+                "backend_invocation_sender_failed",
+                queue=self.claim.queue,
+                invocation_kind=record.invocation_kind.value,
+                error_type=type(exc).__name__,
+            )
             self._finish(
                 record,
                 state=InvocationState.OUTCOME_UNKNOWN,
@@ -520,6 +540,11 @@ class PostgresDurableWorkStore:
                 "SELECT * FROM public.sleepagent_claim_normalization_work(%s, %s)",
                 (worker_instance, lease_seconds),
             )
+        if target.kind == WorkKind.JOURNEY:
+            return (
+                "SELECT * FROM public.sleepagent_claim_demo_journey(%s, %s)",
+                (worker_instance, lease_seconds),
+            )
         if target.kind == WorkKind.OPERATION:
             assert target.selector is not None
             return (
@@ -547,6 +572,34 @@ class PostgresDurableWorkStore:
         row: Sequence[Any],
     ) -> _ClaimSeed:
         values = tuple(row)
+        if target.kind == WorkKind.JOURNEY:
+            if len(values) != 15:
+                raise DurableWorkStoreError("invalid demo journey claim row")
+            return _ClaimSeed(
+                work_id=str(values[0]),
+                operation_id=str(values[1]),
+                queue=queue,
+                kind=target.kind,
+                namespace_id=str(values[2]),
+                data_mode=str(values[3]),
+                namespace_generation=int(values[4]),
+                run_id=str(values[5]),
+                arm_id=str(values[6]),
+                subject_id=str(values[7]),
+                authorization_epoch=int(values[10]),
+                privacy_epoch=int(values[11]),
+                retrieval_policy_epoch=int(values[12]),
+                lease_generation=int(values[13]),
+                fencing_token=str(values[14]),
+                worker_instance=worker_instance,
+                metadata={
+                    "work_kind": target.kind.value,
+                    "lease_seconds": lease_seconds,
+                    "root_operation_id": str(values[1]),
+                    "phase": str(values[8]),
+                    "journey_version": int(values[9]),
+                },
+            )
         if target.kind == WorkKind.RETENTION:
             if len(values) != 14:
                 raise DurableWorkStoreError("invalid retention claim row")
@@ -619,7 +672,20 @@ class PostgresDurableWorkStore:
             return None
         values = tuple(row)
         metadata = dict(seed.metadata)
-        if seed.kind == WorkKind.NORMALIZATION:
+        if seed.kind == WorkKind.JOURNEY:
+            if len(values) != 8:
+                raise DurableWorkStoreError("invalid demo journey payload row")
+            operation_version = int(values[0])
+            attempt, maximum, deadline = int(values[1]), int(values[2]), values[3]
+            payload, snapshot = values[4], values[5]
+            metadata.update(
+                {
+                    "root_operation_id": str(values[6]),
+                    "phase": str(values[7]),
+                }
+            )
+            operation_id = str(values[6])
+        elif seed.kind == WorkKind.NORMALIZATION:
             if len(values) != 8:
                 raise DurableWorkStoreError("invalid normalization payload row")
             operation_version = 0
@@ -708,6 +774,54 @@ class PostgresDurableWorkStore:
             "lease_generation = %s AND fencing_token = %s "
             "AND worker_instance = %s AND lease_expires_at > clock_timestamp()"
         )
+        if kind == WorkKind.JOURNEY:
+            return (
+                "SELECT journey.version, "
+                "journey.failure_attempt_count + 1, "
+                "journey.max_failure_attempts, journey.lease_expires_at, "
+                "jsonb_build_object("
+                "'schema_version', 'replay_journey_work.v1', "
+                "'journey_id', journey.journey_id, "
+                "'root_operation_id', journey.root_operation_id, "
+                "'seed_id', journey.seed_id, "
+                "'batch_size', (operation.operation_json ->> 'batch_size')::integer, "
+                "'phase', journey.phase, "
+                "'scenario_sha256', journey.scenario_sha256, "
+                "'manifest_sha256', journey.manifest_sha256, "
+                "'generator_version', journey.generator_version, "
+                "'adapter_version', journey.adapter_version, "
+                "'model_version', journey.model_version, "
+                "'policy_sha256', journey.policy_sha256, "
+                "'schema_manifest_sha256', journey.schema_manifest_sha256), "
+                "jsonb_build_object("
+                "'schema_version', 'workload_authorization_snapshot.v1', "
+                "'workload_principal_id', NULLIF(current_setting("
+                "'sleepagent.service_principal_id', TRUE), ''), "
+                "'namespace_id', journey.namespace_id, "
+                "'namespace_generation', journey.namespace_generation, "
+                "'data_mode', journey.data_mode, "
+                "'run_id', journey.run_id, 'arm_id', journey.arm_id, "
+                "'subject_id', journey.subject_id, "
+                "'purpose', NULLIF(current_setting("
+                "'sleepagent.purpose', TRUE), ''), "
+                "'allowed_handler', 'replay_journey', "
+                "'authorization_epoch', epoch.authorization_epoch, "
+                "'privacy_epoch', epoch.privacy_epoch, "
+                "'retrieval_policy_epoch', epoch.retrieval_policy_epoch), "
+                "journey.root_operation_id, journey.phase "
+                "FROM public.backend_demo_journeys AS journey "
+                "JOIN public.sleep_domain_operations AS operation "
+                "ON operation.operation_id = journey.root_operation_id "
+                "JOIN public.backend_subject_epochs AS epoch "
+                "ON epoch.namespace_id = journey.namespace_id "
+                "AND epoch.data_mode = journey.data_mode "
+                "AND epoch.subject_id = journey.subject_id "
+                "WHERE journey.journey_id = %s "
+                "AND journey.lease_generation = %s "
+                "AND journey.fencing_token = %s "
+                "AND journey.worker_instance = %s "
+                "AND journey.lease_expires_at > clock_timestamp()"
+            )
         if kind == WorkKind.NORMALIZATION:
             return (
                 "SELECT work_generation, attempt_count, max_attempts, "
@@ -817,6 +931,10 @@ class PostgresDurableWorkStore:
         _validate_lease_seconds(lease_seconds)
         kind = _claim_kind(claim)
         statement = {
+            WorkKind.JOURNEY: (
+                "SELECT public.sleepagent_heartbeat_demo_journey("
+                "%s, %s, %s, %s)"
+            ),
             WorkKind.NORMALIZATION: (
                 "SELECT public.sleepagent_heartbeat_normalization_work("
                 "%s, %s, %s, %s)"
@@ -940,7 +1058,21 @@ class PostgresDurableWorkStore:
                         )
                     retry_at = _aware_datetime(retry_row[0], "retry deadline")
 
-                if kind == WorkKind.OPERATION:
+                if kind == WorkKind.JOURNEY:
+                    cursor.execute(
+                        "SELECT public.sleepagent_finalize_demo_journey_attempt("
+                        "%s, %s, %s, %s, %s, %s)",
+                        (
+                            claim.work_id,
+                            claim.lease_generation,
+                            claim.fencing_token,
+                            final_status,
+                            result.error_code or result.disposition.value,
+                            retry_at,
+                        ),
+                    )
+                    finalized = _boolean_row(cursor.fetchone())
+                elif kind == WorkKind.OPERATION:
                     cursor.execute(
                         "SELECT public.sleepagent_finalize_operation("
                         "%s, %s, %s, %s, %s, %s, %s)",
@@ -1003,6 +1135,15 @@ class PostgresDurableWorkStore:
                         ),
                     )
                     finalized = _boolean_row(cursor.fetchone())
+                    if finalized and final_status == "outcome_unknown":
+                        self._insert_delivery_reconciliation_operation(
+                            cursor,
+                            claim,
+                            error_code=(
+                                result.error_code
+                                or WorkDisposition.OUTCOME_UNKNOWN.value
+                            ),
+                        )
                 else:
                     cursor.execute(
                         "SELECT public.sleepagent_finalize_retention_job("
@@ -1022,6 +1163,125 @@ class PostgresDurableWorkStore:
                 return False
             uow.commit()
         return True
+
+    def _insert_delivery_reconciliation_operation(
+        self,
+        cursor: Any,
+        claim: LeaseClaim,
+        *,
+        error_code: str,
+    ) -> None:
+        """Create the sole reconciliation claim with the delivery terminal write."""
+
+        if claim.operation_id is None:
+            raise DurableWorkStoreError(
+                "delivery reconciliation requires an operation origin"
+            )
+        invocation_key = "replay-delivery:" + str(
+            claim.metadata.get("semantic_effect_key", "")
+        ) + ":v1"
+        cursor.execute(
+            "SELECT intent.destination, intent.handler_name, "
+            "intent.semantic_effect_key, intent.payload_sha256, "
+            "source.policy_sha256 "
+            "FROM public.backend_delivery_intents AS intent "
+            "JOIN public.sleep_domain_domain_outbox AS event "
+            "ON event.event_id = intent.source_event_id "
+            "AND event.namespace_id = intent.namespace_id "
+            "AND event.data_mode = intent.data_mode "
+            "AND event.subject_id = intent.subject_id "
+            "JOIN public.sleep_domain_operations AS source "
+            "ON source.operation_id = event.operation_id "
+            "AND source.namespace_id = intent.namespace_id "
+            "AND source.data_mode = intent.data_mode "
+            "AND source.subject_id = intent.subject_id "
+            "WHERE intent.delivery_intent_id = %s "
+            "AND intent.status = 'outcome_unknown' FOR UPDATE OF intent",
+            (claim.work_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or not _is_sha256(str(row[3])) or not _is_sha256(str(row[4])):
+            raise DurableWorkStoreError(
+                "delivery reconciliation source is incomplete"
+            )
+        semantic_key = hashlib.sha256(
+            _canonical_json(
+                {
+                    "operation_type": "delivery_reconciliation",
+                    "delivery_intent_id": claim.work_id,
+                }
+            )
+        ).hexdigest()
+        workload = {
+            "schema_version": "workload_authorization_snapshot.v1",
+            "workload_principal_id": self.settings.service_principal_id,
+            "namespace_id": claim.namespace_id,
+            "namespace_generation": claim.namespace_generation,
+            "data_mode": claim.data_mode,
+            "run_id": claim.run_id,
+            "arm_id": claim.arm_id,
+            "subject_id": claim.subject_id,
+            "purpose": self.purpose,
+            "allowed_handler": "reconciliation",
+            "authorization_epoch": _snapshot_epoch(
+                claim.authorization_snapshot, "authorization_epoch"
+            ),
+            "privacy_epoch": _snapshot_epoch(
+                claim.authorization_snapshot, "privacy_epoch"
+            ),
+            "retrieval_policy_epoch": _snapshot_epoch(
+                claim.authorization_snapshot, "retrieval_policy_epoch"
+            ),
+        }
+        payload = {
+            "schema_version": "delivery_reconciliation_operation.v1",
+            "delivery_intent_id": claim.work_id,
+            "source_operation_id": claim.operation_id,
+            "destination": str(row[0]),
+            "handler_name": str(row[1]),
+            "semantic_effect_key": str(row[2]),
+            "payload_sha256": str(row[3]),
+            "invocation_key": invocation_key,
+            "trigger_error_code": error_code,
+            "authorization_snapshot": workload,
+        }
+        encoded = _canonical_json(payload)
+        operation_id = self.id_generator()
+        cursor.execute(
+            "INSERT INTO public.sleep_domain_operations ("
+            "operation_id, namespace_id, data_mode, operation_type, subject_id, "
+            "service_principal_id, actor_id, target_resource_id, "
+            "target_resource_key, idempotency_key, request_sha256, status, "
+            "cas_version, operation_json, created_at, updated_at, "
+            "protocol_version, namespace_generation, run_id, arm_id, id_scheme, "
+            "origin_kind, semantic_key, queue_name, priority, available_at, "
+            "max_attempts, workload_authorization_snapshot_json, policy_sha256) "
+            "VALUES (%s, %s, %s, 'delivery_reconciliation', %s, %s, NULL, %s, "
+            "%s, %s, %s, 'pending', 0, %s::jsonb, clock_timestamp(), "
+            "clock_timestamp(), 2, %s, %s, %s, 'uuidv7', 'system', %s, "
+            "'reconciliation', 80, clock_timestamp(), 5, %s::jsonb, %s) "
+            "ON CONFLICT (namespace_id, data_mode, namespace_generation, "
+            "(COALESCE(run_id, '')), (COALESCE(arm_id, '')), operation_type, "
+            "semantic_key) WHERE protocol_version >= 2 DO NOTHING",
+            (
+                operation_id,
+                claim.namespace_id,
+                claim.data_mode,
+                claim.subject_id,
+                self.settings.service_principal_id,
+                claim.work_id,
+                f"delivery:{claim.work_id}",
+                f"delivery-reconciliation:{claim.work_id}",
+                hashlib.sha256(encoded).hexdigest(),
+                encoded.decode("utf-8"),
+                claim.namespace_generation,
+                claim.run_id,
+                claim.arm_id,
+                semantic_key,
+                _canonical_json(workload).decode("utf-8"),
+                str(row[4]),
+            ),
+        )
 
     def _lock_operation_fence(self, cursor: Any, claim: LeaseClaim) -> bool:
         cursor.execute(
@@ -1292,7 +1552,25 @@ class PostgresDurableWorkStore:
                         and record.state == InvocationState.KNOWN_FAILED
                         and claim.lease_generation > int(row[4])
                     )
-                    if can_rebind_reserved or can_reopen_known_failure:
+                    latest_event = (
+                        {}
+                        if row[8] is None
+                        else _json_mapping(
+                            row[8], field_name="invocation journal event"
+                        )
+                    )
+                    can_reopen_reconciled_not_delivered = (
+                        invocation_matches
+                        and record.state == InvocationState.RECONCILED
+                        and latest_event.get("resolution")
+                        == "known_not_delivered"
+                        and claim.lease_generation > int(row[4])
+                    )
+                    if (
+                        can_rebind_reserved
+                        or can_reopen_known_failure
+                        or can_reopen_reconciled_not_delivered
+                    ):
                         previous = record.state
                         cursor.execute(
                             "UPDATE public.backend_invocations SET "
@@ -1729,10 +2007,16 @@ class DurableWorkerRuntime:
 
     def _ordered_queues(self) -> tuple[str, ...]:
         rank = {name: index for index, name in enumerate(DEFAULT_QUEUE_ORDER)}
+
+        def queue_rank(value: str) -> int:
+            if value.startswith("delivery:"):
+                return rank["delivery"]
+            return rank.get(value, len(rank))
+
         return tuple(
             sorted(
                 self.handlers,
-                key=lambda value: (rank.get(value, len(rank)), value),
+                key=lambda value: (queue_rank(value), value),
             )
         )
 
@@ -1748,6 +2032,7 @@ class DurableWorkerRuntime:
         with self._state_lock:
             self._in_flight += 1
         heartbeat.start()
+        result: WorkResult | None = None
         try:
             try:
                 result = handler(WorkContext(claim, self.store, lost))
@@ -1767,7 +2052,12 @@ class DurableWorkerRuntime:
                     disposition=WorkDisposition.OUTCOME_UNKNOWN,
                     error_code=exc.code,
                 )
-            except Exception:
+            except Exception as exc:
+                log_event(
+                    "backend_worker_handler_failed",
+                    queue=claim.queue,
+                    error_type=type(exc).__name__,
+                )
                 result = WorkResult(
                     disposition=WorkDisposition.OUTCOME_UNKNOWN,
                     error_code="unclassified_handler_failure",
@@ -1778,9 +2068,57 @@ class DurableWorkerRuntime:
             ):
                 self.store.finalize(claim, result)
         finally:
+            if result is not None:
+                metric_outcome = (
+                    "lease_lost" if lost.is_set() else result.disposition.value
+                )
+                record_backend_queue(queue=claim.queue, outcome=metric_outcome)
+                _record_domain_signal(
+                    claim,
+                    result=result,
+                    lease_lost=lost.is_set(),
+                )
+                log_event(
+                    "backend_worker_completed",
+                    queue=claim.queue,
+                    outcome=(
+                        "lease_lost"
+                        if lost.is_set()
+                        else result.disposition.value
+                    ),
+                    attempt=claim.attempt,
+                )
             heartbeat.stop()
             with self._state_lock:
                 self._in_flight -= 1
+
+
+def _record_domain_signal(
+    claim: LeaseClaim,
+    *,
+    result: WorkResult,
+    lease_lost: bool,
+) -> None:
+    outcome = "outcome_unknown" if lease_lost else result.disposition.value
+    category = None
+    if claim.queue in {"product_agent", "product_interaction"}:
+        category = "product"
+    elif claim.queue == "fast_path":
+        category = "safety"
+    elif claim.queue in {"retention", "demo_reset"}:
+        category = "retention"
+    elif claim.queue == "reconciliation":
+        category = "reconciliation"
+    if category is not None:
+        record_backend_signal(category=category, outcome=outcome)
+    error_code = (result.error_code or "").lower()
+    if "timeout" in error_code:
+        record_backend_signal(category="provider", outcome="timeout")
+    if result.disposition == WorkDisposition.OUTCOME_UNKNOWN:
+        record_backend_signal(
+            category="reconciliation",
+            outcome="reconciliation_required",
+        )
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
@@ -1799,6 +2137,8 @@ def _queue_target(queue: str) -> _QueueTarget:
         raise ValueError("queue is required")
     if value == "ingestion":
         return _QueueTarget(WorkKind.NORMALIZATION)
+    if value == "replay_journey":
+        return _QueueTarget(WorkKind.JOURNEY)
     if value == "retention":
         return _QueueTarget(WorkKind.RETENTION)
     if value == "delivery":
@@ -1903,8 +2243,17 @@ def _final_status(
     result: WorkResult,
 ) -> str:
     if result.disposition == WorkDisposition.RETRYABLE:
-        return "retry" if claim.attempt < claim.max_attempts else "dead_letter"
+        if claim.attempt < claim.max_attempts:
+            return "retry"
+        # Replay journeys have an explicit terminal receipt/root-operation
+        # protocol rather than a generic dead-letter state.
+        return "failed" if kind == WorkKind.JOURNEY else "dead_letter"
     statuses = {
+        WorkKind.JOURNEY: {
+            WorkDisposition.SUCCEEDED: "failed",
+            WorkDisposition.TERMINAL: "failed",
+            WorkDisposition.OUTCOME_UNKNOWN: "reconciliation_required",
+        },
         WorkKind.NORMALIZATION: {
             WorkDisposition.SUCCEEDED: "succeeded",
             WorkDisposition.TERMINAL: "quarantined",
@@ -1931,6 +2280,13 @@ def _final_status(
 
 def _required_function_signatures(queues: Sequence[str]) -> tuple[str, ...]:
     groups = {
+        WorkKind.JOURNEY: (
+            "public.sleepagent_claim_demo_journey(text,integer)",
+            "public.sleepagent_heartbeat_demo_journey(text,bigint,text,integer)",
+            "public.sleepagent_wait_demo_journey(text,bigint,text,text,timestamptz)",
+            "public.sleepagent_finalize_demo_journey_attempt(text,bigint,text,text,text,timestamptz)",
+            "public.sleepagent_succeed_demo_journey(text,bigint,text,jsonb)",
+        ),
         WorkKind.NORMALIZATION: (
             "public.sleepagent_claim_normalization_work(text,integer)",
             "public.sleepagent_heartbeat_normalization_work(text,bigint,text,integer)",
@@ -1959,33 +2315,25 @@ def _required_function_signatures(queues: Sequence[str]) -> tuple[str, ...]:
         for signature in groups[_queue_target(queue).kind]:
             if signature not in required:
                 required.append(signature)
-    return tuple(required)
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayNoModelHandler:
-    """Deterministic infrastructure handler restricted to replay test profiles."""
-
-    queue: str
-
-    def __call__(self, context: WorkContext) -> WorkResult:
-        if _claim_kind(context.claim) == WorkKind.OPERATION:
-            context.checkpoint(
-                "replay_no_model_handler",
-                {
-                    "queue": self.queue,
-                    "attempt": context.claim.attempt,
-                    "synthetic_non_release": True,
-                },
+        if queue in {"sleep_command", "product_interaction"}:
+            signature = (
+                "public.sleepagent_stage2_authority_allows(text,text,text)"
             )
-        return WorkResult(
-            disposition=WorkDisposition.SUCCEEDED,
-            result={
-                "handler": "replay_no_model",
-                "queue": self.queue,
-                "synthetic_non_release": True,
-            },
-        )
+            if signature not in required:
+                required.append(signature)
+        if queue == "demo_advance":
+            signature = (
+                "public.sleepagent_stage3_advance_authority_allows(text)"
+            )
+            if signature not in required:
+                required.append(signature)
+        if _queue_target(queue).kind == WorkKind.DELIVERY:
+            signature = (
+                "public.sleepagent_stage4_delivery_authority_allows(text)"
+            )
+            if signature not in required:
+                required.append(signature)
+    return tuple(required)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2024,48 +2372,46 @@ def _cli_handlers(settings: SleepBackendSettings) -> dict[str, WorkHandler]:
         build_product_agent_worker_handlers,
     )
     from sleepagent.sleep_domain.worker_adapters import build_b3_worker_handlers
+    from sleepagent.stage2_worker import build_stage2_worker_handlers
+    from sleepagent.stage3_worker import build_stage3_worker_handlers
+    from sleepagent.stage4_worker import build_stage4_worker_handlers
+    from sleepagent.stage5_worker import build_stage5_worker_handlers
 
     handlers = build_b3_worker_handlers(settings)
     product_handlers = build_product_agent_worker_handlers(settings)
-    overlap = set(handlers).intersection(product_handlers)
+    stage2_handlers = build_stage2_worker_handlers(settings)
+    stage3_handlers = build_stage3_worker_handlers(settings)
+    stage4_handlers = build_stage4_worker_handlers(settings)
+    stage5_handlers = build_stage5_worker_handlers(settings)
+    registries = (
+        handlers,
+        product_handlers,
+        stage2_handlers,
+        stage3_handlers,
+        stage4_handlers,
+        stage5_handlers,
+    )
+    overlap: set[str] = set()
+    for index, registry in enumerate(registries):
+        for other in registries[index + 1 :]:
+            overlap.update(set(registry).intersection(other))
     if overlap:
         raise DurableWorkStoreError(
             "worker queue has more than one explicit handler: "
             + ", ".join(sorted(overlap))
         )
     handlers.update(product_handlers)
+    handlers.update(stage2_handlers)
+    handlers.update(stage3_handlers)
+    handlers.update(stage4_handlers)
+    handlers.update(stage5_handlers)
     unsupported = set(settings.worker_queues) - set(handlers)
-    if unsupported and (
-        settings.deployment_mode != DeploymentMode.TEST
-        or settings.data_mode != DataMode.REPLAY
-    ):
+    if unsupported:
         raise DurableWorkStoreError(
-            "production/development worker handlers must be explicitly composed: "
+            "worker handlers must be explicitly composed: "
             + ", ".join(sorted(unsupported))
         )
-    return {
-        queue: (
-            handlers[queue]
-            if queue in handlers
-            else ReplayNoModelHandler(queue)
-        )
-        for queue in settings.worker_queues
-    }
-
-
-def _validate_replay_no_model_profile(
-    settings: SleepBackendSettings,
-    handlers: Mapping[str, WorkHandler],
-) -> None:
-    if (
-        settings.deployment_mode == DeploymentMode.TEST
-        and settings.data_mode == DataMode.REPLAY
-    ):
-        return
-    if any(isinstance(handler, ReplayNoModelHandler) for handler in handlers.values()):
-        raise DurableWorkStoreError(
-            "ReplayNoModelHandler is restricted to test replay profiles"
-        )
+    return {queue: handlers[queue] for queue in settings.worker_queues}
 
 
 def run_worker_command(
@@ -2092,7 +2438,6 @@ def run_worker_command(
             }
         )
     )
-    _validate_replay_no_model_profile(settings, selected_handlers)
     runtime = build_backend_runtime(
         settings,
         worker_handlers=selected_handlers,
@@ -2169,7 +2514,6 @@ __all__ = [
     "LeaseLostError",
     "OutcomeUnknownError",
     "PostgresDurableWorkStore",
-    "ReplayNoModelHandler",
     "RetryableWorkError",
     "TerminalWorkError",
     "WorkContext",

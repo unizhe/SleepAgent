@@ -46,6 +46,7 @@ from sleepagent.sleep_domain.contracts import (
     DeterministicRiskPolicy,
     DeviceBindingReference,
     DomainEvent,
+    DomainRuleReviewStatus,
     EpisodeBoundaryPolicy,
     FastPathEventPolicy,
     FastPathSignalProjection,
@@ -57,6 +58,8 @@ from sleepagent.sleep_domain.contracts import (
     ObservationQuality,
     ObservationType,
     ProviderDeviceIdentity,
+    ReviewedVendorAlertRule,
+    RiskState,
     SleepDomainContract,
     SleepObservation,
     SourceKind,
@@ -76,10 +79,18 @@ from sleepagent.sleep_domain.fast_path import (
     DeterministicFastPathResult,
     DeterministicFastPathService,
 )
+from sleepagent.sleep_domain.ontology import validate_observation_ontology
 from sleepagent.sleep_domain.repository import (
     CurrentRevisionPointer,
     DomainNamespace,
     SubjectLifecycleLease,
+)
+from sleepagent.sleep_domain.schema_versions import dispatch_versioned_json
+from sleepagent.retention import (
+    PostgresRetentionKeyCoordinator,
+    RetentionError,
+    RetentionKeyDestroyed,
+    encrypt_raw_payload,
 )
 
 
@@ -156,6 +167,11 @@ class ReplayObservationInput(SleepDomainContract):
             ZoneInfo(self.timezone_name)
         except ZoneInfoNotFoundError as exc:
             raise ValueError("timezone_name must be a valid IANA timezone") from exc
+        validate_observation_ontology(
+            observation_type=self.observation_type,
+            payload=self.payload,
+            source_kind=self.source_kind,
+        )
         return self
 
     def canonical_bytes(self) -> bytes:
@@ -177,6 +193,32 @@ class ReplayRawBatch(SleepDomainContract):
         ]
         if len(keys) != len(set(keys)):
             raise ValueError("a replay batch cannot repeat an idempotency identity")
+        return self
+
+
+class ReplayIngressOrder(SleepDomainContract):
+    """Server-owned ordered stream coordinates for one atomic raw batch."""
+
+    schema_version: Literal["replay_ingress_order.v1"] = (
+        "replay_ingress_order.v1"
+    )
+    journey_id: str = Field(min_length=1)
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    stream_key: str = Field(min_length=1, max_length=200)
+    first_sequence: int = Field(ge=1)
+    predecessor_raw_ingress_record_id: str | None = None
+    predecessor_work_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_predecessors(self) -> "ReplayIngressOrder":
+        predecessors = (
+            self.predecessor_raw_ingress_record_id,
+            self.predecessor_work_id,
+        )
+        if self.first_sequence == 1 and any(predecessors):
+            raise ValueError("first replay batch cannot declare predecessors")
+        if self.first_sequence > 1 and not all(predecessors):
+            raise ValueError("later replay batch requires both predecessors")
         return self
 
 
@@ -216,6 +258,18 @@ class PreparedRawIngress:
     encryption_key_id: str
     encrypted_at: datetime
     retention_until: datetime
+    replay_journey_id: str | None = None
+    replay_manifest_sha256: str | None = None
+    ingress_stream_key: str | None = None
+    stream_sequence: int | None = None
+    predecessor_raw_ingress_record_id: str | None = None
+    predecessor_work_id: str | None = None
+    encryption_protocol_version: int = 1
+    retention_subject_id: str | None = None
+    retention_domain: str | None = None
+    dek_generation: int | None = None
+    retention_binding_id: str | None = None
+    retention_job_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +280,14 @@ class LoadedNormalizationWork:
     encryption_key_id: str
     payload_sha256: str
     subject_id: str
+    encryption_protocol_version: int = 1
+    dek_generation: int | None = None
+    wrapped_data_key: bytes | None = None
+    dek_sha256: str | None = None
+    dek_status: str | None = None
+    replay_journey_id: str | None = None
+    ingress_stream_key: str | None = None
+    stream_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +344,7 @@ class NormalizationResult:
     night_episode_id: str | None
     night_episode_revision_id: str | None
     fast_path_operation_id: str | None
+    reconciliation_operation_id: str | None
     date_state: str | None
 
 
@@ -373,7 +436,25 @@ def default_sleep_slice_policy() -> SleepSlicePolicy:
             allowed_lateness_seconds=2 * 3600,
         ),
         quality=DeterministicQualityPolicy(policy_version="quality-v1"),
-        risk=DeterministicRiskPolicy(policy_version="risk-v1"),
+        risk=DeterministicRiskPolicy(
+            policy_version="risk-v2-reviewed-replay-alert",
+            vendor_alert_rules=(
+                ReviewedVendorAlertRule(
+                    rule_id="reviewed-replay-urgent-alert-v1",
+                    rule_version="1",
+                    provider_id="canonical-replay-provider",
+                    alert_code="REVIEWED_REPLAY_URGENT",
+                    review_status=DomainRuleReviewStatus.APPROVED,
+                    risk_state=RiskState.REVIEWED_SIGNAL,
+                    health_escalation_allowed=True,
+                    evidence_references=(
+                        "policy:reviewed-replay-urgent-alert-v1",
+                    ),
+                    reviewed_by_actor_id="policy-review-board",
+                    reviewed_at=datetime(2026, 8, 11, tzinfo=UTC),
+                ),
+            ),
+        ),
         events=FastPathEventPolicy(policy_version="fast-path-event-v1"),
     )
 
@@ -592,11 +673,21 @@ class EpisodeLifecycleProjector:
         )
 
 
-def decide_fast_path_followup(risk: CurrentRisk) -> FastPathRoutingDecision:
+def decide_fast_path_followup(
+    risk: CurrentRisk,
+    *,
+    quality: DeterministicQualityAssessment | None = None,
+) -> FastPathRoutingDecision:
     urgent = bool(risk.health_escalation_allowed)
     return FastPathRoutingDecision(
         urgent=urgent,
-        enqueue_product_agent=not urgent,
+        enqueue_product_agent=(
+            not urgent
+            and (
+                quality is None
+                or quality.data_sufficiency == DataSufficiency.SUFFICIENT
+            )
+        ),
     )
 
 
@@ -606,6 +697,7 @@ class ReplayIngressHandler:
         uow_factory: UnitOfWorkFactory[Any],
         *,
         cipher: RawPayloadCipher,
+        retention_keys: PostgresRetentionKeyCoordinator | None = None,
         id_generator: Callable[[datetime | None], str] | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         retention: timedelta = timedelta(days=30),
@@ -617,6 +709,7 @@ class ReplayIngressHandler:
             raise ValueError("raw retention must be positive")
         self.uow_factory = uow_factory
         self.cipher = cipher
+        self.retention_keys = retention_keys
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
         self.retention = retention
@@ -632,7 +725,134 @@ class ReplayIngressHandler:
         self,
         scope: UowScope,
         batch: ReplayRawBatch,
+        *,
+        order: ReplayIngressOrder | None = None,
     ) -> tuple[IngressResult, ...]:
+        self._validate_ingress_scope(scope, batch)
+        committed_at = self.now_factory()
+        _require_aware(committed_at, "committed_at")
+        with self.uow_factory.begin(scope) as uow:
+            results = self.ingest_in_uow(
+                uow.connection,
+                scope,
+                batch,
+                order=order,
+                committed_at=committed_at,
+            )
+            uow.commit()
+        return results
+
+    def ingest_in_uow(
+        self,
+        connection: TransactionBoundConnection,
+        scope: UowScope,
+        batch: ReplayRawBatch,
+        *,
+        order: ReplayIngressOrder | None = None,
+        committed_at: datetime | None = None,
+    ) -> tuple[IngressResult, ...]:
+        """Write intake rows into a caller-owned, already-scoped transaction."""
+
+        self._validate_ingress_scope(scope, batch)
+        effective_committed_at = committed_at or self.now_factory()
+        _require_aware(effective_committed_at, "committed_at")
+        repository = self.repository_factory(connection, scope)
+        results: list[IngressResult] = []
+        predecessor_raw_id = (
+            None if order is None else order.predecessor_raw_ingress_record_id
+        )
+        predecessor_work_id = None if order is None else order.predecessor_work_id
+        for offset, item in enumerate(batch.items):
+            payload = item.canonical_bytes()
+            payload_sha256 = hashlib.sha256(payload).hexdigest()
+            raw_id = self.id_generator(effective_committed_at)
+            retention_key = (
+                None
+                if self.retention_keys is None
+                else self.retention_keys.ensure_raw_key(connection, scope)
+            )
+            prepared = PreparedRawIngress(
+                raw_ingress_record_id=raw_id,
+                normalization_work_id=self.id_generator(effective_committed_at),
+                intake_receipt_id=self.id_generator(effective_committed_at),
+                event_id=self.id_generator(effective_committed_at),
+                source=item,
+                payload_sha256=payload_sha256,
+                encrypted_payload=(
+                    self.cipher.encrypt(payload, aad=_raw_aad(scope, raw_id))
+                    if retention_key is None
+                    else encrypt_raw_payload(
+                        retention_key.data_key,
+                        payload,
+                        aad=_raw_aad(scope, raw_id),
+                    )
+                ),
+                encryption_key_id=(
+                    self.cipher.key_id
+                    if retention_key is None
+                    else retention_key.key_id
+                ),
+                encrypted_at=effective_committed_at,
+                retention_until=(
+                    max(effective_committed_at, item.received_at) + self.retention
+                ),
+                replay_journey_id=None if order is None else order.journey_id,
+                replay_manifest_sha256=(
+                    None if order is None else order.manifest_sha256
+                ),
+                ingress_stream_key=None if order is None else order.stream_key,
+                stream_sequence=(
+                    None if order is None else order.first_sequence + offset
+                ),
+                predecessor_raw_ingress_record_id=predecessor_raw_id,
+                predecessor_work_id=predecessor_work_id,
+                encryption_protocol_version=(
+                    1 if retention_key is None else 2
+                ),
+                retention_subject_id=(
+                    None if retention_key is None else scope.subject_id
+                ),
+                retention_domain=(
+                    None if retention_key is None else "raw"
+                ),
+                dek_generation=(
+                    None if retention_key is None else retention_key.generation
+                ),
+                retention_binding_id=(
+                    None
+                    if retention_key is None
+                    else self.id_generator(effective_committed_at)
+                ),
+                retention_job_id=(
+                    None
+                    if retention_key is None
+                    else self.id_generator(effective_committed_at)
+                ),
+            )
+            result = repository.ingest_raw(prepared)
+            if self.retention_keys is not None and not result.duplicate:
+                assert prepared.dek_generation is not None
+                assert prepared.retention_binding_id is not None
+                assert prepared.retention_job_id is not None
+                self.retention_keys.bind_raw(
+                    connection,
+                    scope,
+                    raw_ingress_record_id=result.raw_ingress_record_id,
+                    generation=prepared.dek_generation,
+                    expires_at=prepared.retention_until,
+                    retention_binding_id=prepared.retention_binding_id,
+                    retention_job_id=prepared.retention_job_id,
+                )
+            results.append(result)
+            predecessor_raw_id = result.raw_ingress_record_id
+            predecessor_work_id = result.normalization_work_id
+        return tuple(results)
+
+    @staticmethod
+    def _validate_ingress_scope(
+        scope: UowScope,
+        batch: ReplayRawBatch,
+    ) -> None:
         if scope.data_mode != "replay":
             raise ValueError("replay ingress requires a replay UoW scope")
         if scope.process_role != "worker":
@@ -641,35 +861,6 @@ class ReplayIngressHandler:
             raise ValueError("raw replay ingress requires exact subject scope")
         if any(item.subject_id != scope.subject_id for item in batch.items):
             raise ValueError("replay batch cannot cross subject scope")
-        committed_at = self.now_factory()
-        _require_aware(committed_at, "committed_at")
-        with self.uow_factory.begin(scope) as uow:
-            repository = self.repository_factory(uow.connection, scope)
-            results: list[IngressResult] = []
-            for item in batch.items:
-                payload = item.canonical_bytes()
-                payload_sha256 = hashlib.sha256(payload).hexdigest()
-                raw_id = self.id_generator(committed_at)
-                prepared = PreparedRawIngress(
-                    raw_ingress_record_id=raw_id,
-                    normalization_work_id=self.id_generator(committed_at),
-                    intake_receipt_id=self.id_generator(committed_at),
-                    event_id=self.id_generator(committed_at),
-                    source=item,
-                    payload_sha256=payload_sha256,
-                    encrypted_payload=self.cipher.encrypt(
-                        payload,
-                        aad=_raw_aad(scope, raw_id),
-                    ),
-                    encryption_key_id=self.cipher.key_id,
-                    encrypted_at=committed_at,
-                    retention_until=(
-                        max(committed_at, item.received_at) + self.retention
-                    ),
-                )
-                results.append(repository.ingest_raw(prepared))
-            uow.commit()
-        return tuple(results)
 
 
 class NormalizationHandler:
@@ -678,6 +869,7 @@ class NormalizationHandler:
         uow_factory: UnitOfWorkFactory[Any],
         *,
         cipher: RawPayloadCipher,
+        retention_keys: PostgresRetentionKeyCoordinator | None = None,
         policy: SleepSlicePolicy | None = None,
         id_generator: Callable[[datetime | None], str] | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
@@ -687,6 +879,7 @@ class NormalizationHandler:
     ) -> None:
         self.uow_factory = uow_factory
         self.cipher = cipher
+        self.retention_keys = retention_keys
         self.policy = policy or default_sleep_slice_policy()
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
@@ -716,18 +909,53 @@ class NormalizationHandler:
             work = repository.load_normalization_work(lease)
             if work.subject_id != scope.subject_id:
                 raise SleepSliceInvariantError("normalization work subject mismatch")
-            if work.encryption_key_id != self.cipher.key_id:
-                raise SleepSliceInvariantError(
-                    "raw payload encryption key is unavailable"
+            if work.encryption_protocol_version >= 2:
+                if (
+                    self.retention_keys is None
+                    or work.dek_generation is None
+                    or work.dek_sha256 is None
+                    or work.dek_status is None
+                ):
+                    raise SleepSliceInvariantError(
+                        "raw retention envelope is unavailable"
+                    )
+                try:
+                    raw = self.retention_keys.decrypt_raw(
+                        scope=scope,
+                        generation=work.dek_generation,
+                        wrapped_data_key=work.wrapped_data_key,
+                        dek_sha256=work.dek_sha256,
+                        status=work.dek_status,
+                        encrypted_payload=work.encrypted_payload,
+                        aad=_raw_aad(scope, work.raw_ingress_record_id),
+                    )
+                except RetentionKeyDestroyed:
+                    raise SleepSliceInvariantError("key_destroyed")
+                except RetentionError as exc:
+                    raise SleepSliceInvariantError(
+                        "raw retention envelope failed authentication"
+                    ) from exc
+            else:
+                if work.encryption_key_id != self.cipher.key_id:
+                    raise SleepSliceInvariantError(
+                        "raw payload encryption key is unavailable"
+                    )
+                raw = self.cipher.decrypt(
+                    work.encrypted_payload,
+                    aad=_raw_aad(scope, work.raw_ingress_record_id),
                 )
-            raw = self.cipher.decrypt(
-                work.encrypted_payload,
-                aad=_raw_aad(scope, work.raw_ingress_record_id),
-            )
             if hashlib.sha256(raw).hexdigest() != work.payload_sha256:
                 raise SleepSliceInvariantError("raw payload hash mismatch")
             try:
-                replay_input = ReplayObservationInput.model_validate_json(raw)
+                replay_input = dispatch_versioned_json(
+                    raw,
+                    family="replay_observation_input",
+                    readers={
+                        "replay_observation_input.v1": (
+                            ReplayObservationInput.model_validate
+                        )
+                    },
+                )
             except Exception as exc:
                 raise SleepSliceInvariantError(
                     "raw replay payload does not match its versioned schema"
@@ -763,7 +991,20 @@ class NormalizationHandler:
             )
             fast_path_operation_id = (
                 self.id_generator(committed_at)
-                if mutation is not None and mutation.enqueues_fast_path
+                if mutation is not None
+                and (
+                    mutation.enqueues_fast_path
+                    or (
+                        work.replay_journey_id is not None
+                        and _date_state(mutation.episode) == "finalized"
+                    )
+                )
+                else None
+            )
+            reconciliation_operation_id = (
+                self.id_generator(committed_at)
+                if mutation is not None
+                and mutation.conflicting_episode_id is not None
                 else None
             )
             repository.persist_normalization_handoff(
@@ -774,6 +1015,7 @@ class NormalizationHandler:
                 snapshot=snapshot,
                 mutation=mutation,
                 fast_path_operation_id=fast_path_operation_id,
+                reconciliation_operation_id=reconciliation_operation_id,
                 policy=self.policy,
                 committed_at=committed_at,
             )
@@ -787,6 +1029,7 @@ class NormalizationHandler:
                 None if mutation is None else mutation.revision_id
             ),
             fast_path_operation_id=fast_path_operation_id,
+            reconciliation_operation_id=reconciliation_operation_id,
             date_state=(
                 None if mutation is None else _date_state(mutation.episode)
             ),
@@ -848,7 +1091,10 @@ class FastPathHandler:
                 evaluation_id=operation.operation_id,
                 assessed_at=assessed_at,
             )
-            decision = decide_fast_path_followup(result.current_risk)
+            decision = decide_fast_path_followup(
+                result.current_risk,
+                quality=result.quality,
+            )
             product_operation_id = (
                 self.id_generator(assessed_at)
                 if decision.enqueue_product_agent
@@ -910,7 +1156,16 @@ class PostgresSleepSliceRepository:
                        raw.pre_normalization_payload_sha256,
                        raw.subject_id,
                        work.work_id,
-                       receipt.receipt_id
+                       receipt.receipt_id,
+                       raw.replay_journey_id,
+                       raw.replay_manifest_sha256,
+                       raw.ingress_stream_key,
+                       raw.stream_sequence,
+                       raw.predecessor_raw_ingress_record_id,
+                       work.replay_journey_id,
+                       work.ingress_stream_key,
+                       work.stream_sequence,
+                       work.predecessor_work_id
                 FROM public.sleep_domain_raw_inbox AS raw
                 LEFT JOIN public.sleep_domain_normalization_work AS work
                   ON work.raw_ingress_record_id = raw.raw_ingress_record_id
@@ -951,6 +1206,29 @@ class PostgresSleepSliceRepository:
                     raise SleepSliceInvariantError(
                         "raw inbox record is missing its atomic intake handoff"
                     )
+                expected_order = (
+                    prepared.replay_journey_id,
+                    prepared.replay_manifest_sha256,
+                    prepared.ingress_stream_key,
+                    prepared.stream_sequence,
+                    prepared.predecessor_raw_ingress_record_id,
+                    prepared.replay_journey_id,
+                    prepared.ingress_stream_key,
+                    prepared.stream_sequence,
+                    prepared.predecessor_work_id,
+                )
+                actual_order = tuple(
+                    None if value is None else str(value)
+                    for value in existing[5:14]
+                )
+                normalized_expected = tuple(
+                    None if value is None else str(value)
+                    for value in expected_order
+                )
+                if actual_order != normalized_expected:
+                    raise SleepSliceConflict(
+                        "raw idempotency identity has different stream order"
+                    )
                 return IngressResult(
                     raw_ingress_record_id=str(existing[0]),
                     normalization_work_id=str(existing[3]),
@@ -970,13 +1248,18 @@ class PostgresSleepSliceRepository:
                   encryption_key_id, encrypted_at, content_type,
                   payload_size_bytes, retention_until, raw_metadata_json,
                   scope_protocol_version, namespace_generation, run_id,
-                  arm_id, subject_id
+                  arm_id, subject_id, replay_journey_id,
+                  replay_manifest_sha256, ingress_stream_key,
+                  stream_sequence, predecessor_raw_ingress_record_id,
+                  encryption_protocol_version, retention_subject_id,
+                  retention_domain, dek_generation
                 ) VALUES (
                   %s, %s, %s, %s, %s, %s, %s,
                   %s, %s, %s, %s, 'synthetic-nonrelease.v1',
                   'not_provided', %s, 'replay-observation-input.v1',
                   %s, %s, %s, %s, 'application/json', %s, %s, %s::jsonb,
-                  2, %s, %s, %s, %s
+                  2, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s
                 )
                 """,
                 (
@@ -1009,6 +1292,15 @@ class PostgresSleepSliceRepository:
                     self.scope.run_id,
                     self.scope.arm_id,
                     source.subject_id,
+                    prepared.replay_journey_id,
+                    prepared.replay_manifest_sha256,
+                    prepared.ingress_stream_key,
+                    prepared.stream_sequence,
+                    prepared.predecessor_raw_ingress_record_id,
+                    prepared.encryption_protocol_version,
+                    prepared.retention_subject_id,
+                    prepared.retention_domain,
+                    prepared.dek_generation,
                 ),
             )
             receipt = {
@@ -1044,11 +1336,12 @@ class PostgresSleepSliceRepository:
                   work_json, created_at, updated_at, protocol_version,
                   namespace_generation, run_id, arm_id, subject_id,
                   authorization_snapshot_json, max_attempts,
-                  lease_generation
+                  lease_generation, replay_journey_id,
+                  ingress_stream_key, stream_sequence, predecessor_work_id
                 ) VALUES (
                   %s, %s, %s, %s, 1, 'pending', 0, %s,
                   %s::jsonb, %s, %s, 2, %s, %s, %s, %s,
-                  %s::jsonb, 8, 0
+                  %s::jsonb, 8, 0, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -1072,6 +1365,10 @@ class PostgresSleepSliceRepository:
                     self.scope.arm_id,
                     source.subject_id,
                     _json(authorization),
+                    prepared.replay_journey_id,
+                    prepared.ingress_stream_key,
+                    prepared.stream_sequence,
+                    prepared.predecessor_work_id,
                 ),
             )
             event = {
@@ -1115,13 +1412,24 @@ class PostgresSleepSliceRepository:
                 """
                 SELECT work.work_id, work.raw_ingress_record_id,
                        raw.encrypted_payload, raw.encryption_key_id,
-                       raw.pre_normalization_payload_sha256, work.subject_id
+                       raw.pre_normalization_payload_sha256, work.subject_id,
+                       raw.encryption_protocol_version, raw.dek_generation,
+                       dek.wrapped_dek, dek.dek_sha256, dek.status,
+                       work.replay_journey_id, work.ingress_stream_key,
+                       work.stream_sequence
                 FROM public.sleep_domain_normalization_work AS work
                 JOIN public.sleep_domain_raw_inbox AS raw
                   ON raw.raw_ingress_record_id = work.raw_ingress_record_id
                  AND raw.namespace_id = work.namespace_id
                  AND raw.data_mode = work.data_mode
                  AND raw.subject_id = work.subject_id
+                LEFT JOIN public.backend_retention_deks AS dek
+                  ON raw.encryption_protocol_version >= 2
+                 AND dek.namespace_id = raw.namespace_id
+                 AND dek.data_mode = raw.data_mode
+                 AND dek.subject_id = raw.retention_subject_id
+                 AND dek.retention_domain = raw.retention_domain
+                 AND dek.generation = raw.dek_generation
                 WHERE work.work_id = %s
                   AND work.namespace_id = %s AND work.data_mode = %s
                   AND work.namespace_generation = %s
@@ -1156,6 +1464,14 @@ class PostgresSleepSliceRepository:
             encryption_key_id=str(row[3]),
             payload_sha256=str(row[4]),
             subject_id=str(row[5]),
+            encryption_protocol_version=int(row[6]),
+            dek_generation=None if row[7] is None else int(row[7]),
+            wrapped_data_key=None if row[8] is None else bytes(row[8]),
+            dek_sha256=None if row[9] is None else str(row[9]),
+            dek_status=None if row[10] is None else str(row[10]),
+            replay_journey_id=None if row[11] is None else str(row[11]),
+            ingress_stream_key=None if row[12] is None else str(row[12]),
+            stream_sequence=None if row[13] is None else int(row[13]),
         )
 
     def lock_subject_lifecycle(self) -> None:
@@ -1269,7 +1585,7 @@ class PostgresSleepSliceRepository:
                   AND protocol_version >= 2
                   AND date_state = 'finalized' AND date_conflict = FALSE
                   AND episode_local_date = %s
-                  AND (%s IS NULL OR night_episode_id <> %s)
+                  AND (%s::text IS NULL OR night_episode_id <> %s)
                 LIMIT 1
                 """,
                 (
@@ -1299,6 +1615,7 @@ class PostgresSleepSliceRepository:
         snapshot: LifecycleSnapshotRecord,
         mutation: EpisodeRevisionMutation | None,
         fast_path_operation_id: str | None,
+        reconciliation_operation_id: str | None,
         policy: SleepSlicePolicy,
         committed_at: datetime,
     ) -> None:
@@ -1404,22 +1721,37 @@ class PostgresSleepSliceRepository:
                     committed_at=committed_at,
                 )
                 if mutation.conflicting_episode_id is not None:
+                    if reconciliation_operation_id is None:
+                        raise SleepSliceInvariantError(
+                            "date conflict requires a reconciliation operation"
+                        )
+                    reconciliation_id = self.id_generator(committed_at)
+                    self._insert_date_reconciliation_operation(
+                        cursor,
+                        operation_id=reconciliation_operation_id,
+                        reconciliation_id=reconciliation_id,
+                        mutation=mutation,
+                        policy=policy,
+                        committed_at=committed_at,
+                    )
                     cursor.execute(
                         """
                         INSERT INTO public.backend_episode_date_reconciliation (
-                          reconciliation_id, namespace_id, data_mode,
+                          reconciliation_id, operation_id, protocol_version,
+                          namespace_id, data_mode,
                           namespace_generation, run_id, arm_id, subject_id,
                           candidate_night_episode_id,
                           conflicting_night_episode_id, candidate_revision_id,
                           proposed_episode_local_date, status, reason_code,
                           created_at
                         ) VALUES (
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, 2, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                           'reconciliation_required', 'canonical_date_conflict', %s
                         )
                         """,
                         (
-                            self.id_generator(committed_at),
+                            reconciliation_id,
+                            reconciliation_operation_id,
                             self.scope.namespace_id,
                             self.scope.data_mode,
                             self.scope.namespace_generation,
@@ -1466,6 +1798,9 @@ class PostgresSleepSliceRepository:
                     event_payload["conflicting_night_episode_id"] = (
                         mutation.conflicting_episode_id
                     )
+                    event_payload["reconciliation_operation_id"] = (
+                        reconciliation_operation_id
+                    )
                 self._insert_outbox(
                     cursor,
                     event_id=self.id_generator(committed_at),
@@ -1475,7 +1810,9 @@ class PostgresSleepSliceRepository:
                     aggregate_version=mutation.episode.current_revision,
                     sequence=mutation.episode.current_revision,
                     subject_id=observation.subject_id,
-                    operation_id=fast_path_operation_id,
+                    operation_id=(
+                        fast_path_operation_id or reconciliation_operation_id
+                    ),
                     payload=event_payload,
                     created_at=committed_at,
                 )
@@ -2211,13 +2548,16 @@ class PostgresSleepSliceRepository:
         policy: SleepSlicePolicy,
         committed_at: datetime,
     ) -> None:
-        if decision.urgent and product_agent_operation_id is not None:
+        if (
+            not decision.enqueue_product_agent
+            and product_agent_operation_id is not None
+        ):
             raise SleepSliceInvariantError(
-                "urgent deterministic result cannot enqueue Product Agent"
+                "ineligible deterministic result cannot enqueue Product Agent"
             )
-        if not decision.urgent and product_agent_operation_id is None:
+        if decision.enqueue_product_agent and product_agent_operation_id is None:
             raise SleepSliceInvariantError(
-                "non-urgent deterministic result requires Product operation"
+                "eligible deterministic result requires Product operation"
             )
         cursor = self.connection.cursor()
         try:
@@ -2560,6 +2900,91 @@ class PostgresSleepSliceRepository:
                 episode.date_conflict,
             ),
         )
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_episode_observation_memberships (
+              membership_id, namespace_id, data_mode, night_episode_id,
+              observation_id, subject_id, device_binding_id,
+              binding_version, event_at, received_at,
+              lateness_watermark_at, late_after_watermark,
+              membership_json, associated_at
+            )
+            SELECT
+              'episode-membership:' || encode(digest(
+                convert_to(%s, 'UTF8') || decode('00', 'hex') ||
+                convert_to(canonical.observation_id, 'UTF8'),
+                'sha256'
+              ), 'hex'),
+              canonical.namespace_id, canonical.data_mode, %s,
+              canonical.observation_id, canonical.subject_id,
+              canonical.device_binding_id, canonical.binding_version,
+              COALESCE(canonical.measurement_at, canonical.event_occurred_at),
+              canonical.received_at, NULL,
+              FALSE,
+              jsonb_build_object(
+                'membership_id', 'episode-membership:' || encode(digest(
+                  convert_to(%s, 'UTF8') || decode('00', 'hex') ||
+                  convert_to(canonical.observation_id, 'UTF8'),
+                  'sha256'
+                ), 'hex'),
+                'night_episode_id', %s::text,
+                'observation_id', canonical.observation_id,
+                'subject_id', canonical.subject_id,
+                'device_binding_id', canonical.device_binding_id,
+                'binding_version', canonical.binding_version,
+                'event_at', COALESCE(
+                  canonical.measurement_at, canonical.event_occurred_at
+                ),
+                'received_at', canonical.received_at,
+                'lateness_watermark_at', NULL,
+                'late_after_watermark', FALSE,
+                'associated_at', %s
+              ),
+              %s
+            FROM public.sleep_domain_canonical_observations AS canonical
+            WHERE canonical.namespace_id = %s
+              AND canonical.data_mode = %s
+              AND canonical.subject_id = %s
+              AND canonical.observation_id = ANY(%s::text[])
+            ON CONFLICT (namespace_id, data_mode, observation_id) DO NOTHING
+            """,
+            (
+                episode.night_episode_id,
+                episode.night_episode_id,
+                episode.night_episode_id,
+                episode.night_episode_id,
+                committed_at,
+                committed_at,
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.subject_id,
+                list(mutation.observation_ids),
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT COALESCE(
+              array_agg(membership.observation_id
+                        ORDER BY membership.observation_id),
+              ARRAY[]::text[]
+            ) = %s::text[]
+            FROM public.sleep_domain_episode_observation_memberships AS membership
+            WHERE membership.namespace_id = %s
+              AND membership.data_mode = %s
+              AND membership.night_episode_id = %s
+            """,
+            (
+                sorted(mutation.observation_ids),
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                episode.night_episode_id,
+            ),
+        )
+        membership_match = cursor.fetchone()
+        if membership_match is None or membership_match[0] is not True:
+            raise SleepSliceConflict(
+                "NightEpisode observation membership set conflicts with revision"
+            )
 
     def _episode_values(
         self,
@@ -2748,6 +3173,84 @@ class PostgresSleepSliceRepository:
                 mutation.episode.subject_id,
                 self.scope.service_principal_id,
                 mutation.episode.night_episode_id,
+                mutation.revision_id,
+                semantic_key,
+                semantic_key,
+                _json(operation_json),
+                committed_at,
+                committed_at,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+                semantic_key,
+                committed_at,
+                _json(workload),
+                policy.policy_sha256,
+            ),
+        )
+
+    def _insert_date_reconciliation_operation(
+        self,
+        cursor: Any,
+        *,
+        operation_id: str,
+        reconciliation_id: str,
+        mutation: EpisodeRevisionMutation,
+        policy: SleepSlicePolicy,
+        committed_at: datetime,
+    ) -> None:
+        conflicting_episode_id = mutation.conflicting_episode_id
+        episode_local_date = mutation.episode.episode_local_date
+        if conflicting_episode_id is None or episode_local_date is None:
+            raise SleepSliceInvariantError(
+                "date reconciliation requires an exact conflict pair"
+            )
+        semantic_key = _digest(
+            {
+                "stage": "episode_date_reconciliation",
+                "candidate_night_episode_id": mutation.episode.night_episode_id,
+                "candidate_revision_id": mutation.revision_id,
+                "conflicting_night_episode_id": conflicting_episode_id,
+                "proposed_episode_local_date": episode_local_date.isoformat(),
+                "policy_sha256": policy.policy_sha256,
+            }
+        )
+        workload = _workload_snapshot(self.scope, "reconciliation")
+        operation_json = {
+            "schema_version": "episode_date_reconciliation_operation.v1",
+            "reconciliation_id": reconciliation_id,
+            "candidate_night_episode_id": mutation.episode.night_episode_id,
+            "candidate_revision_id": mutation.revision_id,
+            "conflicting_night_episode_id": conflicting_episode_id,
+            "proposed_episode_local_date": episode_local_date.isoformat(),
+            "resolution_policy": "preserve_existing_canonical_owner.v1",
+            "authorization_snapshot": workload,
+        }
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_operations (
+              operation_id, namespace_id, data_mode, operation_type,
+              subject_id, service_principal_id, actor_id,
+              target_resource_id, target_resource_key, idempotency_key,
+              request_sha256, status, attempt_count, cas_version,
+              operation_json, created_at, updated_at, protocol_version,
+              namespace_generation, run_id, arm_id, id_scheme, origin_kind,
+              semantic_key, queue_name, priority, available_at, max_attempts,
+              workload_authorization_snapshot_json, policy_sha256
+            ) VALUES (
+              %s, %s, %s, 'episode_date_reconciliation', %s, %s, NULL,
+              %s, %s, %s, %s, 'pending', 0, 0, %s::jsonb, %s, %s, 2,
+              %s, %s, %s, 'uuidv7', 'system', %s, 'reconciliation', 90,
+              %s, 5, %s::jsonb, %s
+            )
+            """,
+            (
+                operation_id,
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                mutation.episode.subject_id,
+                self.scope.service_principal_id,
+                reconciliation_id,
                 mutation.revision_id,
                 semantic_key,
                 semantic_key,
@@ -3045,6 +3548,7 @@ __all__ = [
     "PostgresSleepSliceRepository",
     "RawPayloadCipher",
     "ReplayIngressHandler",
+    "ReplayIngressOrder",
     "ReplayObservationInput",
     "ReplayRawBatch",
     "SleepSliceConflict",

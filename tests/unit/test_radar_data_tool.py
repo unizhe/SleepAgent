@@ -11,6 +11,7 @@ from sleepagent.product_runtime.contracts import (
     InvocationOutcome,
     SourceScope,
     SourceScopeKind,
+    stable_hash,
 )
 from sleepagent.product_runtime.tooling import (
     CoreProductToolService,
@@ -246,6 +247,74 @@ def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() ->
     )
 
     assert result.receipt.outcome is InvocationOutcome.SUCCEEDED
+
+
+def test_product_night_evidence_accepts_privacy_safe_hashed_subject_binding() -> None:
+    subject_id = "elder-phase3a"
+    subject_ref = "subject:" + stable_hash(
+        {"data_mode": "live", "subject_id": subject_id}
+    )[:32]
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
+        "radar.get_night_evidence",
+        {
+            "data": _product_facts(subject_id=subject_id).model_dump(mode="json"),
+            "source_refs": ["night_episode_revision:live:1"],
+        },
+        context=ProductToolExecutionContext(
+            caller="runtime",
+            fact_snapshot=_snapshot(binding_subject=subject_ref),
+            episode_id="episode-phase3a-private-subject",
+        ),
+    )
+
+    assert subject_id not in subject_ref
+    assert result.receipt.outcome is InvocationOutcome.SUCCEEDED
+
+
+def test_product_night_evidence_projects_large_provenance_to_bounded_summary() -> None:
+    subject_id = "elder-phase3a"
+    facts = _product_facts(subject_id=subject_id).model_copy(
+        update={
+            "provenance_references": (
+                "night_episode_revision:live:1",
+                *tuple(
+                    f"canonical_observation:observation-{index}"
+                    for index in range(100)
+                ),
+            )
+        }
+    )
+    tool_input = facts.tool_inputs()["radar.get_night_evidence"]
+    subject_ref = "subject:" + stable_hash(
+        {"data_mode": "live", "subject_id": subject_id}
+    )[:32]
+    fact_snapshot = _snapshot(
+        binding_subject=subject_ref,
+        source_refs=tuple(tool_input["source_refs"]),
+    )
+
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
+        "radar.get_night_evidence",
+        tool_input,
+        context=ProductToolExecutionContext(
+            caller="runtime",
+            fact_snapshot=fact_snapshot,
+            episode_id="episode-phase3a-bounded-evidence",
+        ),
+    )
+
+    assert result.receipt.outcome is InvocationOutcome.SUCCEEDED
+    assert len(result.receipt.source_refs) <= 50
+    assert result.receipt.output["data"]["schema_version"] == (
+        "product_night_evidence.v1"
+    )
+    assert result.receipt.output["data"]["provenance_ref_count"] == 101
+    assert "subject_id" not in result.receipt.output["data"]
+    assert "canonical_observations" not in result.receipt.output["data"]
 
 
 def test_agent_cannot_promote_caller_supplied_generic_radar_payload() -> None:
@@ -510,7 +579,11 @@ class _TamperedQualityGate(DataQualityGate):
         return super().run(**kwargs).model_copy(update=self._summary_update)
 
 
-def _snapshot(*, binding_subject: str = "elder-phase3a") -> FactSnapshot:
+def _snapshot(
+    *,
+    binding_subject: str = "elder-phase3a",
+    source_refs: tuple[str, ...] | None = None,
+) -> FactSnapshot:
     as_of = datetime(2026, 7, 10, 8, tzinfo=timezone.utc)
     return FactSnapshot.create(
         fact_snapshot_id="phase3a-radar-snapshot",
@@ -528,7 +601,7 @@ def _snapshot(*, binding_subject: str = "elder-phase3a") -> FactSnapshot:
             valid_night_count=1,
         ),
         canonical_data_version="a" * 64,
-        source_refs=("night_episode_revision:live:1",),
+        source_refs=source_refs or ("night_episode_revision:live:1",),
         created_at=as_of,
     )
 

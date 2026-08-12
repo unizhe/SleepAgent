@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import Field, model_validator
 
 from sleepagent.sleep_domain.contracts import DataMode, SleepDomainContract
+from sleepagent.sleep_domain.schema_versions import dispatch_versioned
 
 
 UTC = timezone.utc
@@ -339,11 +340,21 @@ def finalize_episode_date(
 
 
 def upcast_night_episode(payload: Mapping[str, Any]) -> NightEpisodeV2:
-    version = payload.get("schema_version")
-    if version == "night_episode.v2":
-        return NightEpisodeV2.model_validate(payload)
-    if version != "night_episode.v1":
-        raise ValueError(f"unsupported NightEpisode schema: {version!r}")
+    readers: Mapping[
+        str,
+        Callable[[Mapping[str, Any]], NightEpisodeV2],
+    ] = {
+        "night_episode.v1": _upcast_night_episode_v1,
+        "night_episode.v2": NightEpisodeV2.model_validate,
+    }
+    return dispatch_versioned(
+        payload,
+        family="night_episode",
+        readers=readers,
+    )
+
+
+def _upcast_night_episode_v1(payload: Mapping[str, Any]) -> NightEpisodeV2:
     created_at = _datetime(payload["created_at"])
     start = _datetime(payload["collection_start_at"])
     deadline_raw = payload.get("report_deadline_at")

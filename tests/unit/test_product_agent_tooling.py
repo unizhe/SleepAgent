@@ -220,6 +220,42 @@ def test_runtime_read_service_derives_catalog_constraints_state_and_policy() -> 
     ].required_tools
 
 
+def test_tool_receipt_bounds_large_fact_snapshot_provenance() -> None:
+    source_refs = tuple(f"canonical-observation:{index}" for index in range(75))
+    fact_snapshot = FactSnapshot.create(
+        fact_snapshot_id="large-snapshot",
+        binding=AuthenticatedBinding(
+            actor_id="a1", subject_id="u1", role="elder"
+        ),
+        source_scope=SourceScope(
+            kind=SourceScopeKind.CURRENT_NIGHT,
+            as_of=NOW,
+            timezone_name="Asia/Shanghai",
+            date_start=date(2026, 7, 26),
+            date_end=date(2026, 7, 26),
+            valid_night_count=1,
+        ),
+        canonical_data_version="v1",
+        source_refs=source_refs,
+        created_at=NOW,
+    )
+    executor = ProductToolExecutor(core_service=CoreProductToolService())
+
+    result = executor.execute(
+        "runtime.build_fact_snapshot",
+        {},
+        context=ProductToolExecutionContext(
+            caller="runtime",
+            fact_snapshot=fact_snapshot,
+            episode_id="episode-large-snapshot",
+        ),
+    )
+
+    assert result.receipt.output["source_ref_count"] == len(source_refs)
+    assert result.receipt.output["source_refs"] == list(source_refs[:50])
+    assert result.receipt.source_refs == list(source_refs[:50])
+
+
 def test_runtime_interaction_write_is_receipted_and_replayed_exactly_once() -> None:
     calls: list[dict[str, object]] = []
 

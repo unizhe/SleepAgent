@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -28,6 +29,7 @@ from sleepagent.product_runtime.deterministic_model import (
 from sleepagent.product_runtime.postgres_worker import (
     PostgresProductAgentRepository,
     ProductAgentLease,
+    ProductAgentLeaseLost,
     ProductAgentProcessor,
     ProductAgentWorkHandlerAdapter,
 )
@@ -727,6 +729,7 @@ def _worker_runtime(
     worker_dsn: str,
     worker_principal: str,
     namespace_id: str,
+    pool_max_size: int = 2,
 ) -> tuple[PsycopgPoolProvider, UnitOfWorkFactory[object], PostgresDurableWorkStore]:
     settings = SleepBackendSettings(
         profile="product-postgres-integration",
@@ -745,16 +748,73 @@ def _worker_runtime(
         signing_key_ref="test:worker-signing",
         encryption_key_ref="test:worker-encryption",
         pool_min_size=1,
-        pool_max_size=2,
+        pool_max_size=pool_max_size,
     )
     provider = PsycopgPoolProvider.from_dsn(
         worker_dsn,
-        configuration=PoolConfiguration(min_size=1, max_size=2),
+        configuration=PoolConfiguration(min_size=1, max_size=pool_max_size),
         application_name="sleepagent-product-postgres-integration",
     )
     provider.open()
     factory: UnitOfWorkFactory[object] = UnitOfWorkFactory(provider)
     return provider, factory, PostgresDurableWorkStore(settings, factory)
+
+
+def _clone_pending_product_operations(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+    count: int,
+) -> None:
+    ids = UUID7Generator()
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            for index in range(count):
+                operation_id = ids()
+                semantic_key = hashlib.sha256(
+                    f"load:{seed.operation_id}:{index}".encode()
+                ).hexdigest()
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_operations (
+                      operation_id, namespace_id, data_mode, operation_type,
+                      subject_id, service_principal_id, actor_id,
+                      target_resource_id, target_resource_key, idempotency_key,
+                      request_sha256, status, attempt_count, cas_version,
+                      operation_json, created_at, updated_at, protocol_version,
+                      namespace_generation, run_id, arm_id, id_scheme,
+                      origin_kind, semantic_key, queue_name, priority,
+                      available_at, max_attempts,
+                      workload_authorization_snapshot_json, policy_sha256
+                    )
+                    SELECT
+                      %s, namespace_id, data_mode, operation_type,
+                      subject_id, service_principal_id, NULL,
+                      target_resource_id, target_resource_key || %s,
+                      idempotency_key || %s, request_sha256,
+                      'pending', 0, 0,
+                      operation_json || jsonb_build_object(
+                        'operation_id', %s::text
+                      ),
+                      clock_timestamp(), clock_timestamp(), protocol_version,
+                      namespace_generation, run_id, arm_id, id_scheme,
+                      origin_kind, %s, queue_name, priority,
+                      clock_timestamp(), max_attempts,
+                      workload_authorization_snapshot_json, policy_sha256
+                    FROM public.sleep_domain_operations
+                    WHERE operation_id = %s
+                    """,
+                    (
+                        operation_id,
+                        f":load:{index}",
+                        f":load:{index}",
+                        operation_id,
+                        semantic_key,
+                        seed.operation_id,
+                    ),
+                )
+                assert cursor.rowcount == 1
 
 
 def _claim_product_work(
@@ -1053,6 +1113,120 @@ def test_prepared_product_attempt_is_not_query_visible_before_commit() -> None:
     )
 
 
+def test_expired_product_fence_after_prepare_cannot_commit() -> None:
+    """Model the exact process-loss boundary between prepare and commit."""
+
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"prepared-stale-worker-{uuid4().hex}",
+        )
+        scope = store.uow_scope_for_claim(claim)
+        lease = ProductAgentLease(
+            operation_id=claim.work_id,
+            attempt_sequence=claim.attempt,
+            lease_generation=claim.lease_generation,
+            fencing_token=claim.fencing_token,
+            worker_instance=claim.worker_instance,
+        )
+        processor = ProductAgentProcessor(
+            factory,
+            runtime_bundle=_deterministic_runtime_bundle(),
+        )
+        with factory.begin(scope) as uow:
+            repository = PostgresProductAgentRepository(uow.connection, scope)
+            source = repository.load_source(lease)
+            uow.commit()
+        artifact = processor.prepare(
+            scope=scope,
+            source=source,
+            lease=lease,
+            prepared_at=datetime.now(tz=UTC),
+        )
+        with factory.begin(scope) as uow:
+            repository = PostgresProductAgentRepository(uow.connection, scope)
+            repository.persist_prepared(lease, artifact)
+            uow.commit()
+
+        # This is the durable state a replacement supervisor observes after the
+        # original process disappears at the prepare/commit boundary.
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET lease_expires_at = clock_timestamp() - interval '1 second'
+                    WHERE operation_id = %s
+                    """,
+                    (seed.operation_id,),
+                )
+
+        with pytest.raises(ProductAgentLeaseLost, match="fence"):
+            with factory.begin(scope) as uow:
+                repository = PostgresProductAgentRepository(uow.connection, scope)
+                repository.commit_prepared(
+                    lease,
+                    artifact,
+                    committed_at=datetime.now(tz=UTC),
+                )
+                uow.commit()
+
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT attempt_state, query_visible, committed_at
+                    FROM public.backend_product_attempts
+                    WHERE operation_id = %s
+                    """,
+                    (seed.operation_id,),
+                )
+                assert cursor.fetchone() == ("prepared", False, None)
+                cursor.execute(
+                    """
+                    SELECT
+                      (SELECT count(*)
+                       FROM public.sleep_domain_analysis_revisions
+                       WHERE night_episode_revision_id = %s),
+                      (SELECT count(*)
+                       FROM public.sleep_domain_analysis_role_views
+                       WHERE night_episode_revision_id = %s),
+                      (SELECT count(*)
+                       FROM public.sleep_domain_domain_outbox
+                       WHERE operation_id = %s),
+                      (SELECT status
+                       FROM public.sleep_domain_operations
+                       WHERE operation_id = %s)
+                    """,
+                    (
+                        seed.night_episode_revision_id,
+                        seed.night_episode_revision_id,
+                        seed.operation_id,
+                        seed.operation_id,
+                    ),
+                )
+                assert cursor.fetchone() == (0, 0, 0, "running")
+    finally:
+        provider.close()
+
+
 def test_worker_epoch_lock_privilege_is_column_scoped_and_rls_bounded() -> None:
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
@@ -1201,3 +1375,114 @@ def test_worker_epoch_lock_privilege_is_column_scoped_and_rls_bounded() -> None:
             """,
             (seed.namespace_id, seed.subject_id),
         ).fetchone() == (1, 1, 1, seed.namespace_id)
+
+
+def test_namespace_capacity_and_fairness_hold_under_concurrent_claim_load() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seeds = [
+        _seed_product_scope(
+            psycopg,
+            admin_dsn=admin_dsn,
+            worker_principal=worker_principal,
+        )
+        for _index in range(4)
+    ]
+    for seed in seeds:
+        _clone_pending_product_operations(
+            psycopg,
+            admin_dsn=admin_dsn,
+            seed=seed,
+            count=7,
+        )
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.backend_namespaces "
+                "SET max_worker_concurrency = 1 "
+                "WHERE namespace_id = ANY(%s)",
+                ([seed.namespace_id for seed in seeds],),
+            )
+            assert cursor.rowcount == 4
+            # The postgres marker is order-independent even when it shares one
+            # disposable database. Keep reclaimable work left by another test
+            # outside this load window so every claim belongs to this four-
+            # namespace experiment.
+            cursor.execute(
+                "UPDATE public.sleep_domain_operations "
+                "SET available_at = clock_timestamp() + interval '1 hour' "
+                "WHERE data_mode = 'replay' AND queue_name = 'product_agent' "
+                "AND namespace_id <> ALL(%s) "
+                "AND status IN ('pending', 'retry', 'running')",
+                ([seed.namespace_id for seed in seeds],),
+            )
+
+    provider, _factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id="replay:",
+        pool_max_size=8,
+    )
+    barrier = threading.Barrier(8)
+
+    def claim(index: int) -> LeaseClaim | None:
+        barrier.wait(timeout=10)
+        return store.claim(
+            queue="product_agent",
+            worker_instance=f"fairness-worker-{index}",
+            lease_seconds=30,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            claims = list(executor.map(claim, range(8)))
+        claimed = [item for item in claims if item is not None]
+        # A heavily contended first pass may skip an advisory-locked namespace;
+        # subsequent claims must still reach every namespace and never exceed
+        # its capacity of one running item.
+        for index in range(8, 16):
+            if len(claimed) == len(seeds):
+                break
+            item = store.claim(
+                queue="product_agent",
+                worker_instance=f"fairness-worker-{index}",
+                lease_seconds=30,
+            )
+            if item is not None:
+                claimed.append(item)
+    finally:
+        provider.close()
+
+    claimed_namespaces = [item.namespace_id for item in claimed]
+    assert len(claimed) == 4
+    assert set(claimed_namespaces) == {seed.namespace_id for seed in seeds}
+    assert len(set(claimed_namespaces)) == len(claimed_namespaces)
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT namespace_id, count(*) FROM "
+                "public.sleep_domain_operations "
+                "WHERE namespace_id = ANY(%s) AND status = 'running' "
+                "AND lease_expires_at > clock_timestamp() "
+                "GROUP BY namespace_id ORDER BY namespace_id",
+                ([seed.namespace_id for seed in seeds],),
+            )
+            assert cursor.fetchall() == sorted(
+                (seed.namespace_id, 1) for seed in seeds
+            )
+            cursor.execute(
+                "SELECT namespace_id, claim_count FROM "
+                "public.backend_queue_namespace_fairness "
+                "WHERE queue_name = 'product_agent' "
+                "AND namespace_id = ANY(%s) ORDER BY namespace_id",
+                ([seed.namespace_id for seed in seeds],),
+            )
+            assert cursor.fetchall() == sorted(
+                (seed.namespace_id, 1) for seed in seeds
+            )

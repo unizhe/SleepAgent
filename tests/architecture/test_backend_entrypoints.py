@@ -26,6 +26,11 @@ from sleepagent.backend_settings import (
     ProcessRole,
     SleepBackendSettings,
 )
+from sleepagent.persistence.migrations import (
+    EXPECTED_MIGRATION_IDENTITIES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_MANIFEST_SHA256,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -87,7 +92,16 @@ def test_backend_main_has_no_legacy_import_or_compatibility_guard() -> None:
     assert guarded == []
 
 
-def test_configured_backend_main_import_does_not_load_legacy_module() -> None:
+def test_configured_backend_main_import_does_not_load_legacy_module(
+    tmp_path: Path,
+) -> None:
+    actor_public_key = tmp_path / "actor-public.pem"
+    actor_public_key.write_bytes(
+        Ed25519PrivateKey.generate().public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
     result = _run_import(
         """
 import json
@@ -123,8 +137,8 @@ print(json.dumps({
         SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID="entrypoint-test",
         SLEEPAGENT_BACKEND_DATABASE_SCOPE="replay",
         SLEEPAGENT_BACKEND_NAMESPACE_PREFIXES="replay:entrypoint",
-        SLEEPAGENT_BACKEND_ENABLED_SURFACES="",
-        SLEEPAGENT_BACKEND_SIGNING_KEY_REF="test:entrypoint-signing",
+        SLEEPAGENT_BACKEND_ENABLED_SURFACES="public_v1,product",
+        SLEEPAGENT_BACKEND_SIGNING_KEY_REF=f"file:{actor_public_key}",
         SLEEPAGENT_BACKEND_ENCRYPTION_KEY_REF="test:entrypoint-encryption",
         SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF=(
             "test:entrypoint-service-credential"
@@ -169,29 +183,79 @@ else:
     assert payload["legacy_loaded"] is False
 
 
-def test_standalone_sleep_api_lifespan_does_not_own_worker_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    standalone = importlib.import_module("sleepagent.sleep_api.app")
-    events: list[str] = []
-    monkeypatch.setattr(
-        standalone,
-        "start_sleep_api_worker",
-        lambda: events.append("start"),
-    )
-    monkeypatch.setattr(
-        standalone,
-        "stop_sleep_api_worker",
-        lambda: events.append("stop"),
-    )
-    app = standalone.create_sleep_api_app(runtime_provider=lambda: object())
+def test_legacy_sleep_api_adapter_is_test_only_and_uses_canonical_factory() -> None:
+    support = importlib.import_module("tests.support.runtime_fixtures")
+    app = support.create_test_sleep_api_app(runtime_provider=lambda: object())
 
     async def exercise() -> None:
         async with app.router.lifespan_context(app):
-            assert events == []
+            assert app.state.runtime.worker_handlers == {}
 
     asyncio.run(exercise())
-    assert events == []
+    source = (
+        REPOSITORY / "tests" / "support" / "runtime_fixtures.py"
+    ).read_text()
+    assert "create_sleep_backend_app(" in source
+    assert "start_sleep_api_worker" not in source
+    assert "stop_sleep_api_worker" not in source
+    assert "app =" not in source
+    assert not (REPOSITORY / "sleepagent" / "sleep_api" / "app.py").exists()
+
+    runtime_source = (
+        REPOSITORY / "sleepagent" / "sleep_api" / "runtime.py"
+    ).read_text()
+    assert "_RUNTIME" not in runtime_source
+    assert "_WORKER" not in runtime_source
+    assert "get_sleep_api_runtime" not in runtime_source
+    assert "start_sleep_api_worker" not in runtime_source
+
+
+def test_only_canonical_postgres_worker_directly_calls_product_runner() -> None:
+    diagnostics = (
+        REPOSITORY / "sleepagent" / "product_api" / "diagnostics" / "http.py"
+    ).read_text(encoding="utf-8")
+    bridge = (
+        REPOSITORY / "sleepagent" / "sleep_domain" / "agent_bridge.py"
+    ).read_text(encoding="utf-8")
+    habit = (
+        REPOSITORY / "sleepagent" / "product_runtime" / "habit_api.py"
+    ).read_text(encoding="utf-8")
+    diagnostic_cli = (
+        REPOSITORY / "tests" / "support" / "radar_cli.py"
+    ).read_text(encoding="utf-8")
+    canonical_worker = (
+        REPOSITORY / "sleepagent" / "product_runtime" / "postgres_worker.py"
+    ).read_text(encoding="utf-8")
+
+    assert "product_runner.run" not in diagnostics
+    assert "episode_runner.run" not in bridge
+    assert "build_product_runtime_bundle_from_env()" not in diagnostics
+    assert "build_product_runtime_bundle_from_env()" not in habit
+    assert "build_product_runtime_bundle_from_env" not in diagnostic_cli
+    assert "_RUNTIME = RadarApiRuntime(" not in diagnostics
+    assert "runner.run(request)" in canonical_worker
+
+
+def test_retired_runtime_test_hooks_are_not_shipped_as_production_bindings() -> None:
+    pyproject = (REPOSITORY / "pyproject.toml").read_text(encoding="utf-8")
+    diagnostics = (
+        REPOSITORY / "sleepagent" / "product_api" / "diagnostics" / "http.py"
+    ).read_text(encoding="utf-8")
+    habit = (
+        REPOSITORY / "sleepagent" / "product_runtime" / "habit_api.py"
+    ).read_text(encoding="utf-8")
+    backend_runtime = (
+        REPOSITORY / "sleepagent" / "backend_runtime.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'radar-agent = "sleepagent.product_runtime.cli:main"' not in pyproject
+    assert not any(
+        (REPOSITORY / "sleepagent" / "product_runtime" / "cli").glob("*.py")
+    )
+    assert "def for_test(" not in diagnostics
+    assert "reset_radar_api_runtime_for_tests" not in diagnostics
+    assert "reset_habit_profile_api_for_tests" not in habit
+    assert "reset_active_runtime_for_tests" not in backend_runtime
 
 
 def test_production_openapi_excludes_demo_and_legacy_surfaces(
@@ -226,13 +290,11 @@ def test_production_openapi_excludes_demo_and_legacy_surfaces(
             {
                 ApiSurface.PUBLIC_V1,
                 ApiSurface.PRODUCT,
-                ApiSurface.INTERNAL,
             }
         ),
         signing_key_ref=f"file:{actor_key}",
         encryption_key_ref=f"file:{encryption_key}",
         service_credential_ref=f"file:{service_credential}",
-        internal_auth_token="production-internal-token-32-bytes",
     )
     runtime = SleepBackendRuntime(
         settings,
@@ -241,8 +303,10 @@ def test_production_openapi_excludes_demo_and_legacy_surfaces(
         attestor=lambda: DatabaseAttestation(
             database_identity="sleepagent_live",
             database_role="sleepagent_api_live",
-            schema_version=1,
+            schema_version=LATEST_SCHEMA_VERSION,
             migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
         ),
         services=build_api_runtime_services(settings, uow_factory=object()),
     )
@@ -254,3 +318,13 @@ def test_production_openapi_excludes_demo_and_legacy_surfaces(
     assert not any(path.startswith("/product/radar") for path in paths)
     assert not any(path.startswith("/radar-agent") for path in paths)
     assert paths.isdisjoint({"/health", "/status"})
+
+
+def test_product_contracts_do_not_retain_generic_projection_placeholder() -> None:
+    source = (
+        REPOSITORY / "sleepagent" / "product_api" / "contracts.py"
+    ).read_text(encoding="utf-8")
+
+    assert "class ProjectionResponse" not in source
+    assert "class ProjectionRecord" not in source
+    assert "product_projection_response.v1" not in source

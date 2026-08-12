@@ -3,24 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from threading import RLock
-from typing import Any, Literal, cast
+from typing import Any, Callable, Literal, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import Field, model_validator
 
-from sleepagent.product_device import PRODUCT_RADAR_API_KEY_ENV
 from sleepagent.product_api.diagnostics.routes import RADAR_AGENT_API_PREFIX
 from sleepagent.persistence import (
     RadarPersistenceStore,
     RadarSubject,
 )
 from sleepagent.product_device.provider import ReplayRadarProvider, SUPPORTED_REPLAY_SCENARIOS
-from sleepagent.simulation.replay import ReplayScenario, get_replay_scenario
 from sleepagent.product_runtime.task_runtime import (
     AuthorizationRequired,
     BindingMismatch,
@@ -84,10 +81,7 @@ from sleepagent.product_runtime.runtime_contracts import (
 )
 from sleepagent.product_runtime.runtime_factory import (
     ProductRuntimeBundle,
-    build_product_runtime_bundle_from_env,
-    product_episode_runner_is_configured,
 )
-
 
 RADAR_AGENT_API_KEY_ENV = "SLEEPAGENT_RADAR_AGENT_API_KEY"
 RADAR_AGENT_DATABASE_URL_ENV = "SLEEPAGENT_RADAR_AGENT_DATABASE_URL"
@@ -105,6 +99,14 @@ _PRODUCT_INTERNAL_ARTIFACT_TYPES = {
     PRODUCT_EPISODE_CHECKPOINT_ARTIFACT,
     PRODUCT_EPISODE_REQUEST_ARTIFACT,
 }
+
+
+def _get_replay_scenario(scenario_id: str) -> Any:
+    """Resolve retired diagnostic fixtures only when that surface is exercised."""
+
+    from sleepagent.simulation.replay import get_replay_scenario
+
+    return get_replay_scenario(scenario_id)
 
 
 class ProductGoalType(str, Enum):
@@ -175,7 +177,7 @@ class HumanDecisionPublicView(RadarAgentSchema):
 class RadarTaskDetail(RadarAgentSchema):
     task: RadarAgentTask
     risk_level: str | None = None
-    replay_scenario: ReplayScenario | None = None
+    replay_scenario: dict[str, Any] | None = None
     artifacts: list[RadarArtifactVersion] = Field(default_factory=list)
     confirmations: list[HumanConfirmationRequest] = Field(default_factory=list)
     decisions: list[HumanDecisionPublicView] = Field(default_factory=list)
@@ -239,6 +241,16 @@ class RadarApiRuntime:
         self,
         *,
         product_runtime: ProductRuntimeBundle,
+        execute_episode: Callable[
+            [ProductEpisodeRunRequest], ProductEpisodeRunResult
+        ],
+        commit_confirmations: Callable[
+            [CommitFrozenConfirmedAction], ProductEpisodeRunResult
+        ],
+        reexecute_episode: Callable[
+            [ReexecuteWithAddedFact], ProductEpisodeRunResult
+        ],
+        development_mode: bool = False,
     ) -> None:
         if product_runtime.persistence_store is None:
             raise ValueError(
@@ -256,7 +268,10 @@ class RadarApiRuntime:
         self._lock = RLock()
         self.product_runtime = product_runtime
         self.human_decisions = self.product_runtime.human_decisions
-        self.product_runner = self.product_runtime.runner
+        self.execute_episode = execute_episode
+        self.commit_confirmations = commit_confirmations
+        self.reexecute_episode = reexecute_episode
+        self.development_mode = development_mode
 
     def create_task(
         self,
@@ -280,7 +295,7 @@ class RadarApiRuntime:
             self.store.save_device(device)
             task_service = (
                 self.service
-                if _development_mode_enabled()
+                if self.development_mode
                 else TaskService(
                     self.store,
                     validate_bindings=True,
@@ -547,7 +562,7 @@ class RadarApiRuntime:
         result = (
             precomputed_result
             if precomputed_result is not None
-            else self.product_runner.run(episode_request)
+            else self.execute_episode(episode_request)
         )
         existing_events = self.service.list_events(task.task_id)
         emitted_invocations = {
@@ -699,7 +714,7 @@ class RadarApiRuntime:
             metadata={
                 "runtime_kind": "product_episode",
                 "runtime_contract_version": "product-episode.v1",
-                "risk_level": get_replay_scenario(
+                "risk_level": _get_replay_scenario(
                     task.scenario
                 ).expected.risk_level.value,
             },
@@ -1597,7 +1612,7 @@ class RadarApiRuntime:
             )
             task = self.service.get_task(task_id)
         request = self._record_product_request_intent(task, request)
-        result = self.product_runner.commit_frozen_confirmations(
+        result = self.commit_confirmations(
             CommitFrozenConfirmedAction(
                 request=request,
                 frozen_result=frozen_result,
@@ -1691,7 +1706,7 @@ class RadarApiRuntime:
             running_task,
             resumed,
         )
-        result = self.product_runner.reexecute_with_added_fact(command)
+        result = self.reexecute_episode(command)
         return self._execute_product_task(
             running_task,
             resumed,
@@ -1741,7 +1756,7 @@ class RadarApiRuntime:
         force_dialogue: bool = False,
         audience_role: str | None = None,
     ) -> ProductEpisodeRunRequest:
-        scenario = get_replay_scenario(task.scenario)
+        scenario = _get_replay_scenario(task.scenario)
         source = scenario.deterministic_input
         goal = task.goal_payload or {}
         goal_type = ProductGoalType(
@@ -1944,8 +1959,8 @@ class RadarApiRuntime:
             task=task,
             risk_level=risk_level,
             replay_scenario=(
-                get_replay_scenario(task.scenario)
-                if os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
+                _get_replay_scenario(task.scenario).model_dump(mode="json")
+                if self.development_mode
                 else None
             ),
             artifacts=artifacts,
@@ -1971,7 +1986,7 @@ class RadarApiRuntime:
         task: RadarAgentTask,
         payload: RadarChatRequest,
     ) -> RadarChatResponse:
-        result = self.product_runner.run(
+        result = self.execute_episode(
             self._product_request_for_task(
                 task,
                 user_text=payload.message,
@@ -2037,46 +2052,23 @@ class RadarApiRuntime:
         )
 
 
-_RUNTIME = RadarApiRuntime(
-    product_runtime=build_product_runtime_bundle_from_env()
-)
 router = APIRouter(prefix=RADAR_AGENT_API_PREFIX, tags=["radar-agent"])
 
 
 def get_radar_api_runtime() -> RadarApiRuntime:
-    return _RUNTIME
+    raise RuntimeError("retired diagnostic runtime is not configured")
 
 
-def reset_radar_api_runtime_for_tests(
-    connection: sqlite3.Connection | None = None,
-    *,
-    product_runtime: ProductRuntimeBundle | None = None,
-) -> RadarApiRuntime:
-    global _RUNTIME
-    if product_runtime is not None and connection is not None:
-        raise ValueError(
-            "an injected Product runtime owns the API persistence store"
-        )
-    resolved_runtime = product_runtime
-    if resolved_runtime is None:
-        persistence = RadarPersistenceStore.connect_sqlite(
-            connection
-            or sqlite3.connect(":memory:", check_same_thread=False)
-        )
-        resolved_runtime = build_product_runtime_bundle_from_env(
-            persistence_store=persistence,
-        )
-    _RUNTIME = RadarApiRuntime(product_runtime=resolved_runtime)
-    from sleepagent.product_runtime.habit_api import (
-        configure_habit_profile_runtime,
-    )
+def _runtime() -> RadarApiRuntime:
+    return get_radar_api_runtime()
 
-    configure_habit_profile_runtime(_RUNTIME.product_runtime)
-    return _RUNTIME
+
+def _radar_api_key() -> str | None:
+    return None
 
 
 def _require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    expected = os.getenv(RADAR_AGENT_API_KEY_ENV) or os.getenv(PRODUCT_RADAR_API_KEY_ENV)
+    expected = _radar_api_key()
     if not expected:
         raise HTTPException(status_code=503, detail="Radar Agent API authentication is not configured.")
     if x_api_key != expected:
@@ -2112,7 +2104,7 @@ def _identity(
     _assert_actor(task, resolved_id, resolved_role)
     if not _development_mode_enabled():
         try:
-            _RUNTIME.service.assert_task_access(
+            _runtime().service.assert_task_access(
                 task.task_id,
                 actor_id=resolved_id,
                 actor_role=resolved_role,
@@ -2123,7 +2115,7 @@ def _identity(
 
 
 def _development_mode_enabled() -> bool:
-    return os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() == "true"
+    return _runtime().development_mode
 
 
 @router.post("/tasks", response_model=RadarTaskDetail)
@@ -2168,8 +2160,8 @@ async def create_radar_task(
                     "role_binding_ids": list(role_binding_ids),
                 }
             )
-        task = _RUNTIME.create_task(payload, idempotency_key=idempotency_key)
-        return _RUNTIME.detail(task.task_id)
+        task = _runtime().create_task(payload, idempotency_key=idempotency_key)
+        return _runtime().detail(task.task_id)
     except IdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (RoleAccessDenied, AuthorizationRequired, BindingMismatch) as exc:
@@ -2187,9 +2179,9 @@ async def run_radar_task(
 ) -> RadarTaskDetail | Response:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        return _RUNTIME.run_task(task_id)
+        return _runtime().run_task(task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
     except InvalidTaskTransition as exc:
@@ -2206,11 +2198,11 @@ async def answer_radar_task_user_input(
 ) -> Response:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         actor_id, actor_role = _identity(
             task, actor_id=x_actor_id, actor_role=x_actor_role
         )
-        request = _RUNTIME.store.get_user_input_request(payload.request_id)
+        request = _runtime().store.get_user_input_request(payload.request_id)
         if request.task_id != task_id:
             raise ValueError("user input request is not active for this task")
         if request.target_role != actor_role:
@@ -2228,7 +2220,7 @@ async def answer_radar_task_user_input(
                     == "user_input.decline_submitted"
                     and isinstance(getattr(event, "payload", None), dict)
                     and event.payload.get("request_id") == request.request_id
-                    for event in _RUNTIME.service.list_events(task_id)
+                    for event in _runtime().service.list_events(task_id)
                 )
             )
             exact_answer = False
@@ -2238,7 +2230,7 @@ async def answer_radar_task_user_input(
                 in {RadarTaskStatus.COMPLETED, RadarTaskStatus.FAILED}
                 and request.status == "answered"
             ):
-                response = _RUNTIME.store.get_user_input_response(
+                response = _runtime().store.get_user_input_response(
                     request.request_id
                 )
                 exact_answer = bool(
@@ -2271,11 +2263,11 @@ async def answer_radar_task_user_input(
                     "only a pending or exactly declined user-input request "
                     "can be projected"
                 )
-            _, newly_declined = _RUNTIME.store.decline_user_input_request(
+            _, newly_declined = _runtime().store.decline_user_input_request(
                 request.request_id
             )
             if newly_declined:
-                _RUNTIME.service.emit_event(
+                _runtime().service.emit_event(
                     task_id,
                     event_type="user_input.decline_submitted",
                     message="User declined the reviewed input request.",
@@ -2284,14 +2276,14 @@ async def answer_radar_task_user_input(
                         "question_id": request.question_id,
                     },
                 )
-            current = _RUNTIME.service.get_task(task_id).model_copy(
+            current = _runtime().service.get_task(task_id).model_copy(
                 update={
                     "completion_status": "partial",
                     "updated_at": datetime.now(timezone.utc),
                 }
             )
-            _RUNTIME.store.save_task(current)
-            _RUNTIME.service.transition_task(
+            _runtime().store.save_task(current)
+            _runtime().service.transition_task(
                 task_id,
                 RadarTaskStatus.FAILED,
                 message=(
@@ -2302,12 +2294,12 @@ async def answer_radar_task_user_input(
         else:
             if request.status == "pending":
                 if task.status != RadarTaskStatus.WAITING_FOR_USER_INPUT:
-                    pending_checkpoint = _RUNTIME._latest_product_checkpoint(
+                    pending_checkpoint = _runtime()._latest_product_checkpoint(
                         task_id,
                         pending_kind="user_input",
                     )
                     _, pending_result = (
-                        _RUNTIME._validated_continuation_checkpoint(
+                        _runtime()._validated_continuation_checkpoint(
                             pending_checkpoint
                         )
                     )
@@ -2331,9 +2323,9 @@ async def answer_radar_task_user_input(
                     answered_by_user_id=actor_id,
                     answered_by_role=actor_role,
                 )
-                response = _RUNTIME.store.save_user_input_response(proposed)
+                response = _runtime().store.save_user_input_response(proposed)
                 if response == proposed:
-                    _RUNTIME.service.emit_event(
+                    _runtime().service.emit_event(
                         task_id,
                         event_type="user_input.submitted",
                         message=(
@@ -2346,7 +2338,7 @@ async def answer_radar_task_user_input(
                         },
                     )
             elif request.status == "answered":
-                response = _RUNTIME.store.get_user_input_response(
+                response = _runtime().store.get_user_input_response(
                     request.request_id
                 )
                 if (
@@ -2363,7 +2355,7 @@ async def answer_radar_task_user_input(
                 raise InvalidTaskTransition(
                     "user input request is no longer answerable"
                 )
-            _RUNTIME.resume_product_after_user_input(
+            _runtime().resume_product_after_user_input(
                 task_id,
                 request_id=request.request_id,
             )
@@ -2395,7 +2387,7 @@ async def list_radar_tasks(
         RadarTaskStatus.WAITING_FOR_USER_INPUT,
         RadarTaskStatus.WAITING_FOR_CONFIRMATION,
     }
-    tasks = _RUNTIME.store.list_tasks()
+    tasks = _runtime().store.list_tasks()
     active_values = {status.value for status in active}
     tasks = [
         task
@@ -2408,7 +2400,7 @@ async def list_radar_tasks(
             _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
         except HTTPException:
             continue
-        visible.append(_RUNTIME.detail(task.task_id))
+        visible.append(_runtime().detail(task.task_id))
     return visible
 
 
@@ -2422,13 +2414,13 @@ async def get_radar_task(
 ) -> RadarTaskDetail:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        detail = _RUNTIME.detail(task_id)
+        detail = _runtime().detail(task_id)
         if artifact_id is not None:
             matches = [
                 item
-                for item in _RUNTIME.service.list_artifacts(
+                for item in _runtime().service.list_artifacts(
                     task_id,
                     artifact_id=artifact_id,
                 )
@@ -2454,9 +2446,9 @@ async def get_radar_task_events(
 ) -> list[RadarTaskEvent]:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        events = _RUNTIME.service.list_events(
+        events = _runtime().service.list_events(
             task_id,
             after_sequence=after_sequence,
         )
@@ -2474,7 +2466,7 @@ async def get_radar_task_decision_trace(
 ) -> dict[str, Any]:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
         visible_prefixes = (
             "goal.",
@@ -2489,7 +2481,7 @@ async def get_radar_task_decision_trace(
         )
         events = [
             event
-            for event in _RUNTIME.service.list_events(task_id)
+            for event in _runtime().service.list_events(task_id)
             if _event_type(event).startswith(visible_prefixes)
         ]
         return {
@@ -2513,12 +2505,12 @@ async def get_radar_task_developer_trace(
     x_actor_role: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_api_key(x_api_key)
-    if os.getenv(RADAR_AGENT_DEV_MODE_ENV, "false").lower() != "true":
+    if not _development_mode_enabled():
         raise HTTPException(status_code=404, detail="Developer trace is disabled.")
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
-        return build_developer_trace(_RUNTIME.service, task_id)
+        return build_developer_trace(_runtime().service, task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
 
@@ -2534,7 +2526,7 @@ async def stream_radar_task_events(
 ) -> Response:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         _identity(task, actor_id=x_actor_id, actor_role=x_actor_role)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Radar task not found.") from exc
@@ -2556,14 +2548,14 @@ async def stream_radar_task_events(
     async def live_events():
         live_cursor = cursor
         while True:
-            batch = _RUNTIME.service.list_events(
+            batch = _runtime().service.list_events(
                 task_id,
                 after_sequence=live_cursor,
             )
             for event in batch:
                 live_cursor = event.sequence
                 yield _format_sse_event(event)
-            current = _RUNTIME.service.get_task(task_id)
+            current = _runtime().service.get_task(task_id)
             if current.status in {
                 RadarTaskStatus.COMPLETED,
                 RadarTaskStatus.FAILED,
@@ -2597,7 +2589,7 @@ async def confirm_radar_task(
 ) -> HumanConfirmationRequest:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         if not x_actor_id or x_actor_role not in {
             "elder",
             "family",
@@ -2607,12 +2599,12 @@ async def confirm_radar_task(
                 "human decisions require authenticated actor and role headers"
             )
         actor_id, actor_role = x_actor_id, x_actor_role
-        projection = _RUNTIME.store.get_confirmation(payload.confirmation_id)
+        projection = _runtime().store.get_confirmation(payload.confirmation_id)
         if projection.task_id != task_id:
             raise InvalidTaskTransition(
                 "product confirmation belongs to another task"
             )
-        checkpoint = _RUNTIME._latest_product_checkpoint(
+        checkpoint = _runtime()._latest_product_checkpoint(
             task_id,
             pending_kind="confirmation",
         )
@@ -2631,7 +2623,7 @@ async def confirm_radar_task(
                 "product confirmation has no unique frozen target"
             )
         target = matching_targets[0]
-        authority = _RUNTIME._bound_human_decision(
+        authority = _runtime()._bound_human_decision(
             task_id=task_id,
             target=target,
         )
@@ -2684,7 +2676,7 @@ async def confirm_radar_task(
                 raise InvalidTaskTransition(
                     "a terminal task cannot accept a new confirmation"
                 )
-            decision = _RUNTIME.human_decisions.decide(
+            decision = _runtime().human_decisions.decide(
                 authority.decision_id,
                 actor_id=actor_id,
                 actor_role=actor_role,
@@ -2694,15 +2686,15 @@ async def confirm_radar_task(
                 role_binding_id=role_binding_id,
                 authorization_id=x_authorization_id,
             )
-        resolved = _RUNTIME._project_human_decision(
+        resolved = _runtime()._project_human_decision(
             task_id=task_id,
             target=target,
             decision=decision,
         )
-        _RUNTIME.store.save_hds_confirmation_projection(resolved)
+        _runtime().store.save_hds_confirmation_projection(resolved)
         pending_decisions = [
             item
-            for item in _RUNTIME.human_decisions.list(task_id=task_id)
+            for item in _runtime().human_decisions.list(task_id=task_id)
             if item.status
             in {
                 HumanDecisionStatus.PENDING,
@@ -2714,12 +2706,12 @@ async def confirm_radar_task(
                 RadarTaskStatus.WAITING_FOR_CONFIRMATION,
                 RadarTaskStatus.RUNNING,
             }:
-                _RUNTIME.resume_product_after_confirmations(task_id)
+                _runtime().resume_product_after_confirmations(task_id)
             elif not exact_retry:
                 raise InvalidTaskTransition(
                     "terminal confirmation replay is not authoritative"
                 )
-            resolved = _RUNTIME.store.get_confirmation(resolved.confirmation_id)
+            resolved = _runtime().store.get_confirmation(resolved.confirmation_id)
         return resolved
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task or confirmation not found.") from exc
@@ -2753,13 +2745,13 @@ async def revoke_product_human_decision(
             raise RoleAccessDenied(
                 "decision revocation requires authenticated actor and role headers"
             )
-        decision = _RUNTIME.human_decisions.get(decision_id)
+        decision = _runtime().human_decisions.get(decision_id)
         task_id = decision.proposal.task_id
         if task_id is None:
             raise InvalidTaskTransition(
                 "control-plane decisions use the release governance endpoint"
             )
-        task = _RUNTIME.service.get_task(task_id)
+        task = _runtime().service.get_task(task_id)
         role_binding_id = x_role_binding_id or next(
             (
                 item.strip()
@@ -2768,7 +2760,7 @@ async def revoke_product_human_decision(
             ),
             None,
         )
-        revoked = _RUNTIME.human_decisions.revoke(
+        revoked = _runtime().human_decisions.revoke(
             decision_id,
             actor_id=x_actor_id,
             actor_role=x_actor_role,
@@ -2777,14 +2769,14 @@ async def revoke_product_human_decision(
         )
         projections = [
             item
-            for item in _RUNTIME.store.list_confirmations(task_id)
+            for item in _runtime().store.list_confirmations(task_id)
             if item.decision_id == decision_id
         ]
         if len(projections) != 1:
             raise InvalidTaskTransition(
                 "decision has no unique task confirmation projection"
             )
-        checkpoint = _RUNTIME._latest_product_checkpoint(task_id)
+        checkpoint = _runtime()._latest_product_checkpoint(task_id)
         targets = [
             PendingConfirmationTarget.model_validate(item)
             for item in checkpoint.payload.get("pending_confirmations", [])
@@ -2804,12 +2796,12 @@ async def revoke_product_human_decision(
             raise InvalidTaskTransition(
                 "decision projection does not match the frozen HDS binding"
             )
-        _RUNTIME._bound_human_decision(
+        _runtime()._bound_human_decision(
             task_id=task_id,
             target=bound_target,
         )
-        _RUNTIME.store.save_hds_confirmation_projection(
-            _RUNTIME._project_human_decision(
+        _runtime().store.save_hds_confirmation_projection(
+            _runtime()._project_human_decision(
                 task_id=task_id,
                 target=bound_target,
                 decision=revoked,
@@ -2817,7 +2809,7 @@ async def revoke_product_human_decision(
         )
         pending_decisions = [
             item
-            for item in _RUNTIME.human_decisions.list(task_id=task_id)
+            for item in _runtime().human_decisions.list(task_id=task_id)
             if item.status
             in {
                 HumanDecisionStatus.PENDING,
@@ -2828,7 +2820,7 @@ async def revoke_product_human_decision(
             not pending_decisions
             and task.status == RadarTaskStatus.WAITING_FOR_CONFIRMATION
         ):
-            _RUNTIME.resume_product_after_confirmations(task_id)
+            _runtime().resume_product_after_confirmations(task_id)
         return revoked
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Decision not found.") from exc
@@ -2847,13 +2839,13 @@ async def radar_task_chat(
 ) -> RadarChatResponse:
     _require_api_key(x_api_key)
     try:
-        task = _RUNTIME.service.get_task(payload.task_id)
+        task = _runtime().service.get_task(payload.task_id)
         actor_id, actor_role = _identity(
             task,
             actor_id=x_actor_id,
             actor_role=x_actor_role,
         )
-        return _RUNTIME.answer_chat(
+        return _runtime().answer_chat(
             payload.model_copy(
                 update={
                     "actor_id": actor_id,
@@ -3067,7 +3059,7 @@ def _sse_cursor(last_event_id: str | None, after_sequence: int) -> int:
 def _sse_history(task_id: str, *, after_sequence: int) -> str:
     chunks = [
         _format_sse_event(event)
-        for event in _RUNTIME.service.list_events(
+        for event in _runtime().service.list_events(
             task_id,
             after_sequence=after_sequence,
         )
@@ -3106,6 +3098,5 @@ __all__ = [
     "RadarTaskCreateRequest",
     "RadarTaskDetail",
     "get_radar_api_runtime",
-    "reset_radar_api_runtime_for_tests",
     "router",
 ]

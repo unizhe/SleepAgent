@@ -11,7 +11,17 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from sleepagent.backend_settings import ProcessRole, SleepBackendSettings
+from sleepagent.backend_settings import (
+    ApiSurface,
+    DataMode,
+    ProcessRole,
+    SleepBackendSettings,
+)
+from sleepagent.persistence.migrations import (
+    EXPECTED_MIGRATION_IDENTITIES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_MANIFEST_SHA256,
+)
 
 
 class PoolLifecycle(Protocol):
@@ -31,6 +41,9 @@ class DatabaseAttestation(BaseModel):
     database_role: str
     schema_version: int
     migrations_clean: bool
+    migration_manifest_sha256: str
+    applied_migration_identities: tuple[str, ...]
+    actor_verification_key_sha256s: tuple[str, ...] = ()
 
 
 class RuntimeDependencyManifest(BaseModel):
@@ -45,6 +58,9 @@ class RuntimeDependencyManifest(BaseModel):
     database_identity: str
     database_role: str
     schema_version: int | None
+    migration_manifest_sha256: str | None
+    applied_migration_identities: tuple[str, ...]
+    actor_verification_key_sha256: str | None
     supported_schema_min: int
     supported_schema_max: int
     data_mode: str
@@ -89,6 +105,7 @@ class SleepBackendRuntime:
         attestor: DatabaseAttestor,
         services: RuntimeServices | None = None,
         worker_handlers: Mapping[str, object] | None = None,
+        expected_actor_verification_key_sha256: str | None = None,
     ) -> None:
         handlers = dict(worker_handlers or {})
         if settings.process_role == ProcessRole.API and handlers:
@@ -114,6 +131,9 @@ class SleepBackendRuntime:
         self.attestor = attestor
         self.services = services or RuntimeServices()
         self.worker_handlers = handlers
+        self.expected_actor_verification_key_sha256 = (
+            expected_actor_verification_key_sha256
+        )
         self.runtime_id = str(uuid4())
         self._started = False
         self._attestation: DatabaseAttestation | None = None
@@ -187,6 +207,19 @@ class SleepBackendRuntime:
             "schema_version": (
                 None if attestation is None else attestation.schema_version
             ),
+            "migration_manifest_sha256": (
+                None
+                if attestation is None
+                else attestation.migration_manifest_sha256
+            ),
+            "applied_migration_identities": (
+                ()
+                if attestation is None
+                else attestation.applied_migration_identities
+            ),
+            "actor_verification_key_sha256": (
+                self.expected_actor_verification_key_sha256
+            ),
             "supported_schema_min": self.settings.supported_schema_min,
             "supported_schema_max": self.settings.supported_schema_max,
             "data_mode": self.settings.data_mode.value,
@@ -227,12 +260,24 @@ class SleepBackendRuntime:
             raise RuntimeError("database role attestation mismatch")
         if not value.migrations_clean:
             raise RuntimeError("database migration ledger is not clean")
-        if not (
-            self.settings.supported_schema_min
-            <= value.schema_version
-            <= self.settings.supported_schema_max
+        if value.schema_version != LATEST_SCHEMA_VERSION:
+            raise RuntimeError("database schema is not at the release target")
+        if value.migration_manifest_sha256 != MIGRATION_MANIFEST_SHA256:
+            raise RuntimeError("database migration manifest attestation mismatch")
+        if value.applied_migration_identities != EXPECTED_MIGRATION_IDENTITIES:
+            raise RuntimeError("database migration identities do not match release")
+        expected_actor_key = self.expected_actor_verification_key_sha256
+        if expected_actor_key is not None and (
+            value.actor_verification_key_sha256s != (expected_actor_key,)
         ):
-            raise RuntimeError("database schema version is unsupported")
+            raise RuntimeError(
+                "actor verification key does not match replay authority registry"
+            )
+        if (
+            self.settings.supported_schema_min != LATEST_SCHEMA_VERSION
+            or self.settings.supported_schema_max != LATEST_SCHEMA_VERSION
+        ):
+            raise RuntimeError("runtime schema support must pin the release target")
 
 
 def build_backend_runtime(
@@ -268,13 +313,33 @@ def build_backend_runtime(
         from sleepagent.backend_services import build_api_runtime_services
 
         services = build_api_runtime_services(settings, uow_factory=uow_factory)
+    expected_actor_key_sha256: str | None = None
+    if (
+        settings.process_role == ProcessRole.API
+        and settings.data_mode == DataMode.REPLAY
+        and settings.enabled_surfaces.intersection(
+            {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
+        )
+    ):
+        from sleepagent.backend_keys import BackendKeyProvider
+
+        expected_actor_key_sha256 = BackendKeyProvider(
+            settings.deployment_mode
+        ).actor_verification_key(
+            settings.signing_key_ref,
+            key_id=settings.actor_assertion_key_id,
+        ).public_key_sha256
     return SleepBackendRuntime(
         settings,
         pool=pool,
         uow_factory=uow_factory,
-        attestor=lambda: _attest_postgres(pool),
+        attestor=lambda: _attest_postgres(
+            pool,
+            include_actor_key=expected_actor_key_sha256 is not None,
+        ),
         services=services,
         worker_handlers=worker_handlers,
+        expected_actor_verification_key_sha256=expected_actor_key_sha256,
     )
 
 
@@ -283,34 +348,68 @@ async def _maybe_await(value: object) -> None:
         await value
 
 
-def _attest_postgres(provider: object) -> DatabaseAttestation:
+def _attest_postgres(
+    provider: object,
+    *,
+    include_actor_key: bool = False,
+) -> DatabaseAttestation:
     with provider.connection() as connection:  # type: ignore[attr-defined]
         with connection.cursor() as cursor:
             cursor.execute("SELECT current_database(), current_user")
             database_identity, database_role = cursor.fetchone()
             cursor.execute(
                 """
-                SELECT COALESCE(MAX(version), 0),
-                       COALESCE(bool_and(
-                         status IN ('applied', 'legacy_attested')
-                         AND finished_at IS NOT NULL
-                       ), false)
+                SELECT version, migration_name, sql_sha256, status,
+                       transactional, finished_at
                 FROM sleepagent_schema_migrations
+                ORDER BY version
                 """
             )
-            schema_version, migrations_clean = cursor.fetchone()
+            rows = tuple(cursor.fetchall())
+            actor_key_rows: tuple[Any, ...] = ()
+            if include_actor_key:
+                cursor.execute(
+                    """
+                    SELECT actor_verification_key_sha256
+                    FROM public.sleepagent_attest_actor_verification_keys()
+                    ORDER BY actor_verification_key_sha256
+                    """
+                )
+                actor_key_rows = tuple(cursor.fetchall())
+    identities = tuple(
+        _ledger_migration_identity(
+            int(row[0]),
+            str(row[1]),
+            str(row[2]),
+            bool(row[4]),
+        )
+        for row in rows
+    )
+    migrations_clean = bool(rows) and all(
+        str(row[3]) == "applied" and row[5] is not None for row in rows
+    )
+    schema_version = 0 if not rows else int(rows[-1][0])
     return DatabaseAttestation(
         database_identity=str(database_identity),
         database_role=str(database_role),
-        schema_version=int(schema_version),
+        schema_version=schema_version,
         migrations_clean=bool(migrations_clean),
+        migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+        applied_migration_identities=identities,
+        actor_verification_key_sha256s=tuple(
+            str(row[0]) for row in actor_key_rows if row[0] is not None
+        ),
     )
 
 
-def reset_active_runtime_for_tests() -> None:
-    global _ACTIVE_RUNTIME_ID
-    with _ACTIVE_LOCK:
-        _ACTIVE_RUNTIME_ID = None
+def _ledger_migration_identity(
+    version: int,
+    name: str,
+    digest: str,
+    transactional: bool,
+) -> str:
+    strategy = "transactional" if transactional else "nontransactional"
+    return f"{version:03d}:{name}:{digest}:{strategy}"
 
 
 __all__ = [
@@ -319,5 +418,4 @@ __all__ = [
     "RuntimeServices",
     "SleepBackendRuntime",
     "build_backend_runtime",
-    "reset_active_runtime_for_tests",
 ]

@@ -15,6 +15,36 @@ from typing import Any
 LOG_LEVEL_ENV = "SLEEPAGENT_LOG_LEVEL"
 MAX_RECENT_ERRORS = 8
 MAX_RECENT_EVENTS = 20
+BACKEND_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
+BACKEND_ROUTE_GROUPS = frozenset(
+    {"livez", "public_v1", "product_sleep", "demo_v1", "internal", "unknown"}
+)
+BACKEND_SIGNAL_CATEGORIES = frozenset(
+    {
+        "auth",
+        "lease",
+        "product",
+        "provider",
+        "reconciliation",
+        "retention",
+        "safety",
+    }
+)
+BACKEND_SIGNAL_OUTCOMES = frozenset(
+    {
+        "allowed",
+        "denied",
+        "dead_letter",
+        "outcome_unknown",
+        "reclaimable",
+        "reconciliation_required",
+        "retry",
+        "succeeded",
+        "terminal",
+        "timeout",
+        "unknown",
+    }
+)
 
 SENSITIVE_KEY_PATTERN = re.compile(
     r"(authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|"
@@ -153,6 +183,141 @@ class ObservabilityState:
 
 
 STATE = ObservabilityState()
+
+
+class BackendMetrics:
+    """In-process bounded metrics with no tenant, subject, or resource labels."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._http_requests: Counter[tuple[str, str, str]] = Counter()
+        self._http_elapsed_ms: Counter[tuple[str, str]] = Counter()
+        self._queue_events: Counter[tuple[str, str]] = Counter()
+        self._signals: Counter[tuple[str, str]] = Counter()
+
+    def record_http(
+        self,
+        *,
+        method: str,
+        route_group: str,
+        status_code: int,
+        elapsed_ms: int,
+    ) -> None:
+        normalized_method = method if method in BACKEND_HTTP_METHODS else "OTHER"
+        normalized_route = (
+            route_group if route_group in BACKEND_ROUTE_GROUPS else "unknown"
+        )
+        status_class = f"{max(0, min(9, status_code // 100))}xx"
+        with self._lock:
+            self._http_requests[
+                (normalized_method, normalized_route, status_class)
+            ] += 1
+            self._http_elapsed_ms[(normalized_method, normalized_route)] += max(
+                0, elapsed_ms
+            )
+
+    def record_queue(self, *, queue: str, outcome: str) -> None:
+        safe_queue = queue if re.fullmatch(r"[a-z][a-z0-9_:.-]{0,63}", queue) else "unknown"
+        safe_outcome = (
+            outcome
+            if outcome in {
+                "succeeded",
+                "retryable",
+                "terminal",
+                "outcome_unknown",
+                "lease_lost",
+                "retry",
+                "dead_letter",
+                "reconciliation_required",
+            }
+            else "unknown"
+        )
+        with self._lock:
+            self._queue_events[(safe_queue, safe_outcome)] += 1
+
+    def record_signal(self, *, category: str, outcome: str) -> None:
+        safe_category = (
+            category if category in BACKEND_SIGNAL_CATEGORIES else "provider"
+        )
+        safe_outcome = outcome if outcome in BACKEND_SIGNAL_OUTCOMES else "unknown"
+        with self._lock:
+            self._signals[(safe_category, safe_outcome)] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            http = [
+                {
+                    "method": method,
+                    "route_group": route,
+                    "status_class": status,
+                    "count": count,
+                }
+                for (method, route, status), count in sorted(
+                    self._http_requests.items()
+                )
+            ]
+            elapsed = [
+                {
+                    "method": method,
+                    "route_group": route,
+                    "total_elapsed_ms": value,
+                }
+                for (method, route), value in sorted(
+                    self._http_elapsed_ms.items()
+                )
+            ]
+            queues = [
+                {"queue": queue, "outcome": outcome, "count": count}
+                for (queue, outcome), count in sorted(self._queue_events.items())
+            ]
+            signals = [
+                {"category": category, "outcome": outcome, "count": count}
+                for (category, outcome), count in sorted(self._signals.items())
+            ]
+        return {
+            "schema_version": "sleepagent_backend_metrics.v1",
+            "http_requests": http,
+            "http_elapsed": elapsed,
+            "queue_events": queues,
+            "signals": signals,
+        }
+
+    def reset_for_tests(self) -> None:
+        with self._lock:
+            self._http_requests.clear()
+            self._http_elapsed_ms.clear()
+            self._queue_events.clear()
+            self._signals.clear()
+
+
+BACKEND_METRICS = BackendMetrics()
+
+
+def record_backend_http(
+    *,
+    method: str,
+    route_group: str,
+    status_code: int,
+    elapsed_ms: int,
+) -> None:
+    BACKEND_METRICS.record_http(
+        method=method,
+        route_group=route_group,
+        status_code=status_code,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def record_backend_queue(*, queue: str, outcome: str) -> None:
+    BACKEND_METRICS.record_queue(queue=queue, outcome=outcome)
+
+
+def record_backend_signal(*, category: str, outcome: str) -> None:
+    BACKEND_METRICS.record_signal(category=category, outcome=outcome)
+
+
+def backend_metrics_snapshot() -> dict[str, Any]:
+    return BACKEND_METRICS.snapshot()
 
 
 def utc_now_iso() -> str:

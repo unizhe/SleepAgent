@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
@@ -64,6 +67,37 @@ def test_uuid7_deterministic_constructor_keeps_random_space_distinct() -> None:
 
     assert first != second
     assert UUID(first).version == UUID(second).version == 7
+
+
+def test_uuid7_is_unique_across_independent_processes_at_one_timestamp() -> None:
+    script = """
+import json
+from datetime import datetime, timezone
+from sleepagent.sleep_domain.episode_v2 import UUID7Generator
+
+generator = UUID7Generator()
+instant = datetime(2026, 8, 7, tzinfo=timezone.utc)
+print(json.dumps([generator(instant) for _ in range(128)]))
+"""
+    batches = [
+        json.loads(
+            subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        for _ in range(4)
+    ]
+    generated = [value for batch in batches for value in batch]
+
+    assert len(generated) == 512
+    assert len(set(generated)) == len(generated)
+    assert all(UUID(value).version == 7 for value in generated)
+    assert all(
+        UUID(value).variant == "specified in RFC 4122" for value in generated
+    )
 
 
 def test_open_identity_does_not_depend_on_bed_or_wake_date() -> None:

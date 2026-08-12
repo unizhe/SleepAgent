@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -64,7 +65,10 @@ ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     403: {"model": ErrorResponse},
     404: {"model": ErrorResponse},
     409: {"model": ErrorResponse},
-    422: {"model": ErrorResponse},
+    422: {
+        "model": ErrorResponse,
+        "description": "Unprocessable Content",
+    },
     503: {"model": ErrorResponse},
 }
 
@@ -264,8 +268,7 @@ def create_sleep_api_router(runtime_provider: RuntimeProvider) -> APIRouter:
         payload: ActivateMonitoringRequest,
         request: Request,
         response: Response,
-        idempotency_key: str | None = Header(
-            default=None,
+        idempotency_key: str = Header(
             alias="Idempotency-Key",
         ),
         _service: HTTPAuthorizationCredentials | None = Security(SERVICE_BEARER),
@@ -303,8 +306,7 @@ def create_sleep_api_router(runtime_provider: RuntimeProvider) -> APIRouter:
         payload: DeactivateMonitoringRequest,
         request: Request,
         response: Response,
-        idempotency_key: str | None = Header(
-            default=None,
+        idempotency_key: str = Header(
             alias="Idempotency-Key",
         ),
         _service: HTTPAuthorizationCredentials | None = Security(SERVICE_BEARER),
@@ -342,8 +344,7 @@ def create_sleep_api_router(runtime_provider: RuntimeProvider) -> APIRouter:
         payload: FeedbackRequest,
         request: Request,
         response: Response,
-        idempotency_key: str | None = Header(
-            default=None,
+        idempotency_key: str = Header(
             alias="Idempotency-Key",
         ),
         _service: HTTPAuthorizationCredentials | None = Security(SERVICE_BEARER),
@@ -377,8 +378,7 @@ def create_sleep_api_router(runtime_provider: RuntimeProvider) -> APIRouter:
         payload: FeedbackRequest,
         request: Request,
         response: Response,
-        idempotency_key: str | None = Header(
-            default=None,
+        idempotency_key: str = Header(
             alias="Idempotency-Key",
         ),
         _service: HTTPAuthorizationCredentials | None = Security(SERVICE_BEARER),
@@ -413,8 +413,7 @@ def create_sleep_api_router(runtime_provider: RuntimeProvider) -> APIRouter:
         payload: ReanalysisRequest,
         request: Request,
         response: Response,
-        idempotency_key: str | None = Header(
-            default=None,
+        idempotency_key: str = Header(
             alias="Idempotency-Key",
         ),
         _service: HTTPAuthorizationCredentials | None = Security(SERVICE_BEARER),
@@ -457,9 +456,7 @@ async def sleep_api_error_handler(
     request: Request,
     exc: SleepApiSecurityError | SleepApiApplicationError,
 ) -> JSONResponse:
-    correlation_id = (
-        request.headers.get("x-correlation-id", "").strip() or "unavailable"
-    )[:128]
+    correlation_id = _server_correlation_id(request)
     response = ErrorResponse(
         code=exc.code,
         message=str(exc),
@@ -481,9 +478,7 @@ async def sleep_api_validation_handler(
 ) -> Any:
     if not request.url.path.startswith(API_PREFIX + "/"):
         return await request_validation_exception_handler(request, exc)
-    correlation_id = (
-        request.headers.get("x-correlation-id", "").strip() or "unavailable"
-    )[:128]
+    correlation_id = _server_correlation_id(request)
     response = ErrorResponse(
         code=PublicErrorCode.INVALID_REQUEST,
         message="The request does not match the versioned API contract.",
@@ -502,6 +497,12 @@ async def sleep_api_validation_handler(
         content=response.model_dump(mode="json"),
         headers={"X-API-Version": "v1", "Deprecation": "false"},
     )
+
+
+def _server_correlation_id(request: Request) -> str:
+    value = str(getattr(request.state, "correlation_id", "") or uuid4())[:128]
+    request.state.correlation_id = value
+    return value
 
 
 async def _authenticate(

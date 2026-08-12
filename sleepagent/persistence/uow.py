@@ -200,6 +200,48 @@ class AuthorityResolutionScope:
 
 
 @dataclass(frozen=True, slots=True)
+class DemoControlScope:
+    """Pre-authority context limited to SECURITY DEFINER demo functions."""
+
+    service_principal_id: str
+    purpose: Literal["demo_control"] = "demo_control"
+    data_mode: Literal["replay"] = "replay"
+
+    def __post_init__(self) -> None:
+        if not self.service_principal_id.strip():
+            raise ValueError("service_principal_id is required")
+
+    def guc_values(self) -> Mapping[str, str]:
+        return _empty_scope_gucs(
+            data_mode="replay",
+            process_role="api",
+            purpose=self.purpose,
+            service_principal_id=self.service_principal_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class InternalControlScope:
+    """Minimal API context limited to protected internal status functions."""
+
+    data_mode: DataMode
+    service_principal_id: str
+    purpose: Literal["internal_status"] = "internal_status"
+
+    def __post_init__(self) -> None:
+        if not self.service_principal_id.strip():
+            raise ValueError("service_principal_id is required")
+
+    def guc_values(self) -> Mapping[str, str]:
+        return _empty_scope_gucs(
+            data_mode=self.data_mode,
+            process_role="api",
+            purpose=self.purpose,
+            service_principal_id=self.service_principal_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerClaimScope:
     """Minimal cross-namespace context for audited SECURITY DEFINER claims."""
 
@@ -549,6 +591,8 @@ def _optional_int_text(value: int | None) -> str:
 __all__ = [
     "ActorRole",
     "AuthorityResolutionScope",
+    "DemoControlScope",
+    "InternalControlScope",
     "PoolConfiguration",
     "PoolContextLeakError",
     "PostgresUnitOfWork",

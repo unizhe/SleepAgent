@@ -8,11 +8,16 @@ boundary and ``ReplayIngressHandler`` is intentionally not registered here.
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import timedelta
 from typing import Any, Callable, Mapping, Protocol, cast
 
 from sleepagent.backend_keys import BackendKeyProvider
 from sleepagent.backend_settings import DataMode, ProcessRole, SleepBackendSettings
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
+from sleepagent.retention import (
+    LocalTestRetentionKeyEnvelope,
+    PostgresRetentionKeyCoordinator,
+)
 from sleepagent.sleep_domain.postgres_slice import (
     FastPathCommitResult,
     FastPathHandler,
@@ -183,7 +188,9 @@ def build_b3_worker_handlers(
         raise B3WorkerCompositionError("B3 handlers require a worker profile")
 
     handlers: dict[str, WorkHandler] = {}
-    if "ingestion" in settings.worker_queues:
+    cipher: RawPayloadCipher | None = None
+    retention_keys: PostgresRetentionKeyCoordinator | None = None
+    if {"ingestion", "replay_journey"}.intersection(settings.worker_queues):
         if settings.data_mode != DataMode.REPLAY:
             raise B3WorkerCompositionError(
                 "the current normalization adapter accepts replay ingress only"
@@ -192,13 +199,47 @@ def build_b3_worker_handlers(
             settings.encryption_key_ref
         )
         cipher = RawPayloadCipher(key, key_id=settings.encryption_key_ref)
+        retention_keys = PostgresRetentionKeyCoordinator(
+            LocalTestRetentionKeyEnvelope(
+                key,
+                key_id=settings.encryption_key_ref,
+            )
+        )
+
+    if "replay_journey" in settings.worker_queues:
+        assert cipher is not None
+        from sleepagent.simulation.journey_worker import ReplayJourneyWorkHandler
+
+        journey_handler: ReplayJourneyWorkHandler | None = None
+
+        def journey_handler_factory(context: WorkContext) -> WorkResult:
+            nonlocal journey_handler
+            if journey_handler is None:
+                journey_handler = ReplayJourneyWorkHandler(
+                    uow_factory=worker_uow_factory(context),
+                    cipher=cipher,
+                    retention_keys=retention_keys,
+                    retention=timedelta(
+                        seconds=settings.raw_retention_seconds
+                    ),
+                )
+            return journey_handler(context)
+
+        handlers["replay_journey"] = journey_handler_factory
+
+    if "ingestion" in settings.worker_queues:
+        assert cipher is not None
 
         def normalization_processor_factory(
             uow_factory: UnitOfWorkFactory[Any],
         ) -> NormalizationProcessor:
             return cast(
                 NormalizationProcessor,
-                NormalizationHandler(uow_factory, cipher=cipher),
+                NormalizationHandler(
+                    uow_factory,
+                    cipher=cipher,
+                    retention_keys=retention_keys,
+                ),
             )
 
         handlers["ingestion"] = NormalizationWorkHandlerAdapter(

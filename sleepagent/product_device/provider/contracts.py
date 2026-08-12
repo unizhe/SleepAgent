@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import Field
 
@@ -21,18 +21,23 @@ from sleepagent.product_runtime.schemas import (
     radar_night_summary_from_product_report,
     radar_vital_snapshot_from_product_snapshot,
 )
-from sleepagent.simulation.replay import (
-    ReplayScenario,
-    get_replay_scenario,
-    replay_scenario_ids,
-    scenario_now,
-)
+
+if TYPE_CHECKING:
+    from sleepagent.simulation.replay import ReplayScenario
 
 
 DEFAULT_REPLAY_SUBJECT_ID = "elder-demo-001"
 DEFAULT_REPLAY_TIMEZONE = "Asia/Shanghai"
 REPLAY_BASE_WAKE_TIME = datetime(2026, 7, 10, 6, 30, tzinfo=timezone.utc)
-SUPPORTED_REPLAY_SCENARIOS = replay_scenario_ids()
+SUPPORTED_REPLAY_SCENARIOS = (
+    "normal_night",
+    "device_or_data_quality_issue",
+    "frequent_out_of_bed",
+    "vital_fluctuation",
+    "worsening_trend",
+    "escalate_candidate",
+    "urgent_boundary_text_input",
+)
 
 
 class ProviderFaultState(str, Enum):
@@ -225,6 +230,8 @@ class ReplayRadarProvider:
     ) -> None:
         if scenario not in SUPPORTED_REPLAY_SCENARIOS:
             raise ValueError(f"Unsupported replay scenario: {scenario}.")
+        from sleepagent.simulation.replay import get_replay_scenario, scenario_now
+
         self._delegate = delegate
         self._scenario = scenario
         self._catalog_scenario: ReplayScenario = get_replay_scenario(scenario)

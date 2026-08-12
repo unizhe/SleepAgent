@@ -69,6 +69,7 @@ from sleepagent.sleep_domain.worker_adapters import (
     worker_uow_factory,
 )
 from sleepagent.worker_runtime import (
+    InvocationKind,
     LeaseClaim,
     WorkContext,
     WorkDisposition,
@@ -213,6 +214,8 @@ class ProductAgentCommitResult:
     analysis_revision_id: str
     role_view_ids: tuple[str, ...]
     analysis_status: str
+    induction_operation_id: str
+    induction_manifest_id: str
 
 
 class ProductAgentProcessor:
@@ -248,11 +251,7 @@ class ProductAgentProcessor:
         scope: UowScope,
         lease: ProductAgentLease,
     ) -> ProductAgentCommitResult:
-        _require_worker_subject_scope(scope)
-        with self.uow_factory.begin(scope) as uow:
-            repository = self.repository_factory(uow.connection, scope)
-            source = repository.load_source(lease)
-            uow.commit()
+        source = self.load_source(scope, lease)
 
         prepared_at = self.now_factory()
         _require_aware(prepared_at, "prepared_at")
@@ -262,6 +261,30 @@ class ProductAgentProcessor:
             lease=lease,
             prepared_at=prepared_at,
         )
+
+        return self.persist_and_commit(scope, lease, artifact)
+
+    def load_source(
+        self,
+        scope: UowScope,
+        lease: ProductAgentLease,
+    ) -> LoadedProductAgentSource:
+        """Load the exact source in a short transaction before model dispatch."""
+
+        _require_worker_subject_scope(scope)
+        with self.uow_factory.begin(scope) as uow:
+            repository = self.repository_factory(uow.connection, scope)
+            source = repository.load_source(lease)
+            uow.commit()
+        return source
+
+    def persist_and_commit(
+        self,
+        scope: UowScope,
+        lease: ProductAgentLease,
+        artifact: PreparedProductAgentArtifact,
+    ) -> ProductAgentCommitResult:
+        """Persist an invocation-journaled artifact, then CAS-publish it."""
 
         with self.uow_factory.begin(scope) as uow:
             repository = self.repository_factory(uow.connection, scope)
@@ -697,7 +720,8 @@ class PostgresProductAgentRepository:
             operation_json = self._lock_operation_fence(cursor, lease)
             cursor.execute(
                 """
-                SELECT current_revision_id
+                SELECT current_revision_id, episode_local_date,
+                       assignment_basis
                 FROM public.sleep_domain_night_episodes
                 WHERE night_episode_id = %s AND namespace_id = %s
                   AND data_mode = %s AND namespace_generation = %s
@@ -725,6 +749,10 @@ class PostgresProductAgentRepository:
             if str(episode_row[0]) != artifact.night_episode_revision_id:
                 raise ProductAgentStaleSource(
                     "Product source Episode revision changed before commit"
+                )
+            if episode_row[1] is None or episode_row[2] is None:
+                raise ProductAgentInvariantError(
+                    "Product source Episode has no committed date contract"
                 )
             cursor.execute(
                 """
@@ -781,6 +809,14 @@ class PostgresProductAgentRepository:
             )
             for role_run in artifact.role_runs:
                 view = role_run.role_view
+                public_today = _public_today_projection(
+                    analysis=analysis,
+                    view=view,
+                    projection_version=artifact.source_state_version,
+                    episode_local_date=episode_row[1],
+                    assignment_basis=str(episode_row[2]),
+                    committed_at=committed_at,
+                )
                 cursor.execute(
                     """
                     INSERT INTO public.sleep_domain_analysis_role_views (
@@ -792,11 +828,14 @@ class PostgresProductAgentRepository:
                       source_fact_snapshot_sha256, source_state_version,
                       authorization_epoch, privacy_epoch,
                       retrieval_policy_epoch, policy_sha256,
-                      projection_sha256
+                      projection_sha256, public_schema_version,
+                      public_today_json, public_projection_sha256,
+                      public_committed_at
                     ) VALUES (
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s::jsonb, %s, 2, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s
+                      %s, %s, %s, 'product_sleep_today.v1', %s::jsonb,
+                      %s, %s
                     )
                     """,
                     (
@@ -822,6 +861,14 @@ class PostgresProductAgentRepository:
                         self.scope.retrieval_policy_epoch,
                         artifact.policy_sha256,
                         stable_hash(view.model_dump(mode="json")),
+                        json.dumps(
+                            public_today,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        stable_hash(public_today),
+                        committed_at,
                     ),
                 )
             cursor.execute(
@@ -848,6 +895,128 @@ class PostgresProductAgentRepository:
                 raise ProductAgentConflict(
                     "prepared Product attempt commit CAS failed"
                 )
+            induction_operation_id = self.id_generator(committed_at)
+            induction_manifest_id = self.id_generator(committed_at)
+            induction_manifest = {
+                "schema_version": "induction_manifest.v1",
+                "manifest_id": induction_manifest_id,
+                "source_product_operation_id": lease.operation_id,
+                "analysis_revision_id": analysis.analysis_revision_id,
+                "night_episode_id": analysis.night_episode_id,
+                "night_episode_revision_id": analysis.night_episode_revision_id,
+                "analysis_status": analysis.status.value,
+                "source_fact_snapshot_sha256": (
+                    artifact.source_fact_snapshot_sha256
+                ),
+                "policy_sha256": artifact.policy_sha256,
+                "role_projections": [
+                    {
+                        "role": item.role.value,
+                        "role_view_id": item.role_view.role_view_id,
+                        "projection_sha256": stable_hash(
+                            item.role_view.model_dump(mode="json")
+                        ),
+                    }
+                    for item in artifact.role_runs
+                ],
+                "namespace_generation": self.scope.namespace_generation,
+                "authorization_epoch": self.scope.authorization_epoch,
+                "privacy_epoch": self.scope.privacy_epoch,
+                "retrieval_policy_epoch": self.scope.retrieval_policy_epoch,
+                "projector_version": "deterministic_personalization.v1",
+                "synthetic_non_release": self.scope.data_mode == "replay",
+            }
+            induction_manifest_sha256 = stable_hash(induction_manifest)
+            induction_semantic_key = stable_hash(
+                {
+                    "stage": "induction",
+                    "analysis_revision_id": analysis.analysis_revision_id,
+                    "manifest_sha256": induction_manifest_sha256,
+                }
+            )
+            induction_workload = _workload_snapshot(self.scope, "induction")
+            induction_operation = {
+                "schema_version": "induction_operation.v1",
+                "manifest_id": induction_manifest_id,
+                "manifest_sha256": induction_manifest_sha256,
+                "analysis_revision_id": analysis.analysis_revision_id,
+                "night_episode_revision_id": analysis.night_episode_revision_id,
+                "projector_version": "deterministic_personalization.v1",
+                "authorization_snapshot": induction_workload,
+            }
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_operations (
+                  operation_id, namespace_id, data_mode, operation_type,
+                  subject_id, service_principal_id, actor_id,
+                  target_resource_id, target_resource_key, idempotency_key,
+                  request_sha256, status, attempt_count, cas_version,
+                  operation_json, created_at, updated_at, protocol_version,
+                  namespace_generation, run_id, arm_id, id_scheme,
+                  origin_kind, semantic_key, queue_name, priority,
+                  available_at, max_attempts,
+                  workload_authorization_snapshot_json, policy_sha256
+                ) VALUES (
+                  %s, %s, %s, 'induction', %s, %s, NULL, %s, %s, %s, %s,
+                  'pending', 0, 0, %s::jsonb, %s, %s, 2, %s, %s, %s,
+                  'uuidv7', 'system', %s, 'induction', 10, %s, 5,
+                  %s::jsonb, %s
+                )
+                """,
+                (
+                    induction_operation_id,
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    analysis.subject_id,
+                    self.scope.service_principal_id,
+                    induction_manifest_id,
+                    analysis.analysis_revision_id,
+                    induction_semantic_key,
+                    induction_semantic_key,
+                    _json(induction_operation),
+                    committed_at,
+                    committed_at,
+                    self.scope.namespace_generation,
+                    self.scope.run_id,
+                    self.scope.arm_id,
+                    induction_semantic_key,
+                    committed_at,
+                    _json(induction_workload),
+                    artifact.policy_sha256,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_induction_manifests_v2 (
+                  manifest_id, operation_id, source_product_operation_id,
+                  namespace_id, data_mode, namespace_generation, run_id,
+                  arm_id, subject_id, analysis_revision_id,
+                  night_episode_revision_id, source_fact_snapshot_sha256,
+                  policy_sha256, manifest_sha256, manifest_json, created_at
+                ) VALUES (
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s, %s::jsonb, %s
+                )
+                """,
+                (
+                    induction_manifest_id,
+                    induction_operation_id,
+                    lease.operation_id,
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.namespace_generation,
+                    self.scope.run_id,
+                    self.scope.arm_id,
+                    analysis.subject_id,
+                    analysis.analysis_revision_id,
+                    analysis.night_episode_revision_id,
+                    artifact.source_fact_snapshot_sha256,
+                    artifact.policy_sha256,
+                    induction_manifest_sha256,
+                    _json(induction_manifest),
+                    committed_at,
+                ),
+            )
             terminal_operation = {
                 **operation_json,
                 "result_ref": analysis.analysis_revision_id,
@@ -863,6 +1032,8 @@ class PostgresProductAgentRepository:
                         for item in artifact.role_runs
                     ],
                     "analysis_status": analysis.status.value,
+                    "induction_operation_id": induction_operation_id,
+                    "induction_manifest_id": induction_manifest_id,
                 },
             }
             cursor.execute(
@@ -940,6 +1111,8 @@ class PostgresProductAgentRepository:
                             ),
                             "operation_id": lease.operation_id,
                             "roles": [role.value for role in AnalysisRole],
+                            "induction_operation_id": induction_operation_id,
+                            "induction_manifest_id": induction_manifest_id,
                             "synthetic_non_release": (
                                 self.scope.data_mode == "replay"
                             ),
@@ -961,6 +1134,8 @@ class PostgresProductAgentRepository:
                 item.role_view.role_view_id for item in artifact.role_runs
             ),
             analysis_status=artifact.analysis.status.value,
+            induction_operation_id=induction_operation_id,
+            induction_manifest_id=induction_manifest_id,
         )
 
     def _lease_scope_params(self, lease: ProductAgentLease) -> tuple[Any, ...]:
@@ -1124,7 +1299,61 @@ class ProductAgentWorkHandlerAdapter:
             worker_instance=context.claim.worker_instance,
         )
         try:
-            result = self._resolve_processor(context).process(scope, lease)
+            processor = self._resolve_processor(context)
+            if isinstance(processor, ProductAgentProcessor):
+                source = processor.load_source(scope, lease)
+                prepared_at = processor.now_factory()
+                _require_aware(prepared_at, "prepared_at")
+                request = {
+                    "schema_version": "product_agent_model_request.v1",
+                    "operation_id": source.operation_id,
+                    "night_episode_id": source.night_episode_id,
+                    "night_episode_revision_id": source.night_episode_revision_id,
+                    "source_state_version": source.night_episode_revision_number,
+                    "observation_set_sha256": source.observation_set_sha256,
+                    "policy_sha256": source.policy_sha256,
+                    "model_mode": "deterministic",
+                }
+                invocation_key = (
+                    f"product-agent:{source.operation_id}:"
+                    f"{source.night_episode_revision_id}:deterministic.v1"
+                )
+
+                def invoke_model() -> tuple[Mapping[str, Any], str | None]:
+                    artifact = processor.prepare(
+                        scope=scope,
+                        source=source,
+                        lease=lease,
+                        prepared_at=prepared_at,
+                    )
+                    return (
+                        {
+                            "schema_version": "product_agent_model_response.v1",
+                            "artifact": artifact.model_dump(mode="json"),
+                        },
+                        "deterministic:"
+                        + stable_hash(request)[:24],
+                    )
+
+                response = context.invocation_dispatcher().dispatch(
+                    invocation_key=invocation_key,
+                    request=request,
+                    sender=invoke_model,
+                    invocation_kind=InvocationKind.MODEL,
+                )
+                artifact_value = response.get("artifact")
+                if not isinstance(artifact_value, Mapping):
+                    raise ProductAgentInvariantError(
+                        "journaled Product model response has no artifact"
+                    )
+                artifact = PreparedProductAgentArtifact.model_validate(
+                    artifact_value
+                )
+                result = processor.persist_and_commit(scope, lease, artifact)
+            else:
+                # Explicit test processors retain the narrow adapter seam; the
+                # production composition always builds ProductAgentProcessor.
+                result = processor.process(scope, lease)
         except ProductAgentStaleSource:
             return _terminal("product_agent_stale_source")
         except ProductAgentLeaseLost:
@@ -1148,6 +1377,8 @@ class ProductAgentWorkHandlerAdapter:
                 "analysis_revision_id": result.analysis_revision_id,
                 "role_view_ids": list(result.role_view_ids),
                 "analysis_status": result.analysis_status,
+                "induction_operation_id": result.induction_operation_id,
+                "induction_manifest_id": result.induction_manifest_id,
             },
             finalization_mode=WorkFinalizationMode.HANDLER_OWNED,
         )
@@ -1230,8 +1461,7 @@ def _fact_snapshot_for_role(
     local_date = date.fromisoformat(source.facts.local_sleep_date)
     internal_subject = stable_hash(
         {
-            "namespace_id": scope.namespace_id,
-            "namespace_generation": scope.namespace_generation,
+            "data_mode": source.facts.data_mode.value,
             "subject_id": source.subject_id,
         }
     )
@@ -1264,9 +1494,27 @@ def _fact_snapshot_for_role(
                 }
             )
         ),
-        source_refs=source.facts.provenance_references,
+        source_refs=source.facts.agent_source_refs(),
         created_at=created_at,
     )
+
+
+def _workload_snapshot(scope: UowScope, handler: str) -> dict[str, Any]:
+    return {
+        "schema_version": "workload_authorization_snapshot.v1",
+        "workload_principal_id": scope.service_principal_id,
+        "namespace_id": scope.namespace_id,
+        "namespace_generation": scope.namespace_generation,
+        "data_mode": scope.data_mode,
+        "run_id": scope.run_id,
+        "arm_id": scope.arm_id,
+        "subject_id": scope.subject_id,
+        "purpose": scope.purpose,
+        "allowed_handler": handler,
+        "authorization_epoch": scope.authorization_epoch,
+        "privacy_epoch": scope.privacy_epoch,
+        "retrieval_policy_epoch": scope.retrieval_policy_epoch,
+    }
 
 
 def _role_view_from_result(
@@ -1316,6 +1564,58 @@ def _role_view_from_result(
         failure_codes=failure_codes,
         generated_at=generated_at,
     )
+
+
+def _public_today_projection(
+    *,
+    analysis: AnalysisRevision,
+    view: AnalysisRoleView,
+    projection_version: int,
+    episode_local_date: date,
+    assignment_basis: str,
+    committed_at: datetime,
+) -> dict[str, Any]:
+    """Map one internal role view to the only Stage-1 public projection."""
+
+    if view.status == RoleViewStatus.PENDING:
+        raise ProductAgentInvariantError(
+            "pending role views cannot be published as /today projections"
+        )
+    if view.status == RoleViewStatus.READY:
+        fallback_summary = "Sleep summary is ready."
+        fallback_notice = "This summary reflects the latest completed night."
+    elif view.status == RoleViewStatus.DEGRADED:
+        fallback_summary = "A limited sleep summary is available."
+        fallback_notice = "Some sleep evidence was unavailable."
+    else:
+        fallback_summary = "The sleep summary is currently unavailable."
+        fallback_notice = "No recommendation is available from this analysis."
+    content: dict[str, Any] = {
+        "audience": view.role.value,
+        "summary_text": view.content or fallback_summary,
+        "context_notice": view.context_notice or fallback_notice,
+    }
+    if view.role == AnalysisRole.DOCTOR:
+        # Public evidence references are deliberately empty in the first slice.
+        # Internal claim/source references never cross this mapper.
+        content["evidence_refs"] = []
+    return {
+        "schema_version": "product_sleep_today.v1",
+        "data_mode": analysis.data_mode.value,
+        "synthetic_non_release": analysis.data_mode == DataMode.REPLAY,
+        "state": view.status.value,
+        "subject_ref": analysis.subject_id,
+        "role": view.role.value,
+        "episode_id": analysis.night_episode_id,
+        "episode_revision_id": analysis.night_episode_revision_id,
+        "episode_local_date": episode_local_date.isoformat(),
+        "assignment_basis": assignment_basis,
+        "analysis_revision_id": analysis.analysis_revision_id,
+        "projection_id": view.role_view_id,
+        "projection_version": projection_version,
+        "committed_at": committed_at.isoformat(),
+        "content": content,
+    }
 
 
 def _build_facts(

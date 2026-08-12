@@ -8,7 +8,6 @@ from sleepagent.backend_runtime import (
     DatabaseAttestation,
     RuntimeServices,
     SleepBackendRuntime,
-    reset_active_runtime_for_tests,
 )
 from sleepagent.backend_settings import (
     ApiSurface,
@@ -18,6 +17,14 @@ from sleepagent.backend_settings import (
     ProcessRole,
     ProviderMode,
     SleepBackendSettings,
+)
+from sleepagent.persistence.migrations import (
+    EXPECTED_MIGRATION_IDENTITIES,
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_MANIFEST_SHA256,
+)
+from tests.support.runtime_fixtures import (
+    reset_backend_runtime_state as reset_active_runtime_for_tests,
 )
 
 
@@ -78,6 +85,7 @@ def _runtime(
     *,
     pool: Pool | None = None,
     attestation: DatabaseAttestation | None = None,
+    expected_actor_key: str | None = None,
 ) -> SleepBackendRuntime:
     settings = _settings(role)
     handlers = (
@@ -93,11 +101,14 @@ def _runtime(
         or DatabaseAttestation(
             database_identity=settings.database_identity,
             database_role=settings.database_role,
-            schema_version=1,
+            schema_version=LATEST_SCHEMA_VERSION,
             migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
         ),
         services=(RuntimeServices(product=object()) if role == ProcessRole.API else None),
         worker_handlers=handlers,
+        expected_actor_verification_key_sha256=expected_actor_key,
     )
 
 
@@ -163,8 +174,10 @@ def test_attestation_mismatch_fails_closed_and_closes_pool() -> None:
         attestation=DatabaseAttestation(
             database_identity="wrong_database",
             database_role="sleepagent_api_replay",
-            schema_version=1,
+            schema_version=LATEST_SCHEMA_VERSION,
             migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
         ),
     )
 
@@ -172,6 +185,29 @@ def test_attestation_mismatch_fails_closed_and_closes_pool() -> None:
         asyncio.run(runtime.start())
     assert pool.calls == ["open", "close"]
     assert runtime.started is False
+
+
+def test_replay_actor_key_registry_mismatch_fails_readiness_closed() -> None:
+    pool = Pool()
+    settings = _settings()
+    expected = "a" * 64
+    runtime = _runtime(
+        pool=pool,
+        expected_actor_key=expected,
+        attestation=DatabaseAttestation(
+            database_identity=settings.database_identity,
+            database_role=settings.database_role,
+            schema_version=LATEST_SCHEMA_VERSION,
+            migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
+            actor_verification_key_sha256s=("b" * 64,),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="actor verification key"):
+        asyncio.run(runtime.start())
+    assert pool.calls == ["open", "close"]
 
 
 def test_dependency_manifest_is_capability_scoped_and_secret_free() -> None:

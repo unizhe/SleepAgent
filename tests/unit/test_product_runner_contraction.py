@@ -14,7 +14,6 @@ from tests.support.diagnostic_app import app
 from sleepagent.product_api.diagnostics.http import (
     RADAR_AGENT_API_KEY_ENV,
     RADAR_AGENT_DEV_MODE_ENV,
-    reset_radar_api_runtime_for_tests,
 )
 from sleepagent.product_runtime.agent_invocation_coordinator import (
     AgentInvocationCoordinator,
@@ -69,6 +68,9 @@ from tests.integration.test_radar_task_api import (
     API_KEY,
     UserInputProductRunner,
     _product_runtime_with_runner,
+)
+from tests.support.runtime_fixtures import (
+    configure_test_radar_runtime as reset_radar_api_runtime_for_tests,
 )
 
 

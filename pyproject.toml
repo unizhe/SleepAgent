@@ -33,7 +33,6 @@ dev = [
 ]
 
 [project.scripts]
-radar-agent = "sleepagent.product_runtime.cli:main"
 real-perceptor-acceptance = "sleepagent.integrations.perceptor.acceptance_cli:main"
 sleepagent-demo = "sleepagent.demo_cli:main"
 sleepagent-migrate = "sleepagent.persistence.migrate:main"
@@ -42,8 +41,12 @@ sleepagent-migrate = "sleepagent.persistence.migrate:main"
 include = ["backend*", "sleepagent*", "reference_client*"]
 
 [tool.setuptools.package-data]
-"sleepagent.simulation.replay" = ["scenario_catalog.json", "workflow_goldens.json"]
-"sleepagent.persistence" = ["migrations/*.sql", "sqlite_schema.sql"]
+"sleepagent.simulation" = ["replay_seed_registry.json"]
+"sleepagent.persistence" = [
+    "migration_manifest.json",
+    "migrations/*.sql",
+    "sqlite_schema.sql",
+]
 "sleepagent.simulation.fixtures" = [
     "README.md",
     "scenarios/*/scenario.json",

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Literal, Mapping, Protocol, cast
 
 from starlette.requests import Request
 
 from sleepagent.product_api.contracts import (
     AcceptedOperationResponse,
     InteractionStatusResponse,
+    ProductCareResponse,
+    ProductRecordsResponse,
     ProductRole,
-    ProjectionRecord,
-    ProjectionResponse,
+    ProductSleepTodayNoData,
+    ProductSleepTodayProjection,
+    ProductSleepTodayResponse,
+    ProductTrendsResponse,
 )
 
 
@@ -88,14 +91,34 @@ class ProductIdentityResolver(Protocol):
 
 
 class ProductBackend(Protocol):
-    def list_role_projections(
+    def get_today_projection(
+        self,
+        context: ProductRequestContext,
+    ) -> ProductSleepTodayProjection | None: ...
+
+    def get_trends(
         self,
         context: ProductRequestContext,
         *,
-        kind: str,
         limit: int,
         cursor: str | None,
-    ) -> tuple[tuple[ProjectionRecord, ...], str | None]: ...
+    ) -> ProductTrendsResponse: ...
+
+    def get_records(
+        self,
+        context: ProductRequestContext,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> ProductRecordsResponse: ...
+
+    def get_care(
+        self,
+        context: ProductRequestContext,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> ProductCareResponse: ...
 
     def reserve_command(
         self,
@@ -127,6 +150,31 @@ class ProductApiService:
         self.identity_resolver = identity_resolver
         self.backend = backend
 
+    def today(self, request: Request) -> ProductSleepTodayResponse:
+        context = self.identity_resolver.resolve(
+            request,
+            body=b"",
+            purpose="sleep_care",
+        )
+        context.require_scope(READ_SCOPES["today"])
+        projection = self.backend.get_today_projection(context)
+        if projection is None:
+            return ProductSleepTodayNoData(
+                data_mode=cast(Literal["live", "replay"], context.data_mode),
+                synthetic_non_release=context.data_mode == "replay",
+                subject_ref=context.subject_id,
+                role=context.role,
+            )
+        if (
+            projection.role != context.role
+            or projection.subject_ref != context.subject_id
+            or projection.data_mode != context.data_mode
+        ):
+            raise RuntimeError(
+                "backend returned a projection outside the authorized role view"
+            )
+        return projection
+
     def query(
         self,
         request: Request,
@@ -134,7 +182,7 @@ class ProductApiService:
         kind: str,
         limit: int,
         cursor: str | None,
-    ) -> ProjectionResponse:
+    ) -> ProductTrendsResponse | ProductCareResponse | ProductRecordsResponse:
         try:
             required_scope = READ_SCOPES[kind]
         except KeyError as exc:
@@ -149,26 +197,13 @@ class ProductApiService:
             purpose="sleep_care",
         )
         context.require_scope(required_scope)
-        items, next_cursor = self.backend.list_role_projections(
-            context,
-            kind=kind,
-            limit=limit,
-            cursor=cursor,
-        )
-        if any(
-            item.role != context.role or item.subject_ref != context.subject_id
-            for item in items
-        ):
-            raise RuntimeError(
-                "backend returned a projection outside the authorized role view"
-            )
-        return ProjectionResponse(
-            data_mode=context.data_mode,
-            synthetic_non_release=context.data_mode == "replay",
-            kind=kind,
-            items=items,
-            next_cursor=next_cursor,
-        )
+        if kind == "trends":
+            return self.backend.get_trends(context, limit=limit, cursor=cursor)
+        if kind == "records":
+            return self.backend.get_records(context, limit=limit, cursor=cursor)
+        if kind == "care":
+            return self.backend.get_care(context, limit=limit, cursor=cursor)
+        raise RuntimeError("Product read dispatch drifted")
 
     def submit(
         self,
@@ -179,6 +214,7 @@ class ProductApiService:
         idempotency_key: str | None,
         payload: Mapping[str, Any],
         target_id: str | None = None,
+        request_body: bytes | None = None,
     ) -> AcceptedOperationResponse:
         if command_type not in COMMAND_SCOPES:
             raise ProductApiError(
@@ -186,8 +222,13 @@ class ProductApiService:
                 "Unknown command type.",
                 status_code=400,
             )
-        key = _idempotency_key(idempotency_key)
-        body = _canonical_json(payload)
+        if request_body is None:
+            raise ProductApiError(
+                "authenticated_body_missing",
+                "The authenticated request body is required.",
+                status_code=400,
+            )
+        body = request_body
         context = self.identity_resolver.resolve(
             request,
             body=body,
@@ -201,20 +242,29 @@ class ProductApiService:
                     "Doctor role cannot confirm a personal Care action.",
                     status_code=403,
                 )
+        if command_type == "interaction.feedback" and context.role == ProductRole.DOCTOR:
+            raise ProductApiError(
+                "authorization_denied",
+                "Doctor role cannot author elder or family feedback facts.",
+                status_code=403,
+            )
+        caller_key = _idempotency_key(idempotency_key)
         operation_id = self.backend.reserve_command(
             context,
             route_template=route_template,
             command_type=command_type,
-            idempotency_key=key,
-            body_sha256=hashlib.sha256(body).hexdigest(),
+            idempotency_key=caller_key,
+            body_sha256=_sha256_bytes(body),
             payload=payload,
             target_id=target_id,
         )
         return AcceptedOperationResponse(
-            data_mode=context.data_mode,
+            data_mode=cast(Literal["live", "replay"], context.data_mode),
             synthetic_non_release=context.data_mode == "replay",
             operation_id=operation_id,
-            status_url=f"/product/sleep/interactions/status/{operation_id}",
+            status_url=(
+                "/product/sleep/interactions/status/" + operation_id
+            ),
         )
 
     def status(
@@ -278,15 +328,8 @@ def _idempotency_key(value: str | None) -> str:
     return normalized
 
 
-def _canonical_json(payload: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=lambda value: value.isoformat(),
-    ).encode("utf-8")
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 __all__ = [

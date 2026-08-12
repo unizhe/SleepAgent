@@ -9,7 +9,7 @@ from sleepagent.product_api.diagnostics.http import (
     RadarApiRuntime,
     RadarTaskCreateRequest,
 )
-from sleepagent.product_runtime.cli import (
+from tests.support.radar_cli import (
     EXIT_NOT_FOUND,
     EXIT_OK,
     EXIT_TASK_FAILED,
@@ -23,13 +23,14 @@ from sleepagent.persistence import RadarPersistenceStore
 from sleepagent.product_runtime.runtime_factory import (
     build_product_runtime_bundle_from_env,
 )
+from tests.support.runtime_fixtures import build_test_radar_runtime
 
 
 def _runtime() -> RadarApiRuntime:
     persistence = RadarPersistenceStore.connect_sqlite(
         sqlite3.connect(":memory:", check_same_thread=False)
     )
-    return RadarApiRuntime(
+    return build_test_radar_runtime(
         product_runtime=build_product_runtime_bundle_from_env(
             persistence_store=persistence,
         )

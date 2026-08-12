@@ -60,10 +60,10 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "18000"]
 # goldens. Demo surfaces must additionally fail closed in runtime settings.
 FROM runtime-base AS production
 
-RUN find /usr/local/lib/python3.11/site-packages/sleepagent/simulation/fixtures/scenarios \
-      -type f -name scenario.json -delete \
-    && find /usr/local/lib/python3.11/site-packages/sleepagent/radar_agent/replay \
-      -type f \( -name scenario_catalog.json -o -name workflow_goldens.json \) -delete
+RUN rm -rf -- \
+      /usr/local/lib/python3.11/site-packages/sleepagent/simulation/fixtures \
+      /usr/local/lib/python3.11/site-packages/sleepagent/simulation/replay \
+      /usr/local/lib/python3.11/site-packages/sleepagent/simulation/replay_seed_registry.json
 
 USER sleepagent
 

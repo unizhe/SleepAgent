@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from fastapi import HTTPException
-
 from sleepagent.backend_runtime import RuntimeServices
 from sleepagent.backend_settings import ApiSurface, ProcessRole, SleepBackendSettings
 from sleepagent.backend_keys import BackendKeyProvider
@@ -19,139 +17,75 @@ from sleepagent.backend_persistence import (
     PostgresProductIdentityResolver,
     build_product_authenticator,
 )
-from sleepagent.demo_api import (
-    DemoAcceptedResponse,
-    DemoAdvanceRequest,
-    DemoResetRequest,
-    DemoSeedRequest,
-    DemoTraceResponse,
-    ScenarioClockResponse,
-)
+from sleepagent.demo_persistence import DurableDemoController, PostgresDemoStore
 from sleepagent.product_api.service import (
-    FailClosedProductIdentityResolver,
     ProductApiService,
-    ProductBackend,
-    ProductRequestContext,
 )
-from sleepagent.sleep_api.contracts import PublicErrorCode
-from sleepagent.sleep_api.auth import SleepApiSecurityError
+from sleepagent.persistence.uow import InternalControlScope
 from sleepagent.sleep_api.postgres_runtime import build_postgres_sleep_api_runtime
 
 
-class _UnavailableProductBackend(ProductBackend):
-    def list_role_projections(
-        self,
-        context: ProductRequestContext,
-        *,
-        kind: str,
-        limit: int,
-        cursor: str | None,
-    ) -> tuple[tuple[Any, ...], str | None]:
-        del context, kind, limit, cursor
-        raise RuntimeError("product persistence adapter is unavailable")
+class PostgresInternalStatus:
+    """Read non-PHI reconciliation summaries through one protected function."""
 
-    def reserve_command(
-        self,
-        context: ProductRequestContext,
-        *,
-        route_template: str,
-        command_type: str,
-        idempotency_key: str,
-        body_sha256: str,
-        payload: Mapping[str, Any],
-        target_id: str | None,
-    ) -> str:
-        del (
-            context,
-            route_template,
-            command_type,
-            idempotency_key,
-            body_sha256,
-            payload,
-            target_id,
+    def __init__(self, settings: SleepBackendSettings, uow_factory: object) -> None:
+        self.settings = settings
+        self.uow_factory = uow_factory
+
+    def reconciliation_status(self, operation_id: str) -> dict[str, Any] | None:
+        if not operation_id.strip() or len(operation_id) > 200:
+            return None
+        scope = InternalControlScope(
+            data_mode=self.settings.data_mode.value,
+            service_principal_id=self.settings.service_principal_id,
         )
-        raise RuntimeError("product persistence adapter is unavailable")
+        with self.uow_factory.begin(scope) as uow:  # type: ignore[attr-defined]
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT public.sleepagent_internal_reconciliation_status(%s)",
+                    (operation_id,),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            uow.commit()
+        if row is None or row[0] is None:
+            return None
+        value = row[0]
+        if isinstance(value, str):
+            import json
 
-    def get_operation(
-        self,
-        context: ProductRequestContext,
-        *,
-        operation_id: str,
-    ) -> None:
-        del context, operation_id
-        raise RuntimeError("product persistence adapter is unavailable")
+            value = json.loads(value)
+        if not isinstance(value, Mapping):
+            raise RuntimeError("internal reconciliation status is not an object")
+        return dict(value)
 
-
-class _UnavailableSleepAuthenticator:
-    @staticmethod
-    def _raise() -> None:
-        raise SleepApiSecurityError(
-            PublicErrorCode.AUTHORIZATION_UNAVAILABLE,
-            "The PostgreSQL identity authority is not configured.",
-            status_code=503,
-            retryable=True,
+    def operational_metrics(self) -> dict[str, Any]:
+        scope = InternalControlScope(
+            data_mode=self.settings.data_mode.value,
+            service_principal_id=self.settings.service_principal_id,
         )
+        with self.uow_factory.begin(scope) as uow:  # type: ignore[attr-defined]
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT public.sleepagent_internal_operational_metrics()"
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            uow.commit()
+        if row is None or row[0] is None:
+            raise RuntimeError("internal operational metrics are unavailable")
+        value = row[0]
+        if isinstance(value, str):
+            import json
 
-    def authenticate(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        self._raise()
-
-    def verify_identity(self, *args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        self._raise()
-
-
-class _UnavailableSleepRuntime:
-    authenticator = _UnavailableSleepAuthenticator()
-
-
-class _UnavailableDemoController:
-    @staticmethod
-    def _raise() -> None:
-        raise HTTPException(
-            status_code=503,
-            detail="durable replay controller is unavailable",
-        )
-
-    def seed(
-        self,
-        *,
-        request: DemoSeedRequest,
-        idempotency_key: str,
-    ) -> DemoAcceptedResponse:
-        del request, idempotency_key
-        self._raise()
-
-    def advance(
-        self,
-        *,
-        request: DemoAdvanceRequest,
-        idempotency_key: str,
-    ) -> DemoAcceptedResponse:
-        del request, idempotency_key
-        self._raise()
-
-    def reset(
-        self,
-        *,
-        request: DemoResetRequest,
-        idempotency_key: str,
-    ) -> DemoAcceptedResponse:
-        del request, idempotency_key
-        self._raise()
-
-    def clock(self) -> ScenarioClockResponse:
-        self._raise()
-
-    def trace(
-        self,
-        *,
-        operation_id: str | None,
-        cursor: str | None,
-        limit: int,
-    ) -> DemoTraceResponse:
-        del operation_id, cursor, limit
-        self._raise()
+            value = json.loads(value)
+        if not isinstance(value, Mapping):
+            raise RuntimeError("internal operational metrics are not an object")
+        return dict(value)
 
 
 def build_api_runtime_services(
@@ -184,11 +118,14 @@ def build_api_runtime_services(
                 ),
             ),
         )
-    demo = (
-        _UnavailableDemoController()
-        if ApiSurface.DEMO in settings.enabled_surfaces
-        else None
-    )
+    demo = None
+    if ApiSurface.DEMO in settings.enabled_surfaces:
+        demo = DurableDemoController(
+            PostgresDemoStore(
+                settings,
+                uow_factory,  # type: ignore[arg-type]
+            )
+        )
     public_provider = None
     if ApiSurface.PUBLIC_V1 in settings.enabled_surfaces:
         key_provider = BackendKeyProvider(settings.deployment_mode)
@@ -202,7 +139,12 @@ def build_api_runtime_services(
         product=product,
         demo=demo,
         public_v1_runtime_provider=public_provider,
+        internal_status=(
+            PostgresInternalStatus(settings, uow_factory)
+            if ApiSurface.INTERNAL in settings.enabled_surfaces
+            else None
+        ),
     )
 
 
-__all__ = ["build_api_runtime_services"]
+__all__ = ["PostgresInternalStatus", "build_api_runtime_services"]

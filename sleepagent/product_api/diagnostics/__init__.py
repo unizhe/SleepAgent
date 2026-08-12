@@ -20,7 +20,6 @@ def __getattr__(name: str):
         "RadarChatResponse",
         "RadarTaskCreateRequest",
         "RadarTaskDetail",
-        "reset_radar_api_runtime_for_tests",
         "router",
     }:
         from sleepagent.product_api.diagnostics import http
@@ -45,6 +44,5 @@ __all__ = [
     "RadarChatResponse",
     "RadarTaskCreateRequest",
     "RadarTaskDetail",
-    "reset_radar_api_runtime_for_tests",
     "router",
 ]

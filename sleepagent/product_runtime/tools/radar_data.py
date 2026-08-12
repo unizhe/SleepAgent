@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from sleepagent.product_runtime.contracts import StrictContract
+from sleepagent.product_runtime.contracts import StrictContract, stable_hash
 from sleepagent.product_device.night_quality import DataQualityGate, RadarProviderLike
 from sleepagent.product_runtime.schemas import RadarDevice, RadarNightSummary
 
@@ -135,6 +135,7 @@ class CanonicalRadarEvidenceTool:
             if not _subject_matches_binding(
                 canonical_subject=facts.subject_id,
                 binding_subject=binding.subject_id,
+                data_mode=facts.data_mode.value,
             ):
                 raise ValueError("canonical radar evidence subject mismatch")
             if (
@@ -142,8 +143,8 @@ class CanonicalRadarEvidenceTool:
                 != context.fact_snapshot.canonical_data_version
             ):
                 raise ValueError("canonical radar evidence version mismatch")
-            if not requested_refs or set(requested_refs) != set(
-                facts.provenance_references
+            if not requested_refs or tuple(requested_refs) != (
+                facts.agent_source_refs()
             ):
                 raise ValueError(
                     "canonical radar evidence refs must match Product facts"
@@ -158,9 +159,10 @@ class CanonicalRadarEvidenceTool:
                 raise ValueError(
                     "canonical radar evidence date exceeds FactSnapshot scope"
                 )
+            data = facts.agent_night_evidence()
         return {
             "data": data,
-            "source_refs": requested_refs,
+            "source_refs": requested_refs[:50],
         }
 
     @staticmethod
@@ -206,12 +208,12 @@ class CanonicalRadarEvidenceTool:
                 "data_sufficiency": data.get("data_sufficiency"),
                 "policy_version": policy_version,
                 "reason_codes": list(data.get("reason_codes", [])),
-                "source_refs": requested_refs,
+                "source_refs": requested_refs[:50],
             }
         return {
             "coverage_ratio": coverage,
             "usable": coverage >= 0.6,
-            "source_refs": requested_refs,
+            "source_refs": requested_refs[:50],
         }
 
     @staticmethod
@@ -234,7 +236,7 @@ class CanonicalRadarEvidenceTool:
         ):
             raise ValueError("device status refs exceed FactSnapshot scope")
         return CanonicalRadarDeviceStatus.model_validate(
-            {**data, "source_refs": requested_refs}
+            {**data, "source_refs": requested_refs[:50]}
         ).model_dump(mode="json")
 
 
@@ -311,11 +313,18 @@ def _subject_matches_binding(
     *,
     canonical_subject: str,
     binding_subject: str,
+    data_mode: str | None = None,
 ) -> bool:
     if not canonical_subject:
         return False
     if binding_subject == canonical_subject:
         return True
+    if data_mode is not None:
+        expected = stable_hash(
+            {"data_mode": data_mode, "subject_id": canonical_subject}
+        )[:32]
+        if binding_subject == f"subject:{expected}":
+            return True
     marker = "::subject::"
     if marker not in binding_subject:
         return False

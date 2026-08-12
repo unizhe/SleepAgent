@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
@@ -23,12 +24,9 @@ from sleepagent.product_device.schemas import (
     RadarSourceMetadata,
     RadarVitalSnapshot,
 )
-from sleepagent.simulation.replay import (
-    ReplayScenario,
-    default_replay_scenario_id,
-    get_replay_scenario,
-    scenario_now,
-)
+
+if TYPE_CHECKING:
+    from sleepagent.simulation.replay import ReplayScenario
 
 
 PRODUCT_RADAR_API_KEY_ENV = "SLEEPAGENT_PRODUCT_RADAR_API_KEY"
@@ -162,9 +160,9 @@ class FakeRadarProductDataProvider:
                 "development/test mode, provider_mode=fake and a replay "
                 "product namespace"
             )
-        self.scenario = get_replay_scenario(scenario_id or default_replay_scenario_id())
+        self.scenario = _get_replay_scenario(scenario_id)
         self.scenario_id = self.scenario.scenario_id
-        now = scenario_now(self.scenario)
+        now = _replay_scenario_now(self.scenario)
         scenario_input = self.scenario.deterministic_input
         self._devices: dict[str, RadarDevice] = {
             scenario_input.radar_device_id: RadarDevice(
@@ -222,7 +220,7 @@ class FakeRadarProductDataProvider:
             recent_snapshots=self.get_recent_snapshots(radar_device_id),
             latest_sleep_report=self.get_latest_sleep_report(radar_device_id),
             recent_alerts=self.get_recent_alerts(radar_device_id),
-            now=scenario_now(self.scenario),
+            now=_replay_scenario_now(self.scenario),
         )
         return _apply_scenario_expected_quality(
             dashboard=dashboard,
@@ -250,7 +248,7 @@ class FakeRadarProductDataProvider:
             radar_device_id=radar_device_id,
         )
         device = self.get_device(radar_device_id)
-        now = scenario_now(self.scenario) + timedelta(
+        now = _replay_scenario_now(self.scenario) + timedelta(
             minutes=len(self._snapshots.get(radar_device_id, [])) + 1
         )
         snapshots = self._snapshots.setdefault(radar_device_id, [])
@@ -443,6 +441,25 @@ def scenario_trend_summary(scenario: ReplayScenario) -> list[dict[str, object]]:
     ]
 
 
+def _get_replay_scenario(scenario_id: str | None) -> ReplayScenario:
+    """Load development-only replay data without joining the production graph."""
+
+    from sleepagent.simulation.replay import (
+        default_replay_scenario_id,
+        get_replay_scenario,
+    )
+
+    return get_replay_scenario(scenario_id or default_replay_scenario_id())
+
+
+def _replay_scenario_now(scenario: ReplayScenario) -> datetime:
+    """Keep replay helpers behind the same explicit development-only boundary."""
+
+    from sleepagent.simulation.replay import scenario_now
+
+    return scenario_now(scenario)
+
+
 def _scenario_snapshot(
     *,
     scenario: ReplayScenario,
@@ -474,7 +491,7 @@ def _scenario_sleep_report(*, scenario: ReplayScenario) -> RadarSleepReport:
     source_metadata = _scenario_source_metadata(
         scenario=scenario,
         raw_event_id=f"{scenario.scenario_id}:night-report",
-        received_at=scenario_now(scenario),
+        received_at=_replay_scenario_now(scenario),
     )
     return RadarSleepReport(
         radar_device_id=scenario.deterministic_input.radar_device_id,

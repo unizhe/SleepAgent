@@ -498,3 +498,107 @@ def test_ambiguous_send_commits_outcome_unknown_journal() -> None:
     assert invocation_locks
     assert factory.commits == 3
     factory.assert_consumed()
+
+
+def test_delivery_outcome_unknown_atomically_creates_reconciliation_operation() -> None:
+    claim = _delivery_claim().model_copy(
+        update={
+            "metadata": {
+                "work_kind": "delivery",
+                "destination": "replay_care_notification",
+                "handler_name": "deterministic_replay_sink",
+                "semantic_effect_key": "effect-key-1",
+                "lease_seconds": 30,
+            }
+        }
+    )
+    factory = ScriptedUowFactory(
+        [
+            Step("sleepagent_heartbeat_delivery", (True,)),
+            Step("SELECT status FROM public.backend_delivery_intents", ("dispatching",)),
+            Step("MAX(sequence)", (3,)),
+            Step("INSERT INTO public.backend_delivery_journal"),
+            Step("sleepagent_finalize_delivery", (True,)),
+            Step(
+                "source.policy_sha256",
+                (
+                    "replay_care_notification",
+                    "deterministic_replay_sink",
+                    "effect-key-1",
+                    "a" * 64,
+                    "b" * 64,
+                ),
+            ),
+            Step("INSERT INTO public.sleep_domain_operations"),
+        ]
+    )
+    store = PostgresDurableWorkStore(
+        _settings(), factory, id_generator=lambda: "01987654-3210-7abc-8def-0123456789ab"
+    )
+
+    finalized = store.finalize(
+        claim,
+        WorkResult(
+            disposition=WorkDisposition.OUTCOME_UNKNOWN,
+            error_code="prior_send_requires_reconciliation",
+        ),
+    )
+
+    assert finalized is True
+    operation_insert = factory.calls[-1]
+    assert operation_insert[2][5] == "delivery-1"
+    assert "delivery_reconciliation" in operation_insert[1]
+    assert '"allowed_handler":"reconciliation"' in operation_insert[2][-2]
+    assert factory.commits == 1
+    factory.assert_consumed()
+
+
+def test_known_not_delivered_reconciliation_is_the_only_reopen_path() -> None:
+    claim = _delivery_claim().model_copy(
+        update={
+            "lease_generation": 3,
+            "fencing_token": "33333333-3333-4333-8333-333333333333",
+        }
+    )
+    request_sha256 = "a" * 64
+    factory = ScriptedUowFactory(
+        [
+            Step("sleepagent_heartbeat_delivery", (True,)),
+            Step("SELECT status FROM public.backend_delivery_intents", ("running",)),
+            Step(
+                "FROM public.backend_invocations AS invocation",
+                (
+                    "invocation-1",
+                    "external_sink",
+                    request_sha256,
+                    "reconciled",
+                    2,
+                    "22222222-2222-4222-8222-222222222222",
+                    None,
+                    4,
+                    {
+                        "event": "reconciled",
+                        "resolution": "known_not_delivered",
+                    },
+                ),
+            ),
+            Step("current_state = 'reserved'", (5,)),
+            Step("MAX(sequence)", (5,)),
+            Step("INSERT INTO public.backend_invocation_journal"),
+        ]
+    )
+    store = PostgresDurableWorkStore(_settings(), factory)
+
+    record = store.reserve_invocation(
+        claim,
+        invocation_kind=InvocationKind.EXTERNAL_SINK,
+        invocation_key="replay-delivery:effect-key-1:v1",
+        request_sha256=request_sha256,
+    )
+
+    assert record.state == InvocationState.RESERVED
+    assert record.lease_generation == 3
+    rebound_event = factory.calls[-1][2][-1]
+    assert '"event":"lease_rebound"' in rebound_event
+    assert factory.commits == 1
+    factory.assert_consumed()
