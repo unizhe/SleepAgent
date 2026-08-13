@@ -859,22 +859,6 @@ class CompiledPrompt(FrozenContract):
     receipt: CompilerReceipt
 
 
-class SkillOutcome(StrictContract):
-    outcome_id: str
-    episode_id: str
-    invocation_id: str
-    agent_id: AgentId
-    skill_id: str
-    skill_version: str
-    package_hash: str = Field(..., min_length=64, max_length=64)
-    status: SkillOutcomeStatus
-    root_cause: RootCauseKind
-    reason_codes: list[str] = Field(default_factory=list, max_length=20)
-    input_refs: list[str] = Field(default_factory=list, max_length=30)
-    output_ref: str | None = None
-    safety_decision_ref: str | None = None
-
-
 class SkillRegistry:
     def __init__(
         self,
@@ -1251,7 +1235,6 @@ __all__ = [
     "SkillBundle",
     "SkillLifecycle",
     "SkillLock",
-    "SkillOutcome",
     "SkillOutcomeStatus",
     "SkillPackage",
     "SkillRegistry",
