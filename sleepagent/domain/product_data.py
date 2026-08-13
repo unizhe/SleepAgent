@@ -8,7 +8,7 @@ Radar ``raw_payload``/``data_payload`` compatibility shapes.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
 
 from pydantic import Field, model_validator
@@ -25,6 +25,7 @@ from sleepagent.runtime.cold_start import (
     MetricReadinessDecision,
     snapshot_binding_material,
 )
+from sleepagent.runtime.tools import TrendRiskSignal
 from sleepagent.domain.contracts import (
     AnalysisRole,
     AnalysisRoleView,
@@ -54,6 +55,10 @@ ROLE_VIEW_SCOPES = {
     AnalysisRole.FAMILY: "read_family_view",
     AnalysisRole.DOCTOR: "read_doctor_view",
 }
+
+LONGITUDINAL_VITAL_MIN_NIGHTS = 3
+LONGITUDINAL_HEART_RATE_MIN_TOTAL_DELTA = 5.0
+LONGITUDINAL_RESPIRATORY_RATE_MIN_TOTAL_DELTA = 1.5
 FORBIDDEN_AGENT_CONTEXT_KEYS = frozenset(
     {
         "raw_payload",
@@ -97,6 +102,98 @@ class RoleViewAuthorization(SleepDomainContract):
     authorization_scope: tuple[str, ...]
 
 
+class ProductNightVitalSummary(SleepDomainContract):
+    """Privacy-minimized centers for one exact finalized Episode revision."""
+
+    schema_version: Literal["product_night_vital_summary.v1"] = (
+        "product_night_vital_summary.v1"
+    )
+    local_sleep_date: date
+    night_episode_revision_ref: str = Field(..., min_length=1)
+    heart_rate_center: float = Field(..., gt=0, le=300)
+    respiratory_rate_center: float = Field(..., gt=0, le=150)
+    heart_rate_sample_count: int = Field(..., ge=1)
+    respiratory_rate_sample_count: int = Field(..., ge=1)
+
+
+class ProductLongitudinalRiskContext(SleepDomainContract):
+    """Source-bound, non-diagnostic trend signal eligible for Care routing."""
+
+    schema_version: Literal["product_longitudinal_risk_context.v1"] = (
+        "product_longitudinal_risk_context.v1"
+    )
+    policy_version: Literal["product-longitudinal-vital-watch.v1"] = (
+        "product-longitudinal-vital-watch.v1"
+    )
+    date_start: date
+    date_end: date
+    valid_night_count: int = Field(..., ge=LONGITUDINAL_VITAL_MIN_NIGHTS)
+    night_summaries: tuple[ProductNightVitalSummary, ...] = Field(
+        min_length=LONGITUDINAL_VITAL_MIN_NIGHTS
+    )
+    trend_signals: tuple[TrendRiskSignal, ...] = Field(min_length=1)
+    reason_codes: tuple[Literal["consistent_vital_increase_three_nights"], ...]
+
+    @model_validator(mode="after")
+    def require_exact_ordered_window(self) -> "ProductLongitudinalRiskContext":
+        dates = tuple(item.local_sleep_date for item in self.night_summaries)
+        if dates != tuple(sorted(dates)) or len(dates) != len(set(dates)):
+            raise ValueError("longitudinal vital nights must be unique and ordered")
+        if self.date_start != dates[0] or self.date_end != dates[-1]:
+            raise ValueError("longitudinal vital dates do not bind the summaries")
+        if self.valid_night_count != len(self.night_summaries):
+            raise ValueError("longitudinal valid-night count is inconsistent")
+        return self
+
+
+def build_longitudinal_vital_risk_context(
+    summaries: tuple[ProductNightVitalSummary, ...],
+) -> ProductLongitudinalRiskContext | None:
+    """Classify a recent three-night dual-vital increase as a watch signal."""
+
+    window = tuple(sorted(summaries, key=lambda item: item.local_sleep_date))[
+        -LONGITUDINAL_VITAL_MIN_NIGHTS:
+    ]
+    if len(window) < LONGITUDINAL_VITAL_MIN_NIGHTS:
+        return None
+    if any(
+        later.local_sleep_date - earlier.local_sleep_date != timedelta(days=1)
+        for earlier, later in zip(window, window[1:])
+    ):
+        return None
+    heart = tuple(item.heart_rate_center for item in window)
+    respiratory = tuple(item.respiratory_rate_center for item in window)
+    if not (
+        all(later > earlier for earlier, later in zip(heart, heart[1:]))
+        and all(
+            later > earlier
+            for earlier, later in zip(respiratory, respiratory[1:])
+        )
+        and heart[-1] - heart[0]
+        >= LONGITUDINAL_HEART_RATE_MIN_TOTAL_DELTA
+        and respiratory[-1] - respiratory[0]
+        >= LONGITUDINAL_RESPIRATORY_RATE_MIN_TOTAL_DELTA
+    ):
+        return None
+    source_refs = tuple(
+        item.night_episode_revision_ref for item in window
+    )
+    return ProductLongitudinalRiskContext(
+        date_start=window[0].local_sleep_date,
+        date_end=window[-1].local_sleep_date,
+        valid_night_count=len(window),
+        night_summaries=window,
+        trend_signals=(
+            TrendRiskSignal(
+                risk_level="watch",
+                confidence=min(1.0, len(window) / 4),
+                source_refs=source_refs,
+            ),
+        ),
+        reason_codes=("consistent_vital_increase_three_nights",),
+    )
+
+
 class ProductRevisionFacts(SleepDomainContract):
     """Safe, versioned tool input for one exact NightEpisode revision."""
 
@@ -114,6 +211,7 @@ class ProductRevisionFacts(SleepDomainContract):
     canonical_observations: tuple[dict[str, Any], ...]
     deterministic_quality: dict[str, Any]
     deterministic_risk: dict[str, Any]
+    longitudinal_risk_context: ProductLongitudinalRiskContext | None = None
     conflict_summaries: tuple[dict[str, Any], ...]
     provenance_references: tuple[str, ...]
     canonical_data_version: str = Field(..., min_length=64, max_length=64)
@@ -133,6 +231,29 @@ class ProductRevisionFacts(SleepDomainContract):
         coverage_ratio = quality.get("coverage_ratio", 0.0)
         risk = dict(self.deterministic_risk)
         risk.setdefault("data_sufficiency", self.data_sufficiency)
+        risk_arguments: dict[str, Any] = {
+            "data": risk,
+            "source_refs": agent_refs,
+        }
+        if self.longitudinal_risk_context is not None:
+            risk_arguments["trend_signals"] = [
+                item.model_dump(mode="json")
+                for item in self.longitudinal_risk_context.trend_signals
+            ]
+            risk_arguments["trend_observation"] = {
+                "quality_status": (
+                    "good"
+                    if self.data_sufficiency == "sufficient"
+                    else "partial"
+                ),
+                "confidence_label": "normal",
+                "health_conclusion_allowed": (
+                    self.data_sufficiency == "sufficient"
+                ),
+                "source_refs": list(
+                    self.longitudinal_risk_context.trend_signals[0].source_refs
+                ),
+            }
         return {
             "radar.get_night_evidence": {
                 "data": evidence,
@@ -153,8 +274,7 @@ class ProductRevisionFacts(SleepDomainContract):
                 "source_refs": agent_refs,
             },
             "risk.classify_signal": {
-                "data": risk,
-                "source_refs": agent_refs,
+                **risk_arguments,
             },
         }
 
@@ -199,6 +319,11 @@ class ProductRevisionFacts(SleepDomainContract):
             "conflict_count": len(self.conflict_summaries),
             "deterministic_quality": dict(self.deterministic_quality),
             "deterministic_risk": dict(self.deterministic_risk),
+            "longitudinal_risk_context": (
+                None
+                if self.longitudinal_risk_context is None
+                else self.longitudinal_risk_context.model_dump(mode="json")
+            ),
             "canonical_data_version": self.canonical_data_version,
             "provenance_set_sha256": stable_hash(self.provenance_references),
             "provenance_ref_count": len(self.provenance_references),

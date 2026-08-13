@@ -105,7 +105,7 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         item.value for item in PRODUCT_AGENT_ROSTER
     )
     assert stable_hash(product_agent_manifest()) == (
-        "ee4b6205206102bc27c2addbd58ffb55a0acf13351a4255d1f89748e2add1a4e"
+        "e2e1435b12d27fdd52ce616b04800456fe9686f6d349f9378e3d630dc14445a3"
     )
     assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
 

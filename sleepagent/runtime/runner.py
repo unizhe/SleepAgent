@@ -96,6 +96,7 @@ from sleepagent.runtime.tool_execution_coordinator import (
     ToolExecutionCoordinator,
     serialized_episode_execution,
 )
+from sleepagent.runtime.tools import CareCoordinationPolicyResult
 from sleepagent.runtime.memory import (
     InMemoryLongitudinalResultStore,
     LongitudinalMemoryService,
@@ -334,6 +335,7 @@ class ProductEpisodeRunner:
         safety: AcceptedWorkProduct | None = None
         communication: AcceptedWorkProduct | None = None
         deterministic_risk_reasons: list[str] = []
+        policy_routed_care_required = False
 
         try:
             if WorkProductKind.EVIDENCE_PACKET in (
@@ -357,6 +359,12 @@ class ProductEpisodeRunner:
                 ):
                     risk_arguments = dict(
                         request.tool_inputs.get("risk.classify_signal", {})
+                    )
+                    trend_signals = tuple(
+                        risk_arguments.pop("trend_signals", ())
+                    )
+                    trend_observation = risk_arguments.pop(
+                        "trend_observation", None
                     )
                     risk_arguments["accepted_evidence_ref"] = (
                         evidence.work_product_ref
@@ -398,10 +406,63 @@ class ProductEpisodeRunner:
                                 ("deterministic_risk_escalate",),
                             )
                         )
+                    risk_receipts = [risk_result.receipt]
+                    if trend_signals:
+                        trend_result = self.tool_execution_coordinator.execute(
+                            "risk.classify_signal",
+                            {
+                                "observation": trend_observation,
+                                "trend_signals": trend_signals,
+                            },
+                            context=ProductToolExecutionContext(
+                                caller="runtime",
+                                fact_snapshot=request.fact_snapshot,
+                                episode_id=request.episode_id,
+                                authorization_scope=(
+                                    request.fact_snapshot.binding.authorization_scope
+                                ),
+                            ),
+                            runtime=runtime,
+                            record_call=True,
+                        )
+                        tool_receipts.append(trend_result.receipt)
+                        if (
+                            trend_result.receipt.outcome
+                            != InvocationOutcome.SUCCEEDED
+                        ):
+                            raise AcceptanceError(
+                                "Longitudinal risk classification failed"
+                            )
+                        risk_receipts.append(trend_result.receipt)
+                    if (
+                        "coordination.read_policy"
+                        in EPISODE_DEFINITIONS[
+                            request.episode_type
+                        ].required_tools
+                    ):
+                        policy_routed_care_required = (
+                            self._care_required_by_policy(
+                                request=request,
+                                runtime=runtime,
+                                evidence=evidence,
+                                risk_receipts=tuple(risk_receipts),
+                                tool_receipts=tool_receipts,
+                            )
+                        )
 
-            if WorkProductKind.CARE_STRATEGY in (
+            care_planned = WorkProductKind.CARE_STRATEGY in (
                 set(plan.required_work_products) | set(plan.conditional_work_products)
-            ):
+            )
+            care_policy_routed = (
+                "coordination.read_policy"
+                in EPISODE_DEFINITIONS[request.episode_type].required_tools
+            )
+            should_run_care = (
+                policy_routed_care_required
+                if care_policy_routed
+                else care_planned
+            )
+            if should_run_care:
                 if evidence is None:
                     raise AcceptanceError("Care cannot run without accepted Evidence")
                 envelope, accepted = self._invoke_and_accept(
@@ -1045,6 +1106,54 @@ class ProductEpisodeRunner:
         elif decision.decision == EvaluationDecision.BLOCK:
             raise AcceptanceError("SleepCare evaluation blocked path")
 
+    def _care_required_by_policy(
+        self,
+        *,
+        request: ProductEpisodeRunRequest,
+        runtime: ProductEpisodeRuntime,
+        evidence: AcceptedWorkProduct,
+        risk_receipts: tuple[ToolReceipt, ...],
+        tool_receipts: list[ToolReceipt],
+    ) -> bool:
+        result = self.tool_execution_coordinator.execute(
+            "coordination.read_policy",
+            {
+                "accepted_evidence_ref": evidence.work_product_ref,
+                "accepted_evidence_hash": evidence.target_hash,
+                "risk_decisions": [
+                    {
+                        "risk_receipt_ref": risk_receipt.tool_invocation_id,
+                        "risk_level": risk_receipt.output["risk_level"],
+                        "quality_status": risk_receipt.output[
+                            "quality_status"
+                        ],
+                        "urgent_required": bool(
+                            risk_receipt.output.get("urgent_required")
+                        ),
+                        "source_refs": risk_receipt.source_refs,
+                    }
+                    for risk_receipt in risk_receipts
+                ],
+            },
+            context=ProductToolExecutionContext(
+                caller="runtime",
+                fact_snapshot=request.fact_snapshot,
+                episode_id=request.episode_id,
+                authorization_scope=(
+                    request.fact_snapshot.binding.authorization_scope
+                ),
+            ),
+            runtime=runtime,
+            record_call=True,
+        )
+        tool_receipts.append(result.receipt)
+        if result.receipt.outcome != InvocationOutcome.SUCCEEDED:
+            raise AcceptanceError("Care coordination policy failed")
+        payload = dict(result.receipt.output)
+        payload.pop("policy", None)
+        decision = CareCoordinationPolicyResult.model_validate(payload).routing
+        return bool(decision.candidate_intents) and not decision.urgent_preempt
+
     def _urgent_preflight(
         self, request: ProductEpisodeRunRequest
     ) -> ProductEpisodeRunResult | None:
@@ -1189,6 +1298,7 @@ class ProductEpisodeRunner:
             if tool_name in {
                 "risk.match_urgent_boundary",
                 "risk.classify_signal",
+                "coordination.read_policy",
                 "artifact.render",
             }:
                 continue

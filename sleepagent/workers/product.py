@@ -56,13 +56,18 @@ from sleepagent.domain.contracts import (
     DataMode,
     DataSufficiency,
     DeterministicQualityAssessment,
+    HeartRatePayload,
+    RespiratoryRatePayload,
     RoleViewStatus,
     SleepObservation,
 )
 from sleepagent.domain.episodes import NightEpisodeV2, UUID7Generator
 from sleepagent.domain.product_data import (
+    ProductLongitudinalRiskContext,
+    ProductNightVitalSummary,
     ProductRevisionFacts,
     _project_observation,
+    build_longitudinal_vital_risk_context,
 )
 from sleepagent.workers.runtime import (
     B3ClaimInvariantError,
@@ -576,6 +581,10 @@ class PostgresProductAgentRepository:
                 observations_by_id[observation_id]
                 for observation_id in observation_ids
             )
+            longitudinal_risk_context = self._load_longitudinal_risk_context(
+                cursor,
+                episode=episode,
+            )
             cursor.execute(
                 """
                 SELECT analysis_revision_id, revision_number
@@ -604,6 +613,7 @@ class PostgresProductAgentRepository:
             observations=observations,
             quality=quality,
             risk=risk,
+            longitudinal_risk_context=longitudinal_risk_context,
         )
         policy_versions = {
             str(name): str(value)
@@ -626,6 +636,128 @@ class PostgresProductAgentRepository:
             observation_schema_versions=observation_schemas,
             policy_versions=policy_versions,
         )
+
+    def _load_longitudinal_risk_context(
+        self,
+        cursor: Any,
+        *,
+        episode: NightEpisodeV2,
+    ) -> ProductLongitudinalRiskContext | None:
+        """Read the recent exact revisions and derive a non-diagnostic watch."""
+
+        if episode.episode_local_date is None:
+            return None
+        cursor.execute(
+            """
+            SELECT item.episode_local_date, item.current_revision_id,
+                   revision.revision_json
+            FROM public.sleep_domain_night_episodes AS item
+            JOIN public.sleep_domain_night_episode_revisions AS revision
+              ON revision.night_episode_revision_id = item.current_revision_id
+             AND revision.night_episode_id = item.night_episode_id
+             AND revision.namespace_id = item.namespace_id
+             AND revision.data_mode = item.data_mode
+             AND revision.namespace_generation = item.namespace_generation
+             AND revision.subject_id = item.subject_id
+            WHERE item.namespace_id = %s
+              AND item.data_mode = %s
+              AND item.namespace_generation = %s
+              AND COALESCE(item.run_id, '') = COALESCE(%s, '')
+              AND COALESCE(item.arm_id, '') = COALESCE(%s, '')
+              AND item.subject_id = %s
+              AND item.date_state = 'finalized'
+              AND item.date_conflict = FALSE
+              AND item.episode_local_date <= %s
+            ORDER BY item.episode_local_date DESC
+            LIMIT 3
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+                self.scope.subject_id,
+                episode.episode_local_date,
+            ),
+        )
+        rows = list(reversed(cursor.fetchall()))
+        if len(rows) < 3:
+            return None
+        observation_ids_by_revision: list[tuple[str, ...]] = []
+        all_observation_ids: list[str] = []
+        for row in rows:
+            revision_payload = _json_value(row[2])
+            observation_ids = tuple(
+                str(value)
+                for value in revision_payload.get("observation_ids", ())
+            )
+            if not observation_ids or len(observation_ids) != len(
+                set(observation_ids)
+            ):
+                raise ProductAgentInvariantError(
+                    "longitudinal Product source has no exact observation set"
+                )
+            observation_ids_by_revision.append(observation_ids)
+            all_observation_ids.extend(observation_ids)
+        cursor.execute(
+            """
+            SELECT observation_id, observation_json
+            FROM public.sleep_domain_canonical_observations
+            WHERE namespace_id = %s AND data_mode = %s
+              AND subject_id = %s AND observation_id = ANY(%s)
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.subject_id,
+                all_observation_ids,
+            ),
+        )
+        observations = {
+            str(row[0]): SleepObservation.model_validate(_json_value(row[1]))
+            for row in cursor.fetchall()
+        }
+        if set(observations) != set(all_observation_ids):
+            raise ProductAgentInvariantError(
+                "longitudinal Product source has missing canonical observations"
+            )
+        summaries: list[ProductNightVitalSummary] = []
+        for row, observation_ids in zip(rows, observation_ids_by_revision):
+            heart = [
+                observation.payload.value
+                for observation_id in observation_ids
+                if isinstance(
+                    (observation := observations[observation_id]).payload,
+                    HeartRatePayload,
+                )
+            ]
+            respiratory = [
+                observation.payload.value
+                for observation_id in observation_ids
+                if isinstance(
+                    (observation := observations[observation_id]).payload,
+                    RespiratoryRatePayload,
+                )
+            ]
+            if not heart or not respiratory:
+                return None
+            summaries.append(
+                ProductNightVitalSummary(
+                    local_sleep_date=row[0],
+                    night_episode_revision_ref=(
+                        f"night_episode_revision:{episode.data_mode.value}:"
+                        f"{row[1]}"
+                    ),
+                    heart_rate_center=sum(heart) / len(heart),
+                    respiratory_rate_center=(
+                        sum(respiratory) / len(respiratory)
+                    ),
+                    heart_rate_sample_count=len(heart),
+                    respiratory_rate_sample_count=len(respiratory),
+                )
+            )
+        return build_longitudinal_vital_risk_context(tuple(summaries))
 
     def persist_prepared(
         self,
@@ -1625,6 +1757,27 @@ def _fact_snapshot_for_role(
     created_at: datetime,
 ) -> FactSnapshot:
     local_date = date.fromisoformat(source.facts.local_sleep_date)
+    longitudinal = source.facts.longitudinal_risk_context
+    source_scope = SourceScope(
+        kind=(
+            SourceScopeKind.HISTORICAL_RANGE
+            if longitudinal is not None
+            else SourceScopeKind.CURRENT_NIGHT
+        ),
+        as_of=created_at,
+        timezone_name=source.facts.timezone_name,
+        date_start=(
+            longitudinal.date_start
+            if longitudinal is not None
+            else local_date
+        ),
+        date_end=local_date,
+        valid_night_count=(
+            longitudinal.valid_night_count
+            if longitudinal is not None
+            else 1
+        ),
+    )
     internal_subject = stable_hash(
         {
             "data_mode": source.facts.data_mode.value,
@@ -1643,14 +1796,7 @@ def _fact_snapshot_for_role(
                 "draft_material",
             ),
         ),
-        source_scope=SourceScope(
-            kind=SourceScopeKind.CURRENT_NIGHT,
-            as_of=created_at,
-            timezone_name=source.facts.timezone_name,
-            date_start=local_date,
-            date_end=local_date,
-            valid_night_count=1,
-        ),
+        source_scope=source_scope,
         canonical_data_version=source.facts.canonical_data_version,
         active_constraint_codes=tuple(
             sorted(
@@ -1792,6 +1938,7 @@ def _build_facts(
     observations: tuple[SleepObservation, ...],
     quality: DeterministicQualityAssessment,
     risk: CurrentRisk,
+    longitudinal_risk_context: ProductLongitudinalRiskContext | None,
 ) -> tuple[ProductRevisionFacts, str, dict[str, str], tuple[str, ...]]:
     if episode.episode_local_date is None:
         raise ProductAgentInvariantError(
@@ -1817,6 +1964,11 @@ def _build_facts(
             f"current_risk:{risk.current_risk_id}",
         )
     )
+    if longitudinal_risk_context is not None:
+        source_refs.extend(
+            summary.night_episode_revision_ref
+            for summary in longitudinal_risk_context.night_summaries
+        )
     observation_ids = tuple(item.observation_id for item in observations)
     observation_set_sha256 = stable_hash(observation_ids)
     quality_payload = quality.model_dump(mode="json")
@@ -1827,6 +1979,11 @@ def _build_facts(
         "observations": safe_observations,
         "quality": quality_payload,
         "risk": risk_payload,
+        "longitudinal_risk_context": (
+            None
+            if longitudinal_risk_context is None
+            else longitudinal_risk_context.model_dump(mode="json")
+        ),
     }
     facts = ProductRevisionFacts(
         night_episode_id=episode.night_episode_id,
@@ -1840,6 +1997,7 @@ def _build_facts(
         canonical_observations=tuple(safe_observations),
         deterministic_quality=quality_payload,
         deterministic_risk=risk_payload,
+        longitudinal_risk_context=longitudinal_risk_context,
         conflict_summaries=(),
         provenance_references=tuple(dict.fromkeys(source_refs)),
         canonical_data_version=stable_hash(version_material),

@@ -17,10 +17,67 @@ from sleepagent.runtime.tooling import (
     ProductToolExecutor,
 )
 from sleepagent.domain.contracts import DataMode
-from sleepagent.domain.product_data import ProductRevisionFacts
+from sleepagent.domain.product_data import (
+    ProductNightVitalSummary,
+    ProductRevisionFacts,
+    build_longitudinal_vital_risk_context,
+)
 
 
 NIGHT = date(2026, 7, 9)
+
+
+def _vital_summary(
+    day: int,
+    heart_rate: float,
+    respiratory_rate: float,
+) -> ProductNightVitalSummary:
+    return ProductNightVitalSummary(
+        local_sleep_date=date(2026, 7, day),
+        night_episode_revision_ref=f"night_episode_revision:live:{day}",
+        heart_rate_center=heart_rate,
+        respiratory_rate_center=respiratory_rate,
+        heart_rate_sample_count=120,
+        respiratory_rate_sample_count=120,
+    )
+
+
+def test_longitudinal_vital_watch_requires_three_consistent_meaningful_nights() -> None:
+    rising = (
+        _vital_summary(7, 64.0, 14.0),
+        _vital_summary(8, 72.0, 17.0),
+        _vital_summary(9, 82.0, 20.0),
+    )
+
+    context = build_longitudinal_vital_risk_context(rising)
+
+    assert context is not None
+    assert context.reason_codes == ("consistent_vital_increase_three_nights",)
+    assert context.trend_signals[0].risk_level == "watch"
+    assert context.trend_signals[0].source_refs == tuple(
+        item.night_episode_revision_ref for item in rising
+    )
+    facts = _product_facts().model_copy(
+        update={
+            "longitudinal_risk_context": context,
+            "provenance_references": (
+                "night_episode_revision:live:1",
+                *context.trend_signals[0].source_refs,
+            ),
+        }
+    )
+    risk_arguments = facts.tool_inputs()["risk.classify_signal"]
+    assert "trend_signals" not in risk_arguments["data"]
+    assert risk_arguments["trend_signals"][0]["risk_level"] == "watch"
+    assert risk_arguments["trend_observation"]["quality_status"] == "good"
+    assert build_longitudinal_vital_risk_context(rising[:2]) is None
+    assert build_longitudinal_vital_risk_context(
+        (
+            _vital_summary(7, 64.0, 14.0),
+            _vital_summary(8, 65.0, 14.2),
+            _vital_summary(9, 64.5, 14.1),
+        )
+    ) is None
 
 
 def test_product_night_evidence_tool_rejects_cross_subject_canonical_facts() -> None:

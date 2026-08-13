@@ -294,11 +294,12 @@ EPISODE_DEFINITIONS: Mapping[EpisodeType, EpisodeDefinition] = MappingProxyType(
         _definition(
             EpisodeType.MORNING_REVIEW,
             required={_PLAN, _EVIDENCE, _COMMUNICATION},
-            allowed={_PLAN, _EVIDENCE, _SAFETY, _COMMUNICATION},
+            allowed={_PLAN, _EVIDENCE, _CARE, _SAFETY, _COMMUNICATION},
             tools={
                 "radar.get_night_evidence",
                 "radar.assess_data_quality",
                 "risk.classify_signal",
+                "coordination.read_policy",
             },
             safety={"personal_claim_safety"},
             exits={"communication_published", "safe_degraded", "blocked"},

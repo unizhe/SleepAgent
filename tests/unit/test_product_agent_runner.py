@@ -942,10 +942,10 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
         ]
 
     roster_projection = audit_projection(roster_result)
-    # Phase C intentionally removed fake Tool requests from the Skill package;
-    # freeze the resulting invocation identity for this exact Episode input.
+    # Freeze the invocation identity, including the runtime-bound Care routing
+    # receipt now visible to the final SleepCare communication turn.
     assert stable_hash(roster_projection) == (
-        "9e92c69f90fb1482ef4b28e482d3c4b847e93f32a79a1f81ce91fcf0d6b8b18a"
+        "4c7034fbb87da433f7ae5dca945aed2f63b279de4b100063d954feb59ffe0f69"
     )
 
 
@@ -1008,6 +1008,15 @@ def test_morning_uses_sleepcare_evidence_sleepcare_without_fixed_safety() -> Non
         AgentId.EVIDENCE_REASONING,
         AgentId.SLEEP_CARE,
     ]
+    assert AgentId.CARE_STRATEGY not in {
+        item.agent_id for item in result.accepted_work_products
+    }
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["candidate_intents"] == []
     assert result.agent_invocations
     assert {
         item.invocation_id for item in result.agent_invocations
@@ -1359,6 +1368,11 @@ def test_urgent_preempts_all_model_agents() -> None:
     assert result.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
     assert not result.envelopes
     assert not model.calls
+    assert not result.accepted_work_products
+    assert not any(
+        item.tool_name == "coordination.read_policy"
+        for item in result.tool_receipts
+    )
 
 
 def test_failed_urgent_text_preflight_blocks_before_model_agents() -> None:
@@ -1436,7 +1450,7 @@ def test_doctor_data_quality_recovery_preserves_agentless_deterministic_view() -
 
 
 
-def test_exact_revision_risk_escalate_deterministically_invokes_safety() -> None:
+def test_exact_revision_risk_escalate_routes_care_and_retains_result() -> None:
     instance, model = runner(EpisodeType.MORNING_REVIEW)
     run_request = request(EpisodeType.MORNING_REVIEW)
     tool_inputs = dict(run_request.tool_inputs)
@@ -1461,9 +1475,102 @@ def test_exact_revision_risk_escalate_deterministically_invokes_safety() -> None
     )
     assert risk_receipt.output["risk_level"] == "escalate"
     assert risk_receipt.output["safety_required"] is True
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["candidate_intents"]
+    assert CareStrategyModelOutput.__name__ in model.calls
     assert SafetyReviewModelOutput.__name__ in model.calls
+    care = next(
+        item
+        for item in result.accepted_work_products
+        if item.agent_id == AgentId.CARE_STRATEGY
+    )
+    care_candidate = care.payload["primary_action"]["candidate_id"]
+    assert result.publication is not None
+    assert care_candidate in result.publication.care_candidate_refs
     assert any(
         item.agent_id == AgentId.SAFETY_REVIEW
+        for item in result.accepted_work_products
+    )
+
+
+def test_longitudinal_watch_routes_care_without_forcing_safety() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+    base = request(EpisodeType.MORNING_REVIEW)
+    trend_refs = tuple(
+        f"night_episode_revision:replay:{day}" for day in range(24, 27)
+    )
+    trend_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-morning-longitudinal-watch",
+        binding=base.fact_snapshot.binding,
+        source_scope=SourceScope(
+            kind=SourceScopeKind.HISTORICAL_RANGE,
+            as_of=NOW,
+            timezone_name="Asia/Shanghai",
+            date_start=date(2026, 7, 24),
+            date_end=date(2026, 7, 26),
+            valid_night_count=3,
+        ),
+        canonical_data_version=base.fact_snapshot.canonical_data_version,
+        source_refs=(*base.fact_snapshot.source_refs, *trend_refs),
+        created_at=NOW,
+    )
+    tool_inputs = dict(base.tool_inputs)
+    tool_inputs["risk.classify_signal"] = {
+        "data": {
+            "risk_state": "no_reviewed_signal",
+            "data_sufficiency": "sufficient",
+            "health_escalation_allowed": False,
+            "reason_codes": ["no_reviewed_signal_in_source_scope"],
+        },
+        "source_refs": list(trend_snapshot.source_refs),
+        "trend_signals": [
+            {
+                "risk_level": "watch",
+                "confidence": 0.75,
+                "source_refs": list(trend_refs),
+            }
+        ],
+        "trend_observation": {
+            "quality_status": "good",
+            "confidence_label": "normal",
+            "health_conclusion_allowed": True,
+            "source_refs": list(trend_refs),
+        },
+    }
+
+    result = instance.run(
+        base.model_copy(
+            update={
+                "fact_snapshot": trend_snapshot,
+                "tool_inputs": tool_inputs,
+            }
+        )
+    )
+
+    risk_receipts = [
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "risk.classify_signal"
+    ]
+    assert [item.output["risk_level"] for item in risk_receipts] == [
+        "normal",
+        "watch",
+    ]
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["risk_level"] == "watch"
+    assert coordination.output["routing"]["candidate_intents"]
+    assert CareStrategyModelOutput.__name__ in model.calls
+    assert SafetyReviewModelOutput.__name__ not in model.calls
+    assert any(
+        item.agent_id == AgentId.CARE_STRATEGY
         for item in result.accepted_work_products
     )
 
