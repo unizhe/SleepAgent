@@ -187,8 +187,11 @@ def load_packaged_scenario(scenario_id: str) -> ReplayScenario:
         for character in scenario_id
     ):
         raise ReplayFixtureError("scenario_id must be a lowercase slug")
-    fixture = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", scenario_id, "scenario.json"
+    fixture = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath(scenario_id)
+        .joinpath("scenario.json")
     )
     try:
         raw = fixture.read_bytes()

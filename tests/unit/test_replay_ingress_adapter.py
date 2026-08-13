@@ -56,8 +56,10 @@ def test_normal_one_night_is_facts_only_and_adapts_deterministically() -> None:
         for item in first.items[1:]
     )
 
-    fixture = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", "normal-one-night"
+    fixture = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath("normal-one-night")
     )
     assert not fixture.joinpath("expected.json").is_file()
     assert not fixture.joinpath("actions.jsonl").is_file()
@@ -173,3 +175,11 @@ def test_seed_registry_owns_actor_aliases_and_scope_matrix() -> None:
     assert "product:sleep:care:confirm" in seed.actor_scopes["family"]
     assert "sleep:reanalysis:write" in seed.actor_scopes["doctor"]
     assert "product:sleep:care:confirm" not in seed.actor_scopes["doctor"]
+
+
+def test_every_packaged_seed_scenario_is_traversable() -> None:
+    registry = load_replay_seed_registry()
+
+    verified = tuple(verify_packaged_seed(seed).scenario_id for seed in registry.seeds)
+
+    assert verified == tuple(seed.scenario_id for seed in registry.seeds)

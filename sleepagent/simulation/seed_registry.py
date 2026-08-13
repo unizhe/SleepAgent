@@ -173,9 +173,13 @@ def load_replay_seed_registry() -> ReplaySeedRegistry:
 def verify_packaged_seed(seed: ReplaySeedDefinition) -> ReplayScenario:
     """Verify only the strict scenario document; generation remains Worker-only."""
 
-    raw = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", seed.scenario_id, "scenario.json"
-    ).read_bytes()
+    raw = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath(seed.scenario_id)
+        .joinpath("scenario.json")
+        .read_bytes()
+    )
     try:
         scenario = ReplayScenario.model_validate_json(raw)
     except Exception as exc:
