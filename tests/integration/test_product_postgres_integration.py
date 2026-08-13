@@ -7,6 +7,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import NoReturn
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -22,12 +24,15 @@ from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
+    UowScope,
 )
 from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
 )
 from sleepagent.workers.product import (
     PostgresProductAgentRepository,
+    PreparedProductAgentArtifact,
+    ProductAgentConflict,
     ProductAgentLease,
     ProductAgentLeaseLost,
     ProductAgentProcessor,
@@ -837,6 +842,119 @@ def _claim_product_work(
     return claim
 
 
+def _lease_for_claim(claim: LeaseClaim) -> ProductAgentLease:
+    return ProductAgentLease(
+        operation_id=claim.work_id,
+        attempt_sequence=claim.attempt,
+        lease_generation=claim.lease_generation,
+        fencing_token=claim.fencing_token,
+        worker_instance=claim.worker_instance,
+    )
+
+
+def _admin_execute(
+    psycopg: object,
+    admin_dsn: str,
+    sql: str,
+    params: tuple[object, ...],
+) -> None:
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(sql, params)
+
+
+def _expire_operation(psycopg: object, admin_dsn: str, operation_id: str) -> None:
+    _admin_execute(
+        psycopg,
+        admin_dsn,
+        "UPDATE public.sleep_domain_operations SET lease_expires_at = "
+        "clock_timestamp() - interval '1 second' WHERE operation_id = %s",
+        (operation_id,),
+    )
+
+
+def _persist_prepared(
+    factory: UnitOfWorkFactory[object],
+    scope: UowScope,
+    lease: ProductAgentLease,
+    artifact: PreparedProductAgentArtifact,
+) -> None:
+    with factory.begin(scope) as uow:
+        repository = PostgresProductAgentRepository(uow.connection, scope)
+        repository.persist_prepared(lease, artifact)
+        uow.commit()
+
+
+class _PreparedProcessCrash(RuntimeError):
+    pass
+
+
+class _PersistPreparedThenCrashProcessor(ProductAgentProcessor):
+    persisted_artifact: PreparedProductAgentArtifact | None = None
+
+    def persist_and_commit(
+        self,
+        scope: UowScope,
+        lease: ProductAgentLease,
+        artifact: PreparedProductAgentArtifact,
+    ) -> NoReturn:
+        self.persisted_artifact = artifact
+        _persist_prepared(self.uow_factory, scope, lease, artifact)
+        raise _PreparedProcessCrash
+
+
+def _prepared_attempt_snapshot(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    product_attempt_id: str,
+) -> tuple[object, int, int, str]:
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT to_jsonb(attempt) - ARRAY[
+                         'attempt_sequence', 'lease_generation', 'fencing_token'
+                       ],
+                       attempt_sequence, lease_generation, fencing_token
+                FROM public.backend_product_attempts AS attempt
+                WHERE product_attempt_id = %s
+                """,
+                (product_attempt_id,),
+            )
+            row = cursor.fetchone()
+    assert row is not None
+    return row[0], int(row[1]), int(row[2]), str(row[3])
+
+
+def _invocation_snapshot(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    operation_id: str,
+) -> tuple[tuple[object, ...], ...]:
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT invocation.invocation_id, invocation.invocation_key,
+                       invocation.request_sha256, invocation.current_state,
+                       invocation.response_sha256, journal.sequence,
+                       journal.to_state, journal.lease_generation,
+                       journal.fencing_token, journal.event_json
+                FROM public.backend_invocations AS invocation
+                JOIN public.backend_invocation_journal AS journal
+                  ON journal.invocation_id = invocation.invocation_id
+                WHERE invocation.operation_id = %s
+                ORDER BY journal.sequence
+                """,
+                (operation_id,),
+            )
+            rows = cursor.fetchall()
+    assert rows
+    return tuple(tuple(row) for row in rows)
+
+
 def _assert_committed_closure(
     psycopg: object,
     *,
@@ -852,11 +970,14 @@ def _assert_committed_closure(
                 """
                 SELECT attempt_state, query_visible,
                        committed_at IS NOT NULL,
-                       night_episode_revision_id, policy_sha256
+                       night_episode_revision_id, policy_sha256,
+                       (SELECT count(*)
+                        FROM public.backend_product_attempts AS all_attempts
+                        WHERE all_attempts.operation_id = %s)
                 FROM public.backend_product_attempts
                 WHERE product_attempt_id = %s AND operation_id = %s
                 """,
-                (product_attempt_id, seed.operation_id),
+                (seed.operation_id, product_attempt_id, seed.operation_id),
             )
             assert cursor.fetchone() == (
                 "committed",
@@ -864,6 +985,7 @@ def _assert_committed_closure(
                 True,
                 seed.night_episode_revision_id,
                 seed.policy_sha256,
+                1,
             )
             cursor.execute(
                 """
@@ -882,16 +1004,20 @@ def _assert_committed_closure(
             cursor.execute(
                 """
                 SELECT night_episode_id, night_episode_revision_id, subject_id,
-                       revision_number
+                       revision_number,
+                       (SELECT count(*)
+                        FROM public.sleep_domain_analysis_revisions AS revisions
+                        WHERE revisions.night_episode_revision_id = %s)
                 FROM public.sleep_domain_analysis_revisions
                 WHERE analysis_revision_id = %s
                 """,
-                (analysis_revision_id,),
+                (seed.night_episode_revision_id, analysis_revision_id),
             )
             assert cursor.fetchone() == (
                 seed.night_episode_id,
                 seed.night_episode_revision_id,
                 seed.subject_id,
+                1,
                 1,
             )
             cursor.execute(
@@ -941,16 +1067,18 @@ def _assert_committed_closure(
                 if analysis_status == "ready"
                 else "AGENT_ANALYSIS_DEGRADED"
             )
-            assert cursor.fetchone() == (
-                expected_event_type,
-                "AnalysisRevision",
-                analysis_revision_id,
-                "committed",
-                2,
-                1,
-                seed.run_id,
-                seed.arm_id,
-            )
+            assert cursor.fetchall() == [
+                (
+                    expected_event_type,
+                    "AnalysisRevision",
+                    analysis_revision_id,
+                    "committed",
+                    2,
+                    1,
+                    seed.run_id,
+                    seed.arm_id,
+                )
+            ]
 
 
 def test_product_worker_claim_commits_exact_three_role_views() -> None:
@@ -1113,8 +1241,8 @@ def test_prepared_product_attempt_is_not_query_visible_before_commit() -> None:
     )
 
 
-def test_expired_product_fence_after_prepare_cannot_commit() -> None:
-    """Model the exact process-loss boundary between prepare and commit."""
+def test_reclaimed_prepared_artifact_is_taken_over_without_reinvocation() -> None:
+    """A journaled immutable artifact survives its original Product owner."""
 
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
@@ -1134,95 +1262,403 @@ def test_expired_product_fence_after_prepare_cannot_commit() -> None:
         namespace_id=seed.namespace_id,
     )
     try:
-        claim = _claim_product_work(
+        model = DeterministicReplayStructuredAgentModel()
+        counted_generate = Mock(wraps=model.generate)
+        model.generate = counted_generate  # type: ignore[method-assign]
+
+        first_claim = _claim_product_work(
             store,
             worker_instance=f"prepared-stale-worker-{uuid4().hex}",
         )
-        scope = store.uow_scope_for_claim(claim)
-        lease = ProductAgentLease(
-            operation_id=claim.work_id,
-            attempt_sequence=claim.attempt,
-            lease_generation=claim.lease_generation,
-            fencing_token=claim.fencing_token,
-            worker_instance=claim.worker_instance,
+        first_scope = store.uow_scope_for_claim(first_claim)
+        first_lease = _lease_for_claim(first_claim)
+        first_processor = _PersistPreparedThenCrashProcessor(
+            factory,
+            runtime_bundle=build_deterministic_product_runtime_bundle(model=model),
         )
+        first_adapter = ProductAgentWorkHandlerAdapter(processor=first_processor)
+        with pytest.raises(_PreparedProcessCrash):
+            first_adapter(WorkContext(first_claim, store, threading.Event()))
+        first_artifact = first_processor.persisted_artifact
+        assert first_artifact is not None
+        first_model_call_count = counted_generate.call_count
+        assert first_model_call_count > 0
+
+        before_attempt = _prepared_attempt_snapshot(
+            psycopg,
+            admin_dsn=admin_dsn,
+            product_attempt_id=first_artifact.product_attempt_id,
+        )
+        before_invocation = _invocation_snapshot(
+            psycopg,
+            admin_dsn=admin_dsn,
+            operation_id=seed.operation_id,
+        )
+        assert {row[6] for row in before_invocation} == {
+            "reserved",
+            "send_started",
+            "response_received",
+        }
+
+        _expire_operation(psycopg, admin_dsn, seed.operation_id)
+
+        second_claim = _claim_product_work(
+            store,
+            worker_instance=f"prepared-takeover-worker-{uuid4().hex}",
+        )
+        assert second_claim.work_id == first_claim.work_id
+        assert second_claim.attempt == first_claim.attempt
+        assert second_claim.lease_generation == first_claim.lease_generation + 1
+        assert second_claim.fencing_token != first_claim.fencing_token
+        second_scope = store.uow_scope_for_claim(second_claim)
+        second_lease = _lease_for_claim(second_claim)
+        second_processor = _PersistPreparedThenCrashProcessor(
+            factory,
+            runtime_bundle=build_deterministic_product_runtime_bundle(model=model),
+        )
+        second_adapter = ProductAgentWorkHandlerAdapter(processor=second_processor)
+        with pytest.raises(_PreparedProcessCrash):
+            second_adapter(WorkContext(second_claim, store, threading.Event()))
+        second_artifact = second_processor.persisted_artifact
+        assert second_artifact is not None
+
+        assert counted_generate.call_count == first_model_call_count
+        assert second_artifact.model_dump(mode="json") == first_artifact.model_dump(
+            mode="json"
+        )
+        assert second_artifact.attempt_sha256 == first_artifact.attempt_sha256
+        assert (
+            second_artifact.night_episode_revision_id
+            == first_artifact.night_episode_revision_id
+        )
+        first_agent_identity = tuple(
+            (
+                role_run.role.value,
+                invocation.invocation_id,
+                invocation.skill_lock_hash,
+            )
+            for role_run in first_artifact.role_runs
+            for invocation in role_run.result.agent_invocations
+        )
+        second_agent_identity = tuple(
+            (
+                role_run.role.value,
+                invocation.invocation_id,
+                invocation.skill_lock_hash,
+            )
+            for role_run in second_artifact.role_runs
+            for invocation in role_run.result.agent_invocations
+        )
+        assert first_agent_identity
+        assert second_agent_identity == first_agent_identity
+
+        after_attempt = _prepared_attempt_snapshot(
+            psycopg,
+            admin_dsn=admin_dsn,
+            product_attempt_id=first_artifact.product_attempt_id,
+        )
+        assert after_attempt[0] == before_attempt[0]
+        assert before_attempt[1:] == (
+            first_claim.attempt,
+            first_claim.lease_generation,
+            first_claim.fencing_token,
+        )
+        assert after_attempt[1:] == (
+            second_claim.attempt,
+            second_claim.lease_generation,
+            second_claim.fencing_token,
+        )
+        assert (
+            _invocation_snapshot(
+                psycopg,
+                admin_dsn=admin_dsn,
+                operation_id=seed.operation_id,
+            )
+            == before_invocation
+        )
+
+        with pytest.raises(ProductAgentLeaseLost, match="fence"):
+            with factory.begin(first_scope) as uow:
+                repository = PostgresProductAgentRepository(uow.connection, first_scope)
+                repository.commit_prepared(
+                    first_lease,
+                    first_artifact,
+                    committed_at=datetime.now(tz=UTC),
+                )
+
+        _persist_prepared(factory, second_scope, second_lease, second_artifact)
+        assert (
+            _prepared_attempt_snapshot(
+                psycopg,
+                admin_dsn=admin_dsn,
+                product_attempt_id=first_artifact.product_attempt_id,
+            )
+            == after_attempt
+        )
+
+        with factory.begin(second_scope) as uow:
+            repository = PostgresProductAgentRepository(
+                uow.connection,
+                second_scope,
+            )
+            committed = repository.commit_prepared(
+                second_lease,
+                second_artifact,
+                committed_at=datetime.now(tz=UTC),
+            )
+            uow.commit()
+    finally:
+        provider.close()
+
+    _assert_committed_closure(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+        analysis_revision_id=committed.analysis_revision_id,
+        product_attempt_id=committed.product_attempt_id,
+        analysis_status=committed.analysis_status,
+    )
+
+
+def test_prepared_artifact_takeover_conflicts_fail_closed() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    try:
+        first_claim = _claim_product_work(
+            store,
+            worker_instance=f"conflict-first-worker-{uuid4().hex}",
+        )
+        first_scope = store.uow_scope_for_claim(first_claim)
+        first_lease = _lease_for_claim(first_claim)
         processor = ProductAgentProcessor(
             factory,
             runtime_bundle=_deterministic_runtime_bundle(),
         )
-        with factory.begin(scope) as uow:
-            repository = PostgresProductAgentRepository(uow.connection, scope)
-            source = repository.load_source(lease)
-            uow.commit()
+        source = processor.load_source(first_scope, first_lease)
         artifact = processor.prepare(
-            scope=scope,
+            scope=first_scope,
             source=source,
-            lease=lease,
+            lease=first_lease,
             prepared_at=datetime.now(tz=UTC),
         )
-        with factory.begin(scope) as uow:
-            repository = PostgresProductAgentRepository(uow.connection, scope)
-            repository.persist_prepared(lease, artifact)
-            uow.commit()
+        _persist_prepared(factory, first_scope, first_lease, artifact)
+        _expire_operation(psycopg, admin_dsn, seed.operation_id)
+        second_claim = _claim_product_work(
+            store,
+            worker_instance=f"conflict-second-worker-{uuid4().hex}",
+        )
+        second_scope = store.uow_scope_for_claim(second_claim)
+        second_lease = _lease_for_claim(second_claim)
 
-        # This is the durable state a replacement supervisor observes after the
-        # original process disappears at the prepare/commit boundary.
+        first_invocations = artifact.role_runs[0].result.agent_invocations
+        assert first_invocations
+        changed_hash = "f" * 64 if artifact.attempt_sha256 != "f" * 64 else "e" * 64
+        changed_skill_lock = (
+            "f" * 64
+            if first_invocations[0].skill_lock_hash != "f" * 64
+            else "e" * 64
+        )
+        immutable_drifts = (
+            (
+                "UPDATE public.backend_product_attempts SET attempt_sha256 = %s "
+                "WHERE product_attempt_id = %s",
+                (changed_hash, artifact.product_attempt_id),
+            ),
+            (
+                "UPDATE public.backend_product_attempts SET attempt_json = "
+                "attempt_json || '{\"tampered\": true}'::jsonb "
+                "WHERE product_attempt_id = %s",
+                (artifact.product_attempt_id,),
+            ),
+            (
+                "UPDATE public.backend_product_attempts SET attempt_json = "
+                "jsonb_set(attempt_json, "
+                "'{role_runs,0,result,agent_invocations,0,skill_lock_hash}', "
+                "to_jsonb(%s::text)) WHERE product_attempt_id = %s",
+                (changed_skill_lock, artifact.product_attempt_id),
+            ),
+        )
+        for drift_sql, drift_params in immutable_drifts:
+            _admin_execute(psycopg, admin_dsn, drift_sql, drift_params)
+            with pytest.raises(ProductAgentConflict):
+                _persist_prepared(factory, second_scope, second_lease, artifact)
+            _admin_execute(
+                psycopg,
+                admin_dsn,
+                "UPDATE public.backend_product_attempts SET attempt_sha256 = %s, "
+                "attempt_json = %s::jsonb WHERE product_attempt_id = %s",
+                (
+                    artifact.attempt_sha256,
+                    artifact.model_dump_json(),
+                    artifact.product_attempt_id,
+                ),
+            )
+
+        changed_revision = f"revision-drift-{uuid4().hex}"
+        revision_drift = artifact.model_copy(
+            update={
+                "night_episode_revision_id": changed_revision,
+                "analysis": artifact.analysis.model_copy(
+                    update={"night_episode_revision_id": changed_revision}
+                ),
+                "role_runs": tuple(
+                    role_run.model_copy(
+                        update={
+                            "role_view": role_run.role_view.model_copy(
+                                update={
+                                    "night_episode_revision_id": changed_revision
+                                }
+                            )
+                        }
+                    )
+                    for role_run in artifact.role_runs
+                ),
+            }
+        )
+        revision_drift = PreparedProductAgentArtifact.model_validate(
+            revision_drift.model_dump(mode="json")
+        )
+        with pytest.raises(ProductAgentConflict):
+            _persist_prepared(factory, second_scope, second_lease, revision_drift)
+        assert _prepared_attempt_snapshot(
+            psycopg,
+            admin_dsn=admin_dsn,
+            product_attempt_id=artifact.product_attempt_id,
+        )[1:] == (
+            first_claim.attempt,
+            first_claim.lease_generation,
+            first_claim.fencing_token,
+        )
+
+        ownership_drifts = (
+            (
+                second_claim.lease_generation,
+                first_claim.fencing_token,
+            ),
+            (
+                first_claim.lease_generation,
+                second_claim.fencing_token,
+            ),
+        )
+        for prepared_generation, prepared_token in ownership_drifts:
+            _admin_execute(
+                psycopg,
+                admin_dsn,
+                "UPDATE public.backend_product_attempts "
+                "SET lease_generation = %s, fencing_token = %s "
+                "WHERE product_attempt_id = %s",
+                (
+                    prepared_generation,
+                    prepared_token,
+                    artifact.product_attempt_id,
+                ),
+            )
+            with pytest.raises(ProductAgentConflict):
+                _persist_prepared(factory, second_scope, second_lease, artifact)
+            _admin_execute(
+                psycopg,
+                admin_dsn,
+                "UPDATE public.backend_product_attempts "
+                "SET lease_generation = %s, fencing_token = %s "
+                "WHERE product_attempt_id = %s",
+                (
+                    first_claim.lease_generation,
+                    first_claim.fencing_token,
+                    artifact.product_attempt_id,
+                ),
+            )
+
+        assert store.finalize(
+            second_claim,
+            WorkResult(
+                disposition=WorkDisposition.RETRYABLE,
+                error_code="prepared_artifact_business_retry",
+                retry_after_seconds=0,
+            ),
+        ) is True
+        business_retry_claim = _claim_product_work(
+            store,
+            worker_instance=f"conflict-business-retry-{uuid4().hex}",
+        )
+        assert business_retry_claim.attempt == second_claim.attempt + 1
+        assert (
+            business_retry_claim.lease_generation
+            == second_claim.lease_generation + 1
+        )
+        business_retry_scope = store.uow_scope_for_claim(business_retry_claim)
+        business_retry_lease = _lease_for_claim(business_retry_claim)
+        with pytest.raises(ProductAgentConflict):
+            _persist_prepared(
+                factory,
+                business_retry_scope,
+                business_retry_lease,
+                artifact,
+            )
+
+        other_id = f"product-attempt-conflict-{uuid4().hex}"
+        other_artifact = artifact.model_copy(update={"product_attempt_id": other_id})
+        _admin_execute(
+            psycopg,
+            admin_dsn,
+            "UPDATE public.backend_product_attempts SET product_attempt_id = %s, "
+            "attempt_sequence = %s, lease_generation = %s, fencing_token = %s, "
+            "attempt_sha256 = %s, attempt_json = %s::jsonb "
+            "WHERE product_attempt_id = %s",
+            (
+                other_id,
+                business_retry_claim.attempt,
+                business_retry_claim.lease_generation,
+                business_retry_claim.fencing_token,
+                other_artifact.attempt_sha256,
+                other_artifact.model_dump_json(),
+                artifact.product_attempt_id,
+            ),
+        )
+        with pytest.raises(ProductAgentConflict):
+            _persist_prepared(
+                factory,
+                business_retry_scope,
+                business_retry_lease,
+                artifact,
+            )
+
         with psycopg.connect(admin_dsn) as admin:
             with admin.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE public.sleep_domain_operations
-                    SET lease_expires_at = clock_timestamp() - interval '1 second'
-                    WHERE operation_id = %s
-                    """,
-                    (seed.operation_id,),
-                )
-
-        with pytest.raises(ProductAgentLeaseLost, match="fence"):
-            with factory.begin(scope) as uow:
-                repository = PostgresProductAgentRepository(uow.connection, scope)
-                repository.commit_prepared(
-                    lease,
-                    artifact,
-                    committed_at=datetime.now(tz=UTC),
-                )
-                uow.commit()
-
-        with psycopg.connect(admin_dsn) as admin:
-            with admin.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT attempt_state, query_visible, committed_at
+                    SELECT product_attempt_id, attempt_sequence,
+                           lease_generation, fencing_token
                     FROM public.backend_product_attempts
                     WHERE operation_id = %s
                     """,
                     (seed.operation_id,),
                 )
-                assert cursor.fetchone() == ("prepared", False, None)
-                cursor.execute(
-                    """
-                    SELECT
-                      (SELECT count(*)
-                       FROM public.sleep_domain_analysis_revisions
-                       WHERE night_episode_revision_id = %s),
-                      (SELECT count(*)
-                       FROM public.sleep_domain_analysis_role_views
-                       WHERE night_episode_revision_id = %s),
-                      (SELECT count(*)
-                       FROM public.sleep_domain_domain_outbox
-                       WHERE operation_id = %s),
-                      (SELECT status
-                       FROM public.sleep_domain_operations
-                       WHERE operation_id = %s)
-                    """,
-                    (
-                        seed.night_episode_revision_id,
-                        seed.night_episode_revision_id,
-                        seed.operation_id,
-                        seed.operation_id,
-                    ),
-                )
-                assert cursor.fetchone() == (0, 0, 0, "running")
+                owners = {
+                    str(row[0]): (int(row[1]), int(row[2]), str(row[3]))
+                    for row in cursor.fetchall()
+                }
+        assert owners == {
+            other_id: (
+                business_retry_claim.attempt,
+                business_retry_claim.lease_generation,
+                business_retry_claim.fencing_token,
+            ),
+        }
     finally:
         provider.close()
 

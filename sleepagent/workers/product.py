@@ -633,11 +633,34 @@ class PostgresProductAgentRepository:
         artifact: PreparedProductAgentArtifact,
     ) -> None:
         self._validate_artifact_identity(lease, artifact)
-        epochs = self._lock_and_validate_epochs()
-        del epochs
+        self._lock_and_validate_epochs()
         cursor = self.connection.cursor()
         try:
-            self._lock_operation_fence(cursor, lease)
+            self._lock_operation_fence(cursor, lease, artifact)
+            cursor.execute(
+                """
+                SELECT product_attempt_id
+                FROM public.backend_product_attempts
+                WHERE operation_id = %s AND attempt_sequence = %s
+                FOR UPDATE
+                """,
+                (lease.operation_id, lease.attempt_sequence),
+            )
+            slot = cursor.fetchone()
+            if slot is not None and str(slot[0]) != artifact.product_attempt_id:
+                raise ProductAgentConflict(
+                    "Product attempt sequence belongs to another artifact"
+                )
+
+            existing = self._lock_prepared_artifact(cursor, artifact)
+            if existing is not None:
+                self._persist_existing_artifact(cursor, lease, artifact, existing)
+                return
+            if slot is not None:
+                raise ProductAgentConflict(
+                    "Product attempt slot has no matching prepared artifact"
+                )
+
             cursor.execute(
                 """
                 INSERT INTO public.backend_product_attempts (
@@ -653,7 +676,6 @@ class PostgresProductAgentRepository:
                   'prepared', FALSE, %s, %s, %s, %s, %s, %s, %s, %s,
                   %s, %s::jsonb, %s
                 )
-                ON CONFLICT (operation_id, attempt_sequence) DO NOTHING
                 """,
                 (
                     artifact.product_attempt_id,
@@ -679,28 +701,8 @@ class PostgresProductAgentRepository:
                     artifact.prepared_at,
                 ),
             )
-            if cursor.rowcount == 1:
-                return
-            cursor.execute(
-                """
-                SELECT product_attempt_id, attempt_sha256, attempt_state,
-                       lease_generation, fencing_token
-                FROM public.backend_product_attempts
-                WHERE operation_id = %s AND attempt_sequence = %s
-                """,
-                (lease.operation_id, lease.attempt_sequence),
-            )
-            existing = cursor.fetchone()
-            if existing is None or (
-                str(existing[0]) != artifact.product_attempt_id
-                or str(existing[1]) != artifact.attempt_sha256
-                or str(existing[2]) != "prepared"
-                or int(existing[3]) != lease.lease_generation
-                or str(existing[4]) != lease.fencing_token
-            ):
-                raise ProductAgentConflict(
-                    "Product attempt sequence has different prepared content"
-                )
+            if cursor.rowcount != 1:
+                raise ProductAgentConflict("Product prepared artifact insert failed")
         finally:
             cursor.close()
 
@@ -715,7 +717,7 @@ class PostgresProductAgentRepository:
         self._lock_and_validate_epochs()
         cursor = self.connection.cursor()
         try:
-            operation_json = self._lock_operation_fence(cursor, lease)
+            operation_json = self._lock_operation_fence(cursor, lease, artifact)
             cursor.execute(
                 """
                 SELECT current_revision_id, episode_local_date,
@@ -1186,29 +1188,165 @@ class PostgresProductAgentRepository:
         self,
         cursor: Any,
         lease: ProductAgentLease,
+        artifact: PreparedProductAgentArtifact,
     ) -> dict[str, Any]:
         cursor.execute(
             """
-            SELECT operation_json
+            SELECT operation_json, target_resource_id, policy_sha256
             FROM public.sleep_domain_operations
             WHERE operation_id = %s AND namespace_id = %s
               AND data_mode = %s AND namespace_generation = %s
               AND subject_id = %s
-              AND COALESCE(run_id, '') = COALESCE(%s, '')
-              AND COALESCE(arm_id, '') = COALESCE(%s, '')
+              AND run_id IS NOT DISTINCT FROM %s
+              AND arm_id IS NOT DISTINCT FROM %s
               AND operation_type = 'product_agent'
               AND queue_name = 'product_agent' AND status = 'running'
               AND lease_generation = %s AND fencing_token = %s
               AND worker_instance = %s
+              AND attempt_count = %s
               AND lease_expires_at > clock_timestamp()
             FOR UPDATE
             """,
-            self._lease_scope_params(lease),
+            (*self._lease_scope_params(lease), lease.attempt_sequence),
         )
         row = cursor.fetchone()
         if row is None:
             raise ProductAgentLeaseLost("Product operation fence was rejected")
-        return _json_value(row[0])
+        operation_json = _json_value(row[0])
+        if (
+            str(row[1]) != artifact.night_episode_id
+            or str(row[2]) != artifact.policy_sha256
+            or _required_string(operation_json, "night_episode_revision_id")
+            != artifact.night_episode_revision_id
+        ):
+            raise ProductAgentConflict(
+                "Product operation and prepared artifact identity differ"
+            )
+        return operation_json
+
+    def _lock_prepared_artifact(
+        self,
+        cursor: Any,
+        artifact: PreparedProductAgentArtifact,
+    ) -> tuple[int, int, str, bool] | None:
+        cursor.execute(
+            """
+            SELECT attempt_sequence, lease_generation, fencing_token, (
+                     namespace_id = %s
+                     AND data_mode = %s
+                     AND namespace_generation = %s
+                     AND run_id IS NOT DISTINCT FROM %s
+                     AND arm_id IS NOT DISTINCT FROM %s
+                     AND subject_id = %s
+                     AND operation_id = %s
+                     AND product_attempt_id = %s
+                     AND night_episode_revision_id = %s
+                     AND fact_snapshot_sha256 = %s
+                     AND state_version = %s
+                     AND authorization_epoch = %s
+                     AND privacy_epoch = %s
+                     AND retrieval_policy_epoch = %s
+                     AND policy_sha256 = %s
+                     AND attempt_sha256 = %s
+                     AND attempt_json = %s::jsonb
+                     AND prepared_at = %s
+                     AND attempt_state = 'prepared'
+                     AND query_visible = FALSE
+                     AND committed_at IS NULL
+                   ) AS immutable_matches
+            FROM public.backend_product_attempts
+            WHERE product_attempt_id = %s
+            FOR UPDATE
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+                self.scope.subject_id,
+                artifact.operation_id,
+                artifact.product_attempt_id,
+                artifact.night_episode_revision_id,
+                artifact.source_fact_snapshot_sha256,
+                artifact.source_state_version,
+                self.scope.authorization_epoch,
+                self.scope.privacy_epoch,
+                self.scope.retrieval_policy_epoch,
+                artifact.policy_sha256,
+                artifact.attempt_sha256,
+                artifact.model_dump_json(),
+                artifact.prepared_at,
+                artifact.product_attempt_id,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return (int(row[0]), int(row[1]), str(row[2]), bool(row[3]))
+
+    def _persist_existing_artifact(
+        self,
+        cursor: Any,
+        lease: ProductAgentLease,
+        artifact: PreparedProductAgentArtifact,
+        existing: tuple[int, int, str, bool],
+    ) -> None:
+        old_sequence, old_generation, old_token, immutable_matches = existing
+        current_owner = (
+            old_sequence == lease.attempt_sequence
+            and old_generation == lease.lease_generation
+            and old_token == lease.fencing_token
+        )
+        if not immutable_matches:
+            raise ProductAgentConflict("prepared Product artifact content changed")
+        if current_owner:
+            return
+        if (
+            old_sequence != lease.attempt_sequence
+            or old_generation >= lease.lease_generation
+            or old_token == lease.fencing_token
+        ):
+            raise ProductAgentConflict(
+                "prepared Product artifact owner cannot be taken over"
+            )
+
+        cursor.execute(
+            """
+            UPDATE public.backend_product_attempts
+            SET attempt_sequence = %s, lease_generation = %s,
+                fencing_token = %s
+            WHERE product_attempt_id = %s AND operation_id = %s
+              AND attempt_sequence = %s AND lease_generation = %s
+              AND fencing_token = %s AND attempt_state = 'prepared'
+              AND query_visible = FALSE AND committed_at IS NULL
+              AND attempt_sha256 = %s
+            RETURNING attempt_sequence, lease_generation, fencing_token
+            """,
+            (
+                lease.attempt_sequence,
+                lease.lease_generation,
+                lease.fencing_token,
+                artifact.product_attempt_id,
+                lease.operation_id,
+                old_sequence,
+                old_generation,
+                old_token,
+                artifact.attempt_sha256,
+            ),
+        )
+        updated = cursor.fetchone()
+        if updated is not None:
+            return
+
+        reread = self._lock_prepared_artifact(cursor, artifact)
+        if reread is not None and reread[3] and (
+            reread[0] == lease.attempt_sequence
+            and reread[1] == lease.lease_generation
+            and reread[2] == lease.fencing_token
+        ):
+            return
+        raise ProductAgentConflict("prepared Product artifact takeover CAS failed")
 
     def _validate_analysis_parent(
         self,

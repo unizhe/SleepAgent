@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 7,
+  "target_version": 8,
   "migrations": [
     {
       "version": 1,
@@ -48,6 +48,13 @@
       "version": 7,
       "filename": "007_stage6_system_hardening.sql",
       "sha256": "08bd381723afd3c533d27d6a01596619f7ecf33619f2a76c03b6ecdfba1be0dc",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 8,
+      "filename": "008_durable_claim_attempt_ownership.sql",
+      "sha256": "1dd45914508f628bed4632d6a4da5a86697bf5a69ef8783f14e46b26e7fe3b45",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

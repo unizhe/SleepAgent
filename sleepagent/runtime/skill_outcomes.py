@@ -1,3 +1,5 @@
+# 本模块把既有可信 invocation、SkillLock 与终态结果绑定为离线 SkillOutcome。
+# 唯一入口是 bind_skill_outcome；它不负责在线学习、Prompt 修改、注册表变更或持久化。
 """Core, offline-only feedback for existing trusted invocation/result evidence.
 
 Failures or denials before an invocation record exists remain pending capture.
@@ -54,6 +56,7 @@ class SkillOutcome(FrozenContract):
     reason_codes: tuple[_ReasonCode, ...] = Field(default=(), max_length=20)
     input_refs: tuple[_InputRef, ...] = Field(default=(), max_length=30)
 
+    # Outcome 必须自证内容寻址身份，避免离线反馈脱离原调用或被改写后继续流转。
     @model_validator(mode="after")
     def validate_identity(self) -> "SkillOutcome":
         _require(len(set(self.reason_codes)) == len(self.reason_codes),
@@ -90,6 +93,7 @@ def bind_skill_outcome(
 ) -> SkillOutcome:
     """Validate exact runtime lineage and return deterministic offline feedback."""
 
+    # 先校验锁文件和 Skill 包身份，禁止调用方把另一版本或另一 Agent 的结果嫁接进来。
     lock_material = skill_lock.model_dump(mode="json", exclude={"lock_hash"})
     _require(skill_lock.lock_hash == stable_hash(lock_material), "SkillLock hash mismatch")
     package_ref = f"{skill_package.skill_id}@{skill_package.version}:{skill_package.package_hash}"
@@ -104,6 +108,7 @@ def bind_skill_outcome(
     _require(invocation.validation_status in _SUCCEEDED_VALIDATION_STATUSES,
              "invocation outcome is not provable")
 
+    # 再把终态结果精确绑定到 invocation；只有可复算的 canonical hash 才能形成 Outcome。
     _require(result.receipt.episode_id == invocation.episode_id,
              "invocation and result Episode mismatch")
     _require(result.receipt.agent_invocation_ids.count(invocation.invocation_id) == 1,
@@ -135,6 +140,7 @@ def bind_skill_outcome(
         "reason_codes": tuple(sorted(reason_codes)),
         "input_refs": (f"context-packet:{invocation.context_packet_id}",),
     }
+    # Outcome ID 直接由完整治理材料派生，使任何字段变化都产生新的、可审计的身份。
     outcome_hash = stable_hash(material)
     return SkillOutcome(outcome_id=f"skill-outcome:{outcome_hash}",
                         outcome_hash=outcome_hash, **material)
