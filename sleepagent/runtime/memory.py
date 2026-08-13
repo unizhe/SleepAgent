@@ -83,6 +83,7 @@ def _validate_typed_value(
 
 class MemoryPurpose(str, Enum):
     PERSONAL_EVIDENCE_CONTEXT = "personal_evidence_context"
+    CARE_PREFERENCE_CONTEXT = "care_preference_context"
     EXPLICIT_MEMORY_REVIEW = "explicit_memory_review"
     EXPLICIT_MEMORY_CHANGE = "explicit_memory_change"
     EXPLICIT_MEMORY_FORGET = "explicit_memory_forget"
@@ -179,9 +180,13 @@ class GovernedMemoryItemV2(FrozenContract):
         ) != len(self.allowed_purposes):
             raise ValueError("Memory access ceilings must be unique")
         if not set(self.allowed_roles).issubset(
-            {AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING}
+            {
+                AgentId.SLEEP_CARE,
+                AgentId.EVIDENCE_REASONING,
+                AgentId.CARE_STRATEGY,
+            }
         ):
-            raise ValueError("Care and Safety cannot receive generic Memory")
+            raise ValueError("Safety cannot receive governed personal Memory")
         if self.valid_until is not None and self.valid_until <= self.valid_from:
             raise ValueError("valid_until must follow valid_from")
         expected = _value_hash(
@@ -583,6 +588,9 @@ def resolve_memory_query(
     if intent.purpose == MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT:
         if requesting_agent != AgentId.EVIDENCE_REASONING:
             raise PermissionError("only Evidence may request personal Memory context")
+    elif intent.purpose == MemoryPurpose.CARE_PREFERENCE_CONTEXT:
+        if requesting_agent != AgentId.CARE_STRATEGY:
+            raise PermissionError("only Care may request preference Memory context")
     elif requesting_agent != AgentId.SLEEP_CARE or actor_role != "elder":
         raise PermissionError("explicit Memory management requires the elder")
     values = {
@@ -951,7 +959,7 @@ class InMemoryLongitudinalResultStore:
 
 
 class LongitudinalMemoryService:
-    """兼容模型输入与发布防线；memory tools 已从 registry 移除。"""
+    """Validate governed Memory projections at model and publication edges."""
 
     def __init__(
         self,
@@ -966,8 +974,7 @@ class LongitudinalMemoryService:
 
     def validate_model_input(self, receipt_output: dict[str, Any], context: Any) -> None:
         del context
-        if receipt_output.get("items"):
-            raise ValueError("longitudinal memory input is no longer executable")
+        _validate_untrusted_memory_projection(receipt_output)
 
     def validate_prepublication(
         self,
@@ -977,8 +984,24 @@ class LongitudinalMemoryService:
         actor_id: str,
     ) -> None:
         del subject_id, actor_id
-        if any(output.get("items") for output in receipt_outputs):
-            raise ValueError("longitudinal memory publication is no longer executable")
+        for output in receipt_outputs:
+            _validate_untrusted_memory_projection(output)
+
+
+def _validate_untrusted_memory_projection(output: dict[str, Any]) -> None:
+    items = output.get("items", ())
+    if not isinstance(items, (list, tuple)):
+        raise ValueError("governed Memory projection items must be a sequence")
+    for item in items:
+        if not isinstance(item, dict) or (
+            item.get("trust_label")
+            != TrustLabel.USER_MEMORY_UNTRUSTED_DATA.value
+            or item.get("verified_evidence") is not False
+            or item.get("verified_medical_fact") is not False
+        ):
+            raise ValueError(
+                "governed Memory must remain untrusted personal context"
+            )
 
 
 __all__ = [

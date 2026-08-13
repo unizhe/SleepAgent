@@ -305,6 +305,33 @@ class DeterministicReplayStructuredAgentModel:
                         date_end=packet.source_scope.date_end,
                     )
                 )
+        habit = _optional_context_item(packet, "personalization:habit_profile")
+        if habit is not None:
+            facts = habit.get("facts")
+            if isinstance(facts, list) and facts:
+                fact = facts[0]
+                if isinstance(fact, dict) and fact.get("fact_id"):
+                    value = str(fact.get("value") or "未提供")
+                    concept_id = str(fact.get("concept_id") or "personal_baseline")
+                    claims.append(
+                        EvidenceClaim(
+                            claim_id=_stable_id(
+                                "habit-context-claim",
+                                packet,
+                                str(fact["fact_id"]),
+                            ),
+                            semantic=EvidenceSemantic.USER_REPORTED,
+                            statement=(
+                                f"已确认的个人习惯基线 {concept_id} 为“{value}”；"
+                                "该信息只用于个体上下文，不代表临床正常或诊断结论。"
+                            ),
+                            source_kind=EvidenceSourceKind.CONFIRMED_HABIT,
+                            evidence_refs=[str(fact["fact_id"])],
+                            confidence=1,
+                            date_start=packet.source_scope.date_start,
+                            date_end=packet.source_scope.date_end,
+                        )
+                    )
         return EvidenceReasoningModelOutput(
             status=WorkProductStatus.COMPLETED,
             summary="已按授权范围生成可追溯的确定性证据包。",
@@ -355,6 +382,29 @@ class DeterministicReplayStructuredAgentModel:
             )
             summary = "证据不足，未生成新的照护行动。"
         else:
+            habit = _optional_context_item(
+                packet, "personalization:habit_profile"
+            )
+            memory = _optional_context_item(
+                packet, "personalization:memory_slice"
+            )
+            parameters: dict[str, Any] = {"tolerance_minutes": 30}
+            title = "保持较稳定的起床安排"
+            if habit is not None and isinstance(habit.get("facts"), list):
+                habit_facts = habit["facts"]
+                if habit_facts and isinstance(habit_facts[0], dict):
+                    title = "结合已确认个人习惯，保持较稳定的起床安排"
+            if memory is not None and isinstance(memory.get("items"), list):
+                memory_items = memory["items"]
+                if memory_items and isinstance(memory_items[0], dict):
+                    preference = memory_items[0].get("typed_value")
+                    title = {
+                        "morning_voice": "按早晨语音偏好，保持较稳定的起床安排",
+                        "evening_light": "按晚间灯光偏好，保持较稳定的起床安排",
+                    }.get(
+                        preference,
+                        "结合用户偏好上下文，保持较稳定的起床安排",
+                    )
             strategy = CareStrategy(
                 strategy_id=_stable_id("care", packet),
                 disposition="propose",
@@ -364,9 +414,9 @@ class DeterministicReplayStructuredAgentModel:
                     candidate_version=1,
                     care_action_id="consistent-wake-time",
                     care_action_version=1,
-                    title="保持较稳定的起床安排",
+                    title=title,
                     rationale_evidence_refs=claim_ids[:20],
-                    parameters={"tolerance_minutes": 30},
+                    parameters=parameters,
                     duration_days=5,
                     stop_conditions=["如有不适立即停止并寻求帮助"],
                     confirmation_required=True,
@@ -562,6 +612,18 @@ def _context_item(packet: ContextPacket, key: str) -> dict[str, Any]:
     matches = [item for item in packet.items if item.key == key]
     if len(matches) != 1 or not isinstance(matches[0].value, dict):
         raise ValueError(f"ContextPacket requires exactly one object item {key!r}")
+    return cast(dict[str, Any], matches[0].value)
+
+
+def _optional_context_item(
+    packet: ContextPacket,
+    key: str,
+) -> dict[str, Any] | None:
+    matches = [item for item in packet.items if item.key == key]
+    if not matches:
+        return None
+    if len(matches) != 1 or not isinstance(matches[0].value, dict):
+        raise ValueError(f"ContextPacket has an invalid object item {key!r}")
     return cast(dict[str, Any], matches[0].value)
 
 

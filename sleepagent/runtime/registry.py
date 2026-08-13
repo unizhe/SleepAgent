@@ -1074,10 +1074,14 @@ def default_agent_profiles() -> dict[AgentId, AgentProfile]:
     memory_labels = {
         AgentId.SLEEP_CARE: ("user_memory_untrusted_data",),
         AgentId.EVIDENCE_REASONING: (
+            "confirmed_habit",
             "episodic_hint_untrusted",
             "user_memory_untrusted_data",
         ),
-        AgentId.CARE_STRATEGY: (),
+        AgentId.CARE_STRATEGY: (
+            "confirmed_habit",
+            "user_memory_untrusted_data",
+        ),
         AgentId.SAFETY_REVIEW: (),
     }
     return {

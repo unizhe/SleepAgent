@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 8,
+  "target_version": 9,
   "migrations": [
     {
       "version": 1,
@@ -55,6 +55,13 @@
       "version": 8,
       "filename": "008_durable_claim_attempt_ownership.sql",
       "sha256": "1dd45914508f628bed4632d6a4da5a86697bf5a69ef8783f14e46b26e7fe3b45",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 9,
+      "filename": "009_l2_habit_and_governed_memory.sql",
+      "sha256": "5b088c2e5f9ef13da8f63961820367fb8ee54f5aaa4e31b37a70238a51905cff",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

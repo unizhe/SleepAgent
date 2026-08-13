@@ -55,3 +55,41 @@ Diff review found no scenario-name branching, unconditional four-agent pipeline,
 Habit/Memory scope creep, migration change, or remote write. One manifest snapshot
 hash was updated because the Morning Review registry contract intentionally
 changed. Fix rounds used: 1 of 2.
+
+## Act 4 — P2 Build
+
+### Codex verification
+
+Implemented the frozen P2 L2 wiring without replacing the retained Habit or
+Governed Memory reducers. One additive migration (`009`) supplies separate
+append-only Habit and Memory revisions, governed Memory read receipts, question
+selection persistence, and a narrowly checked family-to-elder Habit confirmation
+handoff. The canonical Product API owns proposal/confirmation/read commands; the
+durable Product worker pins effective Habit state and purpose-scoped Memory
+receipts into each role Episode before Evidence/Care consumption.
+
+Real PostgreSQL verification found and minimally corrected three adapter defects:
+psycopg JSONB parameters were bound as `bytea`, family-originated elder handles
+were rejected by the original actor-local RLS policy, and strict tuple DTOs did
+not normalize decoded JSON arrays. No product semantics or safety boundary was
+relaxed.
+
+- Existing completed suites retained: 464 unit tests and 65 non-PostgreSQL
+  integration tests.
+- Final targeted regression after the real-backend fixes: 80 passed.
+- Focused real PostgreSQL Habit/Memory + Product pinning scenarios: 2 passed.
+- Canonical signed HTTP Habit/Memory proposal, exact confirmation, and read:
+  passed against schema 009.
+- Canonical baseline versus personalized reanalysis pinned L2 versions 0/0 then
+  1/1; `confirmed_habit` and governed `morning_voice` consumption changed from
+  absent to present, with Care receipts returning the allowed item and Evidence
+  receipts remaining empty.
+- Canonical `worsening-vital-trend` verifier: `verified=true`.
+- Canonical `urgent-zero-model` verifier: `verified=true`, terminal
+  `unexpected_urgent_route`; Product/model/Care counts remained zero and the
+  fast path persisted one succeeded operation plus four receipts/projections.
+- Migration ledger/manifest check: schema version 009.
+- `001`–`008` remained immutable; no new production Python file or package was
+  introduced.
+- All isolated API, Demo API, worker, and PostgreSQL processes were stopped.
+- GitHub remote write: none.

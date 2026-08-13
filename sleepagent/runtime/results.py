@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
+from sleepagent.domain.habit import HabitFact
 from sleepagent.runtime.cold_start import (
     CapabilityEligibilityReceipt,
     MetricReadinessDecision,
@@ -24,11 +25,12 @@ from sleepagent.runtime.contracts import (
 )
 from sleepagent.runtime.governance import AcceptedWorkProduct
 from sleepagent.runtime.invocation import AgentInvocationRecord
+from sleepagent.runtime.memory import MemoryReadReceipt
 from sleepagent.runtime.registry import EPISODE_DEFINITIONS
 
 
-PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v47"
-PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v40"
+PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v48"
+PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v41"
 LEGACY_UNBOUND_WAITING_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
 
 
@@ -56,6 +58,46 @@ class ProductUserFactResponse(StrictContract):
         return f"{prefix}:{stable_hash(self.model_dump(mode='json'))[:24]}"
 
 
+class PinnedPersonalizationContext(StrictContract):
+    """Immutable L2 inputs selected before a Product Episode starts."""
+
+    subject_id: str = Field(..., min_length=1)
+    habit_profile_version: int = Field(default=0, ge=0)
+    habit_profile_hash: str | None = Field(
+        default=None, min_length=64, max_length=64
+    )
+    habit_facts: tuple[HabitFact, ...] = ()
+    memory_state_version: int = Field(default=0, ge=0)
+    memory_read_receipts: tuple[MemoryReadReceipt, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_exact_l2_bindings(self) -> "PinnedPersonalizationContext":
+        expected_habit_hash = (
+            None
+            if self.habit_profile_version == 0
+            else stable_hash(
+                {
+                    "subject_id": self.subject_id,
+                    "profile_version": self.habit_profile_version,
+                    "fact_hashes": [item.fact_hash for item in self.habit_facts],
+                }
+            )
+        )
+        if self.habit_profile_hash != expected_habit_hash:
+            raise ValueError("pinned Habit profile hash is inconsistent")
+        if any(item.subject_id != self.subject_id for item in self.habit_facts):
+            raise ValueError("pinned Habit fact subject mismatch")
+        if any(
+            item.subject_id != self.subject_id
+            for item in self.memory_read_receipts
+        ):
+            raise ValueError("pinned Memory receipt subject mismatch")
+        agents = [item.requesting_agent for item in self.memory_read_receipts]
+        if len(agents) != len(set(agents)):
+            raise ValueError("pinned Memory receipts repeat an Agent purpose")
+        return self
+
+
 class ProductEpisodeRunRequest(StrictContract):
     episode_id: str = Field(..., min_length=1)
     episode_type: EpisodeType
@@ -78,6 +120,8 @@ class ProductEpisodeRunRequest(StrictContract):
         "family_coordination",
     ] | None = None
     profile_relevant_concept_ids: tuple[str, ...] = ()
+    personalization: PinnedPersonalizationContext | None = None
+
     @model_validator(mode="after")
     def validate_current_inputs(self) -> ProductEpisodeRunRequest:
         decision_refs = tuple(
@@ -117,6 +161,33 @@ class ProductEpisodeRunRequest(StrictContract):
                 )
         if self.profile_relevant_concept_ids and self.profile_purpose is None:
             raise ValueError("Profile concept read requires an explicit purpose")
+        if self.personalization is not None:
+            pinned = self.personalization
+            if (
+                self.fact_snapshot.habit_profile_version
+                != pinned.habit_profile_version
+                or self.fact_snapshot.habit_profile_hash
+                != pinned.habit_profile_hash
+                or self.fact_snapshot.memory_context_version
+                != pinned.memory_state_version
+                or self.fact_snapshot.memory_read_receipt_refs
+                != tuple(
+                    item.receipt_id for item in pinned.memory_read_receipts
+                )
+                or self.fact_snapshot.memory_read_receipt_hashes
+                != tuple(
+                    str(item.receipt_hash)
+                    for item in pinned.memory_read_receipts
+                )
+            ):
+                raise ValueError(
+                    "Product personalization must exactly match FactSnapshot"
+                )
+            habit_fact_refs = {item.fact_id for item in pinned.habit_facts}
+            if not habit_fact_refs.issubset(self.fact_snapshot.source_refs):
+                raise ValueError(
+                    "pinned Habit facts must be bound as FactSnapshot sources"
+                )
         if self.doctor_material:
             if self.audience_role not in {None, "doctor"}:
                 raise ValueError(
@@ -404,6 +475,7 @@ __all__ = [
     "PRODUCT_EPISODE_RUNNER_VERSION",
     "PendingConfirmationTarget",
     "PendingUserInputTarget",
+    "PinnedPersonalizationContext",
     "ProductEpisodeRunRequest",
     "ProductEpisodeRunResult",
     "ProductUserFactResponse",

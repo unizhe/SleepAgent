@@ -44,8 +44,19 @@ from sleepagent.runtime.contracts import (
     stable_hash,
 )
 from sleepagent.runtime.results import (
+    PinnedPersonalizationContext,
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
+)
+from sleepagent.domain.habit import HabitFact, HabitProfileState
+from sleepagent.runtime.memory import (
+    GovernedMemoryItemV2,
+    GovernedMemoryState,
+    MemoryPurpose,
+    MemoryQueryIntent,
+    MemoryReadReceipt,
+    resolve_memory_query,
+    select_memory_slice,
 )
 from sleepagent.domain.contracts import (
     AnalysisRevision,
@@ -88,6 +99,15 @@ if TYPE_CHECKING:
     )
 
 UTC = timezone.utc
+
+EVIDENCE_MEMORY_CONCEPT_IDS = (
+    "sleep.context.night_routine",
+    "sleep.context.environment",
+)
+CARE_MEMORY_CONCEPT_IDS = (
+    "sleep.preference.care_delivery",
+    "sleep.preference.communication",
+)
 
 
 class ProductAgentWorkerError(RuntimeError):
@@ -142,6 +162,8 @@ class LoadedProductAgentSource:
     adapter_versions: dict[str, str]
     observation_schema_versions: tuple[str, ...]
     policy_versions: dict[str, str]
+    habit_profile: HabitProfileState
+    memory_state: GovernedMemoryState
 
 
 class PreparedRoleRun(BaseModel):
@@ -150,6 +172,7 @@ class PreparedRoleRun(BaseModel):
     role: AnalysisRole
     product_episode_id: str = Field(min_length=1)
     fact_snapshot: FactSnapshot
+    personalization: PinnedPersonalizationContext
     result: ProductEpisodeRunResult
     role_view: AnalysisRoleView
 
@@ -157,8 +180,8 @@ class PreparedRoleRun(BaseModel):
 class PreparedProductAgentArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["product_agent_prepared_attempt.v1"] = (
-        "product_agent_prepared_attempt.v1"
+    schema_version: Literal["product_agent_prepared_attempt.v2"] = (
+        "product_agent_prepared_attempt.v2"
     )
     product_attempt_id: str = Field(min_length=1)
     operation_id: str = Field(min_length=1)
@@ -193,6 +216,13 @@ class PreparedProductAgentArtifact(BaseModel):
             != item.fact_snapshot.fact_snapshot_id
             or item.result.receipt.fact_snapshot_hash
             != item.fact_snapshot.fact_snapshot_hash
+            or item.personalization.habit_profile_hash
+            != item.fact_snapshot.habit_profile_hash
+            or tuple(
+                receipt.receipt_id
+                for receipt in item.personalization.memory_read_receipts
+            )
+            != item.fact_snapshot.memory_read_receipt_refs
             for item in self.role_runs
         ):
             raise ValueError("prepared role views are not bound to the analysis")
@@ -327,21 +357,33 @@ class ProductAgentProcessor:
                 ProductEpisodeRunResult,
             ]
         ] = []
+        personalization_by_episode: dict[
+            str, PinnedPersonalizationContext
+        ] = {}
         for role in AnalysisRole:
             product_episode_id = self.id_generator(prepared_at)
+            personalization = _personalization_for_product_episode(
+                scope=scope,
+                source=source,
+                product_episode_id=product_episode_id,
+                as_of=prepared_at,
+            )
+            personalization_by_episode[product_episode_id] = personalization
             snapshot = _fact_snapshot_for_role(
                 scope=scope,
                 source=source,
                 role=role,
                 fact_snapshot_id=self.id_generator(prepared_at),
                 created_at=prepared_at,
+                personalization=personalization,
             )
             request = ProductEpisodeRunRequest(
                 episode_id=product_episode_id,
                 episode_type=EpisodeType.MORNING_REVIEW,
                 objective=(
                     "基于一个精确 NightEpisode revision 和已授权 Canonical "
-                    f"Observations，为 {role.value} 生成受证据约束的睡眠照护视图。"
+                    f"Observations，为 {role.value} 生成受证据约束的"
+                    "睡眠照护视图。"
                 ),
                 fact_snapshot=snapshot,
                 audience_role=role.value,
@@ -349,6 +391,7 @@ class ProductAgentProcessor:
                 personalized=True,
                 doctor_material=role == AnalysisRole.DOCTOR,
                 idempotency_key=f"{source.operation_id}:{role.value}",
+                personalization=personalization,
             )
             result = runner.run(request)
             role_material.append(
@@ -403,6 +446,7 @@ class ProductAgentProcessor:
                 role=role,
                 product_episode_id=product_episode_id,
                 fact_snapshot=snapshot,
+                personalization=personalization_by_episode[product_episode_id],
                 result=result,
                 role_view=_role_view_from_result(
                     analysis=analysis,
@@ -601,6 +645,8 @@ class PostgresProductAgentRepository:
                 ),
             )
             prior = cursor.fetchone()
+            habit_profile = self._load_habit_profile(cursor)
+            memory_state = self._load_memory_state(cursor)
         finally:
             cursor.close()
 
@@ -635,6 +681,101 @@ class PostgresProductAgentRepository:
             adapter_versions=adapters,
             observation_schema_versions=observation_schemas,
             policy_versions=policy_versions,
+            habit_profile=habit_profile,
+            memory_state=memory_state,
+        )
+
+    def _load_habit_profile(self, cursor: Any) -> HabitProfileState:
+        subject_id = self.scope.subject_id
+        if subject_id is None:
+            raise ProductAgentInvariantError(
+                "Habit Profile load requires an exact subject"
+            )
+        cursor.execute(
+            """
+            SELECT profile_version, fact_json, fact_sha256
+            FROM public.backend_habit_profile_revisions_v2
+            WHERE namespace_id = %s AND data_mode = %s
+              AND namespace_generation = %s
+              AND COALESCE(run_id, '') = COALESCE(%s, '')
+              AND COALESCE(arm_id, '') = COALESCE(%s, '')
+              AND subject_id = %s
+            ORDER BY profile_version
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+                self.scope.subject_id,
+            ),
+        )
+        rows = cursor.fetchall()
+        revisions: list[HabitFact] = []
+        for expected_version, row in enumerate(rows, 1):
+            if int(row[0]) != expected_version:
+                raise ProductAgentInvariantError(
+                    "Habit Profile state version is not contiguous"
+                )
+            fact = HabitFact.model_validate(_json_value(row[1]))
+            expected_hash = stable_hash(
+                fact.model_dump(mode="json", exclude={"fact_hash"})
+            )
+            if fact.fact_hash != str(row[2]) or fact.fact_hash != expected_hash:
+                raise ProductAgentInvariantError(
+                    "Habit Profile revision integrity check failed"
+                )
+            revisions.append(fact)
+        return HabitProfileState(
+            subject_id=subject_id,
+            version=len(revisions),
+            revisions=tuple(revisions),
+        )
+
+    def _load_memory_state(self, cursor: Any) -> GovernedMemoryState:
+        subject_id = self.scope.subject_id
+        if subject_id is None:
+            raise ProductAgentInvariantError(
+                "Governed Memory load requires an exact subject"
+            )
+        cursor.execute(
+            """
+            SELECT state_version, revision_json, revision_sha256
+            FROM public.backend_governed_memory_revisions_v2
+            WHERE namespace_id = %s AND data_mode = %s
+              AND namespace_generation = %s
+              AND COALESCE(run_id, '') = COALESCE(%s, '')
+              AND COALESCE(arm_id, '') = COALESCE(%s, '')
+              AND subject_id = %s
+            ORDER BY state_version
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+                self.scope.subject_id,
+            ),
+        )
+        rows = cursor.fetchall()
+        revisions: list[GovernedMemoryItemV2] = []
+        for expected_version, row in enumerate(rows, 1):
+            if int(row[0]) != expected_version:
+                raise ProductAgentInvariantError(
+                    "Governed Memory state version is not contiguous"
+                )
+            revision = GovernedMemoryItemV2.model_validate(_json_value(row[1]))
+            if stable_hash(revision) != str(row[2]):
+                raise ProductAgentInvariantError(
+                    "Governed Memory revision integrity check failed"
+                )
+            revisions.append(revision)
+        return GovernedMemoryState(
+            subject_id=subject_id,
+            version=len(revisions),
+            revisions=tuple(revisions),
         )
 
     def _load_longitudinal_risk_context(
@@ -939,6 +1080,51 @@ class PostgresProductAgentRepository:
                     committed_at,
                 ),
             )
+            for role_run in artifact.role_runs:
+                request_receipts = role_run.fact_snapshot.memory_read_receipt_refs
+                personalization = role_run.personalization
+                if tuple(
+                    item.receipt_id
+                    for item in personalization.memory_read_receipts
+                ) != request_receipts:
+                    raise ProductAgentInvariantError(
+                        "prepared Memory receipt binding drifted"
+                    )
+                for receipt in personalization.memory_read_receipts:
+                    cursor.execute(
+                        """
+                        INSERT INTO public.backend_memory_read_receipts_v2 (
+                          receipt_id, namespace_id, data_mode,
+                          namespace_generation, run_id, arm_id, subject_id,
+                          product_episode_id, requesting_agent, purpose,
+                          query_sha256, result_sha256, receipt_sha256,
+                          authorization_epoch, privacy_epoch, receipt_json,
+                          completed_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s::jsonb, %s
+                        )
+                        """,
+                        (
+                            receipt.receipt_id,
+                            self.scope.namespace_id,
+                            self.scope.data_mode,
+                            self.scope.namespace_generation,
+                            self.scope.run_id,
+                            self.scope.arm_id,
+                            self.scope.subject_id,
+                            role_run.product_episode_id,
+                            receipt.requesting_agent.value,
+                            receipt.purpose.value,
+                            receipt.query_hash,
+                            receipt.result_hash,
+                            receipt.receipt_hash,
+                            receipt.authorization_epoch,
+                            receipt.privacy_epoch,
+                            receipt.model_dump_json(),
+                            receipt.completed_at,
+                        ),
+                    )
             for role_run in artifact.role_runs:
                 view = role_run.role_view
                 public_today = _public_today_projection(
@@ -1755,6 +1941,7 @@ def _fact_snapshot_for_role(
     role: AnalysisRole,
     fact_snapshot_id: str,
     created_at: datetime,
+    personalization: PinnedPersonalizationContext,
 ) -> FactSnapshot:
     local_date = date.fromisoformat(source.facts.local_sleep_date)
     longitudinal = source.facts.longitudinal_risk_context
@@ -1806,8 +1993,99 @@ def _fact_snapshot_for_role(
                 }
             )
         ),
-        source_refs=source.facts.agent_source_refs(),
+        habit_profile_version=personalization.habit_profile_version,
+        habit_profile_hash=personalization.habit_profile_hash,
+        memory_context_version=personalization.memory_state_version,
+        memory_read_receipt_refs=tuple(
+            item.receipt_id for item in personalization.memory_read_receipts
+        ),
+        memory_read_receipt_hashes=tuple(
+            str(item.receipt_hash)
+            for item in personalization.memory_read_receipts
+        ),
+        source_refs=(
+            *source.facts.agent_source_refs(),
+            *(
+                (
+                    f"habit-profile:{personalization.habit_profile_version}:"
+                    f"{personalization.habit_profile_hash}",
+                )
+                if personalization.habit_profile_hash is not None
+                else ()
+            ),
+            *(item.fact_id for item in personalization.habit_facts),
+            *(item.receipt_id for item in personalization.memory_read_receipts),
+        ),
         created_at=created_at,
+    )
+
+
+def _personalization_for_product_episode(
+    *,
+    scope: UowScope,
+    source: LoadedProductAgentSource,
+    product_episode_id: str,
+    as_of: datetime,
+) -> PinnedPersonalizationContext:
+    _require_worker_subject_scope(scope)
+    privacy_epoch = cast(int, scope.privacy_epoch)
+    authorization_epoch = cast(int, scope.authorization_epoch)
+    current_habits = source.habit_profile.current(as_of)
+    habit_hash = (
+        None
+        if source.habit_profile.version == 0
+        else stable_hash(
+            {
+                "subject_id": source.subject_id,
+                "profile_version": source.habit_profile.version,
+                "fact_hashes": [item.fact_hash for item in current_habits],
+            }
+        )
+    )
+    receipts: list[MemoryReadReceipt] = []
+    for requesting_agent, purpose, concepts in (
+        (
+            AgentId.EVIDENCE_REASONING,
+            MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT,
+            EVIDENCE_MEMORY_CONCEPT_IDS,
+        ),
+        (
+            AgentId.CARE_STRATEGY,
+            MemoryPurpose.CARE_PREFERENCE_CONTEXT,
+            CARE_MEMORY_CONCEPT_IDS,
+        ),
+    ):
+        query = resolve_memory_query(
+            MemoryQueryIntent(
+                purpose=purpose,
+                concept_ids=concepts,
+                source_scope_kind=SourceScopeKind.HISTORICAL_RANGE,
+                max_items=4,
+                token_budget=800,
+            ),
+            invocation_id=(
+                f"personalization:{product_episode_id}:"
+                f"{requesting_agent.value}"
+            ),
+            actor_id=f"workload:{scope.service_principal_id}",
+            actor_role="system",
+            subject_id=source.subject_id,
+            requesting_agent=requesting_agent,
+            authorization_scope=("memory:read",),
+            as_of=as_of,
+            privacy_epoch=privacy_epoch,
+            authorization_epoch=authorization_epoch,
+        )
+        receipts.append(
+            select_memory_slice(query, source.memory_state, now=as_of)
+        )
+    return PinnedPersonalizationContext(
+        subject_id=source.subject_id,
+        habit_profile_version=source.habit_profile.version,
+        habit_profile_hash=habit_hash,
+        habit_facts=current_habits,
+        memory_state_version=source.memory_state.version,
+        memory_read_receipts=tuple(receipts),
     )
 
 

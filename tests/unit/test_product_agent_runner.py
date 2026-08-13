@@ -945,7 +945,7 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
     # Freeze the invocation identity, including the runtime-bound Care routing
     # receipt now visible to the final SleepCare communication turn.
     assert stable_hash(roster_projection) == (
-        "4c7034fbb87da433f7ae5dca945aed2f63b279de4b100063d954feb59ffe0f69"
+        "7410f39bd841621aa520ee26e01e52a09f29698da35ff37329eb032ac5172976"
     )
 
 

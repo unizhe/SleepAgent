@@ -9,7 +9,12 @@ from starlette.requests import Request
 from sleepagent.api.product_contracts import (
     FamilyTodayContent,
     FeedbackRequest,
+    HabitChangeRequest,
+    HabitQuestionSelectionRequest,
     InteractionStatusResponse,
+    L2ConfirmationRequest,
+    MemoryChangeRequest,
+    MemoryQueryRequest,
     ProductCareResponse,
     ProductRecordsResponse,
     ProductRole,
@@ -51,6 +56,56 @@ def test_feedback_request_rejects_a_naive_wire_datetime() -> None:
                 "event_at": "2026-08-11T20:10:00",
             }
         )
+
+
+def test_l2_request_models_accept_decoded_json_arrays_without_relaxing_items() -> None:
+    questions = HabitQuestionSelectionRequest.model_validate(
+        {
+            "episode_id": "episode-1",
+            "candidate_concept_ids": ["habit.primary_goal"],
+            "remaining_episode_budget": 1,
+        }
+    )
+    habit_change = HabitChangeRequest.model_validate(
+        {
+            "selection_id": "selection-1",
+            "answers": [
+                {
+                    "operation": "remember",
+                    "answer": {
+                        "concept_id": "habit.primary_goal",
+                        "concept_version": "1.0.0",
+                        "disposition": "answered",
+                        "value": "白天更有精神",
+                    },
+                }
+            ],
+            "confirmation_actor_id": "elder-1",
+        }
+    )
+    change = MemoryChangeRequest.model_validate(
+        {
+            "operation": "remember",
+            "memory_id": "memory-1",
+            "concept_id": "sleep.preference.care_delivery",
+            "memory_type": "communication_preference",
+            "value_schema_id": "enum.v1",
+            "typed_value": "morning_voice",
+            "sensitivity_class": "personal",
+            "allowed_roles": ["care_strategy"],
+            "allowed_purposes": ["care_preference_context"],
+            "source_text": "Use a morning voice reminder.",
+        }
+    )
+    query = MemoryQueryRequest.model_validate(
+        {"concept_ids": ["sleep.preference.care_delivery"]}
+    )
+
+    assert questions.candidate_concept_ids == ("habit.primary_goal",)
+    assert len(habit_change.answers) == 1
+    assert change.allowed_roles == ("care_strategy",)
+    assert change.allowed_purposes == ("care_preference_context",)
+    assert query.concept_ids == ("sleep.preference.care_delivery",)
 
 
 class Identity:
@@ -291,6 +346,59 @@ def test_doctor_cannot_confirm_personal_care_action() -> None:
             request_body=b'{"confirmation_handle":"opaque-random-handle"}',
         )
     assert captured.value.status_code == 403
+
+
+def test_l2_public_service_enforces_role_specific_mutation_and_reads() -> None:
+    request = _request()
+    doctor = ProductApiService(
+        identity_resolver=Identity(_context(ProductRole.DOCTOR)),
+        backend=Backend(),
+    )
+    with pytest.raises(ProductApiError, match="Doctor role") as habit_denied:
+        doctor.habit_questions(
+            request,
+            HabitQuestionSelectionRequest(episode_id="episode-1"),
+            request_body=b"{}",
+        )
+    assert habit_denied.value.status_code == 403
+
+    family = ProductApiService(
+        identity_resolver=Identity(_context(ProductRole.FAMILY)),
+        backend=Backend(),
+    )
+    with pytest.raises(ProductApiError, match="Only the elder") as write_denied:
+        family.memory_change(
+            request,
+            MemoryChangeRequest(
+                operation="forget",
+                memory_id="memory-1",
+                target_revision_ref="memory-1:v1",
+                target_revision_hash="a" * 64,
+            ),
+            request_body=b"{}",
+        )
+    assert write_denied.value.status_code == 403
+
+    with pytest.raises(ProductApiError, match="Only the elder") as confirm_denied:
+        family.confirm_personalization(
+            request,
+            L2ConfirmationRequest(
+                change_id="change-1",
+                change_hash="a" * 64,
+                confirmation_handle="opaque-handle",
+            ),
+            capability="memory",
+            request_body=b"{}",
+        )
+    assert confirm_denied.value.status_code == 403
+
+    with pytest.raises(ProductApiError, match="belongs to the elder") as read_denied:
+        family.memory_query(
+            request,
+            MemoryQueryRequest(concept_ids=("sleep.preference.care_delivery",)),
+            request_body=b"{}",
+        )
+    assert read_denied.value.status_code == 403
 
 
 def test_command_without_authenticated_body_fails_closed() -> None:

@@ -8,8 +8,8 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Literal, Mapping, cast
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Literal, Mapping, cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -21,7 +21,18 @@ from sleepagent.config import DeploymentMode, SleepBackendSettings
 from sleepagent.api.product_contracts import (
     CareActionRecord,
     CareFollowupRecord,
+    HabitChangeRequest,
+    HabitChangeResponse,
+    HabitProfileResponse,
+    HabitQuestionSelectionRequest,
+    HabitQuestionSelectionResponse,
     InteractionStatusResponse,
+    L2ConfirmationRequest,
+    L2ConfirmationResponse,
+    MemoryChangeRequest,
+    MemoryQueryRequest,
+    MemoryQueryResponse,
+    PendingL2Change,
     ProductCareResponse,
     ProductRecordsResponse,
     ProductRole,
@@ -53,6 +64,41 @@ from sleepagent.api.public_auth import (
 )
 from sleepagent.api.public_contracts import PublicErrorCode
 from sleepagent.domain.episodes import EpisodeAssignmentBasis, UUID7Generator
+from sleepagent.domain.habit import (
+    HABIT_CONCEPTS,
+    HabitAnswer,
+    HabitChange,
+    HabitConceptStatus,
+    HabitConfirmation,
+    HabitEvidence,
+    HabitFact,
+    HabitDisposition,
+    HabitOperation,
+    HabitProfileState,
+    HabitQuestionState,
+    apply_confirmed_habit_change,
+    capture_habit_answers,
+    propose_habit_change,
+    select_habit_questions,
+)
+from sleepagent.runtime.contracts import (
+    AgentId,
+    MemoryChangeCandidate,
+    SourceScopeKind,
+    stable_hash,
+)
+from sleepagent.runtime.memory import (
+    GovernedMemoryItemV2,
+    GovernedMemoryState,
+    MemoryChange,
+    MemoryConfirmation,
+    MemoryOperation,
+    MemoryPurpose,
+    MemoryQueryIntent,
+    apply_memory_change,
+    resolve_memory_query,
+    select_memory_slice,
+)
 
 
 UTC = timezone.utc
@@ -340,10 +386,12 @@ class PostgresProductBackend(ProductBackend):
         *,
         cursor_key: bytes,
         id_generator: UUID7Generator | None = None,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.cursor_codec = _ProductCursorCodec(cursor_key)
         self.id_generator = id_generator or UUID7Generator()
+        self.now_factory = now_factory or (lambda: datetime.now(tz=UTC))
 
     def get_today_projection(
         self,
@@ -789,6 +837,547 @@ class PostgresProductBackend(ProductBackend):
                 id_index=1,
             ),
         )
+
+    def select_habit_questions(
+        self,
+        context: ProductRequestContext,
+        request: HabitQuestionSelectionRequest,
+    ) -> HabitQuestionSelectionResponse:
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                _lock_l2_subject(cursor, context, capability="habit")
+                profile = _load_habit_profile(cursor, context)
+                suppressed, cooldown = _habit_question_history(cursor, context)
+                current = profile.current(now)
+                disputed = set(profile.disputed_concept_ids(now))
+                stale = set(profile.stale_concept_ids(now))
+                known = {item.concept_id for item in current}.difference(disputed)
+                concept_states = {
+                    concept_id: (
+                        HabitConceptStatus.DISPUTED
+                        if concept_id in disputed
+                        else HabitConceptStatus.STALE
+                        if concept_id in stale
+                        else HabitConceptStatus.KNOWN
+                        if concept_id in known
+                        else HabitConceptStatus.UNKNOWN
+                    )
+                    for concept_id in HABIT_CONCEPTS
+                }
+                selected = select_habit_questions(
+                    HabitQuestionState(
+                        episode_id=request.episode_id,
+                        subject_id=context.subject_id,
+                        actor_id=context.actor_id,
+                        role=cast(Literal["elder", "family"], context.role.value),
+                        concept_states=concept_states,
+                        candidate_concept_ids=request.candidate_concept_ids,
+                        suppressed_concept_ids=suppressed,
+                        cooldown_until=cooldown,
+                        remaining_episode_budget=request.remaining_episode_budget,
+                    ),
+                    now=now,
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO public.backend_habit_question_selections_v2 (
+                      selection_id, namespace_id, data_mode,
+                      namespace_generation, run_id, arm_id, subject_id,
+                      actor_id, role, selection_sha256, selection_json,
+                      created_at, expires_at
+                    ) VALUES (
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s::jsonb, %s, %s
+                    )
+                    """,
+                    (
+                        selected.selection_id,
+                        context.namespace_id,
+                        context.data_mode,
+                        context.namespace_generation,
+                        context.run_id,
+                        context.arm_id,
+                        context.subject_id,
+                        context.actor_id,
+                        context.role.value,
+                        selected.receipt_hash,
+                        selected.model_dump_json(),
+                        now,
+                        selected.expires_at,
+                    ),
+                )
+            finally:
+                cursor.close()
+            uow.commit()
+        questions = tuple(
+            {
+                "concept_id": concept_id,
+                "concept_version": concept_version,
+                "question": (
+                    HABIT_CONCEPTS[concept_id].observer_question
+                    if context.role == ProductRole.FAMILY
+                    else HABIT_CONCEPTS[concept_id].question
+                ),
+                "answer_type": HABIT_CONCEPTS[concept_id].answer_type.value,
+                "options": HABIT_CONCEPTS[concept_id].options,
+                "unit": HABIT_CONCEPTS[concept_id].unit,
+                "minimum": HABIT_CONCEPTS[concept_id].minimum,
+                "maximum": HABIT_CONCEPTS[concept_id].maximum,
+            }
+            for concept_id, concept_version in selected.selected_concepts
+        )
+        return HabitQuestionSelectionResponse(
+            selection=selected.model_dump(mode="json"),
+            questions=questions,
+            profile_version=profile.version,
+        )
+
+    def propose_habit_changes(
+        self,
+        context: ProductRequestContext,
+        request: HabitChangeRequest,
+    ) -> HabitChangeResponse:
+        now = self.now_factory()
+        pending: list[PendingL2Change] = []
+        evidence_values: tuple[HabitEvidence, ...] = ()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                _lock_l2_subject(cursor, context, capability="habit")
+                profile = _load_habit_profile(cursor, context)
+                if request.answers:
+                    selection = _load_habit_selection_for_update(
+                        cursor,
+                        context,
+                        str(request.selection_id),
+                        now=now,
+                    )
+                    answers = tuple(
+                        HabitAnswer.model_validate(item.answer)
+                        for item in request.answers
+                    )
+                    evidence_values = capture_habit_answers(
+                        selection,
+                        answers,
+                        episode_id=selection.episode_id,
+                        subject_id=context.subject_id,
+                        actor_id=context.actor_id,
+                        role=cast(Literal["elder", "family"], context.role.value),
+                        now=now,
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE public.backend_habit_question_selections_v2
+                        SET evidence_json = %s::jsonb, consumed_at = %s
+                        WHERE selection_id = %s AND consumed_at IS NULL
+                        """,
+                        (
+                            _json(
+                                [item.model_dump(mode="json") for item in evidence_values]
+                            ),
+                            now,
+                            selection.selection_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ProductApiError(
+                            "state_conflict",
+                            "Habit selection was already consumed.",
+                            status_code=409,
+                        )
+                    command_by_concept = {
+                        HabitAnswer.model_validate(item.answer).concept_id: item
+                        for item in request.answers
+                    }
+                    changes = []
+                    for evidence in evidence_values:
+                        if not evidence.profile_eligible:
+                            continue
+                        command = command_by_concept[evidence.concept_id]
+                        changes.append(
+                            propose_habit_change(
+                                operation=HabitOperation(command.operation),
+                                subject_id=context.subject_id,
+                                concept_id=evidence.concept_id,
+                                expected_profile_version=profile.version,
+                                confirmation_actor_id=request.confirmation_actor_id,
+                                now=now,
+                                evidence=evidence,
+                                target_fact_id=command.target_fact_id,
+                            )
+                        )
+                else:
+                    changes = [
+                        propose_habit_change(
+                            operation=HabitOperation(str(request.operation)),
+                            subject_id=context.subject_id,
+                            concept_id=str(request.concept_id),
+                            expected_profile_version=profile.version,
+                            confirmation_actor_id=request.confirmation_actor_id,
+                            now=now,
+                            target_fact_id=request.target_fact_id,
+                        )
+                    ]
+                for change in changes:
+                    pending.append(
+                        _insert_l2_pending_handle(
+                            cursor,
+                            context,
+                            capability="habit",
+                            change_id=change.change_id,
+                            change_hash=change.change_hash,
+                            change_json=change.model_dump(mode="json"),
+                            confirmation_actor_id=change.confirmation_actor_id,
+                            expected_state_version=change.expected_profile_version,
+                            expires_at=change.confirmation_expires_at,
+                        )
+                    )
+            finally:
+                cursor.close()
+            uow.commit()
+        return HabitChangeResponse(
+            evidence=tuple(item.model_dump(mode="json") for item in evidence_values),
+            pending_changes=tuple(pending),
+        )
+
+    def confirm_l2_change(
+        self,
+        context: ProductRequestContext,
+        request: L2ConfirmationRequest,
+        *,
+        capability: Literal["habit", "memory"],
+    ) -> L2ConfirmationResponse:
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                _lock_l2_subject(cursor, context, capability=capability)
+                handle_id, handle_payload = _consume_l2_pending_handle(
+                    cursor,
+                    context,
+                    request,
+                    capability=capability,
+                    now=now,
+                )
+                confirmation_id = "l2-confirmation:" + str(self.id_generator(now))
+                if capability == "habit":
+                    habit_change = HabitChange.model_validate(
+                        handle_payload["change"]
+                    )
+                    profile = _load_habit_profile(cursor, context)
+                    try:
+                        updated = apply_confirmed_habit_change(
+                            profile,
+                            habit_change,
+                            HabitConfirmation(
+                                confirmation_id=confirmation_id,
+                                actor_id=context.actor_id,
+                                actor_role="elder",
+                                subject_id=context.subject_id,
+                                target_change_id=habit_change.change_id,
+                                target_hash=habit_change.change_hash,
+                                approved_at=now,
+                                expires_at=habit_change.confirmation_expires_at,
+                            ),
+                            now=now,
+                        )
+                    except (PermissionError, ValueError) as exc:
+                        if "revision hash mismatch" in str(exc):
+                            raise RuntimeError(
+                                "Habit Profile revision integrity check failed"
+                            ) from exc
+                        raise ProductApiError(
+                            "state_conflict",
+                            "The Habit change is stale or no longer applicable.",
+                            status_code=409,
+                        ) from exc
+                    revision = updated.revisions[-1]
+                    cursor.execute(
+                        """
+                        INSERT INTO public.backend_habit_profile_revisions_v2 (
+                          fact_id, namespace_id, data_mode,
+                          namespace_generation, run_id, arm_id, subject_id,
+                          profile_version, concept_id, concept_version,
+                          operation, fact_sha256, fact_json,
+                          confirmation_ref, committed_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s::jsonb, %s, %s
+                        )
+                        """,
+                        (
+                            revision.fact_id,
+                            context.namespace_id,
+                            context.data_mode,
+                            context.namespace_generation,
+                            context.run_id,
+                            context.arm_id,
+                            context.subject_id,
+                            updated.version,
+                            revision.concept_id,
+                            revision.concept_version,
+                            revision.operation.value,
+                            revision.fact_hash,
+                            revision.model_dump_json(),
+                            confirmation_id,
+                            now,
+                        ),
+                    )
+                    revision_ref = revision.fact_id
+                    revision_hash = revision.fact_hash
+                    state_version = updated.version
+                else:
+                    memory_change = MemoryChange.model_validate(
+                        handle_payload["change"]
+                    )
+                    state = _load_memory_state(cursor, context)
+                    try:
+                        updated_memory = apply_memory_change(
+                            state,
+                            memory_change,
+                            MemoryConfirmation(
+                                confirmation_id=confirmation_id,
+                                actor_id=context.actor_id,
+                                subject_id=context.subject_id,
+                                target_change_id=memory_change.change_id,
+                                target_change_hash=str(memory_change.change_hash),
+                                approved_at=now,
+                                expires_at=memory_change.confirmation_expires_at,
+                            ),
+                            now=now,
+                        )
+                    except (PermissionError, ValueError) as exc:
+                        if "forged" in str(exc):
+                            raise RuntimeError(
+                                "Governed Memory revision integrity check failed"
+                            ) from exc
+                        raise ProductApiError(
+                            "state_conflict",
+                            "The Memory change is stale or no longer applicable.",
+                            status_code=409,
+                        ) from exc
+                    memory_revision = cast(
+                        GovernedMemoryItemV2,
+                        updated_memory.revisions[-1],
+                    )
+                    revision_hash = stable_hash(memory_revision)
+                    cursor.execute(
+                        """
+                        INSERT INTO public.backend_governed_memory_revisions_v2 (
+                          revision_ref, namespace_id, data_mode,
+                          namespace_generation, run_id, arm_id, subject_id,
+                          state_version, memory_id, memory_version, concept_id,
+                          status, revision_sha256, revision_json,
+                          confirmation_ref, committed_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s::jsonb, %s, %s
+                        )
+                        """,
+                        (
+                            memory_revision.revision_ref,
+                            context.namespace_id,
+                            context.data_mode,
+                            context.namespace_generation,
+                            context.run_id,
+                            context.arm_id,
+                            context.subject_id,
+                            updated_memory.version,
+                            memory_revision.memory_id,
+                            memory_revision.version,
+                            memory_revision.concept_id,
+                            memory_revision.status.value,
+                            revision_hash,
+                            memory_revision.model_dump_json(),
+                            confirmation_id,
+                            now,
+                        ),
+                    )
+                    revision_ref = memory_revision.revision_ref
+                    state_version = updated_memory.version
+                cursor.execute(
+                    """
+                    UPDATE public.backend_pending_handles
+                    SET status = 'consumed', consumed_at = %s,
+                        consumed_by_command_receipt_id = %s,
+                        cas_version = cas_version + 1
+                    WHERE handle_id = %s AND status = 'pending'
+                    """,
+                    (now, confirmation_id, handle_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ProductApiError(
+                        "state_conflict",
+                        "L2 confirmation handle changed concurrently.",
+                        status_code=409,
+                    )
+            finally:
+                cursor.close()
+            uow.commit()
+        return L2ConfirmationResponse(
+            capability=capability,
+            state_version=state_version,
+            revision_ref=revision_ref,
+            revision_hash=revision_hash,
+        )
+
+    def get_habit_profile(
+        self,
+        context: ProductRequestContext,
+    ) -> HabitProfileResponse:
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                profile = _load_habit_profile(cursor, context)
+            finally:
+                cursor.close()
+            uow.commit()
+        current = profile.current(now)
+        profile_hash = (
+            None
+            if profile.version == 0
+            else stable_hash(
+                {
+                    "subject_id": context.subject_id,
+                    "profile_version": profile.version,
+                    "fact_hashes": [item.fact_hash for item in current],
+                }
+            )
+        )
+        return HabitProfileResponse(
+            profile_version=profile.version,
+            profile_hash=profile_hash,
+            current_facts=tuple(item.model_dump(mode="json") for item in current),
+            stale_concept_ids=profile.stale_concept_ids(now),
+            disputed_concept_ids=profile.disputed_concept_ids(now),
+        )
+
+    def propose_memory_change(
+        self,
+        context: ProductRequestContext,
+        request: MemoryChangeRequest,
+    ) -> PendingL2Change:
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                _lock_l2_subject(cursor, context, capability="memory")
+                state = _load_memory_state(cursor, context)
+                operation = MemoryOperation(request.operation)
+                candidate = None
+                source_ref = "user_report:" + stable_hash(
+                    {
+                        "actor_id": context.actor_id,
+                        "subject_id": context.subject_id,
+                        "source_text": request.source_text,
+                        "at": now,
+                    }
+                )[:32]
+                if operation in {MemoryOperation.REMEMBER, MemoryOperation.CORRECT}:
+                    assert request.memory_type is not None
+                    assert request.concept_id is not None
+                    assert request.value_schema_id is not None
+                    assert request.sensitivity_class is not None
+                    candidate = MemoryChangeCandidate(
+                        candidate_id=request.memory_id,
+                        operation=(
+                            "create"
+                            if operation == MemoryOperation.REMEMBER
+                            else "replace"
+                        ),
+                        subject_id=context.subject_id,
+                        memory_type=request.memory_type,
+                        concept_id=request.concept_id,
+                        value_schema_id=request.value_schema_id,
+                        typed_value=request.typed_value,
+                        provenance_type="elder_confirmed",
+                        source_ref=source_ref,
+                        sensitivity_class=request.sensitivity_class,
+                        allowed_roles=tuple(
+                            AgentId(value) for value in request.allowed_roles
+                        ),
+                        allowed_purposes=request.allowed_purposes,
+                        valid_until=request.valid_until,
+                        explicit_user_authorization=True,
+                        confirmation_required=True,
+                    )
+                change = MemoryChange(
+                    change_id="memory-change:" + str(self.id_generator(now)),
+                    operation=operation,
+                    memory_id=request.memory_id,
+                    subject_id=context.subject_id,
+                    expected_state_version=state.version,
+                    proposed_value=candidate,
+                    causal_ref=source_ref,
+                    source_actor_id=context.actor_id,
+                    source_actor_role="elder",
+                    source_scope_kind=SourceScopeKind(request.source_scope_kind),
+                    target_revision_ref=request.target_revision_ref,
+                    target_revision_hash=request.target_revision_hash,
+                    confirmation_actor_id=context.actor_id,
+                    created_at=now,
+                    confirmation_expires_at=now + timedelta(minutes=30),
+                )
+                pending = _insert_l2_pending_handle(
+                    cursor,
+                    context,
+                    capability="memory",
+                    change_id=change.change_id,
+                    change_hash=str(change.change_hash),
+                    change_json=change.model_dump(mode="json"),
+                    confirmation_actor_id=context.actor_id,
+                    expected_state_version=state.version,
+                    expires_at=change.confirmation_expires_at,
+                )
+            finally:
+                cursor.close()
+            uow.commit()
+        return pending
+
+    def query_memory(
+        self,
+        context: ProductRequestContext,
+        request: MemoryQueryRequest,
+    ) -> MemoryQueryResponse:
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                state = _load_memory_state(cursor, context)
+                query = resolve_memory_query(
+                    MemoryQueryIntent(
+                        purpose=MemoryPurpose.EXPLICIT_MEMORY_REVIEW,
+                        concept_ids=request.concept_ids,
+                        source_scope_kind=SourceScopeKind(
+                            request.source_scope_kind
+                        ),
+                        max_items=request.max_items,
+                        token_budget=request.token_budget,
+                    ),
+                    invocation_id="memory-review:" + str(self.id_generator(now)),
+                    actor_id=context.actor_id,
+                    actor_role="elder",
+                    subject_id=context.subject_id,
+                    requesting_agent=AgentId.SLEEP_CARE,
+                    authorization_scope=("memory:read",),
+                    as_of=now,
+                    privacy_epoch=context.privacy_epoch,
+                    authorization_epoch=context.authorization_epoch,
+                )
+                receipt = select_memory_slice(query, state, now=now)
+                _insert_memory_read_receipt(
+                    cursor,
+                    context,
+                    receipt,
+                    product_episode_id=None,
+                )
+            finally:
+                cursor.close()
+            uow.commit()
+        return MemoryQueryResponse(receipt=receipt.model_dump(mode="json"))
 
     def reserve_command(
         self,
@@ -1306,6 +1895,388 @@ def _command_queue(command_type: str) -> str:
         "The command type has no durable handler.",
         status_code=400,
     )
+
+
+def _lock_l2_subject(
+    cursor: Any,
+    context: ProductRequestContext,
+    *,
+    capability: Literal["habit", "memory"],
+) -> None:
+    cursor.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 42))",
+        (
+            ":".join(
+                (
+                    "l2",
+                    capability,
+                    context.namespace_id,
+                    context.data_mode,
+                    str(context.namespace_generation),
+                    context.run_id or "",
+                    context.arm_id or "",
+                    context.subject_id,
+                )
+            ),
+        ),
+    )
+
+
+def _load_habit_profile(
+    cursor: Any,
+    context: ProductRequestContext,
+) -> HabitProfileState:
+    cursor.execute(
+        """
+        SELECT profile_version, fact_json, fact_sha256
+        FROM public.backend_habit_profile_revisions_v2
+        WHERE namespace_id = %s AND data_mode = %s
+          AND namespace_generation = %s
+          AND COALESCE(run_id, '') = COALESCE(%s, '')
+          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+          AND subject_id = %s
+        ORDER BY profile_version
+        """,
+        _product_scope_params(context),
+    )
+    rows = cursor.fetchall()
+    revisions: list[HabitFact] = []
+    for expected_version, row in enumerate(rows, 1):
+        if int(row[0]) != expected_version:
+            raise RuntimeError("Habit Profile version chain is not contiguous")
+        fact = HabitFact.model_validate(_json_object(row[1]))
+        expected_hash = stable_hash(
+            fact.model_dump(mode="json", exclude={"fact_hash"})
+        )
+        if fact.fact_hash != str(row[2]) or fact.fact_hash != expected_hash:
+            raise RuntimeError("Habit Profile revision integrity check failed")
+        revisions.append(fact)
+    return HabitProfileState(
+        subject_id=context.subject_id,
+        version=len(revisions),
+        revisions=tuple(revisions),
+    )
+
+
+def _load_memory_state(
+    cursor: Any,
+    context: ProductRequestContext,
+) -> GovernedMemoryState:
+    cursor.execute(
+        """
+        SELECT state_version, revision_json, revision_sha256
+        FROM public.backend_governed_memory_revisions_v2
+        WHERE namespace_id = %s AND data_mode = %s
+          AND namespace_generation = %s
+          AND COALESCE(run_id, '') = COALESCE(%s, '')
+          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+          AND subject_id = %s
+        ORDER BY state_version
+        """,
+        _product_scope_params(context),
+    )
+    rows = cursor.fetchall()
+    revisions: list[GovernedMemoryItemV2] = []
+    for expected_version, row in enumerate(rows, 1):
+        if int(row[0]) != expected_version:
+            raise RuntimeError("Governed Memory version chain is not contiguous")
+        revision = GovernedMemoryItemV2.model_validate(_json_object(row[1]))
+        if stable_hash(revision) != str(row[2]):
+            raise RuntimeError("Governed Memory revision integrity check failed")
+        revisions.append(revision)
+    return GovernedMemoryState(
+        subject_id=context.subject_id,
+        version=len(revisions),
+        revisions=tuple(revisions),
+    )
+
+
+def _habit_question_history(
+    cursor: Any,
+    context: ProductRequestContext,
+) -> tuple[tuple[str, ...], dict[str, datetime]]:
+    cursor.execute(
+        """
+        SELECT evidence_json
+        FROM public.backend_habit_question_selections_v2
+        WHERE namespace_id = %s AND data_mode = %s
+          AND namespace_generation = %s
+          AND COALESCE(run_id, '') = COALESCE(%s, '')
+          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+          AND subject_id = %s AND evidence_json IS NOT NULL
+        ORDER BY consumed_at
+        """,
+        _product_scope_params(context),
+    )
+    suppressed: set[str] = set()
+    cooldown: dict[str, datetime] = {}
+    for row in cursor.fetchall():
+        values = row[0]
+        if isinstance(values, str):
+            values = json.loads(values)
+        if not isinstance(values, list):
+            raise RuntimeError("Habit evidence history is invalid")
+        for value in values:
+            evidence = HabitEvidence.model_validate(value)
+            if evidence.disposition == HabitDisposition.NEVER_ASK:
+                suppressed.add(evidence.concept_id)
+            concept = HABIT_CONCEPTS[evidence.concept_id]
+            until = evidence.captured_at + timedelta(hours=concept.cooldown_hours)
+            if until > cooldown.get(evidence.concept_id, datetime.min.replace(tzinfo=UTC)):
+                cooldown[evidence.concept_id] = until
+    return tuple(sorted(suppressed)), cooldown
+
+
+def _load_habit_selection_for_update(
+    cursor: Any,
+    context: ProductRequestContext,
+    selection_id: str,
+    *,
+    now: datetime,
+) -> HabitQuestionState:
+    cursor.execute(
+        """
+        SELECT actor_id, role, selection_sha256, selection_json,
+               consumed_at, expires_at
+        FROM public.backend_habit_question_selections_v2
+        WHERE selection_id = %s AND namespace_id = %s AND data_mode = %s
+          AND namespace_generation = %s
+          AND COALESCE(run_id, '') = COALESCE(%s, '')
+          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+          AND subject_id = %s
+        FOR UPDATE
+        """,
+        (
+            selection_id,
+            context.namespace_id,
+            context.data_mode,
+            context.namespace_generation,
+            context.run_id,
+            context.arm_id,
+            context.subject_id,
+        ),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise ProductApiError(
+            "not_found",
+            "Habit question selection was not found.",
+            status_code=404,
+        )
+    if (
+        str(row[0]) != context.actor_id
+        or str(row[1]) != context.role.value
+        or row[4] is not None
+        or row[5] <= now
+    ):
+        raise ProductApiError(
+            "state_conflict",
+            "Habit question selection is unavailable or expired.",
+            status_code=409,
+        )
+    selection = HabitQuestionState.model_validate(_json_object(row[3]))
+    if selection.receipt_hash != str(row[2]):
+        raise RuntimeError("Habit selection integrity check failed")
+    return selection
+
+
+def _insert_l2_pending_handle(
+    cursor: Any,
+    context: ProductRequestContext,
+    *,
+    capability: Literal["habit", "memory"],
+    change_id: str,
+    change_hash: str,
+    change_json: Mapping[str, Any],
+    confirmation_actor_id: str,
+    expected_state_version: int,
+    expires_at: datetime,
+) -> PendingL2Change:
+    handle_id = "l2-handle:" + secrets.token_hex(24)
+    token = secrets.token_urlsafe(32)
+    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    payload = {
+        "schema_version": "l2_pending_change.v1",
+        "capability": capability,
+        "change_id": change_id,
+        "change_hash": change_hash,
+        "change": change_json,
+        "source_actor_id": context.actor_id,
+        "source_actor_role": context.role.value,
+        "confirmation_actor_id": confirmation_actor_id,
+        "token_sha256": token_sha256,
+    }
+    cursor.execute(
+        """
+        INSERT INTO public.backend_pending_handles (
+          handle_id, handle_kind, namespace_id, data_mode,
+          namespace_generation, run_id, arm_id, subject_id, actor_id,
+          role, target_resource_type, target_resource_id,
+          target_state_version, target_sha256, fact_snapshot_sha256,
+          care_profile_state_version, authorization_epoch, privacy_epoch,
+          retrieval_policy_epoch, policy_sha256, status, expires_at,
+          handle_json
+        ) VALUES (
+          %s, 'confirmation', %s, %s, %s, %s, %s, %s, %s, 'elder',
+          %s, %s, %s, %s, %s, 1, %s, %s, %s, %s, 'pending', %s,
+          %s::jsonb
+        )
+        """,
+        (
+            handle_id,
+            context.namespace_id,
+            context.data_mode,
+            context.namespace_generation,
+            context.run_id,
+            context.arm_id,
+            context.subject_id,
+            confirmation_actor_id,
+            f"l2_{capability}_change",
+            change_id,
+            expected_state_version + 1,
+            change_hash,
+            change_hash,
+            context.authorization_epoch,
+            context.privacy_epoch,
+            context.retrieval_epoch,
+            context.policy_sha256,
+            expires_at,
+            _json(payload),
+        ),
+    )
+    return PendingL2Change(
+        capability=capability,
+        change_id=change_id,
+        change_hash=change_hash,
+        confirmation_handle=f"{handle_id}.{token}",
+        expires_at=expires_at,
+    )
+
+
+def _consume_l2_pending_handle(
+    cursor: Any,
+    context: ProductRequestContext,
+    request: L2ConfirmationRequest,
+    *,
+    capability: Literal["habit", "memory"],
+    now: datetime,
+) -> tuple[str, dict[str, Any]]:
+    try:
+        handle_id, token = request.confirmation_handle.rsplit(".", 1)
+    except ValueError as exc:
+        raise ProductApiError(
+            "invalid_confirmation_handle",
+            "The L2 confirmation handle is invalid.",
+            status_code=400,
+        ) from exc
+    cursor.execute(
+        """
+        SELECT actor_id, role, target_resource_id, target_sha256,
+               authorization_epoch, privacy_epoch, retrieval_policy_epoch,
+               policy_sha256, status, expires_at, handle_json
+        FROM public.backend_pending_handles
+        WHERE handle_id = %s AND namespace_id = %s AND data_mode = %s
+          AND namespace_generation = %s
+          AND COALESCE(run_id, '') = COALESCE(%s, '')
+          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+          AND subject_id = %s AND target_resource_type = %s
+        FOR UPDATE
+        """,
+        (
+            handle_id,
+            context.namespace_id,
+            context.data_mode,
+            context.namespace_generation,
+            context.run_id,
+            context.arm_id,
+            context.subject_id,
+            f"l2_{capability}_change",
+        ),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise ProductApiError(
+            "not_found",
+            "L2 confirmation handle was not found.",
+            status_code=404,
+        )
+    payload = _json_object(row[10])
+    token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    exact = (
+        str(row[0]) == context.actor_id
+        and str(row[1]) == "elder"
+        and str(row[2]) == request.change_id
+        and str(row[3]) == request.change_hash
+        and int(row[4]) == context.authorization_epoch
+        and int(row[5]) == context.privacy_epoch
+        and int(row[6]) == context.retrieval_epoch
+        and str(row[7]) == context.policy_sha256
+        and str(row[8]) == "pending"
+        and row[9] > now
+        and payload.get("capability") == capability
+        and payload.get("change_id") == request.change_id
+        and payload.get("change_hash") == request.change_hash
+        and payload.get("confirmation_actor_id") == context.actor_id
+        and isinstance(payload.get("token_sha256"), str)
+        and secrets.compare_digest(payload["token_sha256"], token_sha256)
+    )
+    if not exact:
+        raise ProductApiError(
+            "confirmation_binding_changed",
+            "The L2 confirmation no longer matches its exact authority.",
+            status_code=409,
+        )
+    return handle_id, payload
+
+
+def _insert_memory_read_receipt(
+    cursor: Any,
+    context: ProductRequestContext,
+    receipt: Any,
+    *,
+    product_episode_id: str | None,
+) -> None:
+    cursor.execute(
+        """
+        INSERT INTO public.backend_memory_read_receipts_v2 (
+          receipt_id, namespace_id, data_mode, namespace_generation,
+          run_id, arm_id, subject_id, product_episode_id,
+          requesting_agent, purpose, query_sha256, result_sha256,
+          receipt_sha256, authorization_epoch, privacy_epoch,
+          receipt_json, completed_at
+        ) VALUES (
+          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, %s, %s::jsonb, %s
+        )
+        """,
+        (
+            receipt.receipt_id,
+            context.namespace_id,
+            context.data_mode,
+            context.namespace_generation,
+            context.run_id,
+            context.arm_id,
+            context.subject_id,
+            product_episode_id,
+            receipt.requesting_agent.value,
+            receipt.purpose.value,
+            receipt.query_hash,
+            receipt.result_hash,
+            receipt.receipt_hash,
+            receipt.authorization_epoch,
+            receipt.privacy_epoch,
+            receipt.model_dump_json(),
+            receipt.completed_at,
+        ),
+    )
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, dict):
+        raise RuntimeError("PostgreSQL JSON contract is not an object")
+    return value
 
 
 def _uow_scope(context: ProductRequestContext) -> UowScope:

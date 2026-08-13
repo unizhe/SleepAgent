@@ -1037,6 +1037,7 @@ EVIDENCE_CONTEXT_BOUNDARY = RoleContextBoundary(
         TrustLabel.RETRIEVED_KNOWLEDGE_UNTRUSTED,
         TrustLabel.EPISODIC_HINT_UNTRUSTED,
         TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+        TrustLabel.CONFIRMED_HABIT,
     ),
     allowed_context_keys=(
         "user_text",
@@ -1049,6 +1050,7 @@ EVIDENCE_CONTEXT_BOUNDARY = RoleContextBoundary(
         "tool:",
         "tool_receipt:",
         "user_fact_response:",
+        "personalization:",
     ),
     visible_accepted_agents=(AgentId.EVIDENCE_REASONING,),
     visible_tool_receipts=tuple(
@@ -1205,9 +1207,16 @@ CARE_CONTEXT_BOUNDARY = RoleContextBoundary(
         TrustLabel.ACCEPTED_WORK_PRODUCT,
         TrustLabel.TOOL_OUTPUT_UNTRUSTED,
         TrustLabel.RETRIEVED_KNOWLEDGE_UNTRUSTED,
+        TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+        TrustLabel.CONFIRMED_HABIT,
     ),
     allowed_context_keys=("revision_reason", "collaboration_request"),
-    allowed_context_key_prefixes=("accepted:", "tool:", "tool_receipt:"),
+    allowed_context_key_prefixes=(
+        "accepted:",
+        "tool:",
+        "tool_receipt:",
+        "personalization:",
+    ),
     required_context_keys=("accepted:evidence_packet",),
     visible_accepted_agents=(AgentId.EVIDENCE_REASONING,),
     visible_tool_receipts=tuple(
@@ -1550,6 +1559,7 @@ _EXPECTED_CONTEXT_BOUNDARIES = {
             TrustLabel.RETRIEVED_KNOWLEDGE_UNTRUSTED,
             TrustLabel.EPISODIC_HINT_UNTRUSTED,
             TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+            TrustLabel.CONFIRMED_HABIT,
         ),
         allowed_context_keys=(
             "user_text",
@@ -1562,6 +1572,7 @@ _EXPECTED_CONTEXT_BOUNDARIES = {
             "tool:",
             "tool_receipt:",
             "user_fact_response:",
+            "personalization:",
         ),
         visible_accepted_agents=(AgentId.EVIDENCE_REASONING,),
         visible_tool_receipts=tuple(
@@ -1582,9 +1593,16 @@ _EXPECTED_CONTEXT_BOUNDARIES = {
             TrustLabel.ACCEPTED_WORK_PRODUCT,
             TrustLabel.TOOL_OUTPUT_UNTRUSTED,
             TrustLabel.RETRIEVED_KNOWLEDGE_UNTRUSTED,
+            TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+            TrustLabel.CONFIRMED_HABIT,
         ),
         allowed_context_keys=("revision_reason", "collaboration_request"),
-        allowed_context_key_prefixes=("accepted:", "tool:", "tool_receipt:"),
+        allowed_context_key_prefixes=(
+            "accepted:",
+            "tool:",
+            "tool_receipt:",
+            "personalization:",
+        ),
         required_context_keys=("accepted:evidence_packet",),
         visible_accepted_agents=(AgentId.EVIDENCE_REASONING,),
         visible_tool_receipts=tuple(

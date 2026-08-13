@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import NoReturn
+from typing import Any, NoReturn
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -29,6 +29,14 @@ from sleepagent.persistence.uow import (
 from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
 )
+from sleepagent.runtime.contracts import AgentId, SourceScopeKind, stable_hash
+from sleepagent.runtime.memory import (
+    GovernedMemoryItemV2,
+    MemoryPurpose,
+    ProvenanceType,
+    SensitivityClass,
+)
+from sleepagent.domain.habit import HabitFact, HabitOperation
 from sleepagent.workers.product import (
     PostgresProductAgentRepository,
     PreparedProductAgentArtifact,
@@ -147,6 +155,7 @@ def _seed_product_scope(
     *,
     admin_dsn: str,
     worker_principal: str,
+    care_required: bool = False,
 ) -> _ProductSeed:
     suffix = uuid4().hex
     namespace_id = f"replay:product-{suffix}"
@@ -259,12 +268,21 @@ def _seed_product_scope(
         data_mode=DataMode.REPLAY,
         subject_id=subject_id,
         night_episode_id=episode.night_episode_id,
-        risk_state=RiskState.NO_REVIEWED_SIGNAL,
+        risk_state=(
+            RiskState.REVIEWED_SIGNAL
+            if care_required
+            else RiskState.NO_REVIEWED_SIGNAL
+        ),
         data_sufficiency=DataSufficiency.SUFFICIENT,
         source_scope=source_scope,
         policy_version="risk.synthetic.v1",
         observed_at=wake_at,
-        reason_codes=("no_reviewed_signal",),
+        reason_codes=(
+            ("approved_vendor_alert",)
+            if care_required
+            else ("no_reviewed_signal",)
+        ),
+        health_escalation_allowed=care_required,
         updated_at=committed_at,
     )
     workload = {
@@ -863,6 +881,217 @@ def _admin_execute(
             cursor.execute(sql, params)
 
 
+def _seed_l2_personalization(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+) -> tuple[HabitFact, GovernedMemoryItemV2]:
+    now = datetime.now(tz=UTC)
+    unsigned_habit = HabitFact(
+        fact_id=f"habit-fact:{uuid4().hex}",
+        fact_hash="0" * 64,
+        revision=1,
+        operation=HabitOperation.REMEMBER,
+        subject_id=seed.subject_id,
+        concept_id="habit.delivery_modality_preference",
+        concept_version="1.0.0",
+        value="语音",
+        value_hash="b" * 64,
+        confirmed_at=now,
+        valid_until=now + timedelta(days=90),
+        confirmation_ref=f"confirmation:habit:{uuid4().hex}",
+        change_id=f"habit-change:{uuid4().hex}",
+    )
+    habit = unsigned_habit.model_copy(
+        update={
+            "fact_hash": stable_hash(
+                unsigned_habit.model_dump(
+                    mode="json",
+                    exclude={"fact_hash"},
+                )
+            )
+        }
+    )
+    memory = GovernedMemoryItemV2(
+        memory_id=f"memory:{uuid4().hex}",
+        subject_id=seed.subject_id,
+        memory_type="communication_preference",
+        concept_id="sleep.preference.care_delivery",
+        value_schema_id="enum.v1",
+        typed_value="morning_voice",
+        provenance_type=ProvenanceType.ELDER_CONFIRMED,
+        source_ref=f"user_report:{uuid4().hex}",
+        source_scope_kind=SourceScopeKind.HISTORICAL_RANGE,
+        version=1,
+        recorded_at=now,
+        valid_from=now,
+        sensitivity_class=SensitivityClass.PERSONAL,
+        allowed_roles=(AgentId.CARE_STRATEGY,),
+        allowed_purposes=(MemoryPurpose.CARE_PREFERENCE_CONTEXT,),
+        confirmation_ref=f"confirmation:memory:{uuid4().hex}",
+        retention_policy_version="sleepagent-retention.v1",
+    )
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.backend_habit_profile_revisions_v2 (
+                  fact_id, namespace_id, data_mode, namespace_generation,
+                  run_id, arm_id, subject_id, profile_version, concept_id,
+                  concept_version, operation, fact_sha256, fact_json,
+                  confirmation_ref, committed_at
+                ) VALUES (
+                  %s, %s, 'replay', 1, %s, %s, %s, 1, %s, %s, 'remember',
+                  %s, %s::jsonb, %s, %s
+                )
+                """,
+                (
+                    habit.fact_id,
+                    seed.namespace_id,
+                    seed.run_id,
+                    seed.arm_id,
+                    seed.subject_id,
+                    habit.concept_id,
+                    habit.concept_version,
+                    habit.fact_hash,
+                    habit.model_dump_json(),
+                    habit.confirmation_ref,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_governed_memory_revisions_v2 (
+                  revision_ref, namespace_id, data_mode, namespace_generation,
+                  run_id, arm_id, subject_id, state_version, memory_id,
+                  memory_version, concept_id, status, revision_sha256,
+                  revision_json, confirmation_ref, committed_at
+                ) VALUES (
+                  %s, %s, 'replay', 1, %s, %s, %s, 1, %s, 1, %s,
+                  'active', %s, %s::jsonb, %s, %s
+                )
+                """,
+                (
+                    memory.revision_ref,
+                    seed.namespace_id,
+                    seed.run_id,
+                    seed.arm_id,
+                    seed.subject_id,
+                    memory.memory_id,
+                    memory.concept_id,
+                    stable_hash(memory),
+                    memory.model_dump_json(),
+                    memory.confirmation_ref,
+                    now,
+                ),
+            )
+    return habit, memory
+
+
+def _append_l2_corrections(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+    prior_habit: HabitFact,
+    prior_memory: GovernedMemoryItemV2,
+) -> tuple[HabitFact, GovernedMemoryItemV2]:
+    now = datetime.now(tz=UTC)
+    unsigned_habit = HabitFact(
+        fact_id=f"habit-fact:{uuid4().hex}",
+        fact_hash="0" * 64,
+        revision=2,
+        operation=HabitOperation.CORRECT,
+        subject_id=seed.subject_id,
+        concept_id=prior_habit.concept_id,
+        concept_version=prior_habit.concept_version,
+        value="灯光",
+        value_hash="c" * 64,
+        confirmed_at=now,
+        valid_until=now + timedelta(days=90),
+        confirmation_ref=f"confirmation:habit:{uuid4().hex}",
+        change_id=f"habit-change:{uuid4().hex}",
+        replaces_fact_id=prior_habit.fact_id,
+    )
+    habit = unsigned_habit.model_copy(
+        update={
+            "fact_hash": stable_hash(
+                unsigned_habit.model_dump(
+                    mode="json",
+                    exclude={"fact_hash"},
+                )
+            )
+        }
+    )
+    memory_values = prior_memory.model_dump(mode="python")
+    memory_values.update(
+        typed_value="evening_light",
+        value_hash=None,
+        version=2,
+        recorded_at=now,
+        valid_from=now,
+        supersedes_ref=prior_memory.revision_ref,
+        confirmation_ref=f"confirmation:memory:{uuid4().hex}",
+    )
+    memory = GovernedMemoryItemV2.model_validate(memory_values)
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.backend_habit_profile_revisions_v2 (
+                  fact_id, namespace_id, data_mode, namespace_generation,
+                  run_id, arm_id, subject_id, profile_version, concept_id,
+                  concept_version, operation, fact_sha256, fact_json,
+                  confirmation_ref, committed_at
+                ) VALUES (
+                  %s, %s, 'replay', 1, %s, %s, %s, 2, %s, %s, 'correct',
+                  %s, %s::jsonb, %s, %s
+                )
+                """,
+                (
+                    habit.fact_id,
+                    seed.namespace_id,
+                    seed.run_id,
+                    seed.arm_id,
+                    seed.subject_id,
+                    habit.concept_id,
+                    habit.concept_version,
+                    habit.fact_hash,
+                    habit.model_dump_json(),
+                    habit.confirmation_ref,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_governed_memory_revisions_v2 (
+                  revision_ref, namespace_id, data_mode, namespace_generation,
+                  run_id, arm_id, subject_id, state_version, memory_id,
+                  memory_version, concept_id, status, revision_sha256,
+                  revision_json, confirmation_ref, committed_at
+                ) VALUES (
+                  %s, %s, 'replay', 1, %s, %s, %s, 2, %s, 2, %s,
+                  'active', %s, %s::jsonb, %s, %s
+                )
+                """,
+                (
+                    memory.revision_ref,
+                    seed.namespace_id,
+                    seed.run_id,
+                    seed.arm_id,
+                    seed.subject_id,
+                    memory.memory_id,
+                    memory.concept_id,
+                    stable_hash(memory),
+                    memory.model_dump_json(),
+                    memory.confirmation_ref,
+                    now,
+                ),
+            )
+    return habit, memory
+
+
 def _expire_operation(psycopg: object, admin_dsn: str, operation_id: str) -> None:
     _admin_execute(
         psycopg,
@@ -1127,6 +1356,217 @@ def test_product_worker_claim_commits_exact_three_role_views() -> None:
         product_attempt_id=result.result["product_attempt_id"],
         analysis_status=result.result["analysis_status"],
     )
+
+
+def test_product_worker_pins_and_consumes_durable_l2_personalization() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+        care_required=True,
+    )
+    habit, memory = _seed_l2_personalization(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"product-worker-l2-{uuid4().hex}",
+        )
+        first_result = ProductAgentWorkHandlerAdapter(
+            processor=ProductAgentProcessor(
+                factory,
+                runtime_bundle=_deterministic_runtime_bundle(),
+            )
+        )(WorkContext(claim, store, threading.Event()))
+        assert first_result.disposition == WorkDisposition.SUCCEEDED
+    finally:
+        provider.close()
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt_json
+                FROM public.backend_product_attempts
+                WHERE product_attempt_id = %s
+                """,
+                (first_result.result["product_attempt_id"],),
+            )
+            first_attempt = cursor.fetchone()[0]
+
+    corrected_habit, corrected_memory = _append_l2_corrections(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+        prior_habit=habit,
+        prior_memory=memory,
+    )
+    _clone_pending_product_operations(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+        count=1,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"product-worker-l2-v2-{uuid4().hex}",
+        )
+        second_result = ProductAgentWorkHandlerAdapter(
+            processor=ProductAgentProcessor(
+                factory,
+                runtime_bundle=_deterministic_runtime_bundle(),
+            )
+        )(WorkContext(claim, store, threading.Event()))
+        assert second_result.disposition == WorkDisposition.SUCCEEDED
+    finally:
+        provider.close()
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt_json
+                FROM public.backend_product_attempts
+                WHERE product_attempt_id = %s
+                """,
+                (second_result.result["product_attempt_id"],),
+            )
+            second_attempt = cursor.fetchone()[0]
+            cursor.execute(
+                """
+                SELECT requesting_agent,
+                       jsonb_array_length(receipt_json -> 'items')
+                FROM public.backend_memory_read_receipts_v2
+                WHERE namespace_id = %s AND data_mode = 'replay'
+                  AND run_id = %s AND arm_id = %s AND subject_id = %s
+                ORDER BY requesting_agent, receipt_id
+                """,
+                (
+                    seed.namespace_id,
+                    seed.run_id,
+                    seed.arm_id,
+                    seed.subject_id,
+                ),
+            )
+            receipt_rows = cursor.fetchall()
+
+    def assert_pinned_attempt(
+        attempt: dict[str, Any],
+        *,
+        expected_habit: HabitFact,
+        expected_memory: GovernedMemoryItemV2,
+        expected_version: int,
+        expected_preference: str,
+    ) -> None:
+        role_runs = attempt["role_runs"]
+        assert isinstance(role_runs, list) and len(role_runs) == 3
+        for role_run in role_runs:
+            assert isinstance(role_run, dict)
+            pinned = role_run["personalization"]
+            snapshot = role_run["fact_snapshot"]
+            assert isinstance(pinned, dict) and isinstance(snapshot, dict)
+            assert pinned["habit_profile_version"] == expected_version
+            assert pinned["habit_facts"][0]["fact_id"] == expected_habit.fact_id
+            assert pinned["memory_state_version"] == expected_version
+            receipt_ids = [
+                item["receipt_id"] for item in pinned["memory_read_receipts"]
+            ]
+            assert snapshot["memory_read_receipt_refs"] == receipt_ids
+            assert expected_habit.fact_id in snapshot["source_refs"]
+            care_receipt = next(
+                item
+                for item in pinned["memory_read_receipts"]
+                if item["requesting_agent"] == "care_strategy"
+            )
+            assert care_receipt["items"][0]["revision_ref"] == (
+                expected_memory.revision_ref
+            )
+            accepted = role_run["result"]["accepted_work_products"]
+            evidence = next(
+                item for item in accepted
+                if item["agent_id"] == "evidence_reasoning"
+            )
+            assert any(
+                claim["source_kind"] == "confirmed_habit"
+                and expected_habit.fact_id in claim["evidence_refs"]
+                for claim in evidence["payload"]["claims"]
+            )
+            care = next(
+                item for item in accepted
+                if item["agent_id"] == "care_strategy"
+            )
+            assert care["payload"]["primary_action"]["parameters"] == {
+                "tolerance_minutes": 30,
+            }
+            assert care["payload"]["primary_action"]["title"] == {
+                "morning_voice": "按早晨语音偏好，保持较稳定的起床安排",
+                "evening_light": "按晚间灯光偏好，保持较稳定的起床安排",
+            }[expected_preference]
+
+    assert_pinned_attempt(
+        first_attempt,
+        expected_habit=habit,
+        expected_memory=memory,
+        expected_version=1,
+        expected_preference="morning_voice",
+    )
+    assert_pinned_attempt(
+        second_attempt,
+        expected_habit=corrected_habit,
+        expected_memory=corrected_memory,
+        expected_version=2,
+        expected_preference="evening_light",
+    )
+
+    first_episode_ids = {
+        item["product_episode_id"] for item in first_attempt["role_runs"]
+    }
+    second_episode_ids = {
+        item["product_episode_id"] for item in second_attempt["role_runs"]
+    }
+    assert first_episode_ids.isdisjoint(second_episode_ids)
+
+    assert receipt_rows == [
+        ("care_strategy", 1),
+        ("care_strategy", 1),
+        ("care_strategy", 1),
+        ("care_strategy", 1),
+        ("care_strategy", 1),
+        ("care_strategy", 1),
+        ("evidence_reasoning", 0),
+        ("evidence_reasoning", 0),
+        ("evidence_reasoning", 0),
+        ("evidence_reasoning", 0),
+        ("evidence_reasoning", 0),
+        ("evidence_reasoning", 0),
+    ]
+
+    # The immutable first attempt stays pinned to v1 after durable v2 exists.
+    for role_run in first_attempt["role_runs"]:
+        pinned = role_run["personalization"]
+        assert pinned["habit_profile_version"] == 1
+        assert pinned["memory_state_version"] == 1
 
 
 def test_prepared_product_attempt_is_not_query_visible_before_commit() -> None:

@@ -121,6 +121,7 @@ class EvidenceSourceKind(str, Enum):
     REVIEWED_KNOWLEDGE = "reviewed_knowledge"
     TREND_TOOL = "trend_tool"
     CONFIRMED_MEMORY = "confirmed_memory"
+    CONFIRMED_HABIT = "confirmed_habit"
     ACCEPTED_LEDGER = "accepted_ledger"
     DATA_QUALITY = "data_quality"
 
@@ -150,6 +151,7 @@ class TrustLabel(str, Enum):
     CANONICAL_FACT = "canonical_fact"
     ACCEPTED_WORK_PRODUCT = "accepted_work_product"
     CONFIRMED_MEMORY = "confirmed_memory"
+    CONFIRMED_HABIT = "confirmed_habit"
     USER_DATA = "user_data"
     USER_TEXT_UNTRUSTED = "user_text_untrusted"
     TOOL_OUTPUT_UNTRUSTED = "tool_output_untrusted"
@@ -222,6 +224,12 @@ class FactSnapshot(FrozenContract):
     entry_ledger_version: int = Field(default=0, ge=0)
     care_context_version: int = Field(default=0, ge=0)
     memory_context_version: int = Field(default=0, ge=0)
+    habit_profile_version: int = Field(default=0, ge=0)
+    habit_profile_hash: str | None = Field(
+        default=None, min_length=64, max_length=64
+    )
+    memory_read_receipt_refs: tuple[str, ...] = ()
+    memory_read_receipt_hashes: tuple[str, ...] = ()
     active_constraint_codes: tuple[str, ...] = ()
     source_refs: tuple[str, ...] = ()
     readiness_decision_refs: tuple[str, ...] = ()
@@ -241,6 +249,10 @@ class FactSnapshot(FrozenContract):
         entry_ledger_version: int = 0,
         care_context_version: int = 0,
         memory_context_version: int = 0,
+        habit_profile_version: int = 0,
+        habit_profile_hash: str | None = None,
+        memory_read_receipt_refs: tuple[str, ...] = (),
+        memory_read_receipt_hashes: tuple[str, ...] = (),
         active_constraint_codes: tuple[str, ...] = (),
         source_refs: tuple[str, ...] = (),
         readiness_decision_refs: tuple[str, ...] = (),
@@ -257,6 +269,10 @@ class FactSnapshot(FrozenContract):
             "entry_ledger_version": entry_ledger_version,
             "care_context_version": care_context_version,
             "memory_context_version": memory_context_version,
+            "habit_profile_version": habit_profile_version,
+            "habit_profile_hash": habit_profile_hash,
+            "memory_read_receipt_refs": memory_read_receipt_refs,
+            "memory_read_receipt_hashes": memory_read_receipt_hashes,
             "active_constraint_codes": active_constraint_codes,
             "source_refs": source_refs,
             "readiness_decision_refs": readiness_decision_refs,
@@ -271,6 +287,21 @@ class FactSnapshot(FrozenContract):
 
     @model_validator(mode="after")
     def validate_cold_start_bindings(self) -> "FactSnapshot":
+        if (self.habit_profile_version == 0) != (self.habit_profile_hash is None):
+            raise ValueError("Habit profile version/hash binding is incomplete")
+        if len(self.memory_read_receipt_refs) != len(
+            self.memory_read_receipt_hashes
+        ):
+            raise ValueError("Memory receipt refs and hashes must align")
+        if len(set(self.memory_read_receipt_refs)) != len(
+            self.memory_read_receipt_refs
+        ):
+            raise ValueError("Memory receipt refs must be unique")
+        if any(
+            not ref.startswith("memory-read:")
+            for ref in self.memory_read_receipt_refs
+        ) or any(len(value) != 64 for value in self.memory_read_receipt_hashes):
+            raise ValueError("Memory receipt binding is invalid")
         pairs = (
             (
                 self.readiness_decision_refs,
@@ -790,6 +821,7 @@ class MemoryChangeCandidate(StrictContract):
     allowed_purposes: tuple[
         Literal[
             "personal_evidence_context",
+            "care_preference_context",
             "explicit_memory_review",
             "explicit_memory_change",
             "explicit_memory_forget",
@@ -817,9 +849,13 @@ class MemoryChangeCandidate(StrictContract):
                 "unconfirmed Memory write requires explicit elder authorization"
             )
         if not set(self.allowed_roles).issubset(
-            {AgentId.SLEEP_CARE, AgentId.EVIDENCE_REASONING}
+            {
+                AgentId.SLEEP_CARE,
+                AgentId.EVIDENCE_REASONING,
+                AgentId.CARE_STRATEGY,
+            }
         ):
-            raise ValueError("Care and Safety cannot receive generic Memory")
+            raise ValueError("Safety cannot receive governed personal Memory")
         if self.value_schema_id == "bounded_string.v1":
             if (
                 type(self.typed_value) is not str

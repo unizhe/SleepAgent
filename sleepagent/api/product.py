@@ -11,7 +11,18 @@ from starlette.requests import Request
 
 from sleepagent.api.product_contracts import (
     AcceptedOperationResponse,
+    HabitChangeRequest,
+    HabitChangeResponse,
+    HabitProfileResponse,
+    HabitQuestionSelectionRequest,
+    HabitQuestionSelectionResponse,
     InteractionStatusResponse,
+    L2ConfirmationRequest,
+    L2ConfirmationResponse,
+    MemoryChangeRequest,
+    MemoryQueryRequest,
+    MemoryQueryResponse,
+    PendingL2Change,
     ProductCareResponse,
     ProductRecordsResponse,
     ProductRole,
@@ -139,6 +150,43 @@ class ProductBackend(Protocol):
         *,
         operation_id: str,
     ) -> InteractionStatusResponse | None: ...
+
+    def select_habit_questions(
+        self,
+        context: ProductRequestContext,
+        request: HabitQuestionSelectionRequest,
+    ) -> HabitQuestionSelectionResponse: ...
+
+    def propose_habit_changes(
+        self,
+        context: ProductRequestContext,
+        request: HabitChangeRequest,
+    ) -> HabitChangeResponse: ...
+
+    def confirm_l2_change(
+        self,
+        context: ProductRequestContext,
+        request: L2ConfirmationRequest,
+        *,
+        capability: Literal["habit", "memory"],
+    ) -> L2ConfirmationResponse: ...
+
+    def get_habit_profile(
+        self,
+        context: ProductRequestContext,
+    ) -> HabitProfileResponse: ...
+
+    def propose_memory_change(
+        self,
+        context: ProductRequestContext,
+        request: MemoryChangeRequest,
+    ) -> PendingL2Change: ...
+
+    def query_memory(
+        self,
+        context: ProductRequestContext,
+        request: MemoryQueryRequest,
+    ) -> MemoryQueryResponse: ...
 
 
 class ProductApiService:
@@ -293,6 +341,112 @@ class ProductApiService:
         if result.data_mode != context.data_mode:
             raise RuntimeError("backend returned a cross-mode Operation")
         return result
+
+    def habit_questions(
+        self,
+        request: Request,
+        payload: HabitQuestionSelectionRequest,
+        *,
+        request_body: bytes,
+    ) -> HabitQuestionSelectionResponse:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:interaction:write")
+        if context.role == ProductRole.DOCTOR:
+            raise ProductApiError(
+                "authorization_denied",
+                "Doctor role cannot answer personal Habit questions.",
+                status_code=403,
+            )
+        return self.backend.select_habit_questions(context, payload)
+
+    def habit_change(
+        self,
+        request: Request,
+        payload: HabitChangeRequest,
+        *,
+        request_body: bytes,
+    ) -> HabitChangeResponse:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:interaction:write")
+        if context.role == ProductRole.DOCTOR:
+            raise ProductApiError(
+                "authorization_denied",
+                "Doctor role cannot mutate a personal Habit profile.",
+                status_code=403,
+            )
+        return self.backend.propose_habit_changes(context, payload)
+
+    def habit_profile(self, request: Request) -> HabitProfileResponse:
+        context = self._personalization_context(request, b"")
+        context.require_scope("product:sleep:today:read")
+        return self.backend.get_habit_profile(context)
+
+    def memory_change(
+        self,
+        request: Request,
+        payload: MemoryChangeRequest,
+        *,
+        request_body: bytes,
+    ) -> PendingL2Change:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:interaction:write")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Only the elder may propose governed Memory changes.",
+                status_code=403,
+            )
+        return self.backend.propose_memory_change(context, payload)
+
+    def confirm_personalization(
+        self,
+        request: Request,
+        payload: L2ConfirmationRequest,
+        *,
+        capability: Literal["habit", "memory"],
+        request_body: bytes,
+    ) -> L2ConfirmationResponse:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:care:confirm")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Only the elder may confirm an L2 change.",
+                status_code=403,
+            )
+        return self.backend.confirm_l2_change(
+            context,
+            payload,
+            capability=capability,
+        )
+
+    def memory_query(
+        self,
+        request: Request,
+        payload: MemoryQueryRequest,
+        *,
+        request_body: bytes,
+    ) -> MemoryQueryResponse:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:today:read")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Explicit governed Memory review belongs to the elder.",
+                status_code=403,
+            )
+        return self.backend.query_memory(context, payload)
+
+    def _personalization_context(
+        self,
+        request: Request,
+        body: bytes,
+    ) -> ProductRequestContext:
+        return self.identity_resolver.resolve(
+            request,
+            body=body,
+            purpose="sleep_care",
+        )
 
 
 class FailClosedProductIdentityResolver:

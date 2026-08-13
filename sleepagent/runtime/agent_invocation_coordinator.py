@@ -525,6 +525,79 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                 profile_purpose=request.profile_purpose,
             )
         ]
+        personalization_items: list[TrustedContextItem] = []
+        pinned = request.personalization
+        if pinned is not None and agent_id in {
+            AgentId.EVIDENCE_REASONING,
+            AgentId.CARE_STRATEGY,
+        }:
+            if pinned.habit_facts:
+                personalization_items.append(
+                    TrustedContextItem(
+                        key="personalization:habit_profile",
+                        trust_label=TrustLabel.CONFIRMED_HABIT,
+                        value={
+                            "profile_version": pinned.habit_profile_version,
+                            "profile_hash": pinned.habit_profile_hash,
+                            "facts": [
+                                {
+                                    "fact_id": item.fact_id,
+                                    "fact_hash": item.fact_hash,
+                                    "concept_id": item.concept_id,
+                                    "concept_version": item.concept_version,
+                                    "value": item.value,
+                                    "unit": item.unit,
+                                    "valid_until": item.valid_until,
+                                    "source_role": (
+                                        item.evidence.role
+                                        if item.evidence is not None
+                                        else None
+                                    ),
+                                    "clinical_truth": False,
+                                }
+                                for item in pinned.habit_facts
+                            ],
+                        },
+                        source_refs=(
+                            f"habit-profile:{pinned.habit_profile_version}:"
+                            f"{pinned.habit_profile_hash}",
+                            *(item.fact_id for item in pinned.habit_facts),
+                        ),
+                    )
+                )
+            memory_receipt = next(
+                (
+                    item
+                    for item in pinned.memory_read_receipts
+                    if item.requesting_agent == agent_id
+                ),
+                None,
+            )
+            if memory_receipt is not None:
+                personalization_items.append(
+                    TrustedContextItem(
+                        key="personalization:memory_slice",
+                        trust_label=TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+                        value={
+                            "receipt_id": memory_receipt.receipt_id,
+                            "receipt_hash": memory_receipt.receipt_hash,
+                            "query_hash": memory_receipt.query_hash,
+                            "result_hash": memory_receipt.result_hash,
+                            "purpose": memory_receipt.purpose.value,
+                            "items": [
+                                item.model_dump(mode="json")
+                                for item in memory_receipt.items
+                            ],
+                            "untrusted_personal_context": True,
+                            "verified_evidence": False,
+                            "verified_medical_fact": False,
+                        },
+                        source_refs=(
+                            memory_receipt.receipt_id,
+                            *(item.revision_ref for item in memory_receipt.items),
+                        ),
+                    )
+                )
         validation_context = ProductToolExecutionContext(
             caller=agent_id,
             fact_snapshot=request.fact_snapshot,
@@ -537,17 +610,17 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
             plan_step_id="pre-provider-memory-revalidation",
             invocation_id=resolved_tool_session_id,
         )
-        for receipt in tool_receipts:
+        for tool_receipt in tool_receipts:
             if (
-                receipt.tool_name == "memory.read"
-                and receipt.outcome == InvocationOutcome.SUCCEEDED
+                tool_receipt.tool_name == "memory.read"
+                and tool_receipt.outcome == InvocationOutcome.SUCCEEDED
                 and agent.can_view_tool_receipt(
-                    receipt,
+                    tool_receipt,
                     profile_purpose=request.profile_purpose,
                 )
             ):
                 self.longitudinal_memory.validate_model_input(
-                    receipt.output,
+                    tool_receipt.output,
                     validation_context,
                 )
 
@@ -661,6 +734,7 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                 [
                     *accepted_items,
                     *tool_items,
+                    *personalization_items,
                     *user_items,
                     *policy_items,
                     *audience_items,

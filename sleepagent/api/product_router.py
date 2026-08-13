@@ -11,11 +11,22 @@ from sleepagent.api.product_contracts import (
     AcceptedOperationResponse,
     ErrorResponse,
     FeedbackRequest,
+    HabitChangeRequest,
+    HabitChangeResponse,
+    HabitProfileResponse,
+    HabitQuestionSelectionRequest,
+    HabitQuestionSelectionResponse,
     InteractionAnswerRequest,
     InteractionAskRequest,
     InteractionDecisionRequest,
     InteractionStartRequest,
     InteractionStatusResponse,
+    L2ConfirmationRequest,
+    L2ConfirmationResponse,
+    MemoryChangeRequest,
+    MemoryQueryRequest,
+    MemoryQueryResponse,
+    PendingL2Change,
     ProductCareResponse,
     ProductRecordsResponse,
     ProductSleepTodayResponse,
@@ -232,6 +243,99 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             idempotency_key=idempotency_key,
             payload=payload.model_dump(mode="json"),
             target_id=payload.interaction_id or payload.episode_revision_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/questions",
+        response_model=HabitQuestionSelectionResponse,
+    )
+    async def habit_questions(
+        payload: HabitQuestionSelectionRequest,
+        request: Request,
+    ) -> HabitQuestionSelectionResponse:
+        return provider().habit_questions(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/changes",
+        response_model=HabitChangeResponse,
+    )
+    async def habit_change(
+        payload: HabitChangeRequest,
+        request: Request,
+    ) -> HabitChangeResponse:
+        return provider().habit_change(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/confirm",
+        response_model=L2ConfirmationResponse,
+    )
+    async def habit_confirm(
+        payload: L2ConfirmationRequest,
+        request: Request,
+    ) -> L2ConfirmationResponse:
+        return provider().confirm_personalization(
+            request,
+            payload,
+            capability="habit",
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/personalization/habit",
+        response_model=HabitProfileResponse,
+    )
+    def habit_profile(request: Request) -> HabitProfileResponse:
+        return provider().habit_profile(request)
+
+    @router.post(
+        "/personalization/memory/changes",
+        response_model=PendingL2Change,
+    )
+    async def memory_change(
+        payload: MemoryChangeRequest,
+        request: Request,
+    ) -> PendingL2Change:
+        return provider().memory_change(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/memory/confirm",
+        response_model=L2ConfirmationResponse,
+    )
+    async def memory_confirm(
+        payload: L2ConfirmationRequest,
+        request: Request,
+    ) -> L2ConfirmationResponse:
+        return provider().confirm_personalization(
+            request,
+            payload,
+            capability="memory",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/memory/query",
+        response_model=MemoryQueryResponse,
+    )
+    async def memory_query(
+        payload: MemoryQueryRequest,
+        request: Request,
+    ) -> MemoryQueryResponse:
+        return provider().memory_query(
+            request,
+            payload,
             request_body=await request.body(),
         )
 

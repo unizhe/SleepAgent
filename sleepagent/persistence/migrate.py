@@ -746,6 +746,10 @@ def bootstrap_test_database_roles(
             "sleep_domain_analysis_revisions",
             "sleep_domain_analysis_role_views",
             "backend_pending_handles",
+            "backend_habit_question_selections_v2",
+            "backend_habit_profile_revisions_v2",
+            "backend_governed_memory_revisions_v2",
+            "backend_memory_read_receipts_v2",
             "backend_monitoring_transition_receipts",
             "backend_human_facts",
             "backend_product_interactions",
@@ -767,6 +771,11 @@ def bootstrap_test_database_roles(
             "sleep_domain_normalization_work",
             "sleep_domain_domain_outbox",
             "backend_demo_traces",
+            "backend_pending_handles",
+            "backend_habit_question_selections_v2",
+            "backend_habit_profile_revisions_v2",
+            "backend_governed_memory_revisions_v2",
+            "backend_memory_read_receipts_v2",
         )
         worker_tables = (
             "sleepagent_schema_migrations",
@@ -817,6 +826,10 @@ def bootstrap_test_database_roles(
             "backend_delivery_reconciliation_receipts_v2",
             "backend_product_attempts",
             "backend_pending_handles",
+            "backend_habit_question_selections_v2",
+            "backend_habit_profile_revisions_v2",
+            "backend_governed_memory_revisions_v2",
+            "backend_memory_read_receipts_v2",
             "backend_monitoring_transition_receipts",
             "backend_human_facts",
             "backend_product_interactions",
@@ -938,6 +951,7 @@ def bootstrap_test_database_roles(
             "backend_replay_delivery_effects_v2",
             "backend_delivery_reconciliation_receipts_v2",
             "backend_product_attempts",
+            "backend_memory_read_receipts_v2",
             "backend_pending_handles",
             "backend_monitoring_transition_receipts",
             "backend_human_facts",
@@ -1002,6 +1016,39 @@ def bootstrap_test_database_roles(
             "UPDATE",
             worker_update_tables,
             worker_role,
+        )
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.SQL(", ").join(
+                    map(
+                        sql.Identifier,
+                        ("evidence_json", "consumed_at"),
+                    )
+                ),
+                sql.Identifier(
+                    "public", "backend_habit_question_selections_v2"
+                ),
+                sql.Identifier(api_role),
+            ),
+        )
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.SQL(", ").join(
+                    map(
+                        sql.Identifier,
+                        (
+                            "status",
+                            "consumed_at",
+                            "consumed_by_command_receipt_id",
+                            "cas_version",
+                        ),
+                    )
+                ),
+                sql.Identifier("public", "backend_pending_handles"),
+                sql.Identifier(api_role),
+            ),
         )
         _connection_execute(
             connection,

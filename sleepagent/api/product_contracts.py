@@ -22,6 +22,12 @@ from sleepagent.domain.episodes import EpisodeAssignmentBasis
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
+def _wire_array_as_tuple(value: Any) -> Any:
+    """Normalize a decoded JSON array without weakening strict item types."""
+
+    return tuple(value) if isinstance(value, list) else value
+
+
 class PublicModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -286,6 +292,200 @@ class FeedbackRequest(PublicModel):
         return self
 
 
+class HabitQuestionSelectionRequest(PublicModel):
+    episode_id: NonEmpty = Field(max_length=200)
+    candidate_concept_ids: tuple[NonEmpty, ...] = ()
+    remaining_episode_budget: int = Field(default=3, ge=0, le=3)
+
+    _normalize_candidate_concepts = field_validator(
+        "candidate_concept_ids", mode="before"
+    )(_wire_array_as_tuple)
+
+
+class HabitQuestionSelectionResponse(PublicModel):
+    schema_version: Literal["habit_question_selection.v2"] = (
+        "habit_question_selection.v2"
+    )
+    selection: dict[str, Any]
+    questions: tuple[dict[str, Any], ...]
+    profile_version: int = Field(ge=0)
+
+
+class HabitAnswerCommand(PublicModel):
+    operation: Literal["remember", "correct"]
+    answer: dict[str, Any]
+    target_fact_id: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def correction_requires_target(self) -> "HabitAnswerCommand":
+        if (self.operation == "correct") != bool(self.target_fact_id):
+            raise ValueError("Habit correction requires one exact target fact")
+        return self
+
+
+class HabitChangeRequest(PublicModel):
+    operation: Literal["remember", "correct", "expire", "forget"] | None = None
+    selection_id: str | None = Field(default=None, min_length=1)
+    answers: tuple[HabitAnswerCommand, ...] = Field(default=(), max_length=1)
+    concept_id: str | None = Field(default=None, min_length=1)
+    target_fact_id: str | None = Field(default=None, min_length=1)
+    confirmation_actor_id: NonEmpty
+
+    _normalize_answers = field_validator("answers", mode="before")(
+        _wire_array_as_tuple
+    )
+
+    @model_validator(mode="after")
+    def one_habit_change_mode(self) -> "HabitChangeRequest":
+        answering = bool(self.answers)
+        lifecycle = self.operation in {"expire", "forget"}
+        if answering == lifecycle:
+            raise ValueError("submit Habit answers or one expire/forget command")
+        if answering and not self.selection_id:
+            raise ValueError("Habit answers require an exact selection")
+        if answering and any(
+            value is not None
+            for value in (self.operation, self.concept_id, self.target_fact_id)
+        ):
+            raise ValueError("Habit answer mode cannot carry lifecycle fields")
+        if lifecycle and not (self.concept_id and self.target_fact_id):
+            raise ValueError("Habit expire/forget requires an exact target")
+        if lifecycle and self.selection_id is not None:
+            raise ValueError("Habit lifecycle mode cannot carry a selection")
+        return self
+
+
+class PendingL2Change(PublicModel):
+    capability: Literal["habit", "memory"]
+    change_id: NonEmpty
+    change_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    confirmation_handle: NonEmpty
+    expires_at: datetime
+
+
+class HabitChangeResponse(PublicModel):
+    schema_version: Literal["habit_change_proposal.v2"] = (
+        "habit_change_proposal.v2"
+    )
+    evidence: tuple[dict[str, Any], ...] = ()
+    pending_changes: tuple[PendingL2Change, ...] = ()
+
+
+class L2ConfirmationRequest(PublicModel):
+    change_id: NonEmpty
+    change_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+    confirmation_handle: NonEmpty = Field(max_length=512)
+
+
+class L2ConfirmationResponse(PublicModel):
+    schema_version: Literal["l2_confirmation.v1"] = "l2_confirmation.v1"
+    capability: Literal["habit", "memory"]
+    state_version: int = Field(ge=1)
+    revision_ref: NonEmpty
+    revision_hash: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+class HabitProfileResponse(PublicModel):
+    schema_version: Literal["habit_profile.v2"] = "habit_profile.v2"
+    profile_version: int = Field(ge=0)
+    profile_hash: str | None = None
+    current_facts: tuple[dict[str, Any], ...] = ()
+    stale_concept_ids: tuple[str, ...] = ()
+    disputed_concept_ids: tuple[str, ...] = ()
+
+
+class MemoryChangeRequest(PublicModel):
+    operation: Literal["remember", "correct", "expire", "forget"]
+    memory_id: NonEmpty
+    concept_id: str | None = Field(default=None, min_length=2, max_length=160)
+    memory_type: Literal[
+        "preference", "routine", "environment", "communication_preference"
+    ] | None = None
+    value_schema_id: Literal[
+        "bounded_string.v1", "boolean.v1", "number.v1", "enum.v1"
+    ] | None = None
+    typed_value: Any = None
+    sensitivity_class: Literal["personal", "sensitive_personal"] | None = None
+    allowed_roles: tuple[
+        Literal["sleep_care", "evidence_reasoning", "care_strategy"], ...
+    ] = ()
+    allowed_purposes: tuple[
+        Literal[
+            "personal_evidence_context",
+            "care_preference_context",
+            "explicit_memory_review",
+            "explicit_memory_change",
+            "explicit_memory_forget",
+        ],
+        ...,
+    ] = ()
+    source_scope_kind: Literal[
+        "current_night", "7_day", "30_day", "historical_range"
+    ] = "historical_range"
+    source_text: str | None = Field(default=None, min_length=1, max_length=500)
+    valid_until: datetime | None = None
+    target_revision_ref: str | None = Field(default=None, min_length=1)
+    target_revision_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    _normalize_access_arrays = field_validator(
+        "allowed_roles", "allowed_purposes", mode="before"
+    )(_wire_array_as_tuple)
+
+    @model_validator(mode="after")
+    def memory_change_shape(self) -> "MemoryChangeRequest":
+        carries_value = self.operation in {"remember", "correct"}
+        value_fields = (
+            self.concept_id,
+            self.memory_type,
+            self.value_schema_id,
+            self.sensitivity_class,
+            self.source_text,
+        )
+        if carries_value and (
+            not all(value_fields)
+            or not self.allowed_roles
+            or not self.allowed_purposes
+        ):
+            raise ValueError("remember/correct requires a governed typed value")
+        if not carries_value and any(value is not None for value in value_fields):
+            raise ValueError("expire/forget cannot carry a replacement value")
+        if not carries_value and (
+            self.typed_value is not None
+            or self.allowed_roles
+            or self.allowed_purposes
+            or self.valid_until is not None
+        ):
+            raise ValueError("expire/forget cannot carry governed value metadata")
+        target_required = self.operation != "remember"
+        if target_required != bool(
+            self.target_revision_ref and self.target_revision_hash
+        ):
+            raise ValueError("Memory change has an invalid exact target")
+        return self
+
+
+class MemoryQueryRequest(PublicModel):
+    concept_ids: tuple[NonEmpty, ...] = Field(min_length=1, max_length=16)
+    source_scope_kind: Literal[
+        "current_night", "7_day", "30_day", "historical_range"
+    ] = "historical_range"
+    max_items: int = Field(default=8, ge=1, le=8)
+    token_budget: int = Field(default=1200, ge=64, le=4096)
+
+    _normalize_concept_ids = field_validator("concept_ids", mode="before")(
+        _wire_array_as_tuple
+    )
+
+
+class MemoryQueryResponse(PublicModel):
+    schema_version: Literal["governed_memory_query.v2"] = (
+        "governed_memory_query.v2"
+    )
+    receipt: dict[str, Any]
+
+
 class AcceptedOperationResponse(PublicModel):
     schema_version: Literal["product_accepted_operation.v1"] = (
         "product_accepted_operation.v1"
@@ -347,11 +547,23 @@ __all__ = [
     "ErrorResponse",
     "FamilyTodayContent",
     "FeedbackRequest",
+    "HabitAnswerCommand",
+    "HabitChangeRequest",
+    "HabitChangeResponse",
+    "HabitProfileResponse",
+    "HabitQuestionSelectionRequest",
+    "HabitQuestionSelectionResponse",
     "InteractionAnswerRequest",
     "InteractionAskRequest",
     "InteractionDecisionRequest",
     "InteractionStartRequest",
     "InteractionStatusResponse",
+    "L2ConfirmationRequest",
+    "L2ConfirmationResponse",
+    "MemoryChangeRequest",
+    "MemoryQueryRequest",
+    "MemoryQueryResponse",
+    "PendingL2Change",
     "ProductRole",
     "ProductCareResponse",
     "ProductRecordsResponse",
