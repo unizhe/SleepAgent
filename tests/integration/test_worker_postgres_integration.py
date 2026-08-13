@@ -8,21 +8,21 @@ from uuid import uuid4
 
 import pytest
 
-from sleepagent.backend_persistence import PostgresProductBackend
-from sleepagent.backend_settings import (
+from sleepagent.api.postgres import PostgresProductBackend
+from sleepagent.config import (
     DataMode,
     DeploymentMode,
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.product_api.contracts import ProductRole
-from sleepagent.product_api.service import ProductRequestContext
+from sleepagent.api.product_contracts import ProductRole
+from sleepagent.api.product import ProductRequestContext
 from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
 )
-from sleepagent.worker_runtime import (
+from sleepagent.workers.runtime import (
     InvocationDispatcher,
     OutcomeUnknownError,
     PostgresDurableWorkStore,

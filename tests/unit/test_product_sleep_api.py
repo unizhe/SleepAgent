@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import pytest
 from starlette.requests import Request
 
-from sleepagent.product_api.contracts import (
+from sleepagent.api.product_contracts import (
     FamilyTodayContent,
     FeedbackRequest,
     InteractionStatusResponse,
@@ -18,8 +18,8 @@ from sleepagent.product_api.contracts import (
     ProductTodayState,
     PublicOperationState,
 )
-from sleepagent.sleep_domain.episode_v2 import EpisodeAssignmentBasis
-from sleepagent.product_api.service import (
+from sleepagent.domain.episodes import EpisodeAssignmentBasis
+from sleepagent.api.product import (
     ProductApiError,
     ProductApiService,
     ProductRequestContext,
@@ -223,7 +223,7 @@ def test_queries_only_return_authoritative_role_projection() -> None:
     assert result.content.audience == "family"
 
 
-def test_stage_two_command_authenticates_then_reserves_durable_operation() -> None:
+def test_command_authenticates_then_reserves_durable_operation() -> None:
     identity = Identity(_context())
     backend = Backend()
     service = ProductApiService(identity_resolver=identity, backend=backend)
@@ -349,7 +349,7 @@ def test_backend_cross_role_projection_is_treated_as_integrity_failure() -> None
         service.today(_request())
 
 
-def test_stage_three_read_models_have_distinct_typed_contracts() -> None:
+def test_read_models_have_distinct_typed_contracts() -> None:
     identity = Identity(_context())
     service = ProductApiService(
         identity_resolver=identity,

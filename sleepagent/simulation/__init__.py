@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Replay-only canonical data generation.
 
 This package may construct synthetic external-world facts.  It is not an

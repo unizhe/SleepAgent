@@ -8,21 +8,24 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.backend_persistence import ResolvedActorAuthority
-from sleepagent.product_api.contracts import ProductRole
+from sleepagent.api.postgres import ResolvedActorAuthority
+from sleepagent.api.product_contracts import ProductRole
 from sleepagent.persistence.uow import UowScope
-from sleepagent.sleep_api.auth import (
+from sleepagent.api.public_auth import (
     ActorAssertionClaims,
     AuthoritativeRoleBinding,
     ServicePrincipal,
 )
-from sleepagent.sleep_api.contracts import PublicActorRole, PublicErrorCode
-from sleepagent.sleep_api.postgres_runtime import (
+from sleepagent.api.public_contracts import (
+    PublicActorRole,
+    PublicErrorCode,
+    SleepApiApplicationError,
+)
+from sleepagent.api.public_runtime import (
     PostgresAuthenticatedActorContext,
     PostgresSleepApiRuntime,
 )
-from sleepagent.sleep_api.service import SleepApiApplicationError
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlertLifecycleState,
     AlgorithmVersionValue,
     AvailabilityState,
@@ -50,15 +53,17 @@ from sleepagent.sleep_domain.contracts import (
     RiskState,
     SleepObservation,
     SourceKind,
+    CurrentRevisionPointer,
+    SubjectLifecycleLease,
     TimezoneStatus,
     VendorAlertPayload,
 )
-from sleepagent.sleep_domain.episode_v2 import (
+from sleepagent.domain.episodes import (
     EpisodeAssignmentBasis,
     EpisodePublicationStatus,
     uuid7_from_parts,
 )
-from sleepagent.sleep_domain.postgres_slice import (
+from sleepagent.domain.postgres_slice import (
     EpisodeLifecycleProjector,
     FastPathHandler,
     FastPathLease,
@@ -74,10 +79,6 @@ from sleepagent.sleep_domain.postgres_slice import (
     SleepSlicePolicy,
     SleepSliceStaleRevision,
     StoredEpisode,
-)
-from sleepagent.sleep_domain.repository import (
-    CurrentRevisionPointer,
-    SubjectLifecycleLease,
 )
 
 

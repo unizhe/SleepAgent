@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Immutable server registry for replay seed identity and authority pins."""
 
 from __future__ import annotations

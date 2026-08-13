@@ -1,3 +1,4 @@
+# 本模块负责 PostgreSQL 持久化边界与完整性校验，不提供内存或 SQLite 旁路。
 """Fail-closed PostgreSQL installer for the manifest-pinned schema release."""
 
 from __future__ import annotations
@@ -13,13 +14,16 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal, Protocol, Sequence
+from typing import Any, Iterator, Literal, Protocol, Sequence, cast
 
 from sleepagent.persistence.migrations import (
+    COMMAND_AUTHORITY_FUNCTION,
+    DELIVERY_AUTHORITY_FUNCTION,
     LATEST_SCHEMA_VERSION,
     MIGRATION_MANIFEST_SHA256,
     MIGRATION_RELEASE,
     MigrationReleaseManifest,
+    SCENARIO_CLOCK_AUTHORITY_FUNCTION,
     split_sql_statements,
 )
 
@@ -538,8 +542,9 @@ def run_migration_command(
         autocommit=False,
         application_name="sleepagent-migrate",
     ) as connection:
-        assert_migration_owner_capability(connection)
-        runner = PostgresMigrationRunner(connection, applied_by=applied_by)
+        typed_connection = cast(ConnectionLike, connection)
+        assert_migration_owner_capability(typed_connection)
+        runner = PostgresMigrationRunner(typed_connection, applied_by=applied_by)
         if action == "apply":
             version = runner.apply()
         elif action == "check":
@@ -1032,12 +1037,12 @@ def bootstrap_test_database_roles(
             "sleepagent_heartbeat_operation(text,bigint,text,integer)",
             "sleepagent_finalize_operation(text,bigint,bigint,text,text,text,timestamptz)",
             "sleepagent_operation_fence_allows(text,bigint,text)",
-            "sleepagent_stage2_authority_allows(text,text,text)",
-            "sleepagent_stage3_advance_authority_allows(text)",
+            f"{COMMAND_AUTHORITY_FUNCTION}(text,text,text)",
+            f"{SCENARIO_CLOCK_AUTHORITY_FUNCTION}(text)",
             "sleepagent_claim_delivery(text,text,integer)",
             "sleepagent_heartbeat_delivery(text,bigint,text,integer)",
             "sleepagent_mark_delivery_dispatching(text,bigint,text)",
-            "sleepagent_stage4_delivery_authority_allows(text)",
+            f"{DELIVERY_AUTHORITY_FUNCTION}(text)",
             "sleepagent_finalize_delivery(text,bigint,text,text,timestamptz)",
             "sleepagent_claim_retention_job(text,integer)",
             "sleepagent_heartbeat_retention_job(text,bigint,text,integer)",
@@ -1071,8 +1076,8 @@ def bootstrap_test_database_roles(
 def _bootstrap_replay_seed_allowlist(connection: ConnectionLike) -> None:
     """Verify and pin the packaged facts-only replay seed for test profiles."""
 
-    from sleepagent.backend_keys import BackendKeyError, BackendKeyProvider
-    from sleepagent.backend_settings import DeploymentMode
+    from sleepagent.config import BackendKeyError, BackendKeyProvider
+    from sleepagent.config import DeploymentMode
     from sleepagent.simulation.generator import CanonicalReplayGenerator
     from sleepagent.simulation.replay_ingress import replay_external_fact_adapter
     from sleepagent.simulation.seed_registry import (

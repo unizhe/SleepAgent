@@ -5,18 +5,16 @@ import inspect
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     CurrentContextRisk,
     LongitudinalTrend,
     MultifactorSafetyInput,
     OnlineDataQuality,
 )
-from sleepagent.product_runtime.policies import risk as risk_policy_module
-from sleepagent.product_runtime.policies.risk import URGENT_TERMS
-from sleepagent.product_runtime.tools import (
-    risk_classification as risk_tool_module,
-)
-from sleepagent.product_runtime.tools.risk_classification import (
+import sleepagent.runtime.policies as risk_policy_module
+from sleepagent.runtime.policies import URGENT_TERMS
+import sleepagent.runtime.tools as risk_tool_module
+from sleepagent.runtime.tools import (
     DeterministicRiskSnapshot,
     RiskClassificationInput,
     RiskClassificationLevel,

@@ -11,7 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from sleepagent.demo_cli import (
+from sleepagent.simulation.cli import (
     ActorAssertionSigner,
     DemoCliError,
     render_product_demo,
@@ -20,8 +20,8 @@ from sleepagent.demo_cli import (
     verify_backend,
     verify_bounded_retention_backend,
     verify_effects_reconciliation_backend,
-    verify_stage2_backend,
-    verify_stage3_backend,
+    verify_command_backend,
+    verify_read_models_backend,
 )
 
 
@@ -561,7 +561,7 @@ def test_verifier_rejects_response_without_non_release_watermark() -> None:
 
 def test_demo_cli_help_is_available_in_clean_module_execution() -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "sleepagent.demo_cli", "--help"],
+        [sys.executable, "-m", "sleepagent.simulation.cli", "--help"],
         check=False,
         capture_output=True,
         text=True,
@@ -622,8 +622,8 @@ def test_actor_assertion_signer_loads_only_0600_ed25519_file(tmp_path) -> None:
         )
 
 
-def test_stage2_verifier_drives_real_public_command_contracts() -> None:
-    class Stage2Client:
+def test_command_verifier_drives_real_public_command_contracts() -> None:
+    class CommandClient:
         def __init__(self) -> None:
             self.counter = 0
             self.operations: dict[str, dict] = {}
@@ -771,8 +771,8 @@ def test_stage2_verifier_drives_real_public_command_contracts() -> None:
             raise AssertionError((method, path, payload, kwargs))
 
     restarts: list[str] = []
-    result = verify_stage2_backend(
-        Stage2Client(),
+    result = verify_command_backend(
+        CommandClient(),
         subject_id="subject-1",
         actor_ids={
             "elder": "elder-1",
@@ -804,7 +804,7 @@ def test_stage2_verifier_drives_real_public_command_contracts() -> None:
     assert restarts == ["worker", "worker"]
 
 
-def test_stage4_verifier_observes_public_delivery_effect() -> None:
+def test_effect_verifier_observes_public_delivery_effect() -> None:
     class Product:
         def __init__(self) -> None:
             self.read_count = 0
@@ -838,7 +838,7 @@ def test_stage4_verifier_observes_public_delivery_effect() -> None:
             "family": "family-1",
             "doctor": "doctor-1",
         },
-        stage2_result={
+        command_result={
             "care_action_id": "care-confirm",
             "delivery_intent_id": "delivery-confirm",
             "confirm_interaction_id": "confirm-interaction",
@@ -851,7 +851,7 @@ def test_stage4_verifier_observes_public_delivery_effect() -> None:
     assert result["public_care_state"] == "active"
 
 
-def test_stage3_verifier_proves_advance_dedup_and_dedicated_cursors() -> None:
+def test_read_model_verifier_proves_advance_dedup_and_dedicated_cursors() -> None:
     class Demo:
         def request(self, method: str, path: str, **kwargs):
             watermark = {"data_mode": "replay", "synthetic_non_release": True}
@@ -921,7 +921,7 @@ def test_stage3_verifier_proves_advance_dedup_and_dedicated_cursors() -> None:
                 "next_cursor": next_cursor,
             }
 
-    result = verify_stage3_backend(
+    result = verify_read_models_backend(
         Demo(),
         Product(),
         subject_id="subject-1",
@@ -995,7 +995,7 @@ def test_bounded_retention_verifier_fences_old_authority_and_projection(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "sleepagent.demo_cli.verify_backend",
+        "sleepagent.simulation.cli.verify_backend",
         lambda *args, **kwargs: {"operation_id": "baseline-operation"},
     )
 
@@ -1098,7 +1098,7 @@ def test_bounded_retention_verifier_fences_old_authority_and_projection(
     )
 
     assert result == {
-        "schema_version": "backend_stage5_verification.v1",
+        "schema_version": "backend_retention_verification.v1",
         "verified": True,
         "data_mode": "replay",
         "synthetic_non_release": True,

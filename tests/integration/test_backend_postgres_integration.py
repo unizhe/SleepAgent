@@ -10,23 +10,23 @@ from uuid import uuid4
 
 import pytest
 
-from sleepagent.backend_persistence import (
+from sleepagent.api.postgres import (
     PostgresAuthorityStore,
     PostgresProductBackend,
 )
-from sleepagent.backend_runtime import (
+from sleepagent.process import (
     RuntimeServices,
     build_backend_runtime,
 )
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     ApiSurface,
     DataMode,
     DeploymentMode,
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.product_api.contracts import ProductRole
-from sleepagent.product_api.service import ProductApiError, ProductRequestContext
+from sleepagent.api.product_contracts import ProductRole
+from sleepagent.api.product import ProductApiError, ProductRequestContext
 from sleepagent.persistence.migrations import LATEST_SCHEMA_VERSION
 from sleepagent.persistence.uow import (
     PoolConfiguration,

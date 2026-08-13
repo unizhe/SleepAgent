@@ -8,8 +8,8 @@ from uuid import UUID
 
 import pytest
 
-from sleepagent.sleep_domain import DataMode
-from sleepagent.sleep_domain.episode_v2 import (
+from sleepagent.domain import DataMode
+from sleepagent.domain.episodes import (
     EpisodeAssignmentBasis,
     EpisodeDateConfidence,
     EpisodePublicationStatus,
@@ -73,7 +73,7 @@ def test_uuid7_is_unique_across_independent_processes_at_one_timestamp() -> None
     script = """
 import json
 from datetime import datetime, timezone
-from sleepagent.sleep_domain.episode_v2 import UUID7Generator
+from sleepagent.domain.episodes import UUID7Generator
 
 generator = UUID7Generator()
 instant = datetime(2026, 8, 7, tzinfo=timezone.utc)

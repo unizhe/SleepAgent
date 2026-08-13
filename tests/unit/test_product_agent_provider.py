@@ -4,14 +4,12 @@ import json
 
 import pytest
 
-from sleepagent.product_device.llm import (
+from sleepagent.runtime.provider import (
     OpenAICompatibleProviderConfig,
+    OpenAICompatibleStructuredAgentModel,
     ProductLLMProviderError,
 )
-from sleepagent.product_runtime.contracts import StrictContract
-from sleepagent.product_runtime.provider import (
-    OpenAICompatibleStructuredAgentModel,
-)
+from sleepagent.runtime.contracts import StrictContract
 
 
 class ExampleOutput(StrictContract):

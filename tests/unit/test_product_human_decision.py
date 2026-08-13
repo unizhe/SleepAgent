@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import pickle
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
@@ -10,10 +8,9 @@ from threading import Barrier
 import pytest
 from pydantic import ValidationError
 
-import sleepagent.product_runtime.hitl as hitl_module
-from sleepagent.persistence.store import RadarPersistenceStore
-from sleepagent.product_runtime.contracts import stable_hash
-from sleepagent.product_runtime.hitl import (
+import sleepagent.runtime.hitl as hitl_module
+from sleepagent.runtime.contracts import stable_hash
+from sleepagent.runtime.hitl import (
     HITL_POLICY_VERSION,
     ActionProposal,
     ApprovalRequirement,
@@ -26,7 +23,6 @@ from sleepagent.product_runtime.hitl import (
     HumanDecisionStatus,
     HumanRiskLevel,
     InMemoryHumanDecisionRepository,
-    PersistentHumanDecisionRepository,
     VerifiedApprovalCapability,
 )
 
@@ -295,37 +291,6 @@ def test_raw_grant_and_object_forgery_cannot_authorize_result() -> None:
         )
 
 
-def test_self_consistent_persisted_grant_tamper_is_rejected() -> None:
-    connection = sqlite3.connect(":memory:")
-    store = RadarPersistenceStore.connect_sqlite(connection)
-    service = HumanDecisionService(PersistentHumanDecisionRepository(store))
-    request = service.create(proposal())
-    approve(service, request.decision_id)
-    acquire(service, request)
-
-    raw = json.loads(store.get_product_human_decision_json(request.decision_id))
-    grant = raw["active_grant"]
-    grant["target_hash"] = "b" * 64
-    for record in grant["approving_records"]:
-        record["target_hash"] = "b" * 64
-    grant["approving_records_hash"] = stable_hash(grant["approving_records"])
-    material = {
-        key: value
-        for key, value in grant.items()
-        if key not in {"grant_id", "grant_hash"}
-    }
-    grant["grant_hash"] = stable_hash(material)
-    grant["grant_id"] = f"grant-{grant['grant_hash'][:32]}"
-    connection.execute(
-        "UPDATE product_human_decisions SET decision_json = ? WHERE decision_id = ?",
-        (json.dumps(raw), request.decision_id),
-    )
-    connection.commit()
-
-    with pytest.raises(ValidationError, match="not exactly bound"):
-        service.get(request.decision_id)
-
-
 def test_expiry_and_revoke_win_before_acquisition() -> None:
     expired_service = HumanDecisionService()
     expired_request = expired_service.create(proposal(proposal_id="proposal:expiry"))
@@ -527,59 +492,6 @@ def test_terminal_result_and_same_key_replay_are_idempotent(
             receipt_ref="receipt:changed",
             failure_reason=failure_reason,
         )
-
-
-def test_restart_recovers_persisted_grant_after_policy_authority_and_expiry_change() -> None:
-    connection = sqlite3.connect(":memory:")
-    store = RadarPersistenceStore.connect_sqlite(connection)
-    checks: list[tuple[str, str]] = []
-
-    def initially_valid(
-        _request,
-        actor_id,
-        actor_role,
-        _role_binding_id,
-        _authorization_id,
-    ) -> None:
-        checks.append((actor_id, actor_role))
-
-    first = HumanDecisionService(
-        PersistentHumanDecisionRepository(store),
-        authority_validator=initially_valid,
-    )
-    request = first.create(proposal())
-    assert first.create(request.proposal) == request
-    approve(first, request.decision_id)
-    original = acquire(first, request)
-    assert checks == [("elder-1", "elder"), ("elder-1", "elder")]
-
-    changed_policy = HumanDecisionPolicy()
-    changed_policy.version = "sleepagent-hitl-policy.v2"
-
-    def now_revoked(*_args) -> None:
-        raise HumanDecisionError("authority revoked after acquisition")
-
-    restarted = HumanDecisionService(
-        PersistentHumanDecisionRepository(store),
-        policy=changed_policy,
-        authority_validator=now_revoked,
-    )
-    recovered = acquire(
-        restarted,
-        request,
-        now=NOW + timedelta(minutes=30),
-    )
-    assert recovered.grant == original.grant
-
-    committed = restarted.record_execution_result(
-        recovered,
-        status=HumanDecisionStatus.COMMITTED,
-        receipt_ref="receipt:restart",
-        now=NOW + timedelta(minutes=30),
-    )
-    assert committed.status == HumanDecisionStatus.COMMITTED
-    assert restarted.get(request.decision_id) == committed
-    assert len(store.list_product_human_decision_event_json(request.decision_id)) == 4
 
 
 def test_repository_cas_rejects_stale_revision_and_non_advancing_clock() -> None:

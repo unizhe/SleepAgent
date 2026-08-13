@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from sleepagent.product_runtime.policies.care_coordination import (
+from sleepagent.runtime.policies import (
     CareEscalationPolicy,
 )
-from sleepagent.product_runtime.tools.care_coordination import (
+from sleepagent.runtime.tools import (
     CareCoordinationPolicyRequest,
     CareCoordinationTool,
     CareRiskReceiptBinding,
 )
-from sleepagent.product_runtime.schemas import (
+from sleepagent.runtime.schemas import (
     RiskLevel,
 )
 from tests.support.golden_fixtures import load_product_capability_goldens

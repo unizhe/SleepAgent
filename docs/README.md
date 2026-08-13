@@ -1,17 +1,7 @@
-# Documentation
+# SleepAgent 文档
 
-Start with [Architecture overview](architecture/overview.md), then read the
-[backend operations runbook](runbooks/backend-operations.md),
-[API contract artifacts](contracts/README.md), [Product positioning](product/positioning.md),
-[Perceptor integration](development/perceptor-integration.md), and
-[Technical debt](technical-debt.md).
+- [architecture.md](architecture.md)：当前进程、API、domain、runtime 与 worker 边界。
+- [operations.md](operations.md)：replay/PostgreSQL harness、迁移、验证和 live model 配置。
+- [contracts/README.md](contracts/README.md)：对外 HTTP 合同和 OpenAPI 快照。
 
-- `architecture/` — current system boundaries and invariants
-- `product/` — current product behavior and acceptance material
-- `development/` — setup and integration guidance
-- `contracts/` — reproducible public OpenAPI snapshots and client map
-- `runbooks/` — migration, queue, recovery, permissions, and retention operations
-- `references/` — concise external references retained for design context
-- `audits/` — frozen plans, review logs, inventories, and historical decision evidence
-
-Audit documents describe how decisions were reached; they are not the current source of truth when they conflict with `architecture/` or `product/`.
+历史审计、施工阶段计划与已退役功能说明由 Git 保存，不再作为当前文档发布。

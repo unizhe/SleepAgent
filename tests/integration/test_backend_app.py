@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
-from sleepagent.backend_app import (
+from sleepagent.app import (
     BoundedRequestMiddleware,
     CorrelationIdMiddleware,
     ReplayWatermarkMiddleware,
@@ -20,7 +20,7 @@ from sleepagent.backend_app import (
     _product_error_handler,
     create_sleep_backend_app,
 )
-from sleepagent.backend_runtime import (
+from sleepagent.process import (
     DatabaseAttestation,
     RuntimeServices,
     SleepBackendRuntime,
@@ -28,22 +28,22 @@ from sleepagent.backend_runtime import (
 from tests.support.runtime_fixtures import (
     reset_backend_runtime_state as reset_active_runtime_for_tests,
 )
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     ApiSurface,
     DataMode,
     DeploymentMode,
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.demo_api import (
+from sleepagent.api.demo import (
     DemoAcceptedResponse,
     DemoApiError,
     DemoTraceResponse,
     ScenarioClockResponse,
 )
-from sleepagent.product_api.contracts import InteractionStatusResponse
-from sleepagent.product_api.contracts import InteractionStartRequest
-from sleepagent.product_api.service import (
+from sleepagent.api.product_contracts import InteractionStatusResponse
+from sleepagent.api.product_contracts import InteractionStartRequest
+from sleepagent.api.product import (
     ProductApiError,
     ProductApiService,
     ProductRequestContext,
@@ -379,7 +379,7 @@ def test_today_openapi_is_state_and_role_discriminated() -> None:
     }
 
 
-def test_stage_three_read_routes_publish_distinct_versioned_schemas() -> None:
+def test_read_routes_publish_distinct_versioned_schemas() -> None:
     runtime, _, _ = _runtime(
         surfaces=frozenset({ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT})
     )
@@ -578,7 +578,7 @@ def test_request_timeout_includes_decode_and_json_parse(
     phase: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import sleepagent.backend_app as backend_app_module
+    import sleepagent.app as backend_app_module
 
     messages: list[dict[str, Any]] = []
 

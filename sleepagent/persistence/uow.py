@@ -1,3 +1,4 @@
+# 本模块负责 PostgreSQL 持久化边界与完整性校验，不提供内存或 SQLite 旁路。
 """PostgreSQL connection-pool and explicit Unit-of-Work primitives.
 
 This module is intentionally independent from psycopg at import time so unit
@@ -332,7 +333,7 @@ class PsycopgPoolProvider:
             raise RuntimeError(
                 "psycopg_pool is required for PostgreSQL runtime persistence"
             ) from exc
-        pool = ConnectionPool(
+        pool: Any = ConnectionPool(
             conninfo=dsn,
             min_size=configuration.min_size,
             max_size=configuration.max_size,

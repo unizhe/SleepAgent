@@ -8,8 +8,8 @@ from typing import Any, Mapping
 
 import pytest
 
-from sleepagent.backend_runtime import DatabaseAttestation, SleepBackendRuntime
-from sleepagent.backend_settings import (
+from sleepagent.process import DatabaseAttestation, SleepBackendRuntime
+from sleepagent.config import (
     DataMode,
     DeploymentMode,
     ModelMode,
@@ -22,7 +22,7 @@ from sleepagent.persistence.migrations import (
     LATEST_SCHEMA_VERSION,
     MIGRATION_MANIFEST_SHA256,
 )
-from sleepagent.worker_runtime import (
+from sleepagent.workers.runtime import (
     DurableWorkerRuntime,
     InvocationDispatcher,
     InvocationKind,

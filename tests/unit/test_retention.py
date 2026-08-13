@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from sleepagent.persistence.uow import UowScope
-from sleepagent.retention import (
+from sleepagent.workers.retention import (
     LocalTestRetentionKeyEnvelope,
     PostgresRetentionKeyCoordinator,
     PostgresRawRetentionReader,

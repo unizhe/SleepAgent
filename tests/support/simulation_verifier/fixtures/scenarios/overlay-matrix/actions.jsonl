@@ -1,1 +1,0 @@
-{"schema_version":"simulation_action.v1","event_id":"overlay-advance-5","scenario_id":"overlay-matrix","checkpoint":5,"actor":"demo_controller","occurred_at":"2026-02-06T07:00:00+08:00","action":"advance","to_checkpoint":5}

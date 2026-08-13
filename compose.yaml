@@ -4,7 +4,7 @@ x-backend-image: &backend-image
   image: sleepagent-backend-test:local
   build:
     context: .
-    dockerfile: docker/Dockerfile
+    dockerfile: Dockerfile
     target: development
 
 x-runtime-environment: &runtime-environment
@@ -98,7 +98,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -135,7 +135,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -172,7 +172,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -210,7 +210,7 @@ services:
     command:
       - python
       - -m
-      - sleepagent.worker_runtime
+      - sleepagent.workers.runtime
       - run
       - --lease-seconds
       - ${SLEEPAGENT_TEST_WORKER_LEASE_SECONDS:-30}
@@ -243,7 +243,7 @@ services:
         - CMD
         - python
         - -m
-        - sleepagent.worker_runtime
+        - sleepagent.workers.runtime
         - healthcheck
       interval: 3s
       timeout: 5s

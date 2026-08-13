@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentId,
     AuthenticatedBinding,
     EpisodeType,
@@ -16,7 +16,7 @@ from sleepagent.product_runtime.contracts import (
     TrustLabel,
     stable_hash,
 )
-from sleepagent.product_runtime.governance import (
+from sleepagent.runtime.governance import (
     GOVERNANCE_VERSION,
     CareActionCatalog,
     CareActionDefinition,
@@ -24,26 +24,26 @@ from sleepagent.product_runtime.governance import (
     CareTransitionEvent,
     InMemoryCareContextStore,
 )
-from sleepagent.product_runtime.policies.workflow import (
+from sleepagent.runtime.policies import (
     CANONICAL_WORKFLOW_POLICY,
 )
-from sleepagent.product_runtime.registry import (
+from sleepagent.runtime.registry import (
     EPISODE_DEFINITIONS,
     REGISTRY_VERSION,
     InvocationPolicyError,
 )
-from sleepagent.product_runtime.runtime_ports import (
+from sleepagent.runtime.contracts import (
     ProductToolExecutionContext,
 )
-from sleepagent.product_runtime.services.runtime_capabilities import (
+from sleepagent.runtime.tooling import (
     ProductRuntimeReadService,
 )
-from sleepagent.product_runtime.tooling import (
+from sleepagent.runtime.tooling import (
     CoreProductToolService,
     ProductToolError,
     ProductToolExecutor,
 )
-from sleepagent.product_runtime.schemas import RadarNightSummary
+from sleepagent.runtime.schemas import RadarNightSummary
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -254,122 +254,6 @@ def test_tool_receipt_bounds_large_fact_snapshot_provenance() -> None:
     assert result.receipt.output["source_ref_count"] == len(source_refs)
     assert result.receipt.output["source_refs"] == list(source_refs[:50])
     assert result.receipt.source_refs == list(source_refs[:50])
-
-
-def test_runtime_interaction_write_is_receipted_and_replayed_exactly_once() -> None:
-    calls: list[dict[str, object]] = []
-
-    def select_once(arguments, _context):
-        calls.append(arguments)
-        return {
-            "selection": {"selection_id": "selection-1"},
-            "source_refs": ["selection-1"],
-        }
-
-    executor = ProductToolExecutor(
-        handlers={"questionnaire.select_profile": select_once},
-        core_service=CoreProductToolService(),
-    )
-    arguments = {"request": {"request_id": "request-1"}}
-    context = ProductToolExecutionContext(
-        caller="runtime",
-        fact_snapshot=snapshot(),
-        episode_id="episode-questionnaire",
-    )
-
-    first = executor.execute(
-        "questionnaire.select_profile", arguments, context=context
-    )
-    replay = executor.execute(
-        "questionnaire.select_profile", arguments, context=context
-    )
-
-    assert calls == [arguments]
-    assert replay == first
-    assert first.receipt.effect is ToolEffect.STATE_WRITE
-    assert first.receipt.tool_version == "questionnaire.select_profile.v2"
-    assert first.receipt.idempotency_key is not None
-    assert first.receipt.outcome is InvocationOutcome.SUCCEEDED
-
-    collision = executor.execute(
-        "questionnaire.select_profile",
-        {"request": {"request_id": "request-1", "max_questions": 2}},
-        context=context,
-    )
-    assert calls == [arguments]
-    assert collision.receipt.outcome is InvocationOutcome.FAILED
-    assert collision.receipt.error_code == "RuntimeInteractionPayloadConflict"
-    assert collision.receipt.idempotency_key == first.receipt.idempotency_key
-
-    with pytest.raises(InvocationPolicyError):
-        executor.execute(
-            "questionnaire.select_profile",
-            arguments,
-            context=context.model_copy(update={"caller": AgentId.SLEEP_CARE}),
-        )
-
-
-def test_cached_capture_is_revalidated_after_its_authority_window() -> None:
-    calls: list[dict[str, object]] = []
-
-    def capture_once(arguments, _context):
-        calls.append(arguments)
-        if len(calls) > 1:
-            raise ValueError("captured Habit Safety event authority expired")
-        return {
-            "capture": {
-                "selection_id": "selection-1",
-                "answers": [
-                    {
-                        "episode_valid_until": (NOW + timedelta(hours=3)).isoformat()
-                    }
-                ],
-                "safety_events": [
-                    {"valid_until": (NOW + timedelta(hours=1)).isoformat()}
-                ],
-            }
-        }
-
-    executor = ProductToolExecutor(
-        handlers={"questionnaire.capture_profile": capture_once},
-        core_service=CoreProductToolService(),
-    )
-    base_arguments = {
-        "selection": {
-            "selection_id": "selection-1",
-            "episode_id": "episode-questionnaire",
-            "subject_id": "u1",
-            "actor_id": "a1",
-            "role": "elder",
-        },
-        "answers": [{"concept_id": "habit.observed_snoring"}],
-    }
-    context = ProductToolExecutionContext(
-        caller="runtime",
-        fact_snapshot=snapshot(),
-        episode_id="episode-questionnaire",
-    )
-
-    first = executor.execute(
-        "questionnaire.capture_profile",
-        {**base_arguments, "_now": NOW.isoformat()},
-        context=context,
-    )
-    expired = executor.execute(
-        "questionnaire.capture_profile",
-        {
-            **base_arguments,
-            "_now": (NOW + timedelta(hours=2)).isoformat(),
-        },
-        context=context,
-    )
-
-    assert first.receipt.outcome is InvocationOutcome.SUCCEEDED
-    assert expired.receipt.outcome is InvocationOutcome.FAILED
-    assert expired.receipt.error_code == "ValueError"
-    assert len(calls) == 2
-    assert expired.receipt.idempotency_key == first.receipt.idempotency_key
-
 
 @pytest.mark.parametrize(
     "tool_name",

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sleepagent.product_runtime.agents import (
+from sleepagent.runtime.agents import (
     AGENT_IMPLEMENTATIONS,
     CareStrategyAgent,
     EvidenceReasoningAgent,
@@ -17,26 +17,23 @@ from sleepagent.product_runtime.agents import (
     concrete_agent_manifest,
     validate_concrete_agent_manifest,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentId,
     PRODUCT_AGENT_CONTRACT_VERSION,
     PRODUCT_AGENT_ROSTER,
     stable_hash,
 )
-from sleepagent.product_runtime.acceptance import (
-    current_acceptance_release_identity,
-)
-from sleepagent.product_runtime.agent_invocation_coordinator import (
+from sleepagent.runtime.agent_invocation_coordinator import (
     AgentInvocationCoordinator,
 )
-from sleepagent.product_runtime.registry import product_agent_manifest
-from sleepagent.product_runtime.runner import ProductEpisodeRunner
-from sleepagent.product_runtime.skills import (
+from sleepagent.runtime.registry import product_agent_manifest
+from sleepagent.runtime.runner import ProductEpisodeRunner
+from sleepagent.runtime.registry import (
     SkillRegistry,
     default_skill_packages,
 )
-import sleepagent.product_runtime.runtime_factory as runtime_factory
-from sleepagent.product_runtime.runtime_factory import (
+import sleepagent.runtime.factory as runtime_factory
+from sleepagent.runtime.factory import (
     build_product_episode_runner_from_env,
     build_product_runtime_bundle,
     product_episode_runner_is_configured,
@@ -108,10 +105,7 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         item.value for item in PRODUCT_AGENT_ROSTER
     )
     assert stable_hash(product_agent_manifest()) == (
-        "2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3"
-    )
-    assert current_acceptance_release_identity().identity_hash == (
-        "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0"
+        "ee4b6205206102bc27c2addbd58ffb55a0acf13351a4255d1f89748e2add1a4e"
     )
     assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
 

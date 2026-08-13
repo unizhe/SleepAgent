@@ -8,42 +8,42 @@ from uuid import uuid4
 
 import pytest
 
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     DataMode as BackendDataMode,
     DeploymentMode,
     ModelMode,
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.product_runtime.agents.ports import (
+from sleepagent.runtime.agents import (
     EpisodePlanProposal,
     SleepCareEvaluation,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     ContextPacket,
     EpisodeType,
     ExecutionMode,
 )
-from sleepagent.product_runtime.deterministic_model import (
+from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
 )
-from sleepagent.product_runtime.invocation import (
+from sleepagent.runtime.invocation import (
     CareStrategyModelOutput,
     EvidenceReasoningModelOutput,
     SafetyReviewModelOutput,
     SleepCareModelOutput,
 )
-from sleepagent.product_runtime.postgres_worker import (
+from sleepagent.workers.product import (
     build_product_agent_worker_handlers,
 )
-from sleepagent.product_runtime.provider import (
+from sleepagent.runtime.provider import (
     OpenAICompatibleStructuredAgentModel,
 )
-from sleepagent.product_runtime.runtime_factory import (
+from sleepagent.runtime.factory import (
     ProductRuntimeBundle,
     _build_postgres_worker_product_runtime_bundle_from_env,
 )
-from sleepagent.worker_runtime import (
+from sleepagent.workers.runtime import (
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,

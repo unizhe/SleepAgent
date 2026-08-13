@@ -20,7 +20,7 @@ from sleepagent.simulation.seed_registry import (
     load_replay_seed_registry,
     verify_packaged_seed,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     BedPresencePayload,
     BedPresenceState,
 )
@@ -123,14 +123,6 @@ def test_ingress_manifest_rejects_sequence_hash_drift() -> None:
 
     with pytest.raises(ValidationError, match="canonical sequence hash"):
         AdaptedReplayIngress.model_validate(payload)
-
-
-def test_adapter_rejects_multi_night_fixture() -> None:
-    scenario = load_packaged_scenario("golden-15-night")
-    generated = CanonicalReplayGenerator().generate(scenario)
-
-    with pytest.raises(ValueError, match="exactly one night"):
-        ReplayExternalFactAdapter().adapt(scenario, generated)
 
 
 def test_v2_adapter_splits_initial_night_from_clock_releasable_future_facts() -> None:

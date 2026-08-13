@@ -1,3 +1,4 @@
+# 本模块集中定义运行指标与结构化日志，不决定业务流程。
 from __future__ import annotations
 
 import hashlib

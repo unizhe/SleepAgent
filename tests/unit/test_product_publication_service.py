@@ -6,16 +6,16 @@ from typing import Any
 
 import pytest
 
-from sleepagent.product_runtime.cold_start import ClaimCeiling
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.cold_start import ClaimCeiling
+from sleepagent.runtime.contracts import (
     CommunicationDraft,
     EpisodeStatus,
     EpisodeType,
     InvocationOutcome,
     stable_hash,
 )
-from sleepagent.product_runtime.governance import PublicationError
-from sleepagent.product_runtime.publication_service import (
+from sleepagent.runtime.governance import PublicationError
+from sleepagent.runtime.publication_service import (
     PublicationIndeterminateError,
     PublicationService,
 )

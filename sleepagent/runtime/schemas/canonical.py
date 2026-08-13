@@ -1,0 +1,572 @@
+# 本模块保留工具与报告仍消费的 canonical Radar 投影数据模型。
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, timezone
+from enum import Enum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+class StandardTerminologyMapping(BaseModel):
+    """Reserved interoperability fields for later FHIR/LOINC/SNOMED mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fhir_resource: str | None = None
+    fhir_profile: str | None = None
+    loinc_codes: list[str] = Field(default_factory=list)
+    snomed_codes: list[str] = Field(default_factory=list)
+    local_codes: dict[str, str] = Field(default_factory=dict)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RadarAgentSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    standard_mappings: StandardTerminologyMapping = Field(
+        default_factory=StandardTerminologyMapping,
+        description="Reserved FHIR/LOINC/SNOMED/local-code mapping fields.",
+    )
+
+
+class ReviewStatus(str, Enum):
+    DRAFT = "draft"
+    REVIEWED = "reviewed"
+    REJECTED = "rejected"
+    NEEDS_HUMAN_REVIEW = "needs_human_review"
+
+
+class RiskLevel(str, Enum):
+    INFO = "info"
+    WATCH = "watch"
+    ESCALATE = "escalate"
+    URGENT_BOUNDARY = "urgent_boundary"
+    UNCERTAIN = "uncertain"
+
+
+class RadarDeviceStatus(str, Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    UNKNOWN = "unknown"
+
+
+class RadarDataQualityStatus(str, Enum):
+    GOOD = "good"
+    PARTIAL = "partial"
+    UNUSABLE = "unusable"
+
+
+class RadarBedPresence(str, Enum):
+    IN_BED = "in_bed"
+    OUT_OF_BED = "out_of_bed"
+    UNKNOWN = "unknown"
+
+
+def _default_raw_event_retention() -> list[
+    Literal["trace", "replay_validation"]
+]:
+    return ["trace", "replay_validation"]
+
+
+class RadarRawEvent(RadarAgentSchema):
+    """Raw vendor event retained only for trace and replay validation."""
+
+    raw_event_id: str = Field(..., min_length=1)
+    provider: str = Field(..., min_length=1)
+    event_type: str = Field(..., min_length=1)
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    event_timestamp: datetime | None = None
+    vendor_device_id: str | None = None
+    vendor_device_name: str | None = None
+    vendor_home_id: str | None = None
+    idempotency_key: str | None = None
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+    data_payload: dict[str, Any] = Field(default_factory=dict)
+    replay_scenario: str | None = None
+    data_use: Literal["trace", "replay"] = "trace"
+    retained_for: list[Literal["trace", "replay_validation"]] = Field(
+        default_factory=_default_raw_event_retention
+    )
+
+
+class RadarDevice(RadarAgentSchema):
+    radar_device_id: str = Field(..., min_length=1)
+    display_name: str = Field(..., min_length=1)
+    provider: str = Field(..., min_length=1)
+    status: RadarDeviceStatus = RadarDeviceStatus.UNKNOWN
+    vendor_device_id: str | None = None
+    vendor_device_name: str | None = None
+    vendor_home_id: str | None = None
+    bound_subject_id: str | None = None
+    timezone_name: str = "UTC"
+    firmware_version: str | None = None
+    source_raw_event_ids: list[str] = Field(default_factory=list)
+    registered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RadarVitalSnapshot(RadarAgentSchema):
+    snapshot_id: str = Field(..., min_length=1)
+    radar_device_id: str = Field(..., min_length=1)
+    subject_id: str | None = None
+    measured_at: datetime
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    heart_rate_bpm: int | None = Field(default=None, ge=0, le=240)
+    breath_rate_bpm: int | None = Field(default=None, ge=0, le=80)
+    body_movement: float | None = Field(default=None, ge=0)
+    bed_presence: RadarBedPresence = RadarBedPresence.UNKNOWN
+    invalid_reading_flags: list[str] = Field(default_factory=list)
+    data_quality_flags: list[str] = Field(default_factory=list)
+    source_raw_event_ids: list[str] = Field(default_factory=list)
+
+
+class RadarNightSummary(RadarAgentSchema):
+    radar_device_id: str = Field(..., min_length=1)
+    subject_id: str | None = None
+    night_of: date
+    timezone_name: str = "UTC"
+    night_boundary_start_at: datetime | None = None
+    night_boundary_end_at: datetime | None = None
+    device_status: RadarDeviceStatus = RadarDeviceStatus.UNKNOWN
+    sleep_start_at: datetime | None = None
+    sleep_end_at: datetime | None = None
+    total_sleep_minutes: float | None = Field(default=None, ge=0)
+    sleep_score: float | None = Field(default=None, ge=0, le=100)
+    out_of_bed_count: int = Field(default=0, ge=0)
+    movement_count: int = Field(default=0, ge=0)
+    data_coverage_ratio: float = Field(default=0, ge=0, le=1)
+    data_quality_status: RadarDataQualityStatus = RadarDataQualityStatus.GOOD
+    confidence_label: Literal[
+        "normal",
+        "low_confidence",
+        "not_interpretable",
+    ] = "normal"
+    health_conclusion_allowed: bool = True
+    invalid_reading_count: int = Field(default=0, ge=0)
+    abnormal_reading_count: int = Field(default=0, ge=0)
+    missing_intervals: list[str] = Field(default_factory=list)
+    out_of_bed_intervals: list[str] = Field(default_factory=list)
+    not_in_bed_intervals: list[str] = Field(default_factory=list)
+    quality_reasons: list[str] = Field(default_factory=list)
+    blocked_reasons: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    explainable_metrics: dict[str, Any] = Field(default_factory=dict)
+    source_snapshot_ids: list[str] = Field(default_factory=list)
+    source_raw_event_ids: list[str] = Field(default_factory=list)
+    source_report_ref: str | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def validate_sleep_time_order(self) -> "RadarNightSummary":
+        if (
+            self.sleep_start_at is not None
+            and self.sleep_end_at is not None
+            and self.sleep_end_at <= self.sleep_start_at
+        ):
+            raise ValueError("sleep_end_at must be after sleep_start_at.")
+        return self
+
+
+class QuestionnaireEntry(RadarAgentSchema):
+    entry_id: str = Field(..., min_length=1)
+    subject_id: str = Field(..., min_length=1)
+    role: Literal["elder", "family", "doctor"]
+    question_id: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1)
+    answer_type: Literal["choice", "scale", "short_text"] = "choice"
+    collected_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    source: Literal["micro_questionnaire", "sleep_diary", "doctor_note"] = (
+        "micro_questionnaire"
+    )
+    question_source: Literal["bank", "skill", "legacy"] = "legacy"
+    source_id: str | None = None
+    source_version: str | None = None
+    policy_id: str | None = None
+    policy_version: str | None = None
+    trigger: str | None = None
+    prompt_text: str | None = None
+    evidence_ref: str | None = None
+
+    @model_validator(mode="after")
+    def versioned_questions_need_provenance(self) -> "QuestionnaireEntry":
+        if self.question_source in {"bank", "skill"}:
+            required = {
+                "source_id": self.source_id,
+                "source_version": self.source_version,
+                "policy_id": self.policy_id,
+                "policy_version": self.policy_version,
+                "trigger": self.trigger,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "versioned questionnaire entries require provenance: "
+                    + ", ".join(missing)
+                )
+        return self
+
+
+class SupplementaryDocument(RadarAgentSchema):
+    document_id: str = Field(..., min_length=1)
+    subject_id: str = Field(..., min_length=1)
+    document_type: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1)
+    summary: str = ""
+    source_uri: str | None = None
+    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    review_status: ReviewStatus = ReviewStatus.DRAFT
+    caveats: list[str] = Field(default_factory=list)
+
+
+class EvidenceClaim(RadarAgentSchema):
+    claim_id: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1)
+    source_kind: Literal[
+        "canonical_observation",
+        "user_report",
+        "authorized_observer_report",
+        "reviewed_knowledge",
+        "trend_tool",
+        "confirmed_memory",
+        "accepted_ledger",
+        "data_quality",
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    evidence_refs: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    risk_level: RiskLevel = RiskLevel.INFO
+    uncertainty: str | None = None
+    caveats: list[str] = Field(default_factory=list)
+    generated_by: str = Field(..., min_length=1)
+    review_status: ReviewStatus = ReviewStatus.DRAFT
+
+    @model_validator(mode="after")
+    def reviewed_claims_need_evidence(self) -> "EvidenceClaim":
+        if self.review_status == ReviewStatus.REVIEWED and not self.evidence_refs:
+            raise ValueError("reviewed evidence claims require evidence_refs.")
+        return self
+
+
+class EvidenceLedger(RadarAgentSchema):
+    ledger_id: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    raw_evidence_refs: list[str] = Field(default_factory=list)
+    canonical_evidence_refs: list[str] = Field(default_factory=list)
+    derived_metrics: dict[str, Any] = Field(default_factory=dict)
+    questionnaire_entries: list[QuestionnaireEntry] = Field(default_factory=list)
+    supplementary_documents: list[SupplementaryDocument] = Field(default_factory=list)
+    claims: list[EvidenceClaim] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
+    uncertainty: str | None = None
+    caveats: list[str] = Field(default_factory=list)
+    review_status: ReviewStatus = ReviewStatus.DRAFT
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def block_direct_raw_event_reads(self) -> "EvidenceLedger":
+        _assert_no_direct_raw_event(
+            {
+                "derived_metrics": self.derived_metrics,
+                "questionnaire_entries": self.questionnaire_entries,
+                "supplementary_documents": self.supplementary_documents,
+                "claims": self.claims,
+            },
+            owner="EvidenceLedger",
+        )
+        return self
+
+
+class RoleReportArtifact(RadarAgentSchema):
+    schema_version: str = "radar-role-report.v1"
+    artifact_id: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    role: Literal["elder", "family", "doctor"]
+    title: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1)
+    source_ledger_id: str | None = None
+    risk_level: RiskLevel = RiskLevel.INFO
+    claim_ids: list[str] = Field(default_factory=list)
+    facts: list[EvidenceClaim] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
+    trend_highlights: list[str] = Field(default_factory=list)
+    anomaly_highlights: list[str] = Field(default_factory=list)
+    confirmation_actions: list[str] = Field(default_factory=list)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
+    questionnaire_entries: list[QuestionnaireEntry] = Field(default_factory=list)
+    structured_summary: dict[str, Any] = Field(default_factory=dict)
+    caveats: list[str] = Field(default_factory=list)
+    safety_notices: list[str] = Field(default_factory=list)
+    prompt_version: str = "role-report-template.v1"
+    model_provider: str = "deterministic-template"
+    model_id: str = "template"
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generation_mode: Literal["template", "llm", "fallback"] = "template"
+
+    @model_validator(mode="after")
+    def generated_report_keeps_one_fact_snapshot(self) -> "RoleReportArtifact":
+        if self.source_ledger_id:
+            required_notices = {
+                "本报告由 AI 辅助整理，内容来自结构化证据。",
+                "本报告仅用于睡眠健康观察。",
+                "本报告不构成临床诊断或医疗建议。",
+                "本项目不宣称 HIPAA/FDA、医疗器械或临床诊断合规。",
+            }
+            if not required_notices.issubset(set(self.safety_notices)):
+                raise ValueError(
+                    "generated reports require AI-assisted, observation, "
+                    "non-diagnostic, and non-compliance notices."
+                )
+            if any(claim.task_id != self.task_id for claim in self.facts):
+                raise ValueError("role report facts must belong to the same task.")
+            if self.claim_ids != [claim.claim_id for claim in self.facts]:
+                raise ValueError(
+                    "role report claim_ids must match its Evidence Ledger fact snapshot."
+                )
+            fact_refs = {
+                ref for claim in self.facts for ref in claim.evidence_refs
+            }
+            if not fact_refs.issubset(set(self.evidence_refs)):
+                raise ValueError(
+                    "role report evidence_refs must include every fact evidence ref."
+                )
+            if not set(self.evidence_refs).issubset(set(self.source_refs)):
+                raise ValueError(
+                    "role report source_refs must include every displayed evidence ref."
+                )
+            if self.structured_summary:
+                if (
+                    self.structured_summary.get("source_ledger_id")
+                    != self.source_ledger_id
+                    or self.structured_summary.get("risk_level")
+                    != self.risk_level.value
+                    or self.structured_summary.get("claim_ids") != self.claim_ids
+                ):
+                    raise ValueError(
+                        "role report structured summary must match Ledger, risk, and claims."
+                    )
+            if self.role == "doctor":
+                expected_chain = [
+                    claim.model_dump(mode="json") for claim in self.facts
+                ]
+                expected_questionnaires = [
+                    entry.model_dump(mode="json")
+                    for entry in self.questionnaire_entries
+                ]
+                if (
+                    self.structured_summary.get("evidence_chain") != expected_chain
+                    or self.structured_summary.get("data_quality") != self.data_quality
+                    or self.structured_summary.get("questionnaire_entries")
+                    != expected_questionnaires
+                    or self.structured_summary.get("source_refs") != self.source_refs
+                    or self.structured_summary.get("caveats") != self.caveats
+                    or self.structured_summary.get("safety_notices")
+                    != self.safety_notices
+                    or self.structured_summary.get("non_diagnostic_boundary") is not True
+                ):
+                    raise ValueError(
+                        "doctor report must preserve its complete structured evidence package."
+                    )
+        serialized = json.dumps(
+            {
+                "title": self.title,
+                "content": self.content,
+                "caveats": self.caveats,
+                "safety_notices": self.safety_notices,
+            },
+            ensure_ascii=False,
+        ).lower()
+        forbidden_compliance_claims = (
+            "hipaa compliant",
+            "fda approved",
+            "符合 hipaa",
+            "通过 fda",
+            "医疗器械认证",
+            "临床诊断合规系统",
+        )
+        if any(claim in serialized for claim in forbidden_compliance_claims):
+            raise ValueError("reports cannot claim medical or regulatory compliance")
+        return self
+
+
+class HumanConfirmationRequest(RadarAgentSchema):
+    """Read-only task projection of one authoritative HumanDecisionRequest."""
+
+    confirmation_id: str = Field(..., min_length=1)
+    decision_id: str = Field(..., min_length=1)
+    decision_revision: int = Field(default=0, ge=0)
+    task_id: str = Field(..., min_length=1)
+    action_type: str = Field(..., min_length=1)
+    requested_role: Literal["elder", "family", "doctor", "system"]
+    allowed_roles: list[Literal["elder", "family", "doctor", "system"]] = Field(
+        default_factory=list
+    )
+    reason: str = Field(..., min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    status: Literal["pending", "approved", "rejected", "expired", "revoked"] = (
+        "pending"
+    )
+    confirmation_kind: Literal[
+        "approval", "delivery_record", "doctor_annotation"
+    ] = "approval"
+    blocks_daily_flow: bool = True
+    idempotency_key: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    resolved_at: datetime | None = None
+    resolved_by: str | None = None
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+    revocation_reason: str | None = None
+    execution_status: Literal["not_started", "completed", "failed"] = "not_started"
+    execution_ref: str | None = None
+    executed_at: datetime | None = None
+    delivery_status: Literal[
+        "not_applicable", "pending", "delivered", "failed"
+    ] = "not_applicable"
+    delivered_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_resolution_time(self) -> "HumanConfirmationRequest":
+        if self.resolved_at is not None and self.resolved_at < self.created_at:
+            raise ValueError("resolved_at cannot be before created_at.")
+        if self.revoked_at is not None and self.revoked_at < self.created_at:
+            raise ValueError("revoked_at cannot be before created_at.")
+        if self.status in {"approved", "rejected", "expired"} and (
+            self.resolved_at is None or not self.resolved_by
+        ):
+            raise ValueError("resolved confirmations require actor and timestamp.")
+        if self.status == "revoked" and (
+            self.revoked_at is None or not self.revoked_by
+        ):
+            raise ValueError("revoked confirmations require actor and timestamp.")
+        if self.execution_status == "completed" and (
+            not self.execution_ref or self.executed_at is None
+        ):
+            raise ValueError("completed confirmation action requires ref and timestamp.")
+        if self.delivery_status == "delivered" and self.delivered_at is None:
+            raise ValueError("delivered confirmation requires delivered_at.")
+        if not self.allowed_roles:
+            self.allowed_roles = [self.requested_role]
+        return self
+
+
+class TaskContext(RadarAgentSchema):
+    task_id: str = Field(..., min_length=1)
+    trace_id: str = Field(..., min_length=1)
+    role: Literal["elder", "family", "doctor", "system"] = "family"
+    stage: str = "created"
+    purpose: Literal[
+        "orchestration",
+        "analysis",
+        "report",
+        "chat",
+        "risk",
+        "alert",
+        "rag",
+        "memory",
+    ] = "orchestration"
+    allowed_actions: list[str] = Field(default_factory=list)
+
+
+class EvidencePacket(RadarAgentSchema):
+    evidence_refs: list[str] = Field(default_factory=list)
+    vital_snapshots: list[RadarVitalSnapshot] = Field(default_factory=list)
+    night_summaries: list[RadarNightSummary] = Field(default_factory=list)
+    questionnaire_entries: list[QuestionnaireEntry] = Field(default_factory=list)
+    supplementary_documents: list[SupplementaryDocument] = Field(default_factory=list)
+    data_quality: dict[str, Any] = Field(default_factory=dict)
+    claim_refs: list[str] = Field(default_factory=list)
+    evidence_ledger: EvidenceLedger | None = None
+
+    @model_validator(mode="after")
+    def block_direct_raw_event_reads(self) -> "EvidencePacket":
+        _assert_no_direct_raw_event(self.data_quality, owner="EvidencePacket")
+        return self
+
+
+class RagContext(RadarAgentSchema):
+    chunk_ids: list[str] = Field(default_factory=list)
+    citation_ids: list[str] = Field(default_factory=list)
+    snippets: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    source_metadata: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SafetyPolicy(RadarAgentSchema):
+    forbidden_outputs: list[str] = Field(default_factory=list)
+    requires_confirmation_for: list[str] = Field(default_factory=list)
+    max_risk_level: RiskLevel = RiskLevel.ESCALATE
+
+
+class ContextPacket(RadarAgentSchema):
+    context_packet_id: str | None = None
+    version: str = "1.0.0"
+    task_context: TaskContext
+    evidence_packet: EvidencePacket = Field(default_factory=EvidencePacket)
+    memory_snippets: list[str] = Field(default_factory=list)
+    rag_context: RagContext = Field(default_factory=RagContext)
+    safety_policy: SafetyPolicy = Field(default_factory=SafetyPolicy)
+
+    @model_validator(mode="after")
+    def block_direct_raw_event_reads(self) -> "ContextPacket":
+        _assert_no_direct_raw_event(
+            {
+                "evidence_packet": self.evidence_packet,
+                "memory_snippets": self.memory_snippets,
+                "rag_context": self.rag_context,
+            },
+            owner=f"ContextPacket:{self.task_context.purpose}",
+        )
+        return self
+
+
+def _assert_no_direct_raw_event(value: Any, *, owner: str) -> None:
+    if _contains_direct_raw_event(value):
+        raise ValueError(
+            f"{owner} cannot directly contain RadarRawEvent or raw vendor payloads; "
+            "use canonical schemas and raw_evidence_refs instead."
+        )
+
+
+def _contains_direct_raw_event(value: Any) -> bool:
+    if isinstance(value, RadarRawEvent):
+        return True
+    if isinstance(value, BaseModel):
+        if value.__class__.__name__ in {"RadarRawEvent", "RawVendorEvent"}:
+            return True
+        return _contains_direct_raw_event(value.model_dump(mode="python"))
+    if isinstance(value, dict):
+        keys = set(value)
+        if {"raw_event_id", "raw_payload"}.issubset(keys):
+            return True
+        return any(_contains_direct_raw_event(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_direct_raw_event(item) for item in value)
+    return False
+
+
+__all__ = [
+    "ContextPacket",
+    "EvidenceClaim",
+    "EvidenceLedger",
+    "EvidencePacket",
+    "HumanConfirmationRequest",
+    "QuestionnaireEntry",
+    "RadarAgentSchema",
+    "RadarBedPresence",
+    "RadarDataQualityStatus",
+    "RadarDevice",
+    "RadarDeviceStatus",
+    "RadarNightSummary",
+    "RadarRawEvent",
+    "RadarVitalSnapshot",
+    "RagContext",
+    "ReviewStatus",
+    "RiskLevel",
+    "RoleReportArtifact",
+    "SafetyPolicy",
+    "StandardTerminologyMapping",
+    "SupplementaryDocument",
+    "TaskContext",
+]

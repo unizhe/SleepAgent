@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
-from sleepagent.backend_runtime import (
+from sleepagent.process import (
     DatabaseAttestation,
     RuntimeServices,
     SleepBackendRuntime,
 )
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     ApiSurface,
     DataMode,
     DeploymentMode,

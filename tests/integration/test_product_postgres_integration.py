@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     DataMode as BackendDataMode,
     DeploymentMode,
     ModelMode,
@@ -23,21 +23,21 @@ from sleepagent.persistence.uow import (
     PsycopgPoolProvider,
     UnitOfWorkFactory,
 )
-from sleepagent.product_runtime.deterministic_model import (
+from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
 )
-from sleepagent.product_runtime.postgres_worker import (
+from sleepagent.workers.product import (
     PostgresProductAgentRepository,
     ProductAgentLease,
     ProductAgentLeaseLost,
     ProductAgentProcessor,
     ProductAgentWorkHandlerAdapter,
 )
-from sleepagent.product_runtime.runtime_factory import (
+from sleepagent.runtime.factory import (
     ProductRuntimeBundle,
     build_deterministic_product_runtime_bundle,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AvailabilityState,
     BedPresencePayload,
@@ -60,13 +60,13 @@ from sleepagent.sleep_domain.contracts import (
     SourceKind,
     TimezoneStatus,
 )
-from sleepagent.sleep_domain.episode_v2 import (
+from sleepagent.domain.episodes import (
     NightEpisodeV2,
     UUID7Generator,
     finalize_episode_date,
     open_episode_v2,
 )
-from sleepagent.worker_runtime import (
+from sleepagent.workers.runtime import (
     LeaseClaim,
     PostgresDurableWorkStore,
     WorkContext,

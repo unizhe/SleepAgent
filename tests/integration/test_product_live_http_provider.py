@@ -6,17 +6,14 @@ from collections.abc import Iterator
 
 import pytest
 
-from sleepagent.integrations.llm import CloudLLMConfig
 from sleepagent.observability import STATE
-from sleepagent.product_device.llm import (
+from sleepagent.runtime.provider import (
     OpenAICompatibleChatProvider,
     OpenAICompatibleProviderConfig,
+    OpenAICompatibleStructuredAgentModel,
     ProductLLMProviderError,
 )
-from sleepagent.product_runtime.contracts import StrictContract
-from sleepagent.product_runtime.provider import (
-    OpenAICompatibleStructuredAgentModel,
-)
+from sleepagent.runtime.contracts import StrictContract
 from tests.support.openai_compatible_server import (
     LoopbackOpenAICompatibleServer,
     OpenAIRequestRecord,
@@ -94,16 +91,14 @@ def _generate(model: OpenAICompatibleStructuredAgentModel) -> ExampleOutput:
     )
 
 
-def test_cloud_provider_config_does_not_publicly_serialize_api_key() -> None:
-    config = CloudLLMConfig(
+def test_provider_config_has_no_api_key_field() -> None:
+    config = OpenAICompatibleProviderConfig(
         base_url="http://127.0.0.1:1/v1",
-        api_key=API_KEY,
-        model_id=MODEL_ID,
+        model=MODEL_ID,
     )
 
     assert API_KEY not in repr(config)
-    assert API_KEY not in config.model_dump_json()
-    assert "api_key" not in config.model_dump()
+    assert "api_key" not in config.__dict__
 
 
 def test_structured_product_model_uses_real_openai_compatible_http_boundary(

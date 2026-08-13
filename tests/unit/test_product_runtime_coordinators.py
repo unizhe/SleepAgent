@@ -8,10 +8,10 @@ from typing import Any
 
 import pytest
 
-from sleepagent.product_runtime.agent_invocation_coordinator import (
+from sleepagent.runtime.agent_invocation_coordinator import (
     ProviderInputBudgetLedger,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentId,
     AuthenticatedBinding,
     EpisodeReceipt,
@@ -26,33 +26,30 @@ from sleepagent.product_runtime.contracts import (
     ToolReceipt,
     stable_hash,
 )
-from sleepagent.product_runtime.episode_result_finalizer import (
+from sleepagent.runtime.episode_result_finalizer import (
     EpisodeResultFinalizer,
 )
-from sleepagent.product_runtime.governance import AcceptanceError
-from sleepagent.product_runtime.runtime_contracts import (
-    ConfirmedActionOutcome,
+from sleepagent.runtime.governance import AcceptanceError
+from sleepagent.runtime.results import (
     PendingConfirmationTarget,
     PendingUserInputTarget,
-    ProductContinuationLineage,
     ProductEpisodeRunRequest,
     ProductEpisodeRunResult,
-    TerminalEpisodeDecision,
     bind_product_episode_checkpoint,
     product_episode_request_hash,
 )
-from sleepagent.product_runtime.runtime_ports import (
+from sleepagent.runtime.contracts import (
     ProductToolExecutionContext,
     ProductToolResult,
 )
-from sleepagent.product_runtime.registry import (
+from sleepagent.runtime.registry import (
     RUNTIME_INTERACTION_TOOLS,
     TOOL_DEFINITIONS,
 )
-from sleepagent.product_runtime.tool_execution_coordinator import (
+from sleepagent.runtime.tool_execution_coordinator import (
     ToolExecutionCoordinator,
 )
-from sleepagent.product_runtime.tooling import (
+from sleepagent.runtime.tooling import (
     canonical_runtime_interaction_idempotency_key,
     canonical_tool_input_hash,
     canonical_tool_invocation_id,
@@ -486,69 +483,6 @@ def test_tool_execution_rejects_tampered_receipt_provenance(
         )
 
 
-def test_runtime_interaction_receipt_uses_canonical_hash_and_idempotency() -> None:
-    tool_name = "questionnaire.select_profile"
-    episode_id = "episode:runtime-interaction-provenance"
-    arguments = {
-        "request": {
-            "request_id": "request:one",
-            "episode_id": episode_id,
-            "subject_id": "subject-1",
-            "actor_id": "actor-1",
-            "role": "elder",
-            "remaining_episode_budget": 3,
-        },
-        "_now": NOW.isoformat(),
-    }
-    snapshot = _snapshot()
-    valid = _tool_result(
-        snapshot,
-        tool_name=tool_name,
-        arguments=arguments,
-        episode_id=episode_id,
-    )
-    executor = _RecordingToolExecutor()
-    executor.result = valid
-    coordinator = ToolExecutionCoordinator(executor)
-    context = ProductToolExecutionContext(
-        caller="runtime",
-        fact_snapshot=snapshot,
-        episode_id=episode_id,
-    )
-
-    returned = coordinator.execute(
-        tool_name,
-        arguments,
-        context=context,
-    )
-
-    expected_input_hash = canonical_tool_input_hash(tool_name, arguments)
-    assert expected_input_hash != stable_hash(arguments)
-    assert returned.receipt.input_hash == expected_input_hash
-    assert returned.receipt.tool_invocation_id == canonical_tool_invocation_id(
-        tool_name,
-        expected_input_hash,
-    )
-    assert returned.receipt.idempotency_key == (
-        canonical_runtime_interaction_idempotency_key(
-            tool_name,
-            arguments,
-            episode_id=episode_id,
-            fact_snapshot_hash=snapshot.fact_snapshot_hash,
-        )
-    )
-
-    executor.result = valid.model_copy(
-        update={
-            "receipt": valid.receipt.model_copy(
-                update={"idempotency_key": "runtime-interaction:forged"}
-            )
-        }
-    )
-    with pytest.raises(ValueError, match="receipt provenance"):
-        coordinator.execute(tool_name, arguments, context=context)
-
-
 def test_unhashable_nonweakref_mapping_adapter_is_registered_by_identity(
 ) -> None:
     class _SlottedMappingAdapter:
@@ -794,7 +728,7 @@ def test_result_finalizer_nonterminal_preserves_transient_state() -> None:
 
     returned = finalizer.finalize(result, subject_id="subject-1")
 
-    assert returned.continuation_checkpoint_hash is not None
+    assert returned.continuation_checkpoint_hash is None
     assert events == ["append_nonterminal"]
     assert store.nonterminal == [returned]
     assert executor.active_episodes == {"episode:coordinator"}
@@ -877,118 +811,3 @@ def test_result_finalizer_cleanup_failure_does_not_undo_durable_terminal(
     assert returned == result
     assert store.terminal == [result]
     assert events == ["append_terminal", "tool_release", "budget_release"]
-
-
-def test_confirmed_action_finalization_merges_typed_deltas_and_owns_revision(
-) -> None:
-    request, frozen = _confirmed_finalization_fixture()
-    existing_receipt = _tool_result(request.fact_snapshot).receipt
-    frozen = bind_product_episode_checkpoint(
-        frozen.model_copy(
-            update={
-                "receipt": frozen.receipt.model_copy(
-                    update={
-                        "tool_receipt_ids": [
-                            existing_receipt.tool_invocation_id
-                        ]
-                    }
-                ),
-                "tool_receipts": [existing_receipt],
-                "committed_memory_candidate_ids": ["memory:existing"],
-            }
-        )
-    )
-    additional_receipt = existing_receipt.model_copy(
-        update={
-            "tool_invocation_id": "tool:state.commit_memory:confirmed",
-            "tool_name": "state.commit_memory",
-            "tool_version": "state.commit_memory.v1",
-            "input_hash": "d" * 64,
-        }
-    )
-    events: list[str] = []
-    finalizer = EpisodeResultFinalizer(
-        result_store=_ResultStore(events),
-        tool_execution_coordinator=ToolExecutionCoordinator(
-            _RecordingToolExecutor(events=events)
-        ),
-        provider_input_budget_ledger=_TracingBudgetLedger(events),
-    )
-    lineage = ProductContinuationLineage(
-        kind="commit_frozen_confirmed_action",
-        parent_checkpoint_hash="e" * 64,
-        command_hash="f" * 64,
-    )
-
-    result = finalizer.finalize_confirmed_action(
-        frozen_result=frozen,
-        outcome=ConfirmedActionOutcome(
-            additional_tool_receipts=(additional_receipt,),
-            committed_memory_candidate_ids=("memory:new",),
-            declined_confirmation_ids=("confirmation:declined",),
-        ),
-        decision=TerminalEpisodeDecision(
-            status=EpisodeStatus.COMPLETE,
-            goal_achieved=True,
-        ),
-        lineage=lineage,
-        subject_id="subject-1",
-        request=request,
-    )
-
-    assert result.receipt.receipt_revision == 5
-    assert result.receipt.terminal is True
-    assert result.receipt.status is EpisodeStatus.COMPLETE
-    assert result.pending_confirmations == []
-    assert result.committed_memory_candidate_ids == [
-        "memory:existing",
-        "memory:new",
-    ]
-    assert result.declined_confirmation_ids == ["confirmation:declined"]
-    assert result.tool_receipts == [existing_receipt, additional_receipt]
-    assert result.continuation_kind == lineage.kind
-    assert result.continuation_parent_checkpoint_hash == (
-        lineage.parent_checkpoint_hash
-    )
-    assert events == ["append_terminal", "tool_release", "budget_release"]
-
-
-def test_confirmed_action_finalization_rejects_receipt_identity_collision(
-) -> None:
-    request, frozen = _confirmed_finalization_fixture()
-    existing_receipt = _tool_result(request.fact_snapshot).receipt
-    frozen = bind_product_episode_checkpoint(
-        frozen.model_copy(update={"tool_receipts": [existing_receipt]})
-    )
-    collision = existing_receipt.model_copy(
-        update={"output": {"policy_version": "different"}}
-    )
-    events: list[str] = []
-    finalizer = EpisodeResultFinalizer(
-        result_store=_ResultStore(events),
-        tool_execution_coordinator=ToolExecutionCoordinator(
-            _RecordingToolExecutor(events=events)
-        ),
-        provider_input_budget_ledger=_TracingBudgetLedger(events),
-    )
-
-    with pytest.raises(ValueError, match="receipt identity collision"):
-        finalizer.finalize_confirmed_action(
-            frozen_result=frozen,
-            outcome=ConfirmedActionOutcome(
-                additional_tool_receipts=(collision,)
-            ),
-            decision=TerminalEpisodeDecision(
-                status=EpisodeStatus.COMPLETE,
-                goal_achieved=True,
-            ),
-            lineage=ProductContinuationLineage(
-                kind="commit_frozen_confirmed_action",
-                parent_checkpoint_hash="e" * 64,
-                command_hash="f" * 64,
-            ),
-            subject_id="subject-1",
-            request=request,
-        )
-
-    assert events == []

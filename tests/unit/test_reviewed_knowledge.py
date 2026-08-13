@@ -6,14 +6,14 @@ from typing import Sequence
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.product_runtime.services.reviewed_knowledge import (
+from sleepagent.runtime.knowledge import (
     RepositoryKnowledgeRecord,
     ReviewedKnowledgePolicyError,
     ReviewedKnowledgeQuery,
     ReviewedKnowledgeRepository,
     ReviewedKnowledgeService,
 )
-from sleepagent.product_runtime.tools.knowledge_retrieval import (
+from sleepagent.runtime.tools import (
     KnowledgeRetrievalTool,
 )
 from tests.support.golden_fixtures import load_product_capability_goldens
@@ -246,12 +246,7 @@ def test_personal_knowledge_record_requires_subject_identity() -> None:
 
 def test_new_production_modules_do_not_import_legacy_agent_runtime() -> None:
     root = Path(__file__).resolve().parents[2]
-    source_files = (
-        root
-        / "sleepagent/product_runtime/services/reviewed_knowledge.py",
-        root
-        / "sleepagent/product_runtime/tools/knowledge_retrieval.py",
-    )
+    source_files = (root / "sleepagent/runtime/knowledge.py",)
     forbidden = (
         "radar_agent.agents",
         "radar_agent.orchestrator",

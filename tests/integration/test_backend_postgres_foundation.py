@@ -575,7 +575,7 @@ def test_replay_trace_projects_root_and_committed_child_references() -> None:
     assert "COALESCE(event.correlation_id, target_root_operation_id)" in trace
 
 
-def test_stage2_migration_has_real_state_authority_and_queue_capabilities() -> None:
+def test_command_migration_has_real_state_authority_and_queue_capabilities() -> None:
     body = Path(
         "sleepagent/persistence/migrations/003_stage2_commands_and_interactions.sql"
     ).read_text(encoding="utf-8")
@@ -605,7 +605,7 @@ def test_stage2_migration_has_real_state_authority_and_queue_capabilities() -> N
     assert "grant_row.allowed_handlers_json ? op.operation_type" not in claim
 
 
-def test_stage3_migration_has_fenced_advance_and_append_only_receipt() -> None:
+def test_read_model_migration_has_fenced_advance_and_append_only_receipt() -> None:
     body = Path(
         "sleepagent/persistence/migrations/004_stage3_reads_and_scenario_clock.sql"
     ).read_text(encoding="utf-8")
@@ -677,7 +677,7 @@ def test_stage3_migration_has_fenced_advance_and_append_only_receipt() -> None:
         assert f"REVOKE ALL ON FUNCTION {name}(" in body
 
 
-def test_stage4_migration_has_induction_delivery_and_reconciliation_authority() -> None:
+def test_effect_migration_has_induction_delivery_and_reconciliation_authority() -> None:
     body = Path(
         "sleepagent/persistence/migrations/005_stage4_induction_delivery_reconciliation.sql"
     ).read_text(encoding="utf-8")
@@ -750,11 +750,11 @@ def test_stage4_migration_has_induction_delivery_and_reconciliation_authority() 
         'sql.Identifier("public", "backend_induction_manifests_v2")'
         in role_bootstrap
     )
-    assert '"sleepagent_stage4_delivery_authority_allows(text)"' in role_bootstrap
+    assert 'f"{DELIVERY_AUTHORITY_FUNCTION}(text)"' in role_bootstrap
     assert '"sleepagent_internal_reconciliation_status(text)"' in role_bootstrap
 
 
-def test_stage5_migration_has_bounded_shred_and_durable_reset_protocol() -> None:
+def test_retention_migration_has_bounded_shred_and_durable_reset_protocol() -> None:
     body = Path(
         "sleepagent/persistence/migrations/006_stage5_bounded_retention_and_reset.sql"
     ).read_text(encoding="utf-8")

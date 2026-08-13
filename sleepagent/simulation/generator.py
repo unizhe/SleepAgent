@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Deterministic canonical observation generation from strict replay recipes."""
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from sleepagent.simulation.contracts import (
     ReplayScenario,
     VendorAlertOverlay,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AlertLifecycleState,
     AlertSeverity,

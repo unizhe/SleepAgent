@@ -2210,7 +2210,7 @@
         "title": "TrendPoint",
         "type": "object"
       },
-      "sleepagent__product_api__contracts__AcceptedOperationResponse": {
+      "sleepagent__api__product_contracts__AcceptedOperationResponse": {
         "additionalProperties": false,
         "properties": {
           "data_mode": {
@@ -2257,7 +2257,7 @@
         "title": "AcceptedOperationResponse",
         "type": "object"
       },
-      "sleepagent__product_api__contracts__ErrorResponse": {
+      "sleepagent__api__product_contracts__ErrorResponse": {
         "additionalProperties": false,
         "properties": {
           "code": {
@@ -2314,7 +2314,7 @@
         "title": "ErrorResponse",
         "type": "object"
       },
-      "sleepagent__product_api__contracts__FeedbackRequest": {
+      "sleepagent__api__product_contracts__FeedbackRequest": {
         "additionalProperties": false,
         "properties": {
           "episode_revision_id": {
@@ -2360,7 +2360,7 @@
         "title": "FeedbackRequest",
         "type": "object"
       },
-      "sleepagent__sleep_api__contracts__AcceptedOperationResponse": {
+      "sleepagent__api__public_contracts__AcceptedOperationResponse": {
         "additionalProperties": false,
         "properties": {
           "correlation_id": {
@@ -2402,7 +2402,7 @@
         "title": "AcceptedOperationResponse",
         "type": "object"
       },
-      "sleepagent__sleep_api__contracts__ErrorResponse": {
+      "sleepagent__api__public_contracts__ErrorResponse": {
         "additionalProperties": false,
         "properties": {
           "code": {
@@ -2457,7 +2457,7 @@
         "title": "ErrorResponse",
         "type": "object"
       },
-      "sleepagent__sleep_api__contracts__FeedbackRequest": {
+      "sleepagent__api__public_contracts__FeedbackRequest": {
         "additionalProperties": false,
         "properties": {
           "event_at": {
@@ -2560,7 +2560,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2570,7 +2570,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2580,7 +2580,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2590,7 +2590,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2600,7 +2600,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2610,7 +2610,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2620,7 +2620,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2700,7 +2700,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2710,7 +2710,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2720,7 +2720,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2730,7 +2730,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2740,7 +2740,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2750,7 +2750,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2760,7 +2760,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2808,7 +2808,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__FeedbackRequest"
+                "$ref": "#/components/schemas/sleepagent__api__public_contracts__FeedbackRequest"
               }
             }
           },
@@ -2819,7 +2819,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -2829,7 +2829,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2839,7 +2839,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2849,7 +2849,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2859,7 +2859,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2869,7 +2869,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2879,7 +2879,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2889,7 +2889,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2937,7 +2937,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__FeedbackRequest"
+                "$ref": "#/components/schemas/sleepagent__api__public_contracts__FeedbackRequest"
               }
             }
           },
@@ -2948,7 +2948,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -2958,7 +2958,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2968,7 +2968,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2978,7 +2978,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2988,7 +2988,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -2998,7 +2998,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3008,7 +3008,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3018,7 +3018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3068,7 +3068,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3078,7 +3078,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3088,7 +3088,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3098,7 +3098,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3108,7 +3108,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3118,7 +3118,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3128,7 +3128,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3187,7 +3187,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -3197,7 +3197,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3207,7 +3207,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3217,7 +3217,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3227,7 +3227,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3237,7 +3237,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3247,7 +3247,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3257,7 +3257,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3316,7 +3316,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -3326,7 +3326,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3336,7 +3336,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3346,7 +3346,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3356,7 +3356,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3366,7 +3366,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3376,7 +3376,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3386,7 +3386,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3466,7 +3466,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3476,7 +3476,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3486,7 +3486,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3496,7 +3496,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3506,7 +3506,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3516,7 +3516,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3526,7 +3526,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3603,7 +3603,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3613,7 +3613,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3623,7 +3623,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3633,7 +3633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3643,7 +3643,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3653,7 +3653,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3663,7 +3663,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3731,7 +3731,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -3741,7 +3741,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3751,7 +3751,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3761,7 +3761,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3771,7 +3771,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3781,7 +3781,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3791,7 +3791,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3801,7 +3801,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3878,7 +3878,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3888,7 +3888,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3898,7 +3898,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3908,7 +3908,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3918,7 +3918,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3928,7 +3928,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3938,7 +3938,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3988,7 +3988,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -3998,7 +3998,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4008,7 +4008,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4018,7 +4018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4028,7 +4028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4038,7 +4038,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4048,7 +4048,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__sleep_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__public_contracts__ErrorResponse"
                 }
               }
             },
@@ -4118,7 +4118,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4128,7 +4128,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4138,7 +4138,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4148,7 +4148,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4158,7 +4158,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4168,7 +4168,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4178,7 +4178,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4188,7 +4188,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4198,7 +4198,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4229,7 +4229,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/sleepagent__product_api__contracts__FeedbackRequest"
+                "$ref": "#/components/schemas/sleepagent__api__product_contracts__FeedbackRequest"
               }
             }
           },
@@ -4240,7 +4240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -4250,7 +4250,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4260,7 +4260,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4270,7 +4270,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4280,7 +4280,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4290,7 +4290,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4300,7 +4300,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4310,7 +4310,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4320,7 +4320,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4330,7 +4330,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4372,7 +4372,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -4382,7 +4382,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4392,7 +4392,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4402,7 +4402,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4412,7 +4412,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4422,7 +4422,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4432,7 +4432,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4442,7 +4442,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4452,7 +4452,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4462,7 +4462,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4504,7 +4504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4514,7 +4514,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4524,7 +4524,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4534,7 +4534,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4544,7 +4544,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4554,7 +4554,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4564,7 +4564,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4574,7 +4574,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4584,7 +4584,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4635,7 +4635,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -4645,7 +4645,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4655,7 +4655,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4665,7 +4665,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4675,7 +4675,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4685,7 +4685,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4695,7 +4695,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4705,7 +4705,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4715,7 +4715,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4725,7 +4725,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4776,7 +4776,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -4786,7 +4786,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4796,7 +4796,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4806,7 +4806,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4816,7 +4816,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4826,7 +4826,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4836,7 +4836,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4846,7 +4846,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4856,7 +4856,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4866,7 +4866,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4917,7 +4917,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -4927,7 +4927,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4937,7 +4937,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4947,7 +4947,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4957,7 +4957,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4967,7 +4967,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4977,7 +4977,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4987,7 +4987,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -4997,7 +4997,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5007,7 +5007,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5058,7 +5058,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__AcceptedOperationResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__AcceptedOperationResponse"
                 }
               }
             },
@@ -5068,7 +5068,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5078,7 +5078,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5088,7 +5088,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5098,7 +5098,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5108,7 +5108,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5118,7 +5118,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5128,7 +5128,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5138,7 +5138,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5148,7 +5148,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5210,7 +5210,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5220,7 +5220,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5230,7 +5230,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5240,7 +5240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5250,7 +5250,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5260,7 +5260,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5270,7 +5270,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5280,7 +5280,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5290,7 +5290,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5338,7 +5338,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5348,7 +5348,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5358,7 +5358,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5368,7 +5368,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5378,7 +5378,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5388,7 +5388,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5398,7 +5398,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5408,7 +5408,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5418,7 +5418,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5480,7 +5480,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5490,7 +5490,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5500,7 +5500,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5510,7 +5510,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5520,7 +5520,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5530,7 +5530,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5540,7 +5540,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5550,7 +5550,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },
@@ -5560,7 +5560,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/sleepagent__product_api__contracts__ErrorResponse"
+                  "$ref": "#/components/schemas/sleepagent__api__product_contracts__ErrorResponse"
                 }
               }
             },

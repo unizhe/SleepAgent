@@ -161,9 +161,11 @@ class FileEventStateStore:
         if not self.path.exists():
             return {"schema_version": "sleep_client_state.v1", "subjects": {}}
         value = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("reference-client state must be an object")
         if value.get("schema_version") != "sleep_client_state.v1":
             raise ValueError("unsupported reference-client state schema")
-        return value
+        return dict(value)
 
     def save(self, state: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

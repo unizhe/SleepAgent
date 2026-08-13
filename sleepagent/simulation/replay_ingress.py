@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Versioned boundary from generated replay facts to PostgreSQL intake.
 
 The canonical generator is design input, not database authority.  This module
@@ -21,7 +22,7 @@ from sleepagent.simulation.contracts import (
     ReplayScenario,
     SimulationContract,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AvailabilityState,
     CalibrationValue,
@@ -32,7 +33,7 @@ from sleepagent.sleep_domain.contracts import (
     ObservationType,
     SourceKind,
 )
-from sleepagent.sleep_domain.postgres_slice import ReplayObservationInput
+from sleepagent.domain.postgres_slice import ReplayObservationInput
 
 
 ADAPTER_VERSION: Final = "replay_external_fact_adapter.v1"

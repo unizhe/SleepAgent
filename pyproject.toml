@@ -33,19 +33,17 @@ dev = [
 ]
 
 [project.scripts]
-real-perceptor-acceptance = "sleepagent.integrations.perceptor.acceptance_cli:main"
-sleepagent-demo = "sleepagent.demo_cli:main"
+sleepagent-demo = "sleepagent.simulation.cli:main"
 sleepagent-migrate = "sleepagent.persistence.migrate:main"
 
 [tool.setuptools.packages.find]
-include = ["backend*", "sleepagent*", "reference_client*"]
+include = ["sleepagent*", "reference_client*"]
 
 [tool.setuptools.package-data]
 "sleepagent.simulation" = ["replay_seed_registry.json"]
 "sleepagent.persistence" = [
     "migration_manifest.json",
     "migrations/*.sql",
-    "sqlite_schema.sql",
 ]
 "sleepagent.simulation.fixtures" = [
     "README.md",

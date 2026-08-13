@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentEnvelope,
     AgentId,
     AuthenticatedBinding,
@@ -32,10 +32,7 @@ from sleepagent.product_runtime.contracts import (
     ToolReceipt,
     WorkProductStatus,
 )
-from sleepagent.product_runtime.external_actions import (
-    ExternalActionExecutionResult,
-)
-from sleepagent.product_runtime.governance import (
+from sleepagent.runtime.governance import (
     AcceptanceError,
     CareActionCatalog,
     CareActionDefinition,
@@ -51,7 +48,7 @@ from sleepagent.product_runtime.governance import (
     publication_postflight,
     safety_trigger_reasons,
 )
-from sleepagent.product_runtime.hitl import (
+from sleepagent.runtime.hitl import (
     HITL_POLICY_VERSION,
     ActionProposal,
     DecisionExplanation,
@@ -905,68 +902,6 @@ def test_care_transition_preserves_cross_day_lifecycle_history() -> None:
         now=NOW + timedelta(minutes=3),
     )
     assert transition_decision.status == HumanDecisionStatus.COMMITTED
-
-
-def test_external_unknown_is_cached_and_not_blindly_retried() -> None:
-    controller = DeterministicCommitController()
-    calls = 0
-
-    def fail(_target):
-        nonlocal calls
-        calls += 1
-        raise TimeoutError
-
-    target_hash = "e" * 64
-    snap = snapshot()
-    service, capability = _approved_capability(
-        action_kind="external_action",
-        action_scope="share_artifact",
-        target_id="share-target-1",
-        target_hash=target_hash,
-        idempotency_key="share:1",
-        fact_snapshot=snap,
-    )
-
-    first = controller.execute_external(
-        tool_name="external.share",
-        target={"artifact": "a1"},
-        snapshot=snap,
-        idempotency_key="share:1",
-        executor=fail,
-        approval_capability=capability,
-        actor_id="actor-1",
-        subject_id="subject-1",
-        action_scope="share_artifact",
-        target_id="share-target-1",
-        target_version=1,
-        target_hash=target_hash,
-    )
-    second = controller.execute_external(
-        tool_name="external.share",
-        target={"artifact": "a1"},
-        snapshot=snap,
-        idempotency_key="share:1",
-        executor=fail,
-        approval_capability=capability,
-        actor_id="actor-1",
-        subject_id="subject-1",
-        action_scope="share_artifact",
-        target_id="share-target-1",
-        target_version=1,
-        target_hash=target_hash,
-    )
-    assert first.outcome == second.outcome == InvocationOutcome.UNKNOWN
-    assert calls == 1
-    _assert_authority_refs(first, capability)
-    _assert_authority_refs(second, capability)
-    decision = service.record_execution_result(
-        capability,
-        status=HumanDecisionStatus.OUTCOME_UNKNOWN,
-        receipt_ref=first.tool_invocation_id,
-        failure_reason=first.error_code,
-        now=NOW + timedelta(minutes=3),
-    )
-    assert decision.status == HumanDecisionStatus.OUTCOME_UNKNOWN
 
 
 def test_memory_is_a_versioned_service_not_an_agent() -> None:

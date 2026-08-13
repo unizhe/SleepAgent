@@ -1,3 +1,4 @@
+# 本模块负责 PostgreSQL 持久化边界与完整性校验，不提供内存或 SQLite 旁路。
 """Explicit test-only PostgreSQL role, grant, and replay seed bootstrap."""
 
 from __future__ import annotations

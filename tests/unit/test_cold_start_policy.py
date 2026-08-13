@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from sleepagent.product_runtime.cold_start import (
+from sleepagent.runtime.cold_start import (
     FIXTURE_BASELINE_POLICY_VERSION,
     BaselineMaturity,
     CanonicalMetricNight,
@@ -14,6 +14,7 @@ from sleepagent.product_runtime.cold_start import (
     ColdStartReason,
     MeasurementCohort,
     MetricReadinessDecision,
+    ObjectiveBaselineArtifact,
     ResponseMode,
     build_unavailable_entry_decisions,
     degraded_boundary_sentence,
@@ -24,7 +25,7 @@ from sleepagent.product_runtime.cold_start import (
     resolve_claim_requirement,
     snapshot_binding_material,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentEnvelope,
     AgentId,
     AuthenticatedBinding,
@@ -38,18 +39,13 @@ from sleepagent.product_runtime.contracts import (
     SourceScopeKind,
     WorkProductStatus,
 )
-from sleepagent.product_runtime.governance import (
+from sleepagent.runtime.governance import (
     AcceptanceError,
     PublicationError,
     accept_evidence,
     build_cold_start_receipt,
     publication_postflight,
 )
-from sleepagent.product_runtime.habit_profile import (
-    ObjectiveBaselineArtifact,
-)
-
-
 NOW = datetime(2026, 7, 30, 8, 0, tzinfo=timezone.utc)
 
 
