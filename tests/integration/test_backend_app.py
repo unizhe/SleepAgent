@@ -38,6 +38,7 @@ from sleepagent.config import (
 from sleepagent.api.demo import (
     DemoAcceptedResponse,
     DemoApiError,
+    DemoTechnicalTraceResponse,
     DemoTraceResponse,
     ScenarioClockResponse,
 )
@@ -161,6 +162,42 @@ class Demo:
     def trace(self, *, operation_id, cursor, limit):
         del operation_id, cursor, limit
         return DemoTraceResponse(generation=1, entries=())
+
+    def technical_trace(self, *, operation_id):
+        return DemoTechnicalTraceResponse(
+            root_operation_id=operation_id,
+            namespace_generation=1,
+            run_id="run-test",
+            arm_id="arm-test",
+            subject_id="subject-test",
+            journey_state="succeeded",
+            product_operation_count=1,
+            product_attempt_count=1,
+            fast_path_succeeded_count=1,
+        )
+
+
+def test_demo_technical_trace_accepts_postgres_json_array_shapes() -> None:
+    response = DemoTechnicalTraceResponse.model_validate(
+        {
+            "root_operation_id": "root-op",
+            "namespace_generation": 1,
+            "run_id": "run-test",
+            "arm_id": "arm-test",
+            "subject_id": "subject-test",
+            "journey_state": "succeeded",
+            "product_operation_count": 1,
+            "product_attempt_count": 1,
+            "fast_path_succeeded_count": 1,
+            "product_attempts": [{"attempt_state": "committed"}],
+            "durable_invocations": [],
+            "habit_revisions": [],
+            "memory_revisions": [],
+            "memory_read_receipts": [],
+        }
+    )
+
+    assert response.product_attempts == [{"attempt_state": "committed"}]
 
 
 class InternalStatus:
@@ -700,6 +737,24 @@ def test_demo_is_token_protected_and_watermarked() -> None:
     assert denied.value.status_code == 401
     assert allowed.data_mode == "replay"
     assert allowed.synthetic_non_release is True
+
+
+def test_demo_technical_trace_is_token_protected_and_read_only() -> None:
+    runtime, _, _ = _runtime(surfaces=frozenset({ApiSurface.DEMO}))
+    app = create_sleep_backend_app(runtime)
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", None) == "/demo/v1/technical-trace"
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        route.endpoint(operation_id="root-1", demo_token=None)
+    allowed = route.endpoint(operation_id="root-1", demo_token=DEMO_TOKEN)
+
+    assert denied.value.status_code == 401
+    assert allowed.root_operation_id == "root-1"
+    assert allowed.product_attempt_count == 1
 
 
 def test_demo_and_product_errors_are_flat_correlated_watermarked_envelopes() -> None:

@@ -1492,8 +1492,14 @@ def test_product_worker_pins_and_consumes_durable_l2_personalization() -> None:
             receipt_ids = [
                 item["receipt_id"] for item in pinned["memory_read_receipts"]
             ]
+            handle_ids = [
+                handle["handle_id"]
+                for receipt in pinned["memory_read_receipts"]
+                for handle in receipt["handles"]
+            ]
             assert snapshot["memory_read_receipt_refs"] == receipt_ids
             assert expected_habit.fact_id in snapshot["source_refs"]
+            assert set(handle_ids).issubset(snapshot["source_refs"])
             care_receipt = next(
                 item
                 for item in pinned["memory_read_receipts"]

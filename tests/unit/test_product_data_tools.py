@@ -190,6 +190,77 @@ def test_product_night_evidence_projects_large_provenance_to_bounded_summary() -
     assert "canonical_observations" not in result.receipt.output["data"]
 
 
+def test_product_night_evidence_includes_deterministic_sleep_and_bed_exit_summary() -> None:
+    facts = _product_facts().model_copy(
+        update={
+            "canonical_observations": (
+                {
+                    "measurement_at": "2026-07-09T22:30:00+08:00",
+                    "payload": {
+                        "observation_type": "sleep_stage_interval",
+                        "stage": "light",
+                        "start_at": "2026-07-09T22:30:00+08:00",
+                        "end_at": "2026-07-10T02:00:00+08:00",
+                    },
+                },
+                {
+                    "measurement_at": "2026-07-10T02:00:00+08:00",
+                    "payload": {
+                        "observation_type": "bed_exit",
+                        "kind": "bed_exit",
+                    },
+                },
+                {
+                    "measurement_at": "2026-07-10T02:05:00+08:00",
+                    "payload": {
+                        "observation_type": "bed_exit",
+                        "kind": "return_to_bed",
+                    },
+                },
+                {
+                    "measurement_at": "2026-07-10T02:05:00+08:00",
+                    "payload": {
+                        "observation_type": "sleep_stage_interval",
+                        "stage": "light",
+                        "start_at": "2026-07-10T02:05:00+08:00",
+                        "end_at": "2026-07-10T06:30:00+08:00",
+                    },
+                },
+                {
+                    "measurement_at": "2026-07-10T03:00:00+08:00",
+                    "payload": {
+                        "observation_type": "heart_rate",
+                        "value": 62.0,
+                    },
+                },
+                {
+                    "measurement_at": "2026-07-10T03:00:00+08:00",
+                    "payload": {
+                        "observation_type": "respiratory_rate",
+                        "value": 14.0,
+                    },
+                },
+            )
+        }
+    )
+
+    summary = facts.agent_night_evidence()["deterministic_night_summary"]
+
+    assert summary["sleep_window_minutes"] == 480.0
+    assert summary["stage_minutes"] == {"light": 475.0}
+    assert summary["vital_centers"]["heart_rate"] == 62.0
+    assert summary["vital_centers"]["respiratory_rate"] == 14.0
+    assert summary["bed_exit_count"] == 1
+    assert summary["bed_exit_events"] == [
+        {
+            "left_bed_at": "2026-07-10T02:00:00+08:00",
+            "local_time": "02:00",
+            "returned_at": "2026-07-10T02:05:00+08:00",
+            "duration_minutes": 5.0,
+        }
+    ]
+
+
 def test_agent_cannot_promote_caller_supplied_generic_radar_payload() -> None:
     result = ProductToolExecutor(
         core_service=CoreProductToolService()

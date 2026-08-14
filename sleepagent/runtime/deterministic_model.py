@@ -310,7 +310,7 @@ class DeterministicReplayStructuredAgentModel:
             facts = habit.get("facts")
             if isinstance(facts, list) and facts:
                 fact = facts[0]
-                if isinstance(fact, dict) and fact.get("fact_id"):
+                if isinstance(fact, dict) and fact.get("fact_ref"):
                     value = str(fact.get("value") or "未提供")
                     concept_id = str(fact.get("concept_id") or "personal_baseline")
                     claims.append(
@@ -318,7 +318,7 @@ class DeterministicReplayStructuredAgentModel:
                             claim_id=_stable_id(
                                 "habit-context-claim",
                                 packet,
-                                str(fact["fact_id"]),
+                                str(fact["fact_ref"]),
                             ),
                             semantic=EvidenceSemantic.USER_REPORTED,
                             statement=(
@@ -326,7 +326,7 @@ class DeterministicReplayStructuredAgentModel:
                                 "该信息只用于个体上下文，不代表临床正常或诊断结论。"
                             ),
                             source_kind=EvidenceSourceKind.CONFIRMED_HABIT,
-                            evidence_refs=[str(fact["fact_id"])],
+                            evidence_refs=[str(fact["fact_ref"])],
                             confidence=1,
                             date_start=packet.source_scope.date_start,
                             date_end=packet.source_scope.date_end,

@@ -188,6 +188,15 @@ class ProductEpisodeRunRequest(StrictContract):
                 raise ValueError(
                     "pinned Habit facts must be bound as FactSnapshot sources"
                 )
+            memory_handle_refs = {
+                handle.handle_id
+                for receipt in pinned.memory_read_receipts
+                for handle in receipt.handles
+            }
+            if not memory_handle_refs.issubset(self.fact_snapshot.source_refs):
+                raise ValueError(
+                    "pinned Memory handles must be bound as FactSnapshot sources"
+                )
         if self.doctor_material:
             if self.audience_role not in {None, "doctor"}:
                 raise ValueError(

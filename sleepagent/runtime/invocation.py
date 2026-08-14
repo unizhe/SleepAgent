@@ -301,6 +301,11 @@ class ProductAgentInvoker:
             provider=self.model.provider,
             model_id=self.model.model_id,
             provider_request_id=getattr(self.model, "last_provider_request_id", None),
+            provider_input_tokens=getattr(
+                self.model,
+                "last_provider_input_tokens",
+                None,
+            ),
             started_at=started,
             ended_at=ended,
             latency_ms=max(0, int((ended - started).total_seconds() * 1000)),

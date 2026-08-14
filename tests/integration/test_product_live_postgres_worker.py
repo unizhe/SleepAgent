@@ -123,6 +123,17 @@ def _structured_replay_responder(
     assert isinstance(body, Mapping)
     messages = body.get("messages")
     assert isinstance(messages, list) and len(messages) >= 2
+    prompt_json = json.dumps(messages, ensure_ascii=False)
+    assert all(
+        scenario_name not in prompt_json
+        for scenario_name in (
+            "normal-one-night",
+            "habit-baseline-night-exit",
+            "worsening-vital-trend",
+            "habit-family-report",
+            "urgent-zero-model",
+        )
+    )
     instruction = messages[0]
     assert isinstance(instruction, Mapping)
     instruction_content = instruction.get("content")

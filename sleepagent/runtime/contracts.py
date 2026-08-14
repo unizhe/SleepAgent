@@ -769,6 +769,24 @@ class CommunicationSemanticBinding(StrictContract):
     rendered_text: str = Field(..., min_length=1, max_length=1600)
     preserved_numbers: list[str] = Field(default_factory=list, max_length=20)
 
+    @model_validator(mode="after")
+    def canonicalize_preserved_numbers(self) -> "CommunicationSemanticBinding":
+        # Numeric tokenization is deterministic provenance metadata, not an LLM
+        # judgment. Governance still checks every token against the bound source.
+        object.__setattr__(
+            self,
+            "preserved_numbers",
+            sorted(
+                set(
+                    re.findall(
+                        r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?",
+                        self.rendered_text,
+                    )
+                )
+            ),
+        )
+        return self
+
 
 class CommunicationDraft(StrictContract):
     draft_id: str = Field(..., min_length=1)
@@ -784,6 +802,44 @@ class CommunicationDraft(StrictContract):
     )
     context_notice: str = Field(..., min_length=1, max_length=500)
     artifact_kind: str | None = None
+
+    @model_validator(mode="after")
+    def require_rendered_semantic_bindings(self) -> "CommunicationDraft":
+        if any(
+            binding.rendered_text not in self.text
+            for binding in self.semantic_bindings
+        ):
+            raise ValueError(
+                "every semantic binding rendered_text must be an exact substring "
+                "of Communication text"
+            )
+        bound_numbers: set[str] = set()
+        for binding in self.semantic_bindings:
+            rendered_numbers = set(
+                re.findall(
+                    r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?",
+                    binding.rendered_text,
+                )
+            )
+            if set(binding.preserved_numbers) != rendered_numbers:
+                raise ValueError(
+                    "every semantic binding preserved_numbers must enumerate "
+                    "exactly the numbers in rendered_text"
+                )
+            bound_numbers.update(rendered_numbers)
+        text_numbers = set(
+            re.findall(
+                r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?",
+                self.text,
+            )
+        )
+        unbound_numbers = sorted(text_numbers.difference(bound_numbers))
+        if unbound_numbers:
+            raise ValueError(
+                "every number in Communication text must be covered by a "
+                f"semantic binding; remove these unbound tokens: {unbound_numbers}"
+            )
+        return self
 
 
 class MemoryChangeCandidate(StrictContract):

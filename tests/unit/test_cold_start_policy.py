@@ -827,7 +827,7 @@ def test_degraded_copy_shows_evidence_boundary_without_internal_enums() -> None:
         capability_receipts=(capability(),),
     )
     text = degraded_boundary_sentence(decision)
-    assert "3 晚" in text
+    assert "少量夜晚" in text
     assert "稳定规律" in text
     assert "provisional" not in text
 

@@ -316,6 +316,38 @@
         "family": ["product:sleep:today:read", "product:sleep:trends:read", "product:sleep:care:read", "product:sleep:records:read", "product:sleep:interaction:write", "product:sleep:interaction:answer", "product:sleep:care:confirm", "product:sleep:feedback:write", "product:sleep:operation:read", "sleep:operation:read", "sleep:monitoring:write", "sleep:feedback:family", "sleep:reanalysis:write"],
         "doctor": ["product:sleep:today:read", "product:sleep:trends:read", "product:sleep:care:read", "product:sleep:records:read", "product:sleep:interaction:write", "product:sleep:interaction:answer", "product:sleep:operation:read", "sleep:operation:read", "sleep:reanalysis:write"]
       }
+    },
+    {
+      "seed_id": "canonical-replay-fixtures:habit-baseline-night-exit:v1",
+      "scenario_id": "habit-baseline-night-exit",
+      "scenario_sha256": "cf3d8ebc72c602e230dbbe6f65d9a389129863b5347f72a9ee2886d53a588ac7",
+      "generator_version": "canonical-replay-generator.v1",
+      "adapter_version": "replay_external_fact_adapter.v1",
+      "component_pins_sha256": "2c9e0367041aa732fec76cb615c4190a8b0af4b0da82f8c5316b93cc1a2f7e43",
+      "canonical_sequence_sha256": "833a3fb8a9b77836ceae5486a1ff228d6984929f86aabd5f327ff09f16561e1a",
+      "manifest_sha256": "ca00af496a2f1cd86e5017c830f5a67a0c3b31de3fa4a21b8282fdd23d786114",
+      "observation_count": 499,
+      "night_count": 1,
+      "first_received_at": "2026-03-22T22:25:05+08:00",
+      "last_received_at": "2026-03-23T06:35:00+08:00",
+      "namespace_id": "replay:habit-baseline-night-exit",
+      "subject_id": "synthetic-subject-habit-baseline-001",
+      "timezone_name": "Asia/Shanghai",
+      "provider_id": "canonical-replay-provider",
+      "provider_account_id": "synthetic-provider-account-habit-baseline-001",
+      "provider_device_id": "synthetic-device-native-habit-baseline-001",
+      "device_id": "synthetic-device-habit-baseline-001",
+      "device_binding_id": "synthetic-binding-habit-baseline-001",
+      "binding_version": 1,
+      "scenario_clock_start": "2026-03-22T20:00:00+08:00",
+      "model_version": "deterministic-product-model.v1",
+      "policy_sha256": "c0ee4ec0320ce39f927d71572a40e09f01a4488bd149360eabbbbb3a098b8619",
+      "actor_aliases": {"elder":"replay-elder-habit-baseline","family":"replay-family-habit-baseline","doctor":"replay-doctor-habit-baseline"},
+      "actor_scopes": {
+        "elder": ["product:sleep:today:read", "product:sleep:trends:read", "product:sleep:care:read", "product:sleep:records:read", "product:sleep:interaction:write", "product:sleep:interaction:answer", "product:sleep:care:confirm", "product:sleep:feedback:write", "product:sleep:operation:read", "sleep:episode:read", "sleep:operation:read", "sleep:monitoring:write", "sleep:feedback:self", "sleep:reanalysis:write"],
+        "family": ["product:sleep:today:read", "product:sleep:trends:read", "product:sleep:care:read", "product:sleep:records:read", "product:sleep:interaction:write", "product:sleep:interaction:answer", "product:sleep:care:confirm", "product:sleep:feedback:write", "product:sleep:operation:read", "sleep:operation:read", "sleep:monitoring:write", "sleep:feedback:family", "sleep:reanalysis:write"],
+        "doctor": ["product:sleep:today:read", "product:sleep:trends:read", "product:sleep:care:read", "product:sleep:records:read", "product:sleep:interaction:write", "product:sleep:interaction:answer", "product:sleep:operation:read", "sleep:operation:read", "sleep:reanalysis:write"]
+      }
     }
   ]
 }

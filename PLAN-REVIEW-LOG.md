@@ -93,3 +93,180 @@ relaxed.
   introduced.
 - All isolated API, Demo API, worker, and PostgreSQL processes were stopped.
 - GitHub remote write: none.
+
+## Act 3 — Build (P3)
+
+### Round 1 — Codex build
+
+Implemented the frozen P3 terminal Product demo work order from the referenced
+attachment. The existing single OpenAI-compatible Product provider now reuses
+the existing local DeepSeek environment names when the newer Product names are
+absent, records provider prompt-token evidence, and remains selectable through
+the existing Worker `live`/`deterministic` model mode. The unified CLI adds five
+Product stories, a product-first terminal renderer, exact Habit/Memory/HITL
+interactions, public reanalysis, and a replay-only read projection over existing
+durable Product attempts, Agent records, SkillLocks, Habit revisions, governed
+Memory revisions, and Memory ReadReceipts.
+
+The first focused pass found a demo test double that lacked the new read-only
+trace response, an urgent-story assumption that every root has a Product
+analysis, and a missing transactional marker on migration `010`. The smallest
+fixes completed the test double, made urgent selection explicitly empty, and
+restored the manifest-pinned transactional migration contract.
+
+### Round 2 — Codex build
+
+The adversarial story review added fail-closed product assertions: Cold Start
+must move Habit profile v0 to v1; Habit baseline must add a real
+`confirmed_habit` Evidence claim; worsening must durably invoke Evidence and
+Care; longitudinal personalization must preserve Episode A at Habit/Memory v1,
+Episode B at v2, retain both append-only revisions, expose the family dispute,
+and persist Memory ReadReceipts; urgent safety must retain zero Product attempts,
+zero Agent/Care invocations, and a succeeded deterministic fast path. The
+terminal view now displays the longitudinal v1/v2 pins and dispute explicitly.
+
+### Codex verification
+
+- Focused changed-scope regression: 88 passed, 3 deselected before the final
+  story assertions; final CLI/API/provider/data focused set: 60 passed.
+- Real loopback OpenAI-compatible provider tests: 8 passed.
+- Full non-PostgreSQL/non-ASGI-lifespan/non-e2e regression, rerun with local
+  loopback permission: 542 passed, 24 deselected.
+- Packaged narrow replay overlay: verified at 499 canonical observations and one
+  night; registry/scenario/manifest hashes match.
+- Migration discovery: 10 contiguous checksum-pinned migrations; migration
+  `010` is transactional and the `001` immutable baseline remains unchanged.
+- Real configured DeepSeek probe: HTTP 200, provider `openai-compatible`, model
+  `deepseek-v4-flash`, strict JSON result accepted, provider request ID present,
+  118 input tokens recorded. No credential was printed or persisted.
+- Python compilation and `git diff --check`: passed.
+- Mypy could not run because it is not installed in the available host Python.
+- Required real PostgreSQL/API/Worker demo proof is environment-blocked: Docker
+  is installed, but the current account cannot access `/var/run/docker.sock`;
+  passwordless sudo is unavailable, no PostgreSQL server is listening, and the
+  host Python lacks `psycopg`. The targeted PostgreSQL test therefore skipped for
+  missing `psycopg`. No in-memory substitute was used to claim process proof.
+- Diff review found no scenario name in Agent prompts (enforced in the live
+  Worker integration responder), no hard-coded Product conclusion, no mock
+  Product result, no new package, no generic verifier framework, no second LLM
+  router, no secret/config file change, and no GitHub remote write.
+
+Deviation: the code and live provider path are verified, but the five stories
+could not be executed against real PostgreSQL/API/Worker processes in this
+environment. Fix rounds used: 2 of 2. No commit was created.
+
+### Runtime continuation (supersedes the earlier environment-blocked note)
+
+A portable PostgreSQL 16 server and isolated host-side API/Demo API/durable
+Worker processes were subsequently brought up without Docker. Migrations
+`001–010` and the bounded test authority were applied. The configured live
+DeepSeek provider returned real OpenAI-compatible responses for the current
+structured runtime.
+
+- Demo 1 (`cold-start`) completed with 21 durable live-provider Agent
+  invocations and exact Habit v0 → v1 HITL.
+- Demo 2 (`habit-baseline`) completed with 37 durable live-provider Agent
+  invocations; the initial Evidence had no confirmed Habit, while reanalysis
+  consumed the exact `约 02:00` Habit baseline without promoting it to clinical
+  truth.
+- Demo 3 (`worsening-care`) completed four durable Product attempts with 64
+  live-provider Agent invocations, including real EvidenceReasoning and
+  CareStrategy calls. The durable advance released 1,490 staged facts exactly
+  once; the CLI resume guard prevented a second clock advance.
+- The full host suite passed after loopback permission was granted: 557 passed,
+  21 skipped. The changed-scope focused suite passed: 141 passed.
+
+Demo 4 and Demo 5 remain to be run after the environment explicitly approves
+reapplying the bounded local test bootstrap to the clean isolated database.
+No commit or GitHub remote write was performed.
+
+### Runtime continuation 2
+
+The bounded bootstrap was explicitly approved and completed only against local
+`sleepagent_replay_test` on `127.0.0.1:15433`. Schema `010`, three test
+principals, nine seed allowlist rows, the Demo 4/5 fixtures, and technical-trace
+function authority were verified before resuming from Demo 4; Demos 1–3 were not
+rerun.
+
+The first real Demo 4 attempt reached the configured live DeepSeek provider and
+exposed two narrow issues. Evidence instructions named a Habit entity `fact_id`
+instead of the ToolReceipt authority `fact_ref`, causing fail-closed acceptance;
+the repair prompt now names exact Habit `fact_ref` and Memory
+`retrieval_handle` references. The story also requested the family copy of a
+question after the elder answer had correctly activated the seven-day cooldown.
+It now obtains both actor-bound question receipts first, then preserves the
+required elder answer → Episode A → family answer → exact elder confirmation
+order without changing cooldown or HITL governance. Corresponding focused
+regression is green at 68 passed, and the urgent verifier now directly rejects
+any top-level durable provider invocation in addition to requiring zero Product
+attempts, zero Care, and a succeeded fast path.
+
+The failed Demo 4 generation was safely sealed with the public replay reset.
+That reset is intentionally irreversible: it raised authority epochs and the
+seed reservation function then returned `generation_fenced`, so the sealed
+namespace cannot be reseeded. Recreating the one isolated test database is now
+the only clean rerun path, but database deletion was not included in the
+bootstrap authorization and was refused by the execution safety boundary. Demo
+4, Demo 5, final reconciliation, and the conditional local completion commit
+therefore remain pending explicit authorization to recreate only
+`sleepagent_replay_test`. No remote write was performed.
+
+### Runtime continuation 3 — final P3 reconciliation
+
+The user explicitly authorized permanent drop/recreate of only the isolated
+`sleepagent_replay_test` database on `127.0.0.1:15433`, with no backup and no
+effect on any other database or service. The exact PostgreSQL target and data
+directory were verified before recreation. Migrations `001–010` were applied to
+the fresh database, and the bounded `sleepagent.persistence.test_bootstrap`
+restored the three test principals, nine replay seed reservations, actor-key
+authority, Demo 4/5 fixtures, grants, and the technical-trace function. Demos
+1–3 were not rerun.
+
+The earlier reset result is retained as a test-harness lifecycle limitation:
+reset advances replay generation from 1 to 2 and the authorization, privacy,
+and retrieval authority epochs from 1/1/1 to 2/2/2, while the fresh seed
+contract accepts only authority 1/1/1. A reset namespace therefore cannot be
+seeded again. P3 intentionally does not change either the authority epoch model
+or the seed contract to support reset-after-seed reuse.
+
+The resumed live Demo 4 exposed two further production-path defects, each fixed
+at the narrowest owning boundary. A family-originated proposal stored the
+family policy hash and epochs on an elder-confirmation handle, so exact elder
+confirmation failed when family and elder authorities differed. Pending L2
+handles now resolve and persist the designated elder confirmer's authoritative
+epochs and policy hash while retaining the family source actor/role in the
+proposal payload. Separately, migration `010` projected Habit evidence
+`actor_role`, but the durable evidence field is `role`; the trace projection and
+manifest checksum now use the correct field. Focused real PostgreSQL regression
+covered distinct elder/family policy hashes, and the fresh schema `010` trace
+was exercised by the completed demo.
+
+Live Demo 4 (`longitudinal-personalization`) passed against the real PostgreSQL
+database, canonical API and Demo API, durable Worker, and configured DeepSeek
+provider. Root operation `019fffe2-08c4-7e85-aaa6-27d9a1f406c3` completed three
+Product attempts and two succeeded fast paths. The durable trace recorded 44
+OpenAI-compatible `deepseek-v4-flash` Agent invocations with provider request
+IDs, prompt-token counts, latency, and SkillLocks. Habit revisions remained
+append-only at v1 elder (`通常不午睡`) and v2 family (`多数天午睡`), both with
+confirmation references. Governed Memory advanced from v1 to v2 with exact
+confirmation references. Episode A pinned Habit/Memory 1/1; Episode B pinned
+2/2, preserved the family dispute, changed the personalized evidence/context,
+and persisted 18 Memory ReadReceipts, including governed item reads in both
+episodes.
+
+Live-configured Demo 5 (`urgent-zero-model`) passed its authoritative verifier
+at root operation `019fffea-ecc3-7ac7-be57-7c41cf587c7b`. The deterministic
+urgent boundary persisted one succeeded fast-path operation and then terminated
+the replay journey with the expected `unexpected_urgent_route`. The durable
+trace proved Product attempts = 0, durable/provider LLM invocations = 0,
+CareStrategy invocations = 0, Memory ReadReceipts = 0, and fast-path succeeded =
+1. No Product Runtime or role projection was invoked.
+
+Final reconciliation retained the previously completed full-suite result of 557
+passed and 21 skipped and the focused 141 passed rather than rerunning them for
+form. The final changed-scope unit/API/foundation regression passed 192 tests;
+the focused live PostgreSQL cross-authority regression passed; the real Demo 4
+and Demo 5 verifiers passed; migration `010` was applied from a fresh database;
+and `git diff --check` passed. Diff review found no scenario-name routing in the
+runtime, no committed credential/private key, no second provider/router, no
+authority/seed lifecycle scope expansion, and no GitHub remote write.

@@ -35,11 +35,21 @@ from sleepagent.simulation.seed_registry import (
 
 
 MAX_RESPONSE_BYTES = 1_048_576
+TECHNICAL_TRACE_MAX_RESPONSE_BYTES = 16_777_216
 PRODUCT_DEMO_SCENARIOS = (
     "normal-one-night",
+    "habit-baseline-night-exit",
     "worsening-vital-trend",
+    "habit-family-report",
     "urgent-zero-model",
 )
+PRODUCT_DEMO_STORIES = {
+    "cold-start": "normal-one-night",
+    "habit-baseline": "habit-baseline-night-exit",
+    "worsening-care": "worsening-vital-trend",
+    "longitudinal-personalization": "habit-family-report",
+    "urgent-safety": "urgent-zero-model",
+}
 
 
 class DemoCliError(RuntimeError):
@@ -61,7 +71,13 @@ class DemoHttpClient:
         payload: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         query: Mapping[str, str] | None = None,
+        response_limit_bytes: int = MAX_RESPONSE_BYTES,
     ) -> dict[str, Any]:
+        if (
+            response_limit_bytes < 1
+            or response_limit_bytes > TECHNICAL_TRACE_MAX_RESPONSE_BYTES
+        ):
+            raise DemoCliError("backend response limit is outside the verifier boundary")
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         if query:
             url += "?" + urlencode(query)
@@ -84,10 +100,10 @@ class DemoHttpClient:
         request = Request(url, data=body, headers=headers, method=method)
         try:
             with self.opener(request, timeout=self.timeout_seconds) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                raw = response.read(response_limit_bytes + 1)
                 status = int(response.status)
         except HTTPError as exc:
-            raw = exc.read(MAX_RESPONSE_BYTES + 1)
+            raw = exc.read(response_limit_bytes + 1)
             raise DemoCliError(
                 f"backend returned HTTP {exc.code}: {_safe_error_code(raw)}"
             ) from exc
@@ -95,7 +111,7 @@ class DemoHttpClient:
             raise DemoCliError(
                 f"backend request failed: {type(exc).__name__}"
             ) from exc
-        if len(raw) > MAX_RESPONSE_BYTES:
+        if len(raw) > response_limit_bytes:
             raise DemoCliError("backend response exceeded verifier limit")
         if status < 200 or status >= 300:
             raise DemoCliError(f"backend returned HTTP {status}")
@@ -279,6 +295,167 @@ class ProductHttpClient:
             scope=(f"product:sleep:{kind}:read",),
             query=query,
             accepted_statuses=(200,),
+        )
+        return value
+
+    def habit_questions(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str,
+        episode_id: str,
+        concept_id: str,
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="POST",
+            path="/product/sleep/personalization/habit/questions",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("product:sleep:interaction:write",),
+            payload={
+                "episode_id": episode_id,
+                "candidate_concept_ids": [concept_id],
+                "remaining_episode_budget": 1,
+            },
+        )
+        return value
+
+    def habit_change(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="POST",
+            path="/product/sleep/personalization/habit/changes",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("product:sleep:interaction:write",),
+            payload=payload,
+        )
+        return value
+
+    def habit_profile(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str = "elder",
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="GET",
+            path="/product/sleep/personalization/habit",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("product:sleep:today:read",),
+        )
+        return value
+
+    def confirm_personalization(
+        self,
+        *,
+        capability: str,
+        actor_id: str,
+        subject_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if capability not in {"habit", "memory"}:
+            raise DemoCliError("unknown personalization capability")
+        value, _, _ = self.signed_json(
+            method="POST",
+            path=f"/product/sleep/personalization/{capability}/confirm",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role="elder",
+            scope=("product:sleep:care:confirm",),
+            payload=payload,
+        )
+        return value
+
+    def memory_change(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="POST",
+            path="/product/sleep/personalization/memory/changes",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role="elder",
+            scope=("product:sleep:interaction:write",),
+            payload=payload,
+        )
+        return value
+
+    def memory_query(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        concept_ids: Sequence[str],
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="POST",
+            path="/product/sleep/personalization/memory/query",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role="elder",
+            scope=("product:sleep:today:read",),
+            payload={"concept_ids": list(concept_ids)},
+        )
+        return value
+
+    def request_reanalysis(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str,
+        night_episode_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        path = (
+            f"/api/v1/subjects/{subject_id}/night-episodes/"
+            f"{night_episode_id}/reanalysis"
+        )
+        value, _, _ = self.signed_json(
+            method="POST",
+            path=path,
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("sleep:reanalysis:write",),
+            payload={"reason": reason},
+            idempotency_key=f"demo-reanalysis-{uuid4()}",
+            accepted_statuses=(202,),
+        )
+        return value
+
+    def operation(
+        self,
+        *,
+        actor_id: str,
+        subject_id: str,
+        role: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        value, _, _ = self.signed_json(
+            method="GET",
+            path=f"/api/v1/operations/{operation_id}",
+            actor_id=actor_id,
+            subject_id=subject_id,
+            role=role,
+            scope=("sleep:operation:read",),
         )
         return value
 
@@ -565,6 +742,7 @@ def show_product_demo(
     scenario_id: str,
     wait_seconds: float,
     include_trace: bool,
+    advance_nights: bool = True,
 ) -> dict[str, Any]:
     """Run one allowlisted Product demo using public HTTP surfaces only."""
 
@@ -622,31 +800,13 @@ def show_product_demo(
             raise DemoCliError("show seed result subject does not match replay registry")
 
     advance_operation: dict[str, Any] | None = None
-    if seed.night_count > 1:
-        advance_seconds = int(
-            (seed.last_received_at - seed.scenario_clock_start).total_seconds()
-        )
-        if advance_seconds < 1 or advance_seconds > 604_800:
-            raise DemoCliError("replay registry requires an invalid demo clock advance")
-        advance_accepted = demo_client.request(
-            "POST",
-            "/demo/v1/advance",
-            payload={"seconds": advance_seconds},
-            idempotency_key=f"show-advance-{scenario_id}-{uuid4()}",
-        )
-        _require_replay_watermark(advance_accepted)
-        advance_operation = _poll_product_demo_operation(
+    if seed.night_count > 1 and advance_nights:
+        advance_operation = _advance_product_demo_to_seed_target(
             demo_client,
-            operation_id=_required_public_text(
-                advance_accepted.get("operation_id"), "show advance Operation"
-            ),
+            seed=seed,
             wait_seconds=wait_seconds,
+            idempotency_prefix="show-advance",
         )
-        if advance_operation.get("state") != "succeeded":
-            raise DemoCliError(
-                "show clock advance ended as "
-                f"{advance_operation.get('state', 'unknown')}"
-            )
         _wait_for_product_demo_trends(
             product_client,
             seed=seed,
@@ -656,6 +816,14 @@ def show_product_demo(
     public = _read_product_demo_public_views(product_client, seed=seed)
     trace = (
         _read_product_demo_trace(demo_client, operation_id=operation_id)
+        if include_trace
+        else None
+    )
+    technical_trace = (
+        _read_product_demo_technical_trace(
+            demo_client,
+            operation_id=operation_id,
+        )
         if include_trace
         else None
     )
@@ -674,6 +842,7 @@ def show_product_demo(
         "advance_operation": advance_operation,
         "public": public,
         "trace": trace,
+        "technical_trace": technical_trace,
     }
 
 
@@ -879,10 +1048,814 @@ def _read_product_demo_trace(
     }
 
 
+def _read_product_demo_technical_trace(
+    client: DemoHttpClient | Any,
+    *,
+    operation_id: str,
+) -> dict[str, Any]:
+    value = client.request(
+        "GET",
+        "/demo/v1/technical-trace",
+        query={"operation_id": operation_id},
+        response_limit_bytes=TECHNICAL_TRACE_MAX_RESPONSE_BYTES,
+    )
+    _require_replay_watermark(value)
+    if (
+        value.get("schema_version") != "demo_technical_trace.v1"
+        or value.get("root_operation_id") != operation_id
+        or not isinstance(value.get("product_attempts"), list)
+        or not isinstance(value.get("durable_invocations"), list)
+        or not isinstance(value.get("habit_revisions"), list)
+        or not isinstance(value.get("memory_read_receipts"), list)
+    ):
+        raise DemoCliError("Demo technical trace violated its public contract")
+    return value
+
+
+def run_product_demo_story(
+    demo_client: DemoHttpClient | Any,
+    product_client: ProductHttpClient | Any,
+    *,
+    story_id: str,
+    model: str,
+    wait_seconds: float,
+    include_trace: bool,
+) -> dict[str, Any]:
+    """Drive one P3 story through canonical HTTP and durable state."""
+
+    scenario_id = PRODUCT_DEMO_STORIES.get(story_id)
+    if scenario_id is None:
+        raise DemoCliError(
+            "demo supports only " + ", ".join(PRODUCT_DEMO_STORIES)
+        )
+    if model not in {"deterministic", "live"}:
+        raise DemoCliError("demo model must be deterministic or live")
+    advance_nights = story_id not in {"longitudinal-personalization"}
+    value = show_product_demo(
+        demo_client,
+        product_client,
+        scenario_id=scenario_id,
+        wait_seconds=wait_seconds,
+        include_trace=False,
+        advance_nights=advance_nights,
+    )
+    seed = load_replay_seed_registry().lookup(
+        "canonical-replay-fixtures",
+        scenario_id,
+    )
+    root_operation = _mapping(value.get("root_operation"))
+    root_operation_id = _required_public_text(
+        root_operation.get("operation_id"),
+        "demo root Operation",
+    )
+    elder = seed.actor_aliases["elder"]
+    actions: dict[str, Any] = {}
+    selected_analysis_ids: list[str] = []
+
+    if story_id == "urgent-safety":
+        initial_analysis_id = ""
+        initial_episode_id = ""
+    else:
+        initial_today = _mapping(_mapping(value["public"])["today"]).get("elder")
+        initial_today = _mapping(initial_today)
+        initial_analysis_id = _required_public_text(
+            initial_today.get("analysis_revision_id"),
+            "initial analysis revision",
+        )
+        initial_episode_id = _required_public_text(
+            initial_today.get("episode_id"),
+            "initial NightEpisode",
+        )
+        selected_analysis_ids.append(initial_analysis_id)
+
+    if story_id == "cold-start":
+        before = product_client.habit_profile(
+            actor_id=elder,
+            subject_id=seed.subject_id,
+        )
+        change = _remember_habit(
+            product_client,
+            seed=seed,
+            source_role="elder",
+            episode_id=initial_episode_id,
+            concept_id="habit.primary_goal",
+            value="更规律",
+        )
+        after = product_client.habit_profile(
+            actor_id=elder,
+            subject_id=seed.subject_id,
+        )
+        if int(before.get("profile_version") or 0) != 0:
+            raise DemoCliError("cold-start story did not begin with an empty Habit profile")
+        if int(after.get("profile_version") or 0) != 1:
+            raise DemoCliError("cold-start story did not commit exact Habit revision v1")
+        actions = {
+            "cold_start_profile": before,
+            "habit_question": change["question"],
+            "habit_confirmation": change["confirmation"],
+            "confirmed_profile": after,
+        }
+    elif story_id == "habit-baseline":
+        baseline_trace = _read_product_demo_technical_trace(
+            demo_client,
+            operation_id=root_operation_id,
+        )
+        change = _remember_habit(
+            product_client,
+            seed=seed,
+            source_role="elder",
+            episode_id=initial_episode_id,
+            concept_id="habit.night_out_of_bed_time_window",
+            value="约 02:00",
+        )
+        reanalysis = _request_and_wait_for_reanalysis(
+            product_client,
+            seed=seed,
+            night_episode_id=initial_episode_id,
+            previous_analysis_id=initial_analysis_id,
+            wait_seconds=wait_seconds,
+            reason="Use the newly confirmed personal baseline.",
+        )
+        personalized_id = str(reanalysis["analysis_revision_id"])
+        selected_analysis_ids.append(personalized_id)
+        value["public"] = _read_product_demo_public_views(
+            product_client,
+            seed=seed,
+        )
+        actions = {
+            "baseline_analysis_id": initial_analysis_id,
+            "baseline_evidence": _evidence_for_analysis(
+                baseline_trace,
+                initial_analysis_id,
+            ),
+            "habit_question": change["question"],
+            "habit_confirmation": change["confirmation"],
+            "personalized_analysis_id": personalized_id,
+            "reanalysis_operation": reanalysis["operation"],
+        }
+    elif story_id == "longitudinal-personalization":
+        # Issue both actor-bound receipts before either answer is consumed. Once the
+        # elder answer is captured, the reviewed seven-day question cooldown must
+        # suppress a new request for the same concept, including from family.
+        family_selection = product_client.habit_questions(
+            actor_id=seed.actor_aliases["family"],
+            subject_id=seed.subject_id,
+            role="family",
+            episode_id=f"demo-habit:{initial_episode_id}:{uuid4()}",
+            concept_id="habit.nap_pattern",
+        )
+        habit_v1 = _remember_habit(
+            product_client,
+            seed=seed,
+            source_role="elder",
+            episode_id=initial_episode_id,
+            concept_id="habit.nap_pattern",
+            value="通常不午睡",
+        )
+        memory_v1 = _remember_memory(
+            product_client,
+            seed=seed,
+            memory_id="memory:demo-environment",
+            concept_id="sleep.context.environment",
+            memory_type="environment",
+            typed_value="quiet_room",
+            source_text="卧室通常很安静",
+            target=None,
+        )
+        episode_a = _request_and_wait_for_reanalysis(
+            product_client,
+            seed=seed,
+            night_episode_id=initial_episode_id,
+            previous_analysis_id=initial_analysis_id,
+            wait_seconds=wait_seconds,
+            reason="Bind confirmed Habit v1 and Memory v1.",
+        )
+        episode_a_analysis = str(episode_a["analysis_revision_id"])
+
+        family_report = _remember_habit(
+            product_client,
+            seed=seed,
+            source_role="family",
+            episode_id=initial_episode_id,
+            concept_id="habit.nap_pattern",
+            value="多数天午睡",
+            direct_observation=True,
+            prepared_selection=family_selection,
+        )
+        memory_v2 = _remember_memory(
+            product_client,
+            seed=seed,
+            memory_id="memory:demo-environment",
+            concept_id="sleep.context.environment",
+            memory_type="environment",
+            typed_value="soft_night_light",
+            source_text="最近改为保留柔和夜灯",
+            target=memory_v1["confirmation"],
+        )
+        profile_v2 = product_client.habit_profile(
+            actor_id=elder,
+            subject_id=seed.subject_id,
+        )
+        advance_operation = _advance_product_demo(
+            demo_client,
+            product_client,
+            seed=seed,
+            wait_seconds=wait_seconds,
+        )
+        episode_b_today = _wait_for_product_analysis_change(
+            product_client,
+            seed=seed,
+            previous_analysis_id=episode_a_analysis,
+            wait_seconds=wait_seconds,
+        )
+        episode_b_analysis = _required_public_text(
+            episode_b_today.get("analysis_revision_id"),
+            "Episode B analysis revision",
+        )
+        selected_analysis_ids = [episode_a_analysis, episode_b_analysis]
+        value["advance_operation"] = advance_operation
+        value["public"] = _read_product_demo_public_views(
+            product_client,
+            seed=seed,
+        )
+        actions = {
+            "habit_v1_confirmation": habit_v1["confirmation"],
+            "memory_v1_confirmation": memory_v1["confirmation"],
+            "episode_a_analysis_id": episode_a_analysis,
+            "family_report_question": family_report["question"],
+            "family_report_confirmation": family_report["confirmation"],
+            "habit_profile_after_family_report": profile_v2,
+            "memory_v2_confirmation": memory_v2["confirmation"],
+            "episode_b_analysis_id": episode_b_analysis,
+        }
+
+    technical_trace = _read_product_demo_technical_trace(
+        demo_client,
+        operation_id=root_operation_id,
+    )
+    if story_id == "worsening-care":
+        selected_analysis_ids = [
+            analysis_id
+            for attempt in _mapping_items(technical_trace.get("product_attempts"))
+            if (
+                analysis_id := str(
+                    _mapping(attempt.get("analysis")).get("analysis_revision_id")
+                    or ""
+                )
+            )
+        ]
+    selected_attempts = _attempts_for_analyses(
+        technical_trace,
+        selected_analysis_ids,
+    )
+    _verify_demo_model_evidence(
+        model=model,
+        story_id=story_id,
+        selected_attempts=selected_attempts,
+        technical_trace=technical_trace,
+    )
+    if story_id == "habit-baseline":
+        actions["personalized_evidence"] = _evidence_for_analysis(
+            technical_trace,
+            selected_analysis_ids[-1],
+        )
+        _verify_habit_baseline_impact(actions, technical_trace)
+    elif story_id == "worsening-care":
+        invoked_agents = {
+            str(item.get("agent_id")) for item in _agent_invocations(selected_attempts)
+        }
+        if not {"evidence_reasoning", "care_strategy"}.issubset(invoked_agents):
+            raise DemoCliError(
+                "worsening story did not durably invoke Evidence and Care strategy"
+            )
+    elif story_id == "longitudinal-personalization":
+        _verify_longitudinal_personalization_pins(
+            actions,
+            selected_attempts,
+            technical_trace,
+        )
+    value.update(
+        {
+            "schema_version": "terminal_product_demo.v2",
+            "story": {
+                "story_id": story_id,
+                "scenario_id": scenario_id,
+                "requested_model": model,
+                "selected_analysis_ids": selected_analysis_ids,
+            },
+            "actions": actions,
+            "technical_trace": technical_trace,
+            "trace": (
+                _read_product_demo_trace(
+                    demo_client,
+                    operation_id=root_operation_id,
+                )
+                if include_trace
+                else None
+            ),
+        }
+    )
+    return value
+
+
+def _remember_habit(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    source_role: str,
+    episode_id: str,
+    concept_id: str,
+    value: Any,
+    direct_observation: bool = False,
+    prepared_selection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    actor_id = seed.actor_aliases[source_role]
+    selection = (
+        dict(prepared_selection)
+        if prepared_selection is not None
+        else client.habit_questions(
+            actor_id=actor_id,
+            subject_id=seed.subject_id,
+            role=source_role,
+            episode_id=f"demo-habit:{episode_id}:{uuid4()}",
+            concept_id=concept_id,
+        )
+    )
+    questions = _mapping_items(selection.get("questions"))
+    selected = _mapping(selection.get("selection"))
+    selected_concepts = selected.get("selected_concepts")
+    if len(questions) != 1 or not isinstance(selected_concepts, list):
+        raise DemoCliError("Habit demo did not receive one exact question")
+    answer: dict[str, Any] = {
+        "concept_id": concept_id,
+        "concept_version": str(questions[0].get("concept_version") or "1.0.0"),
+        "disposition": "answered",
+        "value": value,
+    }
+    if direct_observation:
+        answer.update(
+            {
+                "direct_observation": True,
+                "observation_description": (
+                    "家属近期直接观察到该日常模式"
+                    if source_role == "family"
+                    else "本人近期直接观察到该日常模式"
+                ),
+                "observation_confidence": 0.9,
+            }
+        )
+    proposal = client.habit_change(
+        actor_id=actor_id,
+        subject_id=seed.subject_id,
+        role=source_role,
+        payload={
+            "selection_id": _required_public_text(
+                selected.get("selection_id"),
+                "Habit selection",
+            ),
+            "answers": [{"operation": "remember", "answer": answer}],
+            "confirmation_actor_id": seed.actor_aliases["elder"],
+        },
+    )
+    pending = _mapping_items(proposal.get("pending_changes"))
+    if len(pending) != 1:
+        raise DemoCliError("Habit demo did not create one exact pending change")
+    confirmation = client.confirm_personalization(
+        capability="habit",
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        payload=_exact_confirmation_payload(pending[0]),
+    )
+    return {
+        "question": questions[0],
+        "proposal": pending[0],
+        "confirmation": confirmation,
+    }
+
+
+def _remember_memory(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    memory_id: str,
+    concept_id: str,
+    memory_type: str,
+    typed_value: Any,
+    source_text: str,
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "operation": "remember" if target is None else "correct",
+        "memory_id": memory_id,
+        "concept_id": concept_id,
+        "memory_type": memory_type,
+        "value_schema_id": "bounded_string.v1",
+        "typed_value": typed_value,
+        "sensitivity_class": "personal",
+        "allowed_roles": ["sleep_care", "evidence_reasoning"],
+        "allowed_purposes": [
+            "personal_evidence_context",
+            "explicit_memory_review",
+        ],
+        "source_text": source_text,
+    }
+    if target is not None:
+        payload.update(
+            {
+                "target_revision_ref": target.get("revision_ref"),
+                "target_revision_hash": target.get("revision_hash"),
+            }
+        )
+    pending = client.memory_change(
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        payload=payload,
+    )
+    confirmation = client.confirm_personalization(
+        capability="memory",
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        payload=_exact_confirmation_payload(pending),
+    )
+    return {"proposal": pending, "confirmation": confirmation}
+
+
+def _exact_confirmation_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "change_id": _required_public_text(value.get("change_id"), "L2 change"),
+        "change_hash": _required_public_text(value.get("change_hash"), "L2 hash"),
+        "confirmation_handle": _required_public_text(
+            value.get("confirmation_handle"),
+            "L2 confirmation handle",
+        ),
+    }
+
+
+def _request_and_wait_for_reanalysis(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    night_episode_id: str,
+    previous_analysis_id: str,
+    wait_seconds: float,
+    reason: str,
+) -> dict[str, Any]:
+    accepted = client.request_reanalysis(
+        actor_id=seed.actor_aliases["elder"],
+        subject_id=seed.subject_id,
+        role="elder",
+        night_episode_id=night_episode_id,
+        reason=reason,
+    )
+    operation_id = _required_public_text(
+        accepted.get("operation_id"),
+        "reanalysis Operation",
+    )
+    deadline = time.monotonic() + wait_seconds
+    operation: dict[str, Any]
+    while True:
+        operation = client.operation(
+            actor_id=seed.actor_aliases["elder"],
+            subject_id=seed.subject_id,
+            role="elder",
+            operation_id=operation_id,
+        )
+        status = str(operation.get("status") or "")
+        if status == "succeeded":
+            break
+        if status in {"failed", "cancelled"}:
+            raise DemoCliError(f"reanalysis ended as {status}")
+        if time.monotonic() >= deadline:
+            raise DemoCliError("reanalysis Operation did not finish")
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+    today = _wait_for_product_analysis_change(
+        client,
+        seed=seed,
+        previous_analysis_id=previous_analysis_id,
+        wait_seconds=max(0.1, deadline - time.monotonic()),
+    )
+    return {
+        "operation": operation,
+        "analysis_revision_id": _required_public_text(
+            today.get("analysis_revision_id"),
+            "reanalyzed Product result",
+        ),
+    }
+
+
+def _wait_for_product_analysis_change(
+    client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    previous_analysis_id: str,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        today = client.today(
+            actor_id=seed.actor_aliases["elder"],
+            subject_id=seed.subject_id,
+            role="elder",
+        )
+        if (
+            today.get("state") in {"ready", "degraded"}
+            and today.get("analysis_revision_id") != previous_analysis_id
+        ):
+            return today
+        if time.monotonic() >= deadline:
+            raise DemoCliError("Product analysis did not publish a new revision")
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def _advance_product_demo(
+    demo_client: DemoHttpClient | Any,
+    product_client: ProductHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    wait_seconds: float,
+) -> dict[str, Any]:
+    operation = _advance_product_demo_to_seed_target(
+        demo_client,
+        seed=seed,
+        wait_seconds=wait_seconds,
+        idempotency_prefix="demo-advance",
+    )
+    _wait_for_product_demo_trends(
+        product_client,
+        seed=seed,
+        wait_seconds=wait_seconds,
+    )
+    return operation
+
+
+def _advance_product_demo_to_seed_target(
+    client: DemoHttpClient | Any,
+    *,
+    seed: ReplaySeedDefinition,
+    wait_seconds: float,
+    idempotency_prefix: str,
+) -> dict[str, Any]:
+    """Advance only the unconsumed interval so a timed-out demo can resume safely."""
+
+    clock = client.request("GET", "/demo/v1/clock")
+    _require_replay_watermark(clock)
+    raw_time = _required_public_text(
+        clock.get("scenario_time"),
+        "demo scenario clock",
+    )
+    try:
+        current_time = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DemoCliError("demo scenario clock is not an ISO-8601 timestamp") from exc
+    if current_time.tzinfo is None:
+        raise DemoCliError("demo scenario clock omitted its timezone offset")
+
+    target_time = seed.last_received_at
+    if current_time > target_time:
+        raise DemoCliError("demo scenario clock has already passed the seed target")
+    if current_time == target_time:
+        return {
+            "schema_version": "demo_advance_resume.v1",
+            "data_mode": "replay",
+            "synthetic_non_release": True,
+            "state": "succeeded",
+            "resumed": True,
+            "result": {
+                "generation": clock.get("generation"),
+                "scenario_time": raw_time,
+                "released_fact_count": 0,
+            },
+        }
+
+    seconds_float = (target_time - current_time).total_seconds()
+    seconds = int(seconds_float)
+    if seconds_float != seconds or seconds < 1 or seconds > 604_800:
+        raise DemoCliError("replay registry requires an invalid demo clock advance")
+    accepted = client.request(
+        "POST",
+        "/demo/v1/advance",
+        payload={"seconds": seconds},
+        idempotency_key=f"{idempotency_prefix}-{seed.scenario_id}-{uuid4()}",
+    )
+    _require_replay_watermark(accepted)
+    operation = _poll_product_demo_operation(
+        client,
+        operation_id=_required_public_text(
+            accepted.get("operation_id"),
+            "demo advance Operation",
+        ),
+        wait_seconds=wait_seconds,
+    )
+    if operation.get("state") != "succeeded":
+        raise DemoCliError(
+            "demo clock advance ended as "
+            f"{operation.get('state', 'unknown')}"
+        )
+    return operation
+
+
+def _attempts_for_analyses(
+    trace: Mapping[str, Any],
+    analysis_ids: Sequence[str],
+) -> list[Mapping[str, Any]]:
+    selected = set(analysis_ids)
+    return [
+        attempt
+        for attempt in _mapping_items(trace.get("product_attempts"))
+        if _mapping(attempt.get("analysis")).get("analysis_revision_id") in selected
+    ]
+
+
+def _evidence_for_analysis(
+    trace: Mapping[str, Any],
+    analysis_id: str,
+) -> list[Mapping[str, Any]]:
+    products: list[Mapping[str, Any]] = []
+    for attempt in _attempts_for_analyses(trace, [analysis_id]):
+        for role_run in _mapping_items(attempt.get("role_runs")):
+            for product in _mapping_items(role_run.get("accepted_work_products")):
+                if product.get("agent_id") == "evidence_reasoning":
+                    products.append(product)
+    return products
+
+
+def _agent_invocations(
+    attempts: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    return [
+        invocation
+        for attempt in attempts
+        for role_run in _mapping_items(attempt.get("role_runs"))
+        for invocation in _mapping_items(role_run.get("agent_invocations"))
+    ]
+
+
+def _verify_demo_model_evidence(
+    *,
+    model: str,
+    story_id: str,
+    selected_attempts: Sequence[Mapping[str, Any]],
+    technical_trace: Mapping[str, Any],
+) -> None:
+    invocations = _agent_invocations(selected_attempts)
+    if story_id == "urgent-safety":
+        durable_invocations = _mapping_items(
+            technical_trace.get("durable_invocations")
+        )
+        care_count = sum(
+            item.get("agent_id") == "care_strategy"
+            for item in (*invocations, *durable_invocations)
+        )
+        if any(
+            (
+                int(technical_trace.get("product_attempt_count") or 0) != 0,
+                invocations,
+                durable_invocations,
+                care_count != 0,
+                int(technical_trace.get("fast_path_succeeded_count") or 0) < 1,
+            )
+        ):
+            raise DemoCliError("urgent story violated the zero-model safety path")
+        return
+    if not selected_attempts or not invocations:
+        raise DemoCliError("demo has no durable Agent invocation evidence")
+    if model == "live":
+        if any(
+            item.get("provider") != "openai-compatible"
+            or not item.get("provider_request_id")
+            for item in invocations
+        ):
+            raise DemoCliError("live demo did not use the real configured provider")
+    elif any(
+        item.get("provider") != "sleepagent-deterministic-replay"
+        for item in invocations
+    ):
+        raise DemoCliError("deterministic demo used an unexpected model provider")
+
+
+def _verify_habit_baseline_impact(
+    actions: Mapping[str, Any],
+    technical_trace: Mapping[str, Any],
+) -> None:
+    baseline = _evidence_claims(actions.get("baseline_evidence"))
+    personalized = _evidence_claims(actions.get("personalized_evidence"))
+    if any(item.get("source_kind") == "confirmed_habit" for item in baseline):
+        raise DemoCliError("baseline analysis unexpectedly consumed a confirmed Habit")
+    if not any(item.get("source_kind") == "confirmed_habit" for item in personalized):
+        raise DemoCliError("confirmed Habit did not materially affect Evidence")
+    if len(_mapping_items(technical_trace.get("habit_revisions"))) != 1:
+        raise DemoCliError("habit-baseline story did not preserve exactly one Habit revision")
+
+
+def _verify_longitudinal_personalization_pins(
+    actions: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+    technical_trace: Mapping[str, Any],
+) -> None:
+    expected = {
+        str(actions.get("episode_a_analysis_id")): (1, 1),
+        str(actions.get("episode_b_analysis_id")): (2, 2),
+    }
+    observed: dict[str, set[tuple[int, int]]] = {}
+    for attempt in attempts:
+        analysis_id = str(_mapping(attempt.get("analysis")).get("analysis_revision_id"))
+        pins: set[tuple[int, int]] = set()
+        for role_run in _mapping_items(attempt.get("role_runs")):
+            personalization = _mapping(role_run.get("personalization"))
+            pins.add(
+                (
+                    int(personalization.get("habit_profile_version") or 0),
+                    int(personalization.get("memory_state_version") or 0),
+                )
+            )
+        observed[analysis_id] = pins
+    if any(observed.get(analysis_id) != {pins} for analysis_id, pins in expected.items()):
+        raise DemoCliError("Episode A/B did not remain pinned to L2 v1/v2 respectively")
+
+    personalized_claims: dict[str, set[tuple[str, str]]] = {}
+    attempt_episode_ids: dict[str, set[str]] = {}
+    for attempt in attempts:
+        analysis_id = str(_mapping(attempt.get("analysis")).get("analysis_revision_id"))
+        claims: set[tuple[str, str]] = set()
+        episode_ids: set[str] = set()
+        for role_run in _mapping_items(attempt.get("role_runs")):
+            product_episode_id = role_run.get("product_episode_id")
+            if isinstance(product_episode_id, str) and product_episode_id:
+                episode_ids.add(product_episode_id)
+            for product in _mapping_items(role_run.get("accepted_work_products")):
+                if product.get("agent_id") != "evidence_reasoning":
+                    continue
+                for claim in _mapping_items(_mapping(product.get("payload")).get("claims")):
+                    source_kind = str(claim.get("source_kind") or "")
+                    statement = str(claim.get("statement") or "")
+                    if source_kind in {"confirmed_habit", "confirmed_memory"}:
+                        claims.add((source_kind, statement))
+        personalized_claims[analysis_id] = claims
+        attempt_episode_ids[analysis_id] = episode_ids
+    required_sources = {"confirmed_habit", "confirmed_memory"}
+    if any(
+        {source for source, _ in personalized_claims.get(analysis_id, set())}
+        != required_sources
+        for analysis_id in expected
+    ):
+        raise DemoCliError(
+            "Episode A/B Evidence did not consume both confirmed Habit and Memory"
+        )
+    if (
+        personalized_claims.get(str(actions.get("episode_a_analysis_id")))
+        == personalized_claims.get(str(actions.get("episode_b_analysis_id")))
+    ):
+        raise DemoCliError(
+            "Habit/Memory v2 did not materially change personalized Evidence"
+        )
+
+    profile = _mapping(actions.get("habit_profile_after_family_report"))
+    disputed = profile.get("disputed_concept_ids")
+    if not isinstance(disputed, list) or "habit.nap_pattern" not in disputed:
+        raise DemoCliError("family direct report did not create a Habit dispute")
+    habit_revisions = _mapping_items(technical_trace.get("habit_revisions"))
+    if len(habit_revisions) != 2:
+        raise DemoCliError("longitudinal story did not retain both Habit revisions")
+    if [item.get("profile_version") for item in habit_revisions] != [1, 2]:
+        raise DemoCliError("longitudinal Habit revision order is not v1 then v2")
+    if [item.get("source_actor_role") for item in habit_revisions] != [
+        "elder",
+        "family",
+    ] or any(not item.get("confirmation_ref") for item in habit_revisions):
+        raise DemoCliError(
+            "family Habit revision did not retain source boundary and exact elder HITL"
+        )
+
+    memory_revisions = _mapping_items(technical_trace.get("memory_revisions"))
+    if len(memory_revisions) != 2:
+        raise DemoCliError("longitudinal story did not retain both Memory revisions")
+    if [item.get("state_version") for item in memory_revisions] != [1, 2] or any(
+        not item.get("confirmation_ref") for item in memory_revisions
+    ):
+        raise DemoCliError("longitudinal Memory did not retain exact v1/v2 HITL")
+
+    memory_receipts = _mapping_items(technical_trace.get("memory_read_receipts"))
+    receipt_episode_ids = {
+        str(item.get("product_episode_id"))
+        for item in memory_receipts
+        if item.get("product_episode_id")
+    }
+    if not memory_receipts or any(
+        not attempt_episode_ids.get(analysis_id, set()).intersection(
+            receipt_episode_ids
+        )
+        for analysis_id in expected
+    ):
+        raise DemoCliError("longitudinal story omitted governed Memory ReadReceipts")
+
+
 def render_product_demo(value: Mapping[str, Any]) -> str:
     """Render already-committed public DTOs without deriving Product decisions."""
 
     scenario = _mapping(value.get("scenario"))
+    story = _mapping(value.get("story"))
+    actions = _mapping(value.get("actions"))
+    technical = _mapping(value.get("technical_trace"))
     public = _mapping(value.get("public"))
     root = _mapping(value.get("root_operation"))
     episodes = _mapping(public.get("night_episodes"))
@@ -895,7 +1868,13 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
     lines = [
         "SleepAgent Terminal Product Demo",
         "================================",
+        f"Product story: {story.get('story_id', 'scenario replay')}",
         f"Scenario: {scenario.get('scenario_id', 'unavailable')}",
+        (
+            "Model: ZERO LLM (authoritative safety path)"
+            if story.get("story_id") == "urgent-safety"
+            else f"Model: {story.get('requested_model', 'deployment configured')}"
+        ),
         "Data: synthetic replay; non-clinical; non-release",
         (
             f"Input summary: {scenario.get('night_count', 'unavailable')} night(s), "
@@ -906,9 +1885,93 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
             f"-> {scenario.get('last_received_at', 'unavailable')}"
         ),
         "",
+        "Sleep Summary",
+        "-------------",
+    ]
+    night_summary = _latest_night_summary(value)
+    if night_summary:
+        lines.extend(
+            [
+                f"Sleep window: {night_summary.get('sleep_window_minutes', 'unavailable')} minutes",
+                (
+                    "Vital centers: heart rate="
+                    f"{_mapping(night_summary.get('vital_centers')).get('heart_rate', 'unavailable')}, "
+                    "respiratory rate="
+                    f"{_mapping(night_summary.get('vital_centers')).get('respiratory_rate', 'unavailable')}"
+                ),
+                f"Bed exits: {night_summary.get('bed_exit_count', 0)}",
+            ]
+        )
+        for event in _mapping_items(night_summary.get("bed_exit_events")):
+            lines.append(
+                f"- around {event.get('local_time', 'unknown time')}, "
+                f"duration={event.get('duration_minutes', 'unknown')} minutes"
+            )
+    else:
+        lines.append("The current durable result has no bounded night summary.")
+
+    lines.extend([
+        "",
+        "Personal Context",
+        "----------------",
+    ])
+    habit_revisions = _mapping_items(technical.get("habit_revisions"))
+    memory_revisions = _mapping_items(technical.get("memory_revisions"))
+    memory_receipts = _mapping_items(technical.get("memory_read_receipts"))
+    if habit_revisions:
+        lines.append(
+            "Habit Profile: revision "
+            f"{habit_revisions[-1].get('profile_version', 'unavailable')} "
+            f"({len(habit_revisions)} append-only fact revision(s))"
+        )
+        for item in habit_revisions[-3:]:
+            lines.append(
+                f"- {item.get('concept_id', 'habit')}: {item.get('value', 'unavailable')} "
+                f"source={item.get('source_actor_role', 'unavailable')}"
+            )
+    else:
+        lines.append("Habit Profile: empty (Cold Start).")
+    if memory_revisions:
+        lines.append(
+            "Governed Memory: state revision "
+            f"{memory_revisions[-1].get('state_version', 'unavailable')}"
+        )
+    else:
+        lines.append("Governed Memory: empty.")
+    lines.append(f"Memory ReadReceipts: {len(memory_receipts)}")
+
+    selected_attempts = _selected_attempts_from_value(value)
+    invocations = _agent_invocations(selected_attempts)
+    lines.extend(["", "Agent Collaboration", "-------------------"])
+    if invocations:
+        invoked_agents = list(
+            dict.fromkeys(str(item.get("agent_id")) for item in invocations)
+        )
+        for agent_id in (
+            "sleep_care",
+            "evidence_reasoning",
+            "care_strategy",
+            "safety_review",
+        ):
+            lines.append(
+                f"{_agent_display_name(agent_id)}: "
+                + ("invoked" if agent_id in invoked_agents else "not required")
+            )
+        lines.append(
+            f"Provider invocations: {len(invocations)}; "
+            f"provider={invocations[0].get('provider', 'unavailable')}; "
+            f"model={invocations[0].get('model_id', 'unavailable')}"
+        )
+    elif story.get("story_id") == "urgent-safety":
+        lines.append("No Agent or provider invocation was allowed.")
+    else:
+        lines.append("No durable Agent invocation evidence was returned.")
+
+    lines.extend([
+        "",
         "NightEpisode",
         "------------",
-    ]
+    ])
     if not episode_items:
         lines.append("Current public contract returned no NightEpisode.")
     for item in episode_items:
@@ -965,6 +2028,9 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
         lines.append("Evidence references: public doctor projection returned none.")
     else:
         lines.append("Evidence detail: current public contract does not provide it.")
+    statements = _evidence_statements(selected_attempts)
+    for statement in statements[:8]:
+        lines.append(f"Key evidence: {statement}")
     care_items = _mapping_items(care.get("items"))
     if care_items:
         for item in care_items:
@@ -974,6 +2040,8 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
             )
     else:
         lines.append("Care: no public confirmed Care records.")
+    for care_summary in _care_summaries(selected_attempts)[:4]:
+        lines.append(f"Care strategy: {care_summary}")
     if (
         scenario.get("scenario_id") == "urgent-zero-model"
         and root.get("state") == "failed"
@@ -984,7 +2052,42 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
             "(public root error=unexpected_urgent_route)."
         )
     else:
-        lines.append("Safety detail: current public contract does not provide it.")
+        safety_count = sum(
+            item.get("agent_id") == "safety_review" for item in invocations
+        )
+        lines.append(
+            "Safety: conditional review "
+            + (f"invoked {safety_count} time(s)." if safety_count else "not required.")
+        )
+
+    if story.get("story_id") == "habit-baseline":
+        baseline = _evidence_statements_from_products(actions.get("baseline_evidence"))
+        personalized = _evidence_statements_from_products(
+            actions.get("personalized_evidence")
+        )
+        lines.extend(["", "Personalization A/B", "-------------------"])
+        lines.append("Without confirmed Habit:")
+        lines.extend(f"- {item}" for item in baseline[:4])
+        lines.append("With confirmed Habit:")
+        lines.extend(f"- {item}" for item in personalized[:4])
+    elif story.get("story_id") == "longitudinal-personalization":
+        pins = _analysis_personalization_pins(selected_attempts)
+        episode_a = str(actions.get("episode_a_analysis_id") or "unavailable")
+        episode_b = str(actions.get("episode_b_analysis_id") or "unavailable")
+        disputed = _mapping(
+            actions.get("habit_profile_after_family_report")
+        ).get("disputed_concept_ids")
+        lines.extend(["", "Longitudinal personalization", "----------------------------"])
+        lines.append(
+            f"Episode A: analysis={episode_a}, pinned={pins.get(episode_a, 'unavailable')}"
+        )
+        lines.append(
+            "Family direct report: elder v1 retained; disputed concepts="
+            + _joined(disputed)
+        )
+        lines.append(
+            f"Episode B: analysis={episode_b}, pinned={pins.get(episode_b, 'unavailable')}"
+        )
 
     lines.extend(["", "Role Product outputs", "--------------------"])
     for role in ("elder", "family", "doctor"):
@@ -1057,6 +2160,30 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
                 "Chain: replay seed -> normalization -> NightEpisode -> "
                 "Product Runtime -> role projections, as exposed by Demo trace."
             )
+        lines.extend(["", "Durable technical evidence", "--------------------------"])
+        lines.append(
+            f"root_operation_id={technical.get('root_operation_id', 'unavailable')}"
+        )
+        lines.append(
+            f"product_attempts={technical.get('product_attempt_count', 'unavailable')} "
+            f"fast_path_succeeded={technical.get('fast_path_succeeded_count', 'unavailable')}"
+        )
+        for invocation in invocations:
+            lines.append(
+                f"- agent={invocation.get('agent_id', 'unknown')} "
+                f"provider={invocation.get('provider', 'unknown')} "
+                f"model={invocation.get('model_id', 'unknown')} "
+                f"latency_ms={invocation.get('latency_ms', 'unknown')} "
+                f"input_tokens={invocation.get('provider_input_tokens', 'unknown')} "
+                f"request_id={invocation.get('provider_request_id', 'unavailable')} "
+                f"skill_lock={invocation.get('skill_lock_hash', 'unavailable')}"
+            )
+        for receipt in memory_receipts:
+            lines.append(
+                f"- memory_receipt={receipt.get('receipt_id', 'unknown')} "
+                f"agent={receipt.get('requesting_agent', 'unknown')} "
+                f"items={len(_mapping_items(receipt.get('items')))}"
+            )
 
     lines.append("")
     return "\n".join(lines)
@@ -1064,6 +2191,110 @@ def render_product_demo(value: Mapping[str, Any]) -> str:
 
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _selected_attempts_from_value(
+    value: Mapping[str, Any],
+) -> list[Mapping[str, Any]]:
+    story = _mapping(value.get("story"))
+    ids = story.get("selected_analysis_ids")
+    selected_ids = [str(item) for item in ids] if isinstance(ids, list) else []
+    return _attempts_for_analyses(
+        _mapping(value.get("technical_trace")),
+        selected_ids,
+    )
+
+
+def _latest_night_summary(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    for attempt in reversed(_selected_attempts_from_value(value)):
+        for role_run in _mapping_items(attempt.get("role_runs")):
+            if role_run.get("role") != "elder":
+                continue
+            for receipt in _mapping_items(role_run.get("tool_receipts")):
+                if receipt.get("tool_name") != "radar.get_night_evidence":
+                    continue
+                output = _mapping(receipt.get("output"))
+                data = _mapping(output.get("data"))
+                summary = data.get("deterministic_night_summary")
+                if isinstance(summary, Mapping):
+                    return summary
+    return {}
+
+
+def _evidence_statements(
+    attempts: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    products = [
+        product
+        for attempt in attempts
+        for role_run in _mapping_items(attempt.get("role_runs"))
+        for product in _mapping_items(role_run.get("accepted_work_products"))
+        if product.get("agent_id") == "evidence_reasoning"
+    ]
+    return _evidence_statements_from_products(products)
+
+
+def _evidence_statements_from_products(value: object) -> list[str]:
+    products = _mapping_items(value)
+    statements: list[str] = []
+    for product in products:
+        payload = _mapping(product.get("payload"))
+        for claim in _mapping_items(payload.get("claims")):
+            statement = claim.get("statement")
+            if isinstance(statement, str) and statement:
+                statements.append(statement)
+    return list(dict.fromkeys(statements))
+
+
+def _evidence_claims(value: object) -> list[Mapping[str, Any]]:
+    return [
+        claim
+        for product in _mapping_items(value)
+        for claim in _mapping_items(_mapping(product.get("payload")).get("claims"))
+    ]
+
+
+def _analysis_personalization_pins(
+    attempts: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for attempt in attempts:
+        analysis_id = str(
+            _mapping(attempt.get("analysis")).get("analysis_revision_id") or ""
+        )
+        role_runs = _mapping_items(attempt.get("role_runs"))
+        if not analysis_id or not role_runs:
+            continue
+        personalization = _mapping(role_runs[0].get("personalization"))
+        values[analysis_id] = (
+            f"Habit v{personalization.get('habit_profile_version', 'unavailable')}, "
+            f"Memory v{personalization.get('memory_state_version', 'unavailable')}"
+        )
+    return values
+
+
+def _care_summaries(attempts: Sequence[Mapping[str, Any]]) -> list[str]:
+    summaries: list[str] = []
+    for attempt in attempts:
+        for role_run in _mapping_items(attempt.get("role_runs")):
+            for product in _mapping_items(role_run.get("accepted_work_products")):
+                if product.get("agent_id") != "care_strategy":
+                    continue
+                payload = _mapping(product.get("payload"))
+                action = _mapping(payload.get("primary_action"))
+                title = action.get("title")
+                if isinstance(title, str) and title:
+                    summaries.append(title)
+    return list(dict.fromkeys(summaries))
+
+
+def _agent_display_name(agent_id: str) -> str:
+    return {
+        "sleep_care": "SleepCareAgent",
+        "evidence_reasoning": "EvidenceReasoningAgent",
+        "care_strategy": "CareStrategyAgent",
+        "safety_review": "SafetyReviewAgent",
+    }.get(agent_id, agent_id)
 
 
 def _mapping_items(value: object) -> list[Mapping[str, Any]]:
@@ -2014,6 +3245,44 @@ def build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--family-actor-id", default=None)
     backend.add_argument("--doctor-actor-id", default=None)
 
+    demo = subcommands.add_parser(
+        "demo",
+        help="run one complete P3 terminal Product story",
+    )
+    demo.add_argument("story", choices=tuple(PRODUCT_DEMO_STORIES))
+    demo.add_argument(
+        "--model",
+        choices=("live", "deterministic"),
+        default="live",
+        help="require durable evidence for the selected Worker model mode",
+    )
+    demo.add_argument(
+        "--trace",
+        action="store_true",
+        help="also show operation IDs, provider requests, SkillLocks, and receipts",
+    )
+    demo.add_argument("--wait-seconds", type=float, default=180.0)
+    demo.add_argument(
+        "--product-base-url",
+        default=os.environ.get(
+            "SLEEPAGENT_PRODUCT_BASE_URL", "http://127.0.0.1:18000"
+        ),
+    )
+    demo.add_argument(
+        "--service-credential",
+        default=os.environ.get(
+            "SLEEPAGENT_DEMO_SERVICE_CREDENTIAL",
+            os.environ.get("SLEEPAGENT_VERIFIER_SERVICE_CREDENTIAL", ""),
+        ),
+    )
+    demo.add_argument(
+        "--actor-private-key",
+        default=os.environ.get(
+            "SLEEPAGENT_DEMO_ACTOR_PRIVATE_KEY",
+            os.environ.get("SLEEPAGENT_VERIFIER_ACTOR_PRIVATE_KEY", ""),
+        ),
+    )
+
     show = subcommands.add_parser(
         "show",
         help="run and present one Phase-1 Product replay scenario",
@@ -2045,7 +3314,6 @@ def build_parser() -> argparse.ArgumentParser:
             os.environ.get("SLEEPAGENT_VERIFIER_ACTOR_PRIVATE_KEY", ""),
         ),
     )
-
     seed = subcommands.add_parser("seed")
     seed.add_argument("scenario")
     seed.add_argument("--artifact-family", default="canonical-replay-fixtures")
@@ -2065,10 +3333,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     client = DemoHttpClient(args.base_url, args.demo_token)
     try:
-        if args.command == "show":
+        if args.command in {"show", "demo"}:
             if not args.service_credential or not args.actor_private_key:
                 raise DemoCliError(
-                    "show requires Product service and actor credentials"
+                    f"{args.command} requires Product service and actor credentials"
                 )
             signer = ActorAssertionSigner.from_private_file(
                 args.actor_private_key,
@@ -2085,17 +3353,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "primary",
                 ),
             )
-            result = show_product_demo(
-                client,
-                ProductHttpClient(
-                    args.product_base_url,
-                    args.service_credential,
-                    signer,
-                ),
-                scenario_id=args.scenario,
-                wait_seconds=args.wait_seconds,
-                include_trace=args.trace,
+            product_client = ProductHttpClient(
+                args.product_base_url,
+                args.service_credential,
+                signer,
             )
+            if args.command == "demo":
+                result = run_product_demo_story(
+                    client,
+                    product_client,
+                    story_id=args.story,
+                    model=args.model,
+                    wait_seconds=args.wait_seconds,
+                    include_trace=args.trace,
+                )
+            else:
+                result = show_product_demo(
+                    client,
+                    product_client,
+                    scenario_id=args.scenario,
+                    wait_seconds=args.wait_seconds,
+                    include_trace=args.trace,
+                )
             print(render_product_demo(result), end="")
             return 0
         if args.command == "verify":
@@ -2525,6 +3804,9 @@ __all__ = [
     "ProductHttpClient",
     "build_parser",
     "main",
+    "render_product_demo",
+    "run_product_demo_story",
+    "show_product_demo",
     "verify_backend",
     "verify_abnormal_backend",
     "verify_effects_reconciliation_backend",

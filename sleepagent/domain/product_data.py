@@ -319,6 +319,7 @@ class ProductRevisionFacts(SleepDomainContract):
             "conflict_count": len(self.conflict_summaries),
             "deterministic_quality": dict(self.deterministic_quality),
             "deterministic_risk": dict(self.deterministic_risk),
+            "deterministic_night_summary": self.deterministic_night_summary(),
             "longitudinal_risk_context": (
                 None
                 if self.longitudinal_risk_context is None
@@ -327,6 +328,97 @@ class ProductRevisionFacts(SleepDomainContract):
             "canonical_data_version": self.canonical_data_version,
             "provenance_set_sha256": stable_hash(self.provenance_references),
             "provenance_ref_count": len(self.provenance_references),
+        }
+
+    def deterministic_night_summary(self) -> dict[str, Any]:
+        """Reduce canonical samples to bounded facts before Agent reasoning."""
+
+        samples: dict[str, list[float]] = {
+            "heart_rate": [],
+            "respiratory_rate": [],
+            "movement": [],
+        }
+        stage_minutes: dict[str, float] = {}
+        bed_events: list[tuple[str, datetime]] = []
+        window_start: datetime | None = None
+        window_end: datetime | None = None
+        for observation in self.canonical_observations:
+            payload = observation.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            observation_type = str(payload.get("observation_type") or "")
+            value = payload.get("value")
+            if observation_type in samples and isinstance(value, (int, float)):
+                samples[observation_type].append(float(value))
+            if observation_type == "sleep_stage_interval":
+                start = _aware_wire_datetime(payload.get("start_at"))
+                end = _aware_wire_datetime(payload.get("end_at"))
+                stage = payload.get("stage")
+                if start is not None and end is not None and end > start:
+                    window_start = start if window_start is None else min(window_start, start)
+                    window_end = end if window_end is None else max(window_end, end)
+                    if isinstance(stage, str) and stage:
+                        stage_minutes[stage] = stage_minutes.get(stage, 0.0) + (
+                            end - start
+                        ).total_seconds() / 60
+            if observation_type == "bed_exit":
+                event_at = _aware_wire_datetime(
+                    observation.get("event_occurred_at")
+                    or observation.get("measurement_at")
+                )
+                kind = payload.get("kind")
+                if event_at is not None and isinstance(kind, str):
+                    bed_events.append((kind, event_at))
+
+        exits: list[dict[str, Any]] = []
+        pending_exit: datetime | None = None
+        for kind, event_at in sorted(bed_events, key=lambda item: item[1]):
+            if kind == "bed_exit":
+                pending_exit = event_at
+            elif kind == "return_to_bed" and pending_exit is not None:
+                exits.append(
+                    {
+                        "left_bed_at": pending_exit.isoformat(),
+                        "local_time": pending_exit.strftime("%H:%M"),
+                        "returned_at": event_at.isoformat(),
+                        "duration_minutes": round(
+                            (event_at - pending_exit).total_seconds() / 60,
+                            1,
+                        ),
+                    }
+                )
+                pending_exit = None
+        if pending_exit is not None:
+            exits.append(
+                {
+                    "left_bed_at": pending_exit.isoformat(),
+                    "local_time": pending_exit.strftime("%H:%M"),
+                    "returned_at": None,
+                    "duration_minutes": None,
+                }
+            )
+
+        return {
+            "schema_version": "product_deterministic_night_summary.v1",
+            "sleep_window_start": (
+                None if window_start is None else window_start.isoformat()
+            ),
+            "sleep_window_end": None if window_end is None else window_end.isoformat(),
+            "sleep_window_minutes": (
+                None
+                if window_start is None or window_end is None
+                else round((window_end - window_start).total_seconds() / 60, 1)
+            ),
+            "stage_minutes": {
+                key: round(value, 1) for key, value in sorted(stage_minutes.items())
+            },
+            "vital_centers": {
+                key: (None if not values else round(sum(values) / len(values), 1))
+                for key, values in samples.items()
+            },
+            "sample_counts": {key: len(values) for key, values in samples.items()},
+            "bed_exit_count": len(exits),
+            "bed_exit_events": exits,
         }
 
 
@@ -764,6 +856,18 @@ def _project_observation(
         expected_data_mode=observation.data_mode,
     )
     return projected, refs
+
+
+def _aware_wire_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def _scope_matches_revision(

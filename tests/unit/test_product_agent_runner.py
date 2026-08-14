@@ -532,6 +532,100 @@ class ProviderReceiptScenarioModel(ScenarioModel):
         return result
 
 
+class CommunicationAcceptanceRepairScenarioModel(ScenarioModel):
+    def __init__(self, episode_type: EpisodeType) -> None:
+        super().__init__(episode_type)
+        self.communication_calls = 0
+
+    def generate(self, **kwargs):
+        result = super().generate(**kwargs)
+        if kwargs["schema"] is not SleepCareModelOutput:
+            return result
+        self.communication_calls += 1
+        if self.communication_calls != 1:
+            return result
+        draft = result.output_payload
+        assert isinstance(draft, CommunicationDraft)
+        claim_ref = draft.claim_refs[0]
+        rendered = "今晚增加99分钟。"
+        return result.model_copy(
+            update={
+                "output_payload": CommunicationDraft(
+                    draft_id=draft.draft_id,
+                    audience_role=draft.audience_role,
+                    text=rendered,
+                    claim_refs=[claim_ref],
+                    semantic_bindings=[
+                        CommunicationSemanticBinding(
+                            binding_id="invented-number",
+                            source_kind="evidence_claim",
+                            source_ref=claim_ref,
+                            rendered_text=rendered,
+                        )
+                    ],
+                    context_notice=draft.context_notice,
+                )
+            }
+        )
+
+
+class ProvenanceAcceptanceRepairScenarioModel(ScenarioModel):
+    def __init__(self, episode_type: EpisodeType) -> None:
+        super().__init__(episode_type)
+        self.evidence_calls = 0
+        self.safety_calls = 0
+        self.evidence_revision_reasons: list[str] = []
+
+    def generate(self, **kwargs):
+        result = super().generate(**kwargs)
+        if kwargs["schema"] is EvidenceReasoningModelOutput:
+            self.evidence_calls += 1
+            context = json.loads(kwargs["messages"][-1]["content"])
+            self.evidence_revision_reasons.extend(
+                str(item["value"])
+                for item in context["items"]
+                if item["key"] == "revision_reason"
+            )
+            if self.evidence_calls == 1:
+                packet = result.output_payload
+                claim = packet.claims[0]
+                return result.model_copy(
+                    update={
+                        "output_payload": packet.model_copy(
+                            update={
+                                "claims": [
+                                    claim.model_copy(
+                                        update={
+                                            "date_start": (
+                                                claim.date_start
+                                                - timedelta(days=1)
+                                            )
+                                        }
+                                    ),
+                                    *packet.claims[1:],
+                                ]
+                            }
+                        )
+                    }
+                )
+        if kwargs["schema"] is SafetyReviewModelOutput:
+            self.safety_calls += 1
+            if self.safety_calls == 1:
+                decision = result.output_payload
+                return result.model_copy(
+                    update={
+                        "output_payload": decision.model_copy(
+                            update={
+                                "reviewed_episode_state_revision": (
+                                    decision.reviewed_episode_state_revision + 1
+                                )
+                            }
+                        )
+                    }
+                )
+        return result
+
+
 class ToolFeedbackScenarioModel(ScenarioModel):
     def generate(self, **kwargs):
         result = super().generate(**kwargs)
@@ -942,10 +1036,51 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
         ]
 
     roster_projection = audit_projection(roster_result)
-    # Freeze the invocation identity, including the runtime-bound Care routing
-    # receipt now visible to the final SleepCare communication turn.
+    # Freeze invocation identity, including the runtime-bound Care receipt and
+    # the reviewed Habit/Memory grounding instructions in the SkillLock.
     assert stable_hash(roster_projection) == (
-        "7410f39bd841621aa520ee26e01e52a09f29698da35ff37329eb032ac5172976"
+        "781daa98700f31a9288ddb643dae9146f8a7ea6d86fdfe25dd325523802267d2"
+    )
+
+
+def test_live_episode_budget_allows_schema_correction_latency() -> None:
+    for episode_type in EpisodeType:
+        assert (
+            EPISODE_DEFINITIONS[episode_type].budget.soft_deadline_seconds
+            == 180
+        )
+
+
+def test_communication_gets_one_live_acceptance_repair_turn() -> None:
+    model = CommunicationAcceptanceRepairScenarioModel(
+        EpisodeType.MORNING_REVIEW
+    )
+
+    result = product_runner(model).run(request(EpisodeType.MORNING_REVIEW))
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert model.communication_calls == 2
+
+
+def test_evidence_and_safety_get_one_provenance_repair_turn_each() -> None:
+    model = ProvenanceAcceptanceRepairScenarioModel(
+        EpisodeType.ROLE_MATERIAL
+    )
+
+    result = product_runner(model).run(
+        request(
+            EpisodeType.ROLE_MATERIAL,
+            doctor_material=True,
+            binding_role="doctor",
+        )
+    )
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert model.evidence_calls == 2
+    assert model.safety_calls >= 2
+    assert any(
+        "fact_ref" in reason and "retrieval_handle" in reason
+        for reason in model.evidence_revision_reasons
     )
 
 

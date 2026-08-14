@@ -163,8 +163,8 @@ def test_retryable_provider_failure_recovers_on_second_real_http_attempt() -> No
         ("timeout", "Product LLM request failed", 2),
         ("http_5xx", "Product LLM request failed", 2),
         ("invalid_envelope_json", "Product LLM request failed", 2),
-        ("invalid_content_json", "returned invalid JSON", 1),
-        ("schema_invalid", "failed ExampleOutput validation", 1),
+        ("invalid_content_json", "returned invalid JSON", 2),
+        ("schema_invalid", "failed ExampleOutput validation", 2),
     ],
 )
 def test_structured_product_model_failure_and_retry_semantics_over_real_http(

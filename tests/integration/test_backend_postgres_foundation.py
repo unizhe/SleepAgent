@@ -334,6 +334,15 @@ def test_migrate_apply_does_not_run_test_bootstrap() -> None:
     assert "test-bootstrap:" in compose
 
 
+def test_terminal_demo_trace_reads_the_habit_evidence_role_field() -> None:
+    source = Path(
+        "sleepagent/persistence/migrations/010_terminal_demo_technical_trace.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "revision.fact_json #> '{evidence,role}'" in source
+    assert "revision.fact_json #> '{evidence,actor_role}'" not in source
+
+
 def test_migration_runner_uses_public_as_the_ddl_target_schema() -> None:
     connection = FakeConnection()
     runner = PostgresMigrationRunner(connection, applied_by="test@ci")

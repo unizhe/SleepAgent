@@ -2015,6 +2015,11 @@ def _fact_snapshot_for_role(
             ),
             *(item.fact_id for item in personalization.habit_facts),
             *(item.receipt_id for item in personalization.memory_read_receipts),
+            *(
+                handle.handle_id
+                for receipt in personalization.memory_read_receipts
+                for handle in receipt.handles
+            ),
         ),
         created_at=created_at,
     )

@@ -1282,17 +1282,17 @@ def degraded_boundary_sentence(decision: MetricReadinessDecision) -> str:
         )
     if count == 1:
         return (
-            "目前有 1 晚可用于这项判断的记录。我可以描述这一晚，"
+            "目前有一晚可用于这项判断的记录。我可以描述这一晚，"
             "但还不能判断个人趋势或是否偏离个人基线。"
         )
     if decision.claim_ceiling == ClaimCeiling.SHORT_SERIES_DIFFERENCE:
         return (
-            f"目前有 {count} 晚可用于比较的记录。我可以描述这些夜晚的差异，"
+            "目前已有少量夜晚可用于比较。我可以描述这些夜晚的差异，"
             "但还不足以判断这是你的稳定规律。"
         )
     if decision.claim_ceiling == ClaimCeiling.PROVISIONAL_PATTERN:
         return (
-            f"目前有 {count} 晚可用于观察的记录，只能作为初步规律，"
+            "目前已有一些夜晚可用于观察，只能作为初步规律，"
             "还需要更多同一来源且质量合格的数据继续确认。"
         )
     return (

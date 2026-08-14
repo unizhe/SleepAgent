@@ -542,6 +542,7 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                             "facts": [
                                 {
                                     "fact_id": item.fact_id,
+                                    "fact_ref": item.fact_id,
                                     "fact_hash": item.fact_hash,
                                     "concept_id": item.concept_id,
                                     "concept_version": item.concept_version,
@@ -585,8 +586,15 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                             "result_hash": memory_receipt.result_hash,
                             "purpose": memory_receipt.purpose.value,
                             "items": [
-                                item.model_dump(mode="json")
-                                for item in memory_receipt.items
+                                {
+                                    **item.model_dump(mode="json"),
+                                    "retrieval_handle": handle.handle_id,
+                                }
+                                for item, handle in zip(
+                                    memory_receipt.items,
+                                    memory_receipt.handles,
+                                    strict=True,
+                                )
                             ],
                             "untrusted_personal_context": True,
                             "verified_evidence": False,
@@ -594,6 +602,7 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                         },
                         source_refs=(
                             memory_receipt.receipt_id,
+                            *(item.handle_id for item in memory_receipt.handles),
                             *(item.revision_ref for item in memory_receipt.items),
                         ),
                     )

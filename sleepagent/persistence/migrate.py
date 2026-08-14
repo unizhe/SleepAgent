@@ -1106,6 +1106,7 @@ def bootstrap_test_database_roles(
             "sleepagent_get_demo_operation(text)",
             "sleepagent_read_demo_clock()",
             "sleepagent_read_demo_trace(text,bigint,integer)",
+            "sleepagent_read_demo_technical_trace(text)",
         )
         for signature in api_functions:
             _grant_function(connection, sql, signature, api_role)

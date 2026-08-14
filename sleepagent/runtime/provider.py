@@ -27,6 +27,12 @@ PRODUCT_LLM_MODEL_ENV = "SLEEPAGENT_PRODUCT_LLM_MODEL"
 PRODUCT_LLM_BASE_URL_ENV = "SLEEPAGENT_PRODUCT_LLM_BASE_URL"
 PRODUCT_LLM_TIMEOUT_SECONDS_ENV = "SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS"
 PRODUCT_LLM_MAX_TOKENS_ENV = "SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS"
+LEGACY_PRODUCT_LLM_API_KEY_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_API_KEY"
+LEGACY_PRODUCT_LLM_MODEL_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID"
+LEGACY_PRODUCT_LLM_BASE_URL_ENV = "SLEEPAGENT_RADAR_AGENT_LLM_BASE_URL"
+LEGACY_PRODUCT_LLM_TIMEOUT_SECONDS_ENV = (
+    "SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS"
+)
 PRODUCT_STRUCTURED_PROVIDER_VERSION = "sleepagent-product-structured-provider.v1"
 LLM_NOT_CONFIGURED_MESSAGE = "LLM is not configured"
 
@@ -51,7 +57,7 @@ class OpenAICompatibleProviderConfig:
     temperature: float = 0.2
     timeout_seconds: float = 30.0
     retry: int = 1
-    max_output_tokens: int = 1200
+    max_output_tokens: int = 4000
     thinking_type: str | None = "disabled"
 
 
@@ -61,19 +67,37 @@ def openai_compatible_provider_config_from_env(
     """读取公开配置；API key 只在 provider 构造时读取且不会进入配置对象。"""
 
     env = os.environ if environment is None else environment
-    model = _optional_setting(env, PRODUCT_LLM_MODEL_ENV, DEFAULT_PRODUCT_LLM_MODEL)
-    base_url = _optional_setting(
-        env, PRODUCT_LLM_BASE_URL_ENV, DEFAULT_PRODUCT_LLM_BASE_URL
+    model = _first_optional_setting(
+        env,
+        (PRODUCT_LLM_MODEL_ENV, LEGACY_PRODUCT_LLM_MODEL_ENV),
+        DEFAULT_PRODUCT_LLM_MODEL,
+    )
+    base_url = _first_optional_setting(
+        env,
+        (PRODUCT_LLM_BASE_URL_ENV, LEGACY_PRODUCT_LLM_BASE_URL_ENV),
+        DEFAULT_PRODUCT_LLM_BASE_URL,
     ).rstrip("/")
     _validate_base_url(base_url)
     return OpenAICompatibleProviderConfig(
         model=model,
+        api_key_env=(
+            PRODUCT_LLM_API_KEY_ENV
+            if _usable_secret(env.get(PRODUCT_LLM_API_KEY_ENV)) is not None
+            else LEGACY_PRODUCT_LLM_API_KEY_ENV
+            if _usable_secret(env.get(LEGACY_PRODUCT_LLM_API_KEY_ENV)) is not None
+            else PRODUCT_LLM_API_KEY_ENV
+        ),
         base_url=base_url,
-        timeout_seconds=_positive_float_setting(
-            env, PRODUCT_LLM_TIMEOUT_SECONDS_ENV, 30.0
+        timeout_seconds=_first_positive_float_setting(
+            env,
+            (
+                PRODUCT_LLM_TIMEOUT_SECONDS_ENV,
+                LEGACY_PRODUCT_LLM_TIMEOUT_SECONDS_ENV,
+            ),
+            30.0,
         ),
         max_output_tokens=_positive_int_setting(
-            env, PRODUCT_LLM_MAX_TOKENS_ENV, 1200
+            env, PRODUCT_LLM_MAX_TOKENS_ENV, 4000
         ),
     )
 
@@ -88,7 +112,7 @@ class ProductChatProvider(Protocol):
         model: str,
         messages: list[dict[str, str]],
         temperature: float,
-        max_output_tokens: int = 1200,
+        max_output_tokens: int = 4000,
         thinking_type: str | None = "disabled",
         retry: int = 1,
     ) -> dict[str, Any]: ...
@@ -140,7 +164,7 @@ class OpenAICompatibleChatProvider:
         model: str,
         messages: list[dict[str, str]],
         temperature: float,
-        max_output_tokens: int = 1200,
+        max_output_tokens: int = 4000,
         thinking_type: str | None = "disabled",
         retry: int = 1,
     ) -> dict[str, Any]:
@@ -264,6 +288,7 @@ class OpenAICompatibleStructuredAgentModel:
             timeout_seconds=self.config.timeout_seconds,
         )
         self.last_provider_request_id: str | None = None
+        self.last_provider_input_tokens: int | None = None
 
     @property
     def provider(self) -> str:
@@ -287,6 +312,7 @@ class OpenAICompatibleStructuredAgentModel:
         context_packet_id: str,
     ) -> SchemaT:
         self.last_provider_request_id = None
+        self.last_provider_input_tokens = None
         schema_instruction = {
             "role": "system",
             "content": (
@@ -303,30 +329,80 @@ class OpenAICompatibleStructuredAgentModel:
                 f"Context packet: {context_packet_id}."
             ),
         }
-        response = self._provider.create_chat_completion(
-            model=self.config.model,
-            messages=[schema_instruction, *messages],
-            temperature=self.config.temperature,
-            max_output_tokens=self.config.max_output_tokens,
-            thinking_type=self.config.thinking_type,
-            retry=self.config.retry,
-        )
-        request_id = response.get("id") if isinstance(response, dict) else None
-        if isinstance(request_id, str) and request_id.strip():
-            self.last_provider_request_id = request_id.strip()
-        content = _message_content(response)
-        try:
-            payload: Any = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ProductLLMProviderError(
-                "Structured Agent provider returned invalid JSON."
-            ) from exc
-        try:
-            return schema.model_validate(payload)
-        except ValidationError as exc:
-            raise ProductLLMProviderError(
-                f"Structured Agent response failed {schema.__name__} validation."
-            ) from exc
+        correction = ""
+        last_error: Exception | None = None
+        for semantic_attempt in range(2):
+            current_schema_instruction = dict(schema_instruction)
+            if correction:
+                current_schema_instruction["content"] += (
+                    " The previous live response failed strict validation. "
+                    "Regenerate the complete JSON object and correct every listed "
+                    "error by changing the offending fields, not by explaining the "
+                    "error. If a validator reports unbound numeric tokens in "
+                    "Communication text, remove every reported number unless it is "
+                    "covered by an allowed semantic binding whose rendered_text is "
+                    "that exact contiguous substring. Never invent a source ref to "
+                    "retain a number. If the reported tokens form a date or "
+                    "timestamp, remove the entire date/time phrase, including its "
+                    "separators and year/month/day labels, and replace it with the "
+                    "number-free word '近期'. Do not respell the digits as Chinese "
+                    "numerals, words, or full-width digits. Every semantic binding "
+                    "rendered_text must be "
+                    "copied verbatim from one exact contiguous substring of the "
+                    "Communication text; replace a mismatched rendered_text with "
+                    "that exact substring, or remove the binding if no such "
+                    f"substring exists. Errors: {correction}"
+                )
+            response = self._provider.create_chat_completion(
+                model=self.config.model,
+                messages=[current_schema_instruction, *messages],
+                temperature=self.config.temperature,
+                max_output_tokens=self.config.max_output_tokens,
+                thinking_type=self.config.thinking_type,
+                retry=self.config.retry,
+            )
+            request_id = response.get("id") if isinstance(response, dict) else None
+            if isinstance(request_id, str) and request_id.strip():
+                self.last_provider_request_id = request_id.strip()
+            usage = response.get("usage") if isinstance(response, dict) else None
+            if isinstance(usage, Mapping):
+                prompt_tokens = usage.get("prompt_tokens")
+                if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+                    self.last_provider_input_tokens = prompt_tokens
+            content = _message_content(response)
+            try:
+                payload: Any = json.loads(content)
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                correction = (
+                    "invalid JSON; return one syntactically complete object with "
+                    "double-quoted property names and no trailing content."
+                )
+                if semantic_attempt == 0:
+                    continue
+                raise ProductLLMProviderError(
+                    "Structured Agent provider returned invalid JSON after one "
+                    "live correction attempt."
+                ) from exc
+            try:
+                return schema.model_validate(payload)
+            except ValidationError as exc:
+                last_error = exc
+                correction = json.dumps(
+                    exc.errors(include_url=False, include_input=False),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                if semantic_attempt == 0:
+                    continue
+                raise ProductLLMProviderError(
+                    f"Structured Agent response failed {schema.__name__} "
+                    "validation after one live correction attempt."
+                ) from exc
+        raise ProductLLMProviderError(
+            "Structured Agent live correction ended without a validated response."
+        ) from last_error
 
 
 def _message_content(response: Any) -> str:
@@ -353,6 +429,26 @@ def _optional_setting(
     if not value or _looks_like_placeholder(value):
         raise ProductLLMConfigurationError(f"{name} must be a concrete value")
     return value
+
+
+def _first_optional_setting(
+    env: Mapping[str, str], names: tuple[str, ...], default: str
+) -> str:
+    for name in names:
+        value = env.get(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+def _first_positive_float_setting(
+    env: Mapping[str, str], names: tuple[str, ...], default: float
+) -> float:
+    for name in names:
+        value = env.get(name)
+        if value is not None and value.strip():
+            return _positive_float_setting(env, name, default)
+    return default
 
 
 def _positive_float_setting(
@@ -491,6 +587,10 @@ __all__ = [
     "DEFAULT_PRODUCT_LLM_BASE_URL",
     "DEFAULT_PRODUCT_LLM_MODEL",
     "LLM_NOT_CONFIGURED_MESSAGE",
+    "LEGACY_PRODUCT_LLM_API_KEY_ENV",
+    "LEGACY_PRODUCT_LLM_BASE_URL_ENV",
+    "LEGACY_PRODUCT_LLM_MODEL_ENV",
+    "LEGACY_PRODUCT_LLM_TIMEOUT_SECONDS_ENV",
     "OpenAICompatibleChatProvider",
     "OpenAICompatibleProviderConfig",
     "OpenAICompatibleStructuredAgentModel",

@@ -637,6 +637,18 @@ def test_communication_rejects_number_not_in_reviewed_knowledge() -> None:
         )
 
 
+def test_communication_binding_canonicalizes_numeric_provenance_metadata() -> None:
+    binding = CommunicationSemanticBinding(
+        binding_id="canonical-number-binding",
+        source_kind="evidence_claim",
+        source_ref="claim:1",
+        rendered_text="Compared with 7 nights, the value changed by 12%.",
+        preserved_numbers=["model-supplied-wrong-value"],
+    )
+
+    assert binding.preserved_numbers == ["12%", "7"]
+
+
 @pytest.mark.parametrize(
     ("field", "tampered_value"),
     (

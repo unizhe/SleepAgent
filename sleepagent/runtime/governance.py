@@ -823,7 +823,12 @@ def accept_communication(
 
 
 def _numeric_tokens(text: str) -> set[str]:
-    return set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?%?", text))
+    # Python's Unicode ``\w`` includes CJK characters, so using it here
+    # silently skipped numbers adjacent to Chinese prose. Only ASCII token
+    # characters should suppress a numeric-token start.
+    return set(
+        re.findall(r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?", text)
+    )
 
 
 def _reject_prohibited_habit_output(text: str) -> None:

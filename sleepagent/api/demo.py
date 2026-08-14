@@ -159,6 +159,30 @@ class DemoTraceResponse(DemoModel):
     next_cursor: str | None = None
 
 
+class DemoTechnicalTraceResponse(DemoModel):
+    schema_version: Literal["demo_technical_trace.v1"] = (
+        "demo_technical_trace.v1"
+    )
+    data_mode: Literal["replay"] = "replay"
+    synthetic_non_release: Literal[True] = True
+    root_operation_id: str = Field(min_length=1)
+    namespace_generation: int = Field(ge=1)
+    run_id: str = Field(min_length=1)
+    arm_id: str = Field(min_length=1)
+    subject_id: str = Field(min_length=1)
+    journey_state: str = Field(min_length=1)
+    journey_error_code: str | None = None
+    journey_result: dict[str, Any] | None = None
+    product_operation_count: int = Field(ge=0)
+    product_attempt_count: int = Field(ge=0)
+    fast_path_succeeded_count: int = Field(ge=0)
+    product_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    durable_invocations: list[dict[str, Any]] = Field(default_factory=list)
+    habit_revisions: list[dict[str, Any]] = Field(default_factory=list)
+    memory_revisions: list[dict[str, Any]] = Field(default_factory=list)
+    memory_read_receipts: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class DemoController(Protocol):
     def seed(
         self,
@@ -192,6 +216,8 @@ class DemoController(Protocol):
         cursor: str | None,
         limit: int,
     ) -> DemoTraceResponse: ...
+
+    def technical_trace(self, *, operation_id: str) -> DemoTechnicalTraceResponse: ...
 
 
 def create_demo_router(
@@ -326,6 +352,17 @@ def create_demo_router(
             limit=limit,
         )
 
+    @router.get("/technical-trace", response_model=DemoTechnicalTraceResponse)
+    def technical_trace(
+        operation_id: Annotated[str, Query(min_length=1, max_length=200)],
+        demo_token: Annotated[
+            str | None,
+            Header(alias="X-Demo-Controller-Token"),
+        ] = None,
+    ) -> DemoTechnicalTraceResponse:
+        authorize(demo_token)
+        return controller.technical_trace(operation_id=operation_id)
+
     return router
 
 
@@ -357,6 +394,7 @@ __all__ = [
     "DemoSeedRequest",
     "DemoTraceEntry",
     "DemoTraceResponse",
+    "DemoTechnicalTraceResponse",
     "ScenarioClockResponse",
     "create_demo_router",
 ]

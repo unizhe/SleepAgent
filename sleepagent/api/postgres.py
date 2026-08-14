@@ -310,20 +310,10 @@ class PostgresProductIdentityResolver(ProductIdentityResolver):
             )
         asserted = frozenset(identity.claims.scope)
         effective = resolved.effective_scopes.intersection(asserted)
-        policy_sha256 = _sha256(
-            {
-                "schema_version": "authorization_policy.v1",
-                "principal_id": identity.service_principal.principal_id,
-                "binding_id": resolved.binding_id,
-                "role": resolved.role.value,
-                "effective_scopes": sorted(resolved.effective_scopes),
-                "namespace_id": resolved.namespace_id,
-                "namespace_generation": resolved.namespace_generation,
-                "purpose": purpose,
-                "authorization_epoch": resolved.authorization_epoch,
-                "privacy_epoch": resolved.privacy_epoch,
-                "retrieval_policy_epoch": resolved.retrieval_policy_epoch,
-            }
+        policy_sha256 = _authorization_policy_sha256(
+            principal_id=identity.service_principal.principal_id,
+            resolved=resolved,
+            purpose=purpose,
         )
         return ProductRequestContext(
             service_principal_id=identity.service_principal.principal_id,
@@ -2092,6 +2082,16 @@ def _insert_l2_pending_handle(
     expected_state_version: int,
     expires_at: datetime,
 ) -> PendingL2Change:
+    confirmation_authority = _resolve_confirmation_authority(
+        cursor,
+        context,
+        confirmation_actor_id=confirmation_actor_id,
+    )
+    confirmation_policy_sha256 = _authorization_policy_sha256(
+        principal_id=context.service_principal_id,
+        resolved=confirmation_authority,
+        purpose=context.purpose,
+    )
     handle_id = "l2-handle:" + secrets.token_hex(24)
     token = secrets.token_urlsafe(32)
     token_sha256 = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -2136,10 +2136,10 @@ def _insert_l2_pending_handle(
             expected_state_version + 1,
             change_hash,
             change_hash,
-            context.authorization_epoch,
-            context.privacy_epoch,
-            context.retrieval_epoch,
-            context.policy_sha256,
+            confirmation_authority.authorization_epoch,
+            confirmation_authority.privacy_epoch,
+            confirmation_authority.retrieval_policy_epoch,
+            confirmation_policy_sha256,
             expires_at,
             _json(payload),
         ),
@@ -2151,6 +2151,65 @@ def _insert_l2_pending_handle(
         confirmation_handle=f"{handle_id}.{token}",
         expires_at=expires_at,
     )
+
+
+def _resolve_confirmation_authority(
+    cursor: Any,
+    context: ProductRequestContext,
+    *,
+    confirmation_actor_id: str,
+) -> ResolvedActorAuthority:
+    try:
+        cursor.execute(
+            "SELECT * FROM public.sleepagent_resolve_actor_authority("
+            "%s, %s, 'elder', %s)",
+            (confirmation_actor_id, context.subject_id, context.purpose),
+        )
+        row = cursor.fetchone()
+    except Exception as exc:
+        if getattr(exc, "sqlstate", None) == "P0001":
+            raise ProductApiError(
+                "authorization_denied",
+                "The confirmation actor has no unique active authority.",
+                status_code=403,
+            ) from exc
+        raise
+    if row is None:
+        raise ProductApiError(
+            "authorization_denied",
+            "The confirmation actor has no active authority.",
+            status_code=403,
+        )
+    scopes_value = row[7]
+    if isinstance(scopes_value, str):
+        scopes_value = json.loads(scopes_value)
+    resolved = ResolvedActorAuthority(
+        namespace_id=str(row[0]),
+        data_mode=str(row[1]),
+        namespace_generation=int(row[2]),
+        run_id=None if row[3] is None else str(row[3]),
+        arm_id=None if row[4] is None else str(row[4]),
+        binding_id=str(row[5]),
+        role=ProductRole(str(row[6])),
+        effective_scopes=frozenset(str(item) for item in scopes_value),
+        authorization_epoch=int(row[8]),
+        privacy_epoch=int(row[9]),
+        retrieval_policy_epoch=int(row[10]),
+    )
+    if (
+        resolved.role is not ProductRole.ELDER
+        or resolved.namespace_id != context.namespace_id
+        or resolved.data_mode != context.data_mode
+        or resolved.namespace_generation != context.namespace_generation
+        or resolved.run_id != context.run_id
+        or resolved.arm_id != context.arm_id
+    ):
+        raise ProductApiError(
+            "authorization_denied",
+            "The confirmation actor authority is outside this L2 scope.",
+            status_code=403,
+        )
+    return resolved
 
 
 def _consume_l2_pending_handle(
@@ -2395,6 +2454,29 @@ def _json(value: Any) -> str:
 
 def _canonical_json(value: Any) -> bytes:
     return _json(value).encode("utf-8")
+
+
+def _authorization_policy_sha256(
+    *,
+    principal_id: str,
+    resolved: ResolvedActorAuthority,
+    purpose: str,
+) -> str:
+    return _sha256(
+        {
+            "schema_version": "authorization_policy.v1",
+            "principal_id": principal_id,
+            "binding_id": resolved.binding_id,
+            "role": resolved.role.value,
+            "effective_scopes": sorted(resolved.effective_scopes),
+            "namespace_id": resolved.namespace_id,
+            "namespace_generation": resolved.namespace_generation,
+            "purpose": purpose,
+            "authorization_epoch": resolved.authorization_epoch,
+            "privacy_epoch": resolved.privacy_epoch,
+            "retrieval_policy_epoch": resolved.retrieval_policy_epoch,
+        }
+    )
 
 
 def _sha256(value: Any) -> str:

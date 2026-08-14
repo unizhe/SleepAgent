@@ -28,8 +28,8 @@ from sleepagent.runtime.contracts import (
 )
 from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
-    build_deterministic_replay_product_runner,
 )
+from sleepagent.runtime.factory import build_deterministic_product_runtime_bundle
 from sleepagent.runtime.invocation import (
     CareStrategyModelOutput,
     EvidenceReasoningModelOutput,
@@ -297,6 +297,7 @@ def test_pinned_personalization_changes_behavior_without_clinical_promotion() ->
                     "facts": [
                         {
                             "fact_id": habit.fact_id,
+                            "fact_ref": habit.fact_id,
                             "concept_id": habit.concept_id,
                             "value": habit.value,
                             "clinical_truth": False,
@@ -396,7 +397,7 @@ def test_product_request_rejects_personalization_snapshot_drift() -> None:
         habit_profile_hash=profile_hash,
         memory_read_receipt_refs=(receipt.receipt_id,),
         memory_read_receipt_hashes=(str(receipt.receipt_hash),),
-        source_refs=(habit.fact_id,),
+        source_refs=(habit.fact_id, receipt.handles[0].handle_id),
         created_at=NOW,
     )
     request = ProductEpisodeRunRequest(
@@ -481,7 +482,29 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
         "care.read_state": {},
         "artifact.render": {"content": "draft"},
     }
-    runner = build_deterministic_replay_product_runner()
+    class CapturingPersonalizationModel(
+        DeterministicReplayStructuredAgentModel
+    ):
+        memory_context_items: list[TrustedContextItem]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.memory_context_items = []
+
+        def generate(self, **kwargs):
+            if kwargs["schema"] is CareStrategyModelOutput:
+                packet = ContextPacket.model_validate_json(
+                    kwargs["messages"][-1]["content"]
+                )
+                self.memory_context_items.extend(
+                    item
+                    for item in packet.items
+                    if item.key == "personalization:memory_slice"
+                )
+            return super().generate(**kwargs)
+
+    model = CapturingPersonalizationModel()
+    runner = build_deterministic_product_runtime_bundle(model=model).runner
     baseline = runner.run(
         ProductEpisodeRunRequest(
             episode_id="episode-runner-baseline",
@@ -514,6 +537,7 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
             "range:1",
             habit.fact_id,
             receipt.receipt_id,
+            receipt.handles[0].handle_id,
         ),
         created_at=NOW,
     )
@@ -542,8 +566,13 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
     )
     assert any(
         claim["source_kind"] == EvidenceSourceKind.CONFIRMED_HABIT.value
+        and claim["evidence_refs"] == [habit.fact_id]
         for claim in evidence.payload["claims"]
     )
+    expected_handle = receipt.handles[0].handle_id
+    memory_context = model.memory_context_items[-1]
+    assert expected_handle in memory_context.source_refs
+    assert memory_context.value["items"][0]["retrieval_handle"] == expected_handle
     baseline_care = next(
         item
         for item in baseline.accepted_work_products

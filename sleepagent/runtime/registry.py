@@ -277,7 +277,10 @@ def _definition(
             agent_call_limit=0 if deterministic else (16 if complex_episode else 14),
             total_model_call_limit=0 if deterministic else (24 if complex_episode else 20),
             tool_call_limit=6 if deterministic else (20 if complex_episode else 14),
-            soft_deadline_seconds=90 if complex_episode else 30,
+            # Every non-urgent episode can require several sequential live-model
+            # turns, including one schema or acceptance-correction turn. Urgent
+            # execution is deterministic and never spends this budget on a model.
+            soft_deadline_seconds=180,
         ),
     )
 
@@ -1209,6 +1212,54 @@ def default_skill_packages() -> list[SkillPackage]:
             "review_action_and_publication",
         }
     )
+    evidence_contract_instructions = (
+        "Every inference claim must include at least one concrete "
+        "alternative_explanation.",
+        "Use readiness bindings only when Context contains a frozen cold-start "
+        "readiness decision. If Context contains none, omit claim_strength, "
+        "metric_id, measurement_cohort_ref, and readiness_decision_ref from every "
+        "claim; never invent a decision or identifier.",
+        "When Context does contain readiness decisions, each personal observed-fact "
+        "or inference claim must copy one matching decision and include all four "
+        "fields: claim_strength, metric_id, measurement_cohort_ref, and "
+        "readiness_decision_ref. Never include only some of those four fields.",
+        "The four readiness fields must exactly match the same Context decision; "
+        "do not invent identifiers or exceed that decision's claim-strength ceiling.",
+        "When personalization:habit_profile contains confirmed facts, include at "
+        "least one user_reported claim with source_kind confirmed_habit, copy its "
+        "value faithfully, and cite that fact's exact fact_ref. State that this is "
+        "personal context rather than clinical truth.",
+        "When personalization:memory_slice contains a current governed-memory item, "
+        "include at least one observed_fact claim about the confirmed context with "
+        "source_kind confirmed_memory, copy its typed_value faithfully, and cite its "
+        "exact retrieval_handle. Do not describe remembered context as sensor data or "
+        "clinical truth.",
+    )
+    sleepcare_contract_instructions = (
+        "Every semantic_bindings rendered_text must be copied verbatim as one "
+        "contiguous substring of the Communication text.",
+        "When Context contains accepted:evidence_packet with one or more claims, "
+        "claim_refs must include at least one of those exact claim_id values and "
+        "semantic_bindings must include a matching evidence_claim binding. Never "
+        "return an ungrounded personalized Communication with empty claim_refs.",
+        "Cite only accepted Evidence claim and Care candidate refs visible in "
+        "Context. Enumerate every number in rendered_text in preserved_numbers, "
+        "and put no number in Communication text unless a semantic binding covers it.",
+        "For an Evidence binding containing a number, copy the bound claim statement "
+        "verbatim; never quantitatively paraphrase it. If any number cannot be "
+        "source-bound, remove it. The safest Communication text is a natural-language "
+        "concatenation of semantic_bindings rendered_text values, with no additional "
+        "numeric text.",
+    )
+    safety_contract_instructions = (
+        "The top-level envelope status is completed, needs_input, revise, or "
+        "blocked; approve is never an envelope status. Put approve, revise, or "
+        "block only in output_payload.verdict.",
+        "Copy review_target_id, review_target_hash, fact_snapshot_hash, reviewed "
+        "episode revision, and policy version exactly from Context.",
+        "Set output_payload.expires_at to the timezone-aware future value "
+        "9999-12-31T23:59:59Z so the decision is not already expired.",
+    )
     return [
         SkillPackage.create(
             skill_id=skill_id,
@@ -1223,6 +1274,15 @@ def default_skill_packages() -> list[SkillPackage]:
             instructions=(
                 f"Perform only the atomic judgment defined by {skill_id}.",
                 "Stay inside the owner Agent responsibility and return its strict Schema.",
+                *(
+                    evidence_contract_instructions
+                    if owner is AgentId.EVIDENCE_REASONING
+                    else sleepcare_contract_instructions
+                    if owner is AgentId.SLEEP_CARE
+                    else safety_contract_instructions
+                    if owner is AgentId.SAFETY_REVIEW
+                    else ()
+                ),
             ),
             failure_modes=("conservative_exit",),
         )

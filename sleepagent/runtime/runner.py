@@ -840,6 +840,7 @@ class ProductEpisodeRunner:
         request_round: int = 0,
         seen_request_hashes: frozenset[str] = frozenset(),
         tool_session_id: str | None = None,
+        acceptance_repair_count: int = 0,
     ) -> tuple[AgentEnvelope, AcceptedWorkProduct]:
         agent_id = agent.agent_id
         kind = agent.boundary.work_product_kind
@@ -953,30 +954,60 @@ class ProductEpisodeRunner:
                 tool_session_id=turn.tool_session_id,
             )
         if kind is WorkProductKind.EVIDENCE_PACKET:
-            accepted = accept_evidence(
-                envelope,
-                snapshot=request.fact_snapshot,
-                tool_receipts=tool_receipts,
-                authorized_user_input_refs={
-                    *(
-                        {
-                            (
-                                "user_report:"
-                                if request.fact_snapshot.binding.role
-                                == "elder"
-                                else "authorized_observer_report:"
-                            )
-                            + stable_hash(request.user_text)[:16]
-                        }
-                        if request.user_text
-                        else set()
+            try:
+                accepted = accept_evidence(
+                    envelope,
+                    snapshot=request.fact_snapshot,
+                    tool_receipts=tool_receipts,
+                    authorized_user_input_refs={
+                        *(
+                            {
+                                (
+                                    "user_report:"
+                                    if request.fact_snapshot.binding.role
+                                    == "elder"
+                                    else "authorized_observer_report:"
+                                )
+                                + stable_hash(request.user_text)[:16]
+                            }
+                            if request.user_text
+                            else set()
+                        ),
+                        *(
+                            response.source_ref
+                            for response in request.user_fact_responses
+                        ),
+                    },
+                )
+            except AcceptanceError as exc:
+                if acceptance_repair_count >= 1:
+                    raise
+                return self._invoke_and_accept(
+                    request=request,
+                    runtime=runtime,
+                    agent=agent,
+                    tool_receipts=tool_receipts,
+                    accepted_evidence=accepted_evidence,
+                    accepted_care=accepted_care,
+                    safety_target=safety_target,
+                    revision_reason=(
+                        "bounded_acceptance_repair: "
+                        f"{exc}. Revise only the rejected Evidence packet. Copy "
+                        "Context source_scope exactly and keep every claim's "
+                        "date_start and date_end inside that scope; use the scope "
+                        "boundaries exactly when uncertain. Do not cite or describe "
+                        "dates outside the source scope. Use only exact authorized "
+                        "source references visible in Context or ToolReceipts: for "
+                        "a confirmed Habit fact use its fact_ref, and for governed "
+                        "Memory use its retrieval_handle. Never use entity IDs as "
+                        "evidence references."
                     ),
-                    *(
-                        response.source_ref
-                        for response in request.user_fact_responses
-                    ),
-                },
-            )
+                    collaboration_request=collaboration_request,
+                    request_round=request_round,
+                    seen_request_hashes=seen_request_hashes,
+                    tool_session_id=turn.tool_session_id,
+                    acceptance_repair_count=acceptance_repair_count + 1,
+                )
         elif kind is WorkProductKind.CARE_STRATEGY:
             if accepted_evidence is None:
                 raise AcceptanceError("Care requires accepted Evidence")
@@ -1000,37 +1031,90 @@ class ProductEpisodeRunner:
         elif kind is WorkProductKind.SAFETY_DECISION:
             if safety_target is None:
                 raise AcceptanceError("Safety requires exact target")
-            accepted = accept_safety(
-                envelope,
-                snapshot=request.fact_snapshot,
-                target=safety_target,
-            )
+            try:
+                accepted = accept_safety(
+                    envelope,
+                    snapshot=request.fact_snapshot,
+                    target=safety_target,
+                )
+            except AcceptanceError as exc:
+                if acceptance_repair_count >= 1:
+                    raise
+                return self._invoke_and_accept(
+                    request=request,
+                    runtime=runtime,
+                    agent=agent,
+                    tool_receipts=tool_receipts,
+                    accepted_evidence=accepted_evidence,
+                    accepted_care=accepted_care,
+                    safety_target=safety_target,
+                    revision_reason=(
+                        "bounded_acceptance_repair: "
+                        f"{exc}. Revise only the rejected Safety decision. Copy "
+                        "review_target_type, review_target_id, review_target_hash, "
+                        "fact_snapshot_hash, reviewed_episode_state_revision, and "
+                        "policy_version exactly from Context target metadata; keep "
+                        "the model's independently reasoned verdict."
+                    ),
+                    collaboration_request=collaboration_request,
+                    request_round=request_round,
+                    seen_request_hashes=seen_request_hashes,
+                    tool_session_id=turn.tool_session_id,
+                    acceptance_repair_count=acceptance_repair_count + 1,
+                )
         else:
             if kind is not WorkProductKind.COMMUNICATION:
                 raise AcceptanceError("unsupported concrete Agent work product")
-            accepted = accept_communication(
-                envelope,
-                snapshot=request.fact_snapshot,
-                accepted_evidence=accepted_evidence,
-                accepted_care=accepted_care,
-                reviewed_knowledge_refs={
-                    ref
-                    for receipt in tool_receipts
-                    if receipt.tool_name == "knowledge.retrieve_reviewed"
-                    and receipt.outcome == InvocationOutcome.SUCCEEDED
-                    for ref in [receipt.tool_invocation_id, *receipt.source_refs]
-                },
-                reviewed_knowledge_payloads={
-                    ref: receipt.output
-                    for receipt in tool_receipts
-                    if receipt.tool_name == "knowledge.retrieve_reviewed"
-                    and receipt.outcome == InvocationOutcome.SUCCEEDED
-                    for ref in [receipt.tool_invocation_id, *receipt.source_refs]
-                },
-                require_personal_grounding=request.personalized,
-                authenticated_user_text=request.user_text,
-                expected_audience_role=_effective_audience_role(request),
-            )
+            try:
+                accepted = accept_communication(
+                    envelope,
+                    snapshot=request.fact_snapshot,
+                    accepted_evidence=accepted_evidence,
+                    accepted_care=accepted_care,
+                    reviewed_knowledge_refs={
+                        ref
+                        for receipt in tool_receipts
+                        if receipt.tool_name == "knowledge.retrieve_reviewed"
+                        and receipt.outcome == InvocationOutcome.SUCCEEDED
+                        for ref in [receipt.tool_invocation_id, *receipt.source_refs]
+                    },
+                    reviewed_knowledge_payloads={
+                        ref: receipt.output
+                        for receipt in tool_receipts
+                        if receipt.tool_name == "knowledge.retrieve_reviewed"
+                        and receipt.outcome == InvocationOutcome.SUCCEEDED
+                        for ref in [receipt.tool_invocation_id, *receipt.source_refs]
+                    },
+                    require_personal_grounding=request.personalized,
+                    authenticated_user_text=request.user_text,
+                    expected_audience_role=_effective_audience_role(request),
+                )
+            except AcceptanceError as exc:
+                if acceptance_repair_count >= 1:
+                    raise
+                return self._invoke_and_accept(
+                    request=request,
+                    runtime=runtime,
+                    agent=agent,
+                    tool_receipts=tool_receipts,
+                    accepted_evidence=accepted_evidence,
+                    accepted_care=accepted_care,
+                    safety_target=safety_target,
+                    revision_reason=(
+                        "bounded_acceptance_repair: "
+                        f"{exc}. Revise only the rejected Communication. Choose "
+                        "exactly one accepted Evidence claim, copy that claim's "
+                        "statement verbatim as the entire Communication text and "
+                        "as the sole semantic binding rendered_text, cite only "
+                        "that claim_id, and emit no Care refs or extra prose. Do "
+                        "not paraphrase, add, remove, or change numeric tokens."
+                    ),
+                    collaboration_request=collaboration_request,
+                    request_round=request_round,
+                    seen_request_hashes=seen_request_hashes,
+                    tool_session_id=turn.tool_session_id,
+                    acceptance_repair_count=acceptance_repair_count + 1,
+                )
         runtime.accept(kind, accepted)
         return envelope, accepted
 

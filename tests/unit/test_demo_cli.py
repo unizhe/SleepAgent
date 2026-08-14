@@ -14,7 +14,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sleepagent.simulation.cli import (
     ActorAssertionSigner,
     DemoCliError,
+    _remember_habit,
+    _verify_longitudinal_personalization_pins,
     render_product_demo,
+    run_product_demo_story,
     show_product_demo,
     verify_abnormal_backend,
     verify_backend,
@@ -23,6 +26,7 @@ from sleepagent.simulation.cli import (
     verify_command_backend,
     verify_read_models_backend,
 )
+from sleepagent.simulation.seed_registry import load_replay_seed_registry
 
 
 pytestmark = pytest.mark.unit
@@ -70,6 +74,12 @@ class ProductDemoHttp:
                     "analysis_revision_id": "analysis-1",
                 },
             }
+        if path == "/demo/v1/clock":
+            return {
+                **replay,
+                "generation": 1,
+                "scenario_time": "2026-03-05T20:00:00+08:00",
+            }
         if path == "/demo/v1/advance":
             return {**replay, "operation_id": "advance-1", "generation": 1}
         if path == "/demo/v1/operations/advance-1":
@@ -115,6 +125,57 @@ class ProductDemoHttp:
                 ],
                 "next_cursor": None,
             }
+        if path == "/demo/v1/technical-trace":
+            urgent = self.scenario_id == "urgent-zero-model"
+            attempts = [] if urgent else [
+                {
+                    "analysis": {"analysis_revision_id": "analysis-1"},
+                    "role_runs": [
+                        {
+                            "role": "elder",
+                            "agent_invocations": [
+                                {
+                                    "agent_id": "sleep_care",
+                                    "provider": "openai-compatible",
+                                    "model_id": "live-model",
+                                    "provider_request_id": "request-1",
+                                    "skill_lock_hash": "a" * 64,
+                                }
+                            ],
+                            "tool_receipts": [],
+                            "accepted_work_products": [],
+                        }
+                    ],
+                }
+            ]
+            return {
+                **replay,
+                "schema_version": "demo_technical_trace.v1",
+                "root_operation_id": "root-1",
+                "namespace_generation": 1,
+                "run_id": "run-1",
+                "arm_id": "arm-1",
+                "subject_id": (
+                    "synthetic-subject-urgent-001"
+                    if urgent
+                    else "synthetic-subject-normal-001"
+                    if self.scenario_id == "normal-one-night"
+                    else "synthetic-subject-lin-001"
+                ),
+                "journey_state": "failed" if urgent else "succeeded",
+                "journey_error_code": (
+                    "unexpected_urgent_route" if urgent else None
+                ),
+                "journey_result": None,
+                "product_operation_count": 0 if urgent else 1,
+                "product_attempt_count": 0 if urgent else 1,
+                "fast_path_succeeded_count": 1,
+                "product_attempts": attempts,
+                "durable_invocations": [],
+                "habit_revisions": [],
+                "memory_revisions": [],
+                "memory_read_receipts": [],
+            }
         raise AssertionError((method, path, kwargs))
 
 
@@ -123,6 +184,7 @@ class ProductDemoProduct:
         self.night_count = night_count
         self.urgent = urgent
         self.calls: list[tuple[str, str]] = []
+        self.habit_profile_version = 0
 
     def night_episodes(self, *, subject_id, **kwargs):
         del kwargs
@@ -179,7 +241,62 @@ class ProductDemoProduct:
             "state": "ready",
             "subject_ref": subject_id,
             "role": role,
+            "episode_id": "episode-1",
+            "analysis_revision_id": "analysis-1",
             "content": content,
+        }
+
+    def habit_profile(self, *, subject_id, **kwargs):
+        del kwargs
+        return {
+            "schema_version": "habit_profile.v2",
+            "profile_version": self.habit_profile_version,
+            "profile_hash": None if self.habit_profile_version == 0 else "a" * 64,
+            "current_facts": [],
+            "stale_concept_ids": [],
+            "disputed_concept_ids": [],
+        }
+
+    def habit_questions(self, *, concept_id, **kwargs):
+        del kwargs
+        return {
+            "selection": {
+                "selection_id": "selection-1",
+                "selected_concepts": [concept_id],
+            },
+            "questions": [
+                {"concept_id": concept_id, "concept_version": "1.0.0"}
+            ],
+            "profile_version": self.habit_profile_version,
+        }
+
+    def habit_change(self, *, payload, **kwargs):
+        del kwargs
+        assert payload["selection_id"] == "selection-1"
+        return {
+            "pending_changes": [
+                {
+                    "change_id": "change-1",
+                    "change_hash": "b" * 64,
+                    "confirmation_handle": "handle-1",
+                }
+            ]
+        }
+
+    def confirm_personalization(self, *, capability, payload, **kwargs):
+        del kwargs
+        assert capability == "habit"
+        assert payload == {
+            "change_id": "change-1",
+            "change_hash": "b" * 64,
+            "confirmation_handle": "handle-1",
+        }
+        self.habit_profile_version = 1
+        return {
+            "capability": "habit",
+            "state_version": 1,
+            "revision_ref": "habit:fact-1",
+            "revision_hash": "c" * 64,
         }
 
     def read_model(self, *, kind, subject_id, role, **kwargs):
@@ -378,6 +495,32 @@ def test_product_show_uses_only_public_http_and_registry_summary(
     }
 
 
+def test_product_show_resumes_after_completed_advance_without_advancing_twice() -> None:
+    class CompletedAdvanceDemo(ProductDemoHttp):
+        def request(self, method: str, path: str, **kwargs):
+            if path == "/demo/v1/clock":
+                self.calls.append((method, path, kwargs))
+                return {
+                    "data_mode": "replay",
+                    "synthetic_non_release": True,
+                    "generation": 1,
+                    "scenario_time": "2026-03-09T06:35:00+08:00",
+                }
+            return super().request(method, path, **kwargs)
+
+    demo = CompletedAdvanceDemo("worsening-vital-trend")
+    result = show_product_demo(
+        demo,
+        ProductDemoProduct(night_count=4),
+        scenario_id="worsening-vital-trend",
+        wait_seconds=0.1,
+        include_trace=False,
+    )
+
+    assert result["advance_operation"]["resumed"] is True
+    assert all(path != "/demo/v1/advance" for _, path, _ in demo.calls)
+
+
 def test_product_show_presents_urgent_zero_model_without_fake_projections() -> None:
     demo = ProductDemoHttp("urgent-zero-model")
     product = ProductDemoProduct(night_count=1, urgent=True)
@@ -397,6 +540,183 @@ def test_product_show_presents_urgent_zero_model_without_fake_projections() -> N
     assert "product=product-1" not in rendered
     assert "Product Runtime and role projections were not invoked" in rendered
     assert "Product Runtime -> role projections" not in rendered
+
+
+def test_urgent_product_story_requires_zero_model_durable_evidence() -> None:
+    demo = ProductDemoHttp("urgent-zero-model")
+
+    result = run_product_demo_story(
+        demo,
+        ProductDemoProduct(night_count=1, urgent=True),
+        story_id="urgent-safety",
+        model="live",
+        wait_seconds=0.1,
+        include_trace=True,
+    )
+
+    assert result["story"]["selected_analysis_ids"] == []
+    assert result["technical_trace"]["product_attempt_count"] == 0
+    assert result["technical_trace"]["durable_invocations"] == []
+    assert "Model: ZERO LLM" in render_product_demo(result)
+
+
+def test_urgent_product_story_rejects_any_durable_provider_invocation() -> None:
+    class LeakyUrgentDemo(ProductDemoHttp):
+        def request(self, method, path, **kwargs):
+            value = super().request(method, path, **kwargs)
+            if path == "/demo/v1/technical-trace":
+                value["durable_invocations"] = [
+                    {
+                        "agent_id": "evidence_reasoning",
+                        "provider": "openai-compatible",
+                        "provider_request_id": "provider-request:forbidden",
+                    }
+                ]
+            return value
+
+    with pytest.raises(DemoCliError, match="zero-model safety path"):
+        run_product_demo_story(
+            LeakyUrgentDemo("urgent-zero-model"),
+            ProductDemoProduct(night_count=1, urgent=True),
+            story_id="urgent-safety",
+            model="live",
+            wait_seconds=0.1,
+            include_trace=True,
+        )
+
+
+def test_cold_start_story_confirms_exact_habit_and_requires_live_evidence() -> None:
+    product = ProductDemoProduct(night_count=1)
+
+    result = run_product_demo_story(
+        ProductDemoHttp("normal-one-night"),
+        product,
+        story_id="cold-start",
+        model="live",
+        wait_seconds=0.1,
+        include_trace=False,
+    )
+
+    assert result["actions"]["cold_start_profile"]["profile_version"] == 0
+    assert result["actions"]["confirmed_profile"]["profile_version"] == 1
+    assert result["technical_trace"]["product_attempt_count"] == 1
+    assert "provider=openai-compatible" in render_product_demo(result)
+
+
+def test_longitudinal_verifier_requires_material_habit_memory_evidence_and_receipts(
+) -> None:
+    actions = {
+        "episode_a_analysis_id": "analysis-a",
+        "episode_b_analysis_id": "analysis-b",
+        "habit_profile_after_family_report": {
+            "disputed_concept_ids": ["habit.nap_pattern"]
+        },
+    }
+
+    def attempt(analysis_id: str, version: int, memory_text: str) -> dict:
+        return {
+            "analysis": {"analysis_revision_id": analysis_id},
+            "role_runs": [
+                {
+                    "role": "elder",
+                    "product_episode_id": f"episode-{version}",
+                    "personalization": {
+                        "habit_profile_version": version,
+                        "memory_state_version": version,
+                    },
+                    "accepted_work_products": [
+                        {
+                            "agent_id": "evidence_reasoning",
+                            "payload": {
+                                "claims": [
+                                    {
+                                        "source_kind": "confirmed_habit",
+                                        "statement": f"habit-v{version}",
+                                    },
+                                    {
+                                        "source_kind": "confirmed_memory",
+                                        "statement": memory_text,
+                                    },
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+    attempts = [
+        attempt("analysis-a", 1, "quiet_room"),
+        attempt("analysis-b", 2, "soft_night_light"),
+    ]
+    trace = {
+        "habit_revisions": [
+            {
+                "profile_version": 1,
+                "source_actor_role": "elder",
+                "confirmation_ref": "confirm-habit-1",
+            },
+            {
+                "profile_version": 2,
+                "source_actor_role": "family",
+                "confirmation_ref": "confirm-habit-2",
+            },
+        ],
+        "memory_revisions": [
+            {"state_version": 1, "confirmation_ref": "confirm-memory-1"},
+            {"state_version": 2, "confirmation_ref": "confirm-memory-2"},
+        ],
+        "memory_read_receipts": [
+            {"product_episode_id": "episode-1"},
+            {"product_episode_id": "episode-2"},
+        ],
+    }
+
+    _verify_longitudinal_personalization_pins(actions, attempts, trace)
+
+    claims = attempts[1]["role_runs"][0]["accepted_work_products"][0][
+        "payload"
+    ]["claims"]
+    claims.pop()
+    with pytest.raises(DemoCliError, match="both confirmed Habit and Memory"):
+        _verify_longitudinal_personalization_pins(actions, attempts, trace)
+
+
+def test_habit_demo_can_consume_an_actor_bound_prepared_question_receipt() -> None:
+    class PreparedSelectionProduct(ProductDemoProduct):
+        def habit_questions(self, **kwargs):
+            del kwargs
+            raise AssertionError("prepared selection must not request a new question")
+
+    product = PreparedSelectionProduct(night_count=2)
+    seed = load_replay_seed_registry().lookup(
+        "canonical-replay-fixtures",
+        "habit-family-report",
+    )
+    prepared = {
+        "selection": {
+            "selection_id": "selection-1",
+            "selected_concepts": [["habit.nap_pattern", "1.0.0"]],
+        },
+        "questions": [
+            {"concept_id": "habit.nap_pattern", "concept_version": "1.0.0"}
+        ],
+        "profile_version": 0,
+    }
+
+    result = _remember_habit(
+        product,
+        seed=seed,
+        source_role="family",
+        episode_id="episode-a",
+        concept_id="habit.nap_pattern",
+        value="多数天午睡",
+        direct_observation=True,
+        prepared_selection=prepared,
+    )
+
+    assert result["question"]["concept_id"] == "habit.nap_pattern"
+    assert result["confirmation"]["state_version"] == 1
 
 
 def test_product_show_default_omits_trace_http_and_section() -> None:

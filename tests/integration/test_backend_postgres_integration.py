@@ -15,6 +15,8 @@ import pytest
 from sleepagent.api.postgres import (
     PostgresAuthorityStore,
     PostgresProductBackend,
+    ResolvedActorAuthority,
+    _authorization_policy_sha256,
 )
 from sleepagent.process import (
     RuntimeServices,
@@ -381,7 +383,6 @@ def test_l2_habit_and_memory_are_governed_append_only_and_durable() -> None:
     subject_id = f"subject-{suffix}"
     elder_actor = f"elder-{suffix}"
     family_actor = f"family-{suffix}"
-    policy_sha256 = hashlib.sha256(f"policy:{suffix}".encode()).hexdigest()
     scopes = [
         "product:sleep:today:read",
         "product:sleep:interaction:write",
@@ -477,6 +478,19 @@ def test_l2_habit_and_memory_are_governed_append_only_and_durable() -> None:
             )
 
     def context(actor_id: str, role: ProductRole) -> ProductRequestContext:
+        resolved = ResolvedActorAuthority(
+            namespace_id=namespace_id,
+            data_mode="live",
+            namespace_generation=1,
+            run_id=None,
+            arm_id=None,
+            binding_id=f"binding-{role.value}-{suffix}",
+            role=role,
+            effective_scopes=frozenset(scopes),
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+        )
         return ProductRequestContext(
             service_principal_id=principal_id,
             actor_id=actor_id,
@@ -493,7 +507,11 @@ def test_l2_habit_and_memory_are_governed_append_only_and_durable() -> None:
             authorization_epoch=1,
             privacy_epoch=1,
             retrieval_epoch=1,
-            policy_sha256=policy_sha256,
+            policy_sha256=_authorization_policy_sha256(
+                principal_id=principal_id,
+                resolved=resolved,
+                purpose="sleep_care",
+            ),
         )
 
     elder = context(elder_actor, ProductRole.ELDER)

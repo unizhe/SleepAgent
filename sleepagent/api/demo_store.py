@@ -24,6 +24,7 @@ from sleepagent.api.demo import (
     DemoSeedRequest,
     DemoTraceEntry,
     DemoTraceResponse,
+    DemoTechnicalTraceResponse,
     ScenarioClockResponse,
 )
 from sleepagent.persistence.uow import DemoControlScope, UnitOfWorkFactory
@@ -132,6 +133,8 @@ class DemoStore(Protocol):
         after_sequence: int,
         limit: int,
     ) -> tuple[DemoTraceEntry, ...]: ...
+
+    def read_technical_trace(self, *, operation_id: str) -> dict[str, Any]: ...
 
 
 class PostgresDemoStore:
@@ -346,6 +349,25 @@ class PostgresDemoStore:
             for row in rows
         )
 
+    def read_technical_trace(self, *, operation_id: str) -> dict[str, Any]:
+        with self.uow_factory.begin(self._scope()) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT public.sleepagent_read_demo_technical_trace(%s)",
+                    (operation_id,),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            uow.commit()
+        if row is None:
+            raise LookupError("operation_not_found")
+        value = _json_object(row[0])
+        if value is None:
+            raise RuntimeError("durable technical trace is unavailable")
+        return value
+
 
 class DurableDemoController:
     def __init__(
@@ -523,6 +545,17 @@ class DurableDemoController:
             entries=page,
             next_cursor=next_cursor,
         )
+
+    def technical_trace(
+        self,
+        *,
+        operation_id: str,
+    ) -> DemoTechnicalTraceResponse:
+        try:
+            value = self.store.read_technical_trace(operation_id=operation_id)
+            return DemoTechnicalTraceResponse.model_validate(value)
+        except Exception as exc:
+            raise _translate_store_error(exc) from exc
 
 
 def _json_object(value: object) -> dict[str, Any] | None:

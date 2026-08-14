@@ -77,6 +77,44 @@ def test_factory_constructs_exact_immutable_four_role_roster() -> None:
         roster.sleepcare = roster.sleepcare  # type: ignore[misc]
 
 
+def test_evidence_skills_compile_semantic_contract_instructions() -> None:
+    package = SkillRegistry(default_skill_packages()).champion(
+        "interpret_scoped_evidence",
+        AgentId.EVIDENCE_REASONING,
+    )
+
+    instructions = " ".join(package.instructions)
+    assert "alternative_explanation" in instructions
+    assert "If Context contains none, omit" in instructions
+    assert "never invent a decision" in instructions
+    assert "claim_strength" in instructions
+    assert "readiness_decision_ref" in instructions
+    assert "source_kind confirmed_habit" in instructions
+    assert "exact fact_ref" in instructions
+    assert "source_kind confirmed_memory" in instructions
+    assert "exact retrieval_handle" in instructions
+
+
+def test_communication_and_safety_skills_compile_contract_instructions() -> None:
+    registry = SkillRegistry(default_skill_packages())
+    communication = registry.champion(
+        "plan_episode",
+        AgentId.SLEEP_CARE,
+    )
+    safety = registry.champion(
+        "review_claim_and_boundary",
+        AgentId.SAFETY_REVIEW,
+    )
+
+    assert "copied verbatim" in " ".join(communication.instructions)
+    assert "empty claim_refs" in " ".join(communication.instructions)
+    assert "with no additional numeric text" in " ".join(
+        communication.instructions
+    )
+    assert "approve is never an envelope status" in " ".join(safety.instructions)
+    assert "9999-12-31T23:59:59Z" in " ".join(safety.instructions)
+
+
 def test_factory_rejects_missing_extra_and_plain_string_role_bindings() -> None:
     model = NeverCalledModel()
     missing = {
@@ -105,7 +143,7 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         item.value for item in PRODUCT_AGENT_ROSTER
     )
     assert stable_hash(product_agent_manifest()) == (
-        "e2e1435b12d27fdd52ce616b04800456fe9686f6d349f9378e3d630dc14445a3"
+        "8a618d48b1e5938d1e5fdca41172a0e7a9ba2c4e63b80bb1a4c73baa50e4505e"
     )
     assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
 
