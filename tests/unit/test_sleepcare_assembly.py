@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -98,13 +99,17 @@ def _evidence_packet(
     )
 
 
-def _care_strategy() -> CareStrategy:
+def _care_strategy(
+    *,
+    candidate_id: str = "care:consistent-wake",
+    title: str = "连续 5 天保持较稳定的起床安排",
+) -> CareStrategy:
     action = CareActionCandidate.create(
-        candidate_id="care:consistent-wake",
+        candidate_id=candidate_id,
         candidate_version=1,
         care_action_id="consistent-wake-time",
         care_action_version=1,
-        title="连续 5 天保持较稳定的起床安排",
+        title=title,
         rationale_evidence_refs=["claim:habit-baseline"],
         duration_days=5,
         confirmation_required=True,
@@ -128,6 +133,8 @@ def _context(
     ),
     claim_id: str = "claim:habit-baseline",
     include_care: bool = True,
+    care_candidate_id: str = "care:consistent-wake",
+    care_title: str = "连续 5 天保持较稳定的起床安排",
     include_reviewed_knowledge: bool = False,
     agent_id: AgentId = AgentId.SLEEP_CARE,
 ) -> ContextPacket:
@@ -145,7 +152,10 @@ def _context(
             TrustedContextItem(
                 key="accepted:care_strategy",
                 trust_label=TrustLabel.ACCEPTED_WORK_PRODUCT,
-                value=_care_strategy().model_dump(mode="json"),
+                value=_care_strategy(
+                    candidate_id=care_candidate_id,
+                    title=care_title,
+                ).model_dump(mode="json"),
                 source_refs=("care-work-product:accepted",),
             )
         )
@@ -202,6 +212,21 @@ def _plan(*segments: tuple[str, str]) -> _SleepCareContentPlan:
             "memory_change_candidates": [],
         }
     )
+
+
+def _allowed_source_manifest(call: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    manifest_message = next(
+        item
+        for item in call["messages"]
+        if item.get("role") == "system"
+        and "SleepCareContentPlan allowed-source manifest" in item.get(
+            "content", ""
+        )
+    )
+    content = manifest_message["content"]
+    marker = "Allowed-source manifest JSON: "
+    assert marker in content
+    return json.loads(content.split(marker, 1)[1]), content
 
 
 class StaticModel:
@@ -586,6 +611,157 @@ def test_assembly_model_context_mismatch_fails_before_provider_call() -> None:
     assert not base.calls
 
 
+@pytest.mark.parametrize(
+    ("audience_role", "doctor_material"),
+    [("elder", False), ("family", False), ("doctor", True)],
+)
+def test_content_plan_provider_receives_exact_allowed_source_manifest(
+    audience_role: str,
+    doctor_material: bool,
+) -> None:
+    claim_id = "claim:opaque/7f3a9c"
+    care_id = "care-candidate:opaque/91bd2e"
+    evidence_text = "已验收记录显示本周有 3 个受限观察项。"
+    care_text = "连续 5 天保持经确认的稳定安排"
+    context = _context(
+        audience_role=audience_role,
+        claim_id=claim_id,
+        statement=evidence_text,
+        care_candidate_id=care_id,
+        care_title=care_text,
+    )
+    base = SequencedPlanModel(
+        [_plan(("evidence_claim", claim_id), ("care_candidate", care_id))]
+    )
+    adapter = _SleepCareAssemblyModel(
+        base_model=base,
+        catalog=_build_sleepcare_source_catalog(context),
+        doctor_material=doctor_material,
+    )
+    original_messages = [
+        {"role": "system", "content": "original skill instruction"},
+        {"role": "user", "content": "opaque typed ContextPacket"},
+    ]
+
+    result = adapter.generate(
+        messages=original_messages,
+        schema=SleepCareModelOutput,
+        prompt_version="explain_for_elder.prompt.3.0.0",
+        context_packet_id=context.context_packet_id,
+    )
+    manifest, manifest_instruction = _allowed_source_manifest(base.calls[0])
+
+    assert base.calls[0]["messages"][1:] == original_messages
+    assert manifest == {
+        "allowed_sources": [
+            {
+                "exact_text": care_text,
+                "source_ref": care_id,
+                "source_type": "care_candidate",
+            },
+            {
+                "exact_text": evidence_text,
+                "source_ref": claim_id,
+                "source_type": "evidence_claim",
+            },
+        ],
+        "context_packet_id": context.context_packet_id,
+    }
+    assert "character-for-character" in manifest_instruction
+    assert "Do not abbreviate, transform, regenerate" in manifest_instruction
+    assert result.output_payload.audience_role == audience_role
+    assert result.output_payload.artifact_kind == (
+        "doctor_material" if doctor_material else None
+    )
+    assert result.output_payload.claim_refs == [claim_id]
+    assert result.output_payload.care_candidate_refs == [care_id]
+    assert all(
+        binding.rendered_text in result.output_payload.text
+        for binding in result.output_payload.semantic_bindings
+    )
+    assert SleepCareModelOutput.model_validate(result.model_dump()) == result
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        _plan(("evidence_claim", "claim:forged-by-provider")),
+        _plan(
+            ("evidence_claim", "claim:habit-baseline"),
+            ("evidence_claim", "claim:habit-baseline"),
+        ),
+    ],
+)
+def test_provider_forged_or_duplicate_manifest_selection_still_fails_closed(
+    plan: _SleepCareContentPlan,
+) -> None:
+    context = _context(include_care=False)
+    base = SequencedPlanModel([plan])
+    adapter = _SleepCareAssemblyModel(
+        base_model=base,
+        catalog=_build_sleepcare_source_catalog(context),
+        doctor_material=False,
+    )
+
+    with pytest.raises(ValueError, match="unknown source|duplicate source"):
+        adapter.generate(
+            messages=[],
+            schema=SleepCareModelOutput,
+            prompt_version="explain_for_elder.prompt.3.0.0",
+            context_packet_id=context.context_packet_id,
+        )
+
+    manifest, _ = _allowed_source_manifest(base.calls[0])
+    assert manifest["allowed_sources"][0]["source_ref"] == (
+        "claim:habit-baseline"
+    )
+
+
+def test_empty_catalog_manifest_cannot_authorize_an_invented_source() -> None:
+    populated = _context(include_care=False)
+    audience_item = next(
+        item
+        for item in populated.items
+        if item.key == "requested_audience_role"
+    )
+    context = populated.model_copy(update={"items": (audience_item,)})
+    catalog = _build_sleepcare_source_catalog(context)
+    empty_base = SequencedPlanModel([_plan()])
+    empty_adapter = _SleepCareAssemblyModel(
+        base_model=empty_base,
+        catalog=catalog,
+        doctor_material=False,
+    )
+
+    result = empty_adapter.generate(
+        messages=[],
+        schema=SleepCareModelOutput,
+        prompt_version="explain_for_elder.prompt.3.0.0",
+        context_packet_id=context.context_packet_id,
+    )
+    manifest, instruction = _allowed_source_manifest(empty_base.calls[0])
+
+    assert manifest["allowed_sources"] == []
+    assert "There is no legal source" in instruction
+    assert result.output_payload.semantic_bindings == []
+
+    forged_base = SequencedPlanModel(
+        [_plan(("evidence_claim", "claim:invented"))]
+    )
+    forged_adapter = _SleepCareAssemblyModel(
+        base_model=forged_base,
+        catalog=catalog,
+        doctor_material=False,
+    )
+    with pytest.raises(ValueError, match="unknown source"):
+        forged_adapter.generate(
+            messages=[],
+            schema=SleepCareModelOutput,
+            prompt_version="explain_for_elder.prompt.3.0.0",
+            context_packet_id=context.context_packet_id,
+        )
+
+
 def test_per_invocation_adapters_do_not_share_catalog_or_metadata() -> None:
     plan = _plan(("evidence_claim", "claim:shared"))
     base = SequencedPlanModel([plan, plan])
@@ -634,6 +810,24 @@ def test_per_invocation_adapters_do_not_share_catalog_or_metadata() -> None:
     assert first.last_provider_input_tokens == 41
     assert second.last_provider_request_id == "provider-request:2"
     assert second.last_provider_input_tokens == 42
+    first_manifest, _ = _allowed_source_manifest(base.calls[0])
+    second_manifest, _ = _allowed_source_manifest(base.calls[1])
+    assert first_manifest["context_packet_id"] == "context:first"
+    assert second_manifest["context_packet_id"] == "context:second"
+    assert first_manifest["allowed_sources"][0]["exact_text"] == (
+        "第一份已验收来源正文。"
+    )
+    assert second_manifest["allowed_sources"][0]["exact_text"] == (
+        "第二份已验收来源正文。"
+    )
+    assert "第二份已验收来源正文。" not in json.dumps(
+        first_manifest,
+        ensure_ascii=False,
+    )
+    assert "第一份已验收来源正文。" not in json.dumps(
+        second_manifest,
+        ensure_ascii=False,
+    )
 
 
 def test_sleepcare_agent_returns_final_schema_record_from_content_plan() -> None:
@@ -832,3 +1026,9 @@ def test_other_agents_continue_using_bound_model_without_override(
     assert len(model.calls) == 1
     assert envelope.agent_id is agent_id
     assert record.provider == "bound-provider"
+    assert not any(
+        "SleepCareContentPlan allowed-source manifest" in item.get(
+            "content", ""
+        )
+        for item in model.calls[0]["messages"]
+    )

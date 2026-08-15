@@ -12,6 +12,8 @@ from sleepagent.runtime.agents import (
     EpisodePlanProposal,
     EvaluationDecision,
     SleepCareEvaluation,
+    _CareStrategyPlan,
+    _CareStrategySelectedAction,
     _SleepCareContentPlan,
 )
 from sleepagent.runtime.cold_start import (
@@ -437,6 +439,21 @@ class ScenarioModel:
                             date_end=scope.date_end,
                         )
                     ],
+                ),
+            )
+        if schema is _CareStrategyPlan:
+            return schema(
+                disposition="propose",
+                summary="形成单一行动",
+                selected_action=_CareStrategySelectedAction(
+                    care_action_id="consistent-wake-time",
+                    version=1,
+                    title="连续五天固定起床时间",
+                    rationale_evidence_refs=["claim-1"],
+                    parameters={"tolerance_minutes": 30},
+                    duration_days=5,
+                    stop_conditions=["不适时停止"],
+                    activatable=True,
                 ),
             )
         if schema is CareStrategyModelOutput:
@@ -1731,7 +1748,7 @@ def test_exact_revision_risk_escalate_routes_care_and_retains_result() -> None:
         if item.tool_name == "coordination.read_policy"
     )
     assert coordination.output["routing"]["candidate_intents"]
-    assert CareStrategyModelOutput.__name__ in model.calls
+    assert _CareStrategyPlan.__name__ in model.calls
     assert SafetyReviewModelOutput.__name__ in model.calls
     care = next(
         item
@@ -1817,7 +1834,7 @@ def test_longitudinal_watch_routes_care_without_forcing_safety() -> None:
     )
     assert coordination.output["routing"]["risk_level"] == "watch"
     assert coordination.output["routing"]["candidate_intents"]
-    assert CareStrategyModelOutput.__name__ in model.calls
+    assert _CareStrategyPlan.__name__ in model.calls
     assert SafetyReviewModelOutput.__name__ not in model.calls
     assert any(
         item.agent_id == AgentId.CARE_STRATEGY

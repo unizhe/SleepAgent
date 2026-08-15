@@ -1690,6 +1690,18 @@ def _agent_invocations(
     ]
 
 
+def _is_allowed_live_control_plane_invocation(
+    invocation: Mapping[str, Any],
+) -> bool:
+    return (
+        invocation.get("agent_id") == "care_strategy"
+        and invocation.get("provider") == "sleepagent-deterministic"
+        and invocation.get("model_id") == "care-catalog-preflight.v1"
+        and "provider_request_id" in invocation
+        and invocation.get("provider_request_id") is None
+    )
+
+
 def _verify_demo_model_evidence(
     *,
     model: str,
@@ -1720,10 +1732,19 @@ def _verify_demo_model_evidence(
     if not selected_attempts or not invocations:
         raise DemoCliError("demo has no durable Agent invocation evidence")
     if model == "live":
+        substantive_invocations = [
+            item
+            for item in invocations
+            if not _is_allowed_live_control_plane_invocation(item)
+        ]
+        if not substantive_invocations:
+            raise DemoCliError(
+                "live demo has no substantive real-provider invocation"
+            )
         if any(
             item.get("provider") != "openai-compatible"
             or not item.get("provider_request_id")
-            for item in invocations
+            for item in substantive_invocations
         ):
             raise DemoCliError("live demo did not use the real configured provider")
     elif any(

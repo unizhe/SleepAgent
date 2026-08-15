@@ -15,6 +15,7 @@ from sleepagent.simulation.cli import (
     ActorAssertionSigner,
     DemoCliError,
     _remember_habit,
+    _verify_demo_model_evidence,
     _verify_longitudinal_personalization_pins,
     render_product_demo,
     run_product_demo_story,
@@ -30,6 +31,151 @@ from sleepagent.simulation.seed_registry import load_replay_seed_registry
 
 
 pytestmark = pytest.mark.unit
+
+
+def _model_proof_attempt(*invocations: dict) -> dict:
+    return {
+        "role_runs": [
+            {
+                "agent_invocations": list(invocations),
+            }
+        ]
+    }
+
+
+def _real_invocation(request_id: str = "provider-request:one") -> dict:
+    return {
+        "agent_id": "evidence_reasoning",
+        "provider": "openai-compatible",
+        "model_id": "deepseek-live",
+        "provider_request_id": request_id,
+    }
+
+
+def _care_catalog_preflight_invocation() -> dict:
+    return {
+        "agent_id": "care_strategy",
+        "provider": "sleepagent-deterministic",
+        "model_id": "care-catalog-preflight.v1",
+        "provider_request_id": None,
+    }
+
+
+def test_live_model_proof_accepts_all_real_provider_invocations() -> None:
+    _verify_demo_model_evidence(
+        model="live",
+        story_id="worsening-care",
+        selected_attempts=[
+            _model_proof_attempt(
+                _real_invocation("provider-request:evidence"),
+                _real_invocation("provider-request:care"),
+            )
+        ],
+        technical_trace={},
+    )
+
+
+def test_live_model_proof_excludes_only_exact_care_catalog_preflight() -> None:
+    _verify_demo_model_evidence(
+        model="live",
+        story_id="worsening-care",
+        selected_attempts=[
+            _model_proof_attempt(
+                _care_catalog_preflight_invocation(),
+                _real_invocation("provider-request:evidence"),
+                _real_invocation("provider-request:care"),
+            )
+        ],
+        technical_trace={},
+    )
+
+
+def test_live_model_proof_rejects_preflight_without_real_provider() -> None:
+    with pytest.raises(DemoCliError, match="no substantive real-provider"):
+        _verify_demo_model_evidence(
+            model="live",
+            story_id="worsening-care",
+            selected_attempts=[
+                _model_proof_attempt(_care_catalog_preflight_invocation())
+            ],
+            technical_trace={},
+        )
+
+
+def test_live_model_proof_rejects_unrecognized_deterministic_invocation() -> None:
+    unrecognized = {
+        **_care_catalog_preflight_invocation(),
+        "agent_id": "sleep_care",
+    }
+    with pytest.raises(DemoCliError, match="real configured provider"):
+        _verify_demo_model_evidence(
+            model="live",
+            story_id="worsening-care",
+            selected_attempts=[
+                _model_proof_attempt(unrecognized, _real_invocation())
+            ],
+            technical_trace={},
+        )
+
+
+def test_live_model_proof_rejects_real_provider_without_request_id() -> None:
+    with pytest.raises(DemoCliError, match="real configured provider"):
+        _verify_demo_model_evidence(
+            model="live",
+            story_id="worsening-care",
+            selected_attempts=[_model_proof_attempt(_real_invocation(""))],
+            technical_trace={},
+        )
+
+
+def test_urgent_zero_model_proof_remains_strict() -> None:
+    _verify_demo_model_evidence(
+        model="live",
+        story_id="urgent-safety",
+        selected_attempts=[],
+        technical_trace={
+            "product_attempt_count": 0,
+            "durable_invocations": [],
+            "fast_path_succeeded_count": 1,
+        },
+    )
+    with pytest.raises(DemoCliError, match="zero-model safety path"):
+        _verify_demo_model_evidence(
+            model="live",
+            story_id="urgent-safety",
+            selected_attempts=[_model_proof_attempt(_real_invocation())],
+            technical_trace={
+                "product_attempt_count": 1,
+                "durable_invocations": [],
+                "fast_path_succeeded_count": 1,
+            },
+        )
+
+
+def test_deterministic_model_proof_keeps_original_provider_rule() -> None:
+    _verify_demo_model_evidence(
+        model="deterministic",
+        story_id="worsening-care",
+        selected_attempts=[
+            _model_proof_attempt(
+                {
+                    "agent_id": "evidence_reasoning",
+                    "provider": "sleepagent-deterministic-replay",
+                    "provider_request_id": None,
+                }
+            )
+        ],
+        technical_trace={},
+    )
+    with pytest.raises(DemoCliError, match="unexpected model provider"):
+        _verify_demo_model_evidence(
+            model="deterministic",
+            story_id="worsening-care",
+            selected_attempts=[
+                _model_proof_attempt(_care_catalog_preflight_invocation())
+            ],
+            technical_trace={},
+        )
 
 
 class ProductDemoHttp:
