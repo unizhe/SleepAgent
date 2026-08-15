@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 
 # 合并自 agents/ports.py。
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, cast
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from sleepagent.runtime.contracts import (
     AgentEnvelope,
@@ -512,6 +513,8 @@ class _ModelBackedRole(RuntimeAgentPort, ABC, Generic[InputT, OutputT]):
     def _invoke_model(
         self,
         command: RoleInvocationInput,
+        *,
+        model_override: StructuredAgentModel | None = None,
     ) -> tuple[AgentEnvelope, AgentInvocationRecord]:
         invocation = command.invocation
         if command.runtime_binding_hash != stable_hash(invocation):
@@ -537,6 +540,7 @@ class _ModelBackedRole(RuntimeAgentPort, ABC, Generic[InputT, OutputT]):
             skill_lock_hash=invocation.skill_lock_hash,
             prompt_bundle_hash=invocation.prompt_bundle_hash,
             compiled_messages=list(invocation.compiled_messages),
+            model_override=model_override,
         )
 
     def _bind_role(
@@ -695,18 +699,457 @@ from sleepagent.runtime.agents import (
 )
 from sleepagent.runtime.contracts import (
     AgentId,
+    CareStrategy,
     CommunicationDraft,
+    CommunicationSemanticBinding,
     EpisodeType,
+    EvidencePacket,
+    MemoryChangeCandidate,
+    ToolRequest,
     TrustLabel,
     WorkProductKind,
+    WorkProductStatus,
 )
-from sleepagent.runtime.invocation import StructuredAgentModel
+from sleepagent.runtime.invocation import (
+    SleepCareModelOutput,
+    StructuredAgentModel,
+)
 from sleepagent.runtime.registry import (
     TOOL_INVOCATION_ALLOWLIST,
 )
 from sleepagent.runtime.registry import (
     SkillRegistry,
 )
+
+
+_SleepCareSourceType = Literal[
+    "evidence_claim",
+    "care_candidate",
+    "reviewed_knowledge",
+]
+_SleepCareBindingSourceKind = Literal[
+    "evidence_claim",
+    "care_candidate",
+    "general_knowledge",
+]
+_AssemblySchemaT = TypeVar("_AssemblySchemaT", bound=BaseModel)
+_COMMUNICATION_NUMBER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?"
+)
+
+
+class _SleepCareSourceUnit(FrozenContract):
+    source_type: _SleepCareSourceType
+    source_ref: str = Field(..., min_length=1)
+    binding_source_kind: _SleepCareBindingSourceKind
+    exact_text: str = Field(..., min_length=1, max_length=1600)
+    claim_ref: str | None = Field(default=None, min_length=1)
+    care_candidate_ref: str | None = Field(default=None, min_length=1)
+    authority_source_kind: str | None = Field(default=None, min_length=1)
+    authority_refs: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def require_source_shape(self) -> "_SleepCareSourceUnit":
+        if self.source_type == "evidence_claim":
+            valid = (
+                self.binding_source_kind == "evidence_claim"
+                and self.claim_ref == self.source_ref
+                and self.care_candidate_ref is None
+            )
+        elif self.source_type == "care_candidate":
+            valid = (
+                self.binding_source_kind == "care_candidate"
+                and self.care_candidate_ref == self.source_ref
+                and self.claim_ref is None
+            )
+        else:
+            valid = (
+                self.binding_source_kind == "general_knowledge"
+                and self.claim_ref is None
+                and self.care_candidate_ref is None
+            )
+        if not valid:
+            raise ValueError("SleepCare source unit authority shape is invalid")
+        return self
+
+
+class _SleepCareSourceCatalog(FrozenContract):
+    context_packet_id: str = Field(..., min_length=1)
+    context_hash: str = Field(..., min_length=64, max_length=64)
+    audience_role: AudienceRole
+    units: tuple[_SleepCareSourceUnit, ...] = ()
+
+    @model_validator(mode="after")
+    def require_unique_sources(self) -> "_SleepCareSourceCatalog":
+        keys = [(item.source_type, item.source_ref) for item in self.units]
+        if len(keys) != len(set(keys)):
+            raise ValueError("SleepCare source catalog contains duplicate sources")
+        return self
+
+
+class _SleepCareSegmentSelection(StrictContract):
+    source_type: _SleepCareSourceType
+    source_ref: str = Field(..., min_length=1)
+
+
+class _SleepCareContentPlan(StrictContract):
+    status: WorkProductStatus
+    selected_segments: list[_SleepCareSegmentSelection] = Field(
+        default_factory=list,
+        max_length=60,
+    )
+    tool_requests: list[ToolRequest] = Field(default_factory=list, max_length=8)
+    collaboration_requests: list[CrossAgentRequest] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+    reason_codes: list[str] = Field(default_factory=list, max_length=20)
+    memory_change_candidates: list[MemoryChangeCandidate] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+
+
+_SLEEPCARE_PRESENTATION_TEMPLATES: tuple[
+    tuple[AudienceRole, _SleepCareSourceType, str], ...
+] = (
+    ("elder", "evidence_claim", "本次已验收信息："),
+    ("elder", "care_candidate", "照护建议："),
+    ("elder", "reviewed_knowledge", "经审阅的一般说明："),
+    ("family", "evidence_claim", "供家属了解的已验收信息："),
+    ("family", "care_candidate", "可协助关注的照护建议："),
+    ("family", "reviewed_knowledge", "供家属参考的一般说明："),
+    ("doctor", "evidence_claim", "已验收证据："),
+    ("doctor", "care_candidate", "照护候选："),
+    ("doctor", "reviewed_knowledge", "经审阅的一般知识："),
+)
+_SLEEPCARE_CONTEXT_NOTICES: tuple[tuple[AudienceRole, str], ...] = (
+    ("elder", "内容仅覆盖当前授权范围内的已验收信息。"),
+    ("family", "内容仅供授权家属在当前范围内了解。"),
+    ("doctor", "材料仅包含当前授权范围内的已验收来源。"),
+)
+_SLEEPCARE_NO_SOURCE_TEXT = "当前没有可发布的个人结论。"
+_SLEEPCARE_PENDING_SOURCE_TEXT = "正在获取完成说明所需的已授权信息。"
+_SLEEPCARE_CONTROLLED_SUMMARY = "已按受控内容计划生成沟通草稿。"
+
+
+def _number_free_template(value: str) -> str:
+    if _COMMUNICATION_NUMBER_PATTERN.search(value):
+        raise ValueError("SleepCare presentation template must not contain numbers")
+    return value
+
+
+def _presentation_template(
+    audience_role: AudienceRole,
+    source_type: _SleepCareSourceType,
+) -> str:
+    try:
+        value = next(
+            template
+            for audience, candidate_type, template in (
+                _SLEEPCARE_PRESENTATION_TEMPLATES
+            )
+            if audience == audience_role and candidate_type == source_type
+        )
+    except StopIteration as exc:
+        raise ValueError("SleepCare presentation template is missing") from exc
+    return _number_free_template(value)
+
+
+def _context_notice(audience_role: AudienceRole) -> str:
+    try:
+        value = next(
+            notice
+            for audience, notice in _SLEEPCARE_CONTEXT_NOTICES
+            if audience == audience_role
+        )
+    except StopIteration as exc:
+        raise ValueError("SleepCare context notice is missing") from exc
+    return _number_free_template(value)
+
+
+def _build_sleepcare_source_catalog(
+    context: ContextPacket,
+) -> _SleepCareSourceCatalog:
+    if context.agent_id is not AgentId.SLEEP_CARE:
+        raise ValueError("SleepCare source catalog requires SleepCare Context")
+    audience_items = [
+        item for item in context.items if item.key == "requested_audience_role"
+    ]
+    if (
+        len(audience_items) != 1
+        or audience_items[0].trust_label is not TrustLabel.SYSTEM_POLICY
+    ):
+        raise ValueError("SleepCare source catalog requires one typed audience")
+    audience_value = audience_items[0].value
+    if audience_value not in {"elder", "family", "doctor"}:
+        raise ValueError("SleepCare source catalog audience is unsupported")
+    audience_role = cast(AudienceRole, audience_value)
+    units: list[_SleepCareSourceUnit] = []
+
+    for item in context.items:
+        if (
+            item.key == "accepted:evidence_packet"
+            and item.trust_label is TrustLabel.ACCEPTED_WORK_PRODUCT
+            and len(item.source_refs) == 1
+        ):
+            evidence = EvidencePacket.model_validate(item.value)
+            units.extend(
+                _SleepCareSourceUnit(
+                    source_type="evidence_claim",
+                    source_ref=claim.claim_id,
+                    binding_source_kind="evidence_claim",
+                    exact_text=str(claim.statement),
+                    claim_ref=claim.claim_id,
+                    authority_source_kind=claim.source_kind.value,
+                    authority_refs=tuple(str(ref) for ref in claim.evidence_refs),
+                )
+                for claim in evidence.claims
+            )
+            continue
+        if (
+            item.key == "accepted:care_strategy"
+            and item.trust_label is TrustLabel.ACCEPTED_WORK_PRODUCT
+            and len(item.source_refs) == 1
+        ):
+            care = CareStrategy.model_validate(item.value)
+            action = care.primary_action
+            if action is not None:
+                units.append(
+                    _SleepCareSourceUnit(
+                        source_type="care_candidate",
+                        source_ref=action.candidate_id,
+                        binding_source_kind="care_candidate",
+                        exact_text=str(action.title),
+                        care_candidate_ref=action.candidate_id,
+                        authority_source_kind="accepted_care_candidate",
+                        authority_refs=tuple(
+                            str(ref) for ref in action.rationale_evidence_refs
+                        ),
+                    )
+                )
+            continue
+        if (
+            item.key == "tool:knowledge.retrieve_reviewed"
+            and item.trust_label is TrustLabel.TOOL_OUTPUT_UNTRUSTED
+            and isinstance(item.value, dict)
+        ):
+            snippets = item.value.get("snippets")
+            citation_ids = item.value.get("citation_ids")
+            source_refs = item.value.get("source_refs")
+            if not all(
+                isinstance(values, (list, tuple))
+                for values in (snippets, citation_ids, source_refs)
+            ):
+                continue
+            assert isinstance(snippets, (list, tuple))
+            assert isinstance(citation_ids, (list, tuple))
+            assert isinstance(source_refs, (list, tuple))
+            if not (
+                len(snippets) == len(citation_ids) == len(source_refs)
+                and all(isinstance(value, str) for value in snippets)
+                and all(isinstance(value, str) for value in citation_ids)
+                and all(isinstance(value, str) for value in source_refs)
+            ):
+                continue
+            for snippet, citation_id, source_ref in zip(
+                snippets,
+                citation_ids,
+                source_refs,
+                strict=True,
+            ):
+                if (
+                    not snippet
+                    or citation_id != source_ref
+                    or source_ref not in item.source_refs
+                ):
+                    continue
+                units.append(
+                    _SleepCareSourceUnit(
+                        source_type="reviewed_knowledge",
+                        source_ref=source_ref,
+                        binding_source_kind="general_knowledge",
+                        exact_text=snippet,
+                        authority_source_kind="reviewed_knowledge",
+                        authority_refs=(source_ref,),
+                    )
+                )
+
+    return _SleepCareSourceCatalog(
+        context_packet_id=context.context_packet_id,
+        context_hash=stable_hash(context),
+        audience_role=audience_role,
+        units=tuple(units),
+    )
+
+
+def _assemble_sleepcare_output(
+    *,
+    catalog: _SleepCareSourceCatalog,
+    plan: _SleepCareContentPlan,
+    doctor_material: bool,
+) -> SleepCareModelOutput:
+    units_by_key = {
+        (unit.source_type, unit.source_ref): unit for unit in catalog.units
+    }
+    selection_keys = [
+        (selection.source_type, selection.source_ref)
+        for selection in plan.selected_segments
+    ]
+    if len(selection_keys) != len(set(selection_keys)):
+        raise ValueError("SleepCare ContentPlan contains duplicate source selection")
+
+    selected_units: list[_SleepCareSourceUnit] = []
+    for key in selection_keys:
+        unit = units_by_key.get(key)
+        if unit is None:
+            raise ValueError("SleepCare ContentPlan selected an unknown source")
+        selected_units.append(unit)
+
+    pending_request = bool(plan.tool_requests or plan.collaboration_requests)
+    if (
+        not selected_units
+        and catalog.units
+        and plan.status is WorkProductStatus.COMPLETED
+        and not pending_request
+    ):
+        raise ValueError("completed SleepCare ContentPlan selected no source")
+
+    text_segments: list[str] = []
+    bindings: list[CommunicationSemanticBinding] = []
+    claim_refs: list[str] = []
+    care_refs: list[str] = []
+    for unit in selected_units:
+        prefix = _presentation_template(
+            catalog.audience_role,
+            unit.source_type,
+        )
+        text_segments.append(f"{prefix}{unit.exact_text}")
+        bindings.append(
+            CommunicationSemanticBinding(
+                binding_id=(
+                    "communication-binding:"
+                    + stable_hash(
+                        (
+                            catalog.context_packet_id,
+                            unit.source_type,
+                            unit.source_ref,
+                        )
+                    )[:24]
+                ),
+                source_kind=unit.binding_source_kind,
+                source_ref=unit.source_ref,
+                rendered_text=unit.exact_text,
+            )
+        )
+        if unit.claim_ref is not None:
+            claim_refs.append(unit.claim_ref)
+        if unit.care_candidate_ref is not None:
+            care_refs.append(unit.care_candidate_ref)
+
+    if not text_segments:
+        text_segments.append(
+            _number_free_template(
+                _SLEEPCARE_PENDING_SOURCE_TEXT
+                if pending_request
+                else _SLEEPCARE_NO_SOURCE_TEXT
+            )
+        )
+    draft = CommunicationDraft(
+        draft_id=(
+            "communication:"
+            + stable_hash(
+                (
+                    catalog.context_packet_id,
+                    tuple(selection_keys),
+                    catalog.audience_role,
+                )
+            )[:24]
+        ),
+        audience_role=catalog.audience_role,
+        text=" ".join(text_segments),
+        claim_refs=list(dict.fromkeys(claim_refs)),
+        care_candidate_refs=list(dict.fromkeys(care_refs)),
+        semantic_bindings=bindings,
+        memory_change_candidates=list(plan.memory_change_candidates),
+        context_notice=_context_notice(catalog.audience_role),
+        artifact_kind="doctor_material" if doctor_material else None,
+    )
+    output = SleepCareModelOutput(
+        status=plan.status,
+        summary=_SLEEPCARE_CONTROLLED_SUMMARY,
+        tool_requests=list(plan.tool_requests),
+        collaboration_requests=list(plan.collaboration_requests),
+        reason_codes=list(plan.reason_codes),
+        output_payload=draft,
+    )
+    return SleepCareModelOutput.model_validate(output.model_dump(mode="python"))
+
+
+class _SleepCareAssemblyModel:
+    """Per-invocation adapter; source authority remains outside the provider."""
+
+    def __init__(
+        self,
+        *,
+        base_model: StructuredAgentModel,
+        catalog: _SleepCareSourceCatalog,
+        doctor_material: bool,
+    ) -> None:
+        self._base_model = base_model
+        self._catalog = catalog
+        self._doctor_material = doctor_material
+        self.last_provider_request_id: str | None = None
+        self.last_provider_input_tokens: int | None = None
+
+    @property
+    def provider(self) -> str:
+        return self._base_model.provider
+
+    @property
+    def model_id(self) -> str:
+        return self._base_model.model_id
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(getattr(self._base_model, "is_configured", True))
+
+    def generate(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        schema: type[_AssemblySchemaT],
+        prompt_version: str,
+        context_packet_id: str,
+    ) -> _AssemblySchemaT:
+        if schema is not SleepCareModelOutput:
+            raise TypeError("SleepCare assembly requires SleepCareModelOutput")
+        if context_packet_id != self._catalog.context_packet_id:
+            raise ValueError("SleepCare assembly ContextPacket identity mismatch")
+        raw_plan = self._base_model.generate(
+            messages=messages,
+            schema=_SleepCareContentPlan,
+            prompt_version=prompt_version,
+            context_packet_id=context_packet_id,
+        )
+        self.last_provider_request_id = getattr(
+            self._base_model,
+            "last_provider_request_id",
+            None,
+        )
+        self.last_provider_input_tokens = getattr(
+            self._base_model,
+            "last_provider_input_tokens",
+            None,
+        )
+        if not isinstance(raw_plan, _SleepCareContentPlan):
+            raise TypeError("SleepCare provider returned a non-ContentPlan output")
+        output = _assemble_sleepcare_output(
+            catalog=self._catalog,
+            plan=raw_plan,
+            doctor_material=self._doctor_material,
+        )
+        return cast(_AssemblySchemaT, output)
 
 
 class SleepCareInvocationInput(RoleInvocationInput):
@@ -865,9 +1308,11 @@ class SleepCareAgent(
         *,
         planning_model: StructuredAgentModel | None = None,
         skill_registry: SkillRegistry | None = None,
+        content_plan_assembly: bool = False,
     ) -> None:
         super().__init__(model, skill_registry=skill_registry)
         self.planning_model = planning_model or model
+        self._content_plan_assembly = content_plan_assembly
         self._control_invoker: SleepCareControlInvocationPort | None = None
 
     @property
@@ -904,7 +1349,19 @@ class SleepCareAgent(
     def invoke(self, command: SleepCareInvocationInput) -> SleepCareInvocationOutput:
         if type(command) is not SleepCareInvocationInput:
             raise TypeError("SleepCareAgent requires SleepCareInvocationInput")
-        envelope, record = self._invoke_model(command)
+        if self._content_plan_assembly:
+            catalog = _build_sleepcare_source_catalog(command.invocation.context)
+            assembly_model = _SleepCareAssemblyModel(
+                base_model=self.model,
+                catalog=catalog,
+                doctor_material=command.invocation.doctor_material,
+            )
+            envelope, record = self._invoke_model(
+                command,
+                model_override=assembly_model,
+            )
+        else:
+            envelope, record = self._invoke_model(command)
         if not isinstance(envelope.output_payload, CommunicationDraft):
             raise TypeError("SleepCareAgent returned a non-Communication payload")
         return SleepCareInvocationOutput(
@@ -1864,6 +2321,7 @@ class ProductAgentFactory:
         safety_review_model: StructuredAgentModel,
         sleepcare_planning_model: StructuredAgentModel | None = None,
         skill_registry: SkillRegistry | None = None,
+        sleepcare_content_plan_assembly: bool = False,
     ) -> ProductAgentRoster:
         validate_concrete_agent_manifest()
         return ProductAgentRoster(
@@ -1871,6 +2329,7 @@ class ProductAgentFactory:
                 sleepcare_model,
                 planning_model=sleepcare_planning_model,
                 skill_registry=skill_registry,
+                content_plan_assembly=sleepcare_content_plan_assembly,
             ),
             evidence_reasoning=EvidenceReasoningAgent(
                 evidence_reasoning_model,
@@ -1892,6 +2351,7 @@ class ProductAgentFactory:
         *,
         sleepcare_planning_model: StructuredAgentModel | None = None,
         skill_registry: SkillRegistry | None = None,
+        sleepcare_content_plan_assembly: bool = False,
     ) -> ProductAgentRoster:
         keys = tuple(models)
         if (
@@ -1907,6 +2367,7 @@ class ProductAgentFactory:
             safety_review_model=models[AgentId.SAFETY_REVIEW],
             sleepcare_planning_model=sleepcare_planning_model,
             skill_registry=skill_registry,
+            sleepcare_content_plan_assembly=sleepcare_content_plan_assembly,
         )
 
 

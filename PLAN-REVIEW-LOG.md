@@ -270,3 +270,31 @@ and Demo 5 verifiers passed; migration `010` was applied from a fresh database;
 and `git diff --check` passed. Diff review found no scenario-name routing in the
 runtime, no committed credential/private key, no second provider/router, no
 authority/seed lifecycle scope expansion, and no GitHub remote write.
+
+## Act 3 — Build
+
+### Round 1 — Codex build: deterministic Communication assembly convergence
+
+The deterministic SleepCare communication path now emits the same private
+`SleepCareContentPlan` used by the live path and delegates final text, bindings,
+numeric preservation, audience presentation, and source references to the
+single assembler in `sleepagent.runtime.agents`. The canonical deterministic
+runtime enables the same per-invocation assembly adapter. Direct deterministic
+`SleepCareModelOutput` generation also uses that shared catalog/plan/assembler
+core, while urgent preflight remains before every model and Care invocation.
+
+The four canonical SleepCare communication skills were versioned to `3.0.0` and
+now instruct the model to select only existing `source_type`/`source_ref` pairs
+and never generate final prose, bindings, numbers, audience, references, or
+template text. Their package, SkillLock, and compiled prompt hashes therefore
+change through the existing registry/compiler mechanisms while their external
+output schema remains `CommunicationDraft` and invocation records remain
+`SleepCareModelOutput.v1`.
+
+### Codex verification
+
+The final scoped unit/provider/runner/governance/contracts/cold-start/worker
+regression passed 249 tests. The loopback HTTP provider and live-configured
+urgent zero-provider regression passed 9 tests in an isolated local socket
+namespace. Python 3.11 imports and `git diff --check` passed. No real Demo,
+PostgreSQL operation, commit, or remote write was performed.

@@ -1212,6 +1212,14 @@ def default_skill_packages() -> list[SkillPackage]:
             "review_action_and_publication",
         }
     )
+    sleepcare_communication_skills = frozenset(
+        {
+            "answer_grounded_question",
+            "explain_for_elder",
+            "draft_user_material",
+            "draft_doctor_material",
+        }
+    )
     evidence_contract_instructions = (
         "Every inference claim must include at least one concrete "
         "alternative_explanation.",
@@ -1251,6 +1259,21 @@ def default_skill_packages() -> list[SkillPackage]:
         "concatenation of semantic_bindings rendered_text values, with no additional "
         "numeric text.",
     )
+    sleepcare_content_plan_instructions = (
+        "Return only a SleepCareContentPlan for deterministic assembly into the "
+        "external CommunicationDraft; do not generate the final Communication text.",
+        "Each selected_segments item may contain only source_type and source_ref. "
+        "Select an exact source_ref already present in accepted Evidence, accepted "
+        "Care, or reliably paired reviewed-knowledge Context.",
+        "Do not generate Communication.text, rendered_text, preserved_numbers, "
+        "binding_id, audience_role, claim_refs, care_candidate_refs, template prose, "
+        "offsets, spans, source text, or replacement text.",
+        "Never guess, transform, or invent a source identity. Never select the same "
+        "source more than once.",
+        "If no legal source is visible, return an empty selected_segments plan and "
+        "use only the current status/request fields permitted by the strict plan "
+        "schema; never fabricate content to make the plan non-empty.",
+    )
     safety_contract_instructions = (
         "The top-level envelope status is completed, needs_input, revise, or "
         "blocked; approve is never an envelope status. Put approve, revise, or "
@@ -1263,7 +1286,13 @@ def default_skill_packages() -> list[SkillPackage]:
     return [
         SkillPackage.create(
             skill_id=skill_id,
-            version="2.0.0" if skill_id in tool_contract_v2 else "1.0.0",
+            version=(
+                "3.0.0"
+                if skill_id in sleepcare_communication_skills
+                else "2.0.0"
+                if skill_id in tool_contract_v2
+                else "1.0.0"
+            ),
             owner_agent=owner,
             lifecycle=SkillLifecycle.APPROVED,
             champion=True,
@@ -1277,6 +1306,8 @@ def default_skill_packages() -> list[SkillPackage]:
                 *(
                     evidence_contract_instructions
                     if owner is AgentId.EVIDENCE_REASONING
+                    else sleepcare_content_plan_instructions
+                    if skill_id in sleepcare_communication_skills
                     else sleepcare_contract_instructions
                     if owner is AgentId.SLEEP_CARE
                     else safety_contract_instructions

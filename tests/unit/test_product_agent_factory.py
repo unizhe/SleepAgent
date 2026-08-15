@@ -98,7 +98,7 @@ def test_evidence_skills_compile_semantic_contract_instructions() -> None:
 def test_communication_and_safety_skills_compile_contract_instructions() -> None:
     registry = SkillRegistry(default_skill_packages())
     communication = registry.champion(
-        "plan_episode",
+        "explain_for_elder",
         AgentId.SLEEP_CARE,
     )
     safety = registry.champion(
@@ -106,13 +106,41 @@ def test_communication_and_safety_skills_compile_contract_instructions() -> None
         AgentId.SAFETY_REVIEW,
     )
 
-    assert "copied verbatim" in " ".join(communication.instructions)
-    assert "empty claim_refs" in " ".join(communication.instructions)
-    assert "with no additional numeric text" in " ".join(
-        communication.instructions
+    communication_instructions = " ".join(communication.instructions)
+    assert communication.version == "3.0.0"
+    assert communication.output_schema_id == "CommunicationDraft"
+    assert "Return only a SleepCareContentPlan" in communication_instructions
+    assert "source_type and source_ref" in communication_instructions
+    assert "do not generate the final Communication text" in (
+        communication_instructions
     )
+    assert "rendered_text" in communication_instructions
+    assert "Never guess" in communication_instructions
+    assert "empty selected_segments" in communication_instructions
     assert "approve is never an envelope status" in " ".join(safety.instructions)
     assert "9999-12-31T23:59:59Z" in " ".join(safety.instructions)
+
+
+@pytest.mark.parametrize(
+    "skill_id",
+    [
+        "answer_grounded_question",
+        "explain_for_elder",
+        "draft_user_material",
+        "draft_doctor_material",
+    ],
+)
+def test_every_sleepcare_communication_skill_uses_versioned_content_plan_contract(
+    skill_id: str,
+) -> None:
+    package = SkillRegistry(default_skill_packages()).champion(
+        skill_id,
+        AgentId.SLEEP_CARE,
+    )
+
+    assert package.version == "3.0.0"
+    assert package.output_schema_id == "CommunicationDraft"
+    assert "SleepCareContentPlan" in " ".join(package.instructions)
 
 
 def test_factory_rejects_missing_extra_and_plain_string_role_bindings() -> None:

@@ -18,6 +18,7 @@ from sleepagent.config import (
 from sleepagent.runtime.agents import (
     EpisodePlanProposal,
     SleepCareEvaluation,
+    _SleepCareContentPlan,
 )
 from sleepagent.runtime.contracts import (
     ContextPacket,
@@ -31,7 +32,6 @@ from sleepagent.runtime.invocation import (
     CareStrategyModelOutput,
     EvidenceReasoningModelOutput,
     SafetyReviewModelOutput,
-    SleepCareModelOutput,
 )
 from sleepagent.workers.product import (
     build_product_agent_worker_handlers,
@@ -72,7 +72,7 @@ _SCHEMAS = (
     EvidenceReasoningModelOutput,
     CareStrategyModelOutput,
     SafetyReviewModelOutput,
-    SleepCareModelOutput,
+    _SleepCareContentPlan,
 )
 
 

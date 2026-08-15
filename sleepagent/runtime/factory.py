@@ -118,6 +118,7 @@ def build_product_runtime_bundle(
     publisher: PublicationPublisher | None = None,
     fact_snapshot_revalidator: FactSnapshotRevalidator | None = None,
     care_catalog: CareActionCatalog | None = None,
+    sleepcare_content_plan_assembly: bool = False,
 ) -> ProductRuntimeBundle:
     """装配 canonical MORNING_REVIEW 运行链，不创建第二持久化 authority。"""
 
@@ -130,6 +131,7 @@ def build_product_runtime_bundle(
         care_strategy_model=care_strategy_model,
         safety_review_model=safety_review_model,
         sleepcare_planning_model=sleepcare_planning_model,
+        sleepcare_content_plan_assembly=sleepcare_content_plan_assembly,
     )
     stores = ProductRuntimeStores(
         care_context=InMemoryCareContextStore(),
@@ -233,6 +235,7 @@ def _build_openai_compatible_product_runtime_bundle() -> ProductRuntimeBundle:
         evidence_reasoning_model=model(),
         care_strategy_model=model(),
         safety_review_model=model(),
+        sleepcare_content_plan_assembly=True,
     )
 
 
@@ -245,6 +248,7 @@ def build_deterministic_product_runtime_bundle(
         care_strategy_model=model,
         safety_review_model=model,
         sleepcare_planning_model=model,
+        sleepcare_content_plan_assembly=True,
     )
 
 
@@ -282,6 +286,7 @@ def _build_roster(
     care_strategy_model: StructuredAgentModel | None,
     safety_review_model: StructuredAgentModel | None,
     sleepcare_planning_model: StructuredAgentModel | None,
+    sleepcare_content_plan_assembly: bool,
 ) -> ProductAgentRoster:
     models = (
         sleepcare_model,
@@ -310,6 +315,7 @@ def _build_roster(
         safety_review_model=safety_review_model,
         sleepcare_planning_model=sleepcare_planning_model,
         skill_registry=skill_registry,
+        sleepcare_content_plan_assembly=sleepcare_content_plan_assembly,
     )
 
 

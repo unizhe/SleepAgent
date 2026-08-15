@@ -163,13 +163,15 @@ class ProductAgentInvoker:
         skill_lock_hash: str = "0" * 64,
         prompt_bundle_hash: str = "0" * 64,
         compiled_messages: list[dict[str, str]] | None = None,
+        model_override: StructuredAgentModel | None = None,
     ) -> tuple[AgentEnvelope, AgentInvocationRecord]:
         if type(context.agent_id) is not AgentId or context.agent_id is not self.agent_id:
             raise ValueError("ContextPacket Agent does not match bound invoker")
         authorize_agent_invocation(caller, self.agent_id)
         schema = self.output_schema
+        active_model = model_override or self.model
         started = datetime.now(timezone.utc)
-        output = self.model.generate(
+        output = active_model.generate(
             messages=compiled_messages or _agent_messages(context),
             schema=schema,
             prompt_version=prompt_version,
@@ -298,11 +300,15 @@ class ProductAgentInvoker:
             context_packet_id=context.context_packet_id,
             context_hash=stable_hash(context),
             target_hash=target_hash,
-            provider=self.model.provider,
-            model_id=self.model.model_id,
-            provider_request_id=getattr(self.model, "last_provider_request_id", None),
+            provider=active_model.provider,
+            model_id=active_model.model_id,
+            provider_request_id=getattr(
+                active_model,
+                "last_provider_request_id",
+                None,
+            ),
             provider_input_tokens=getattr(
-                self.model,
+                active_model,
                 "last_provider_input_tokens",
                 None,
             ),

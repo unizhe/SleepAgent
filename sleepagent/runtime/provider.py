@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import ast
+import copy
+import hashlib
 import json
 import logging
 import math
@@ -11,11 +14,11 @@ import os
 import re
 from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Any, Mapping, Protocol, TypeVar
+from typing import Any, Literal, Mapping, Protocol, TypeVar
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from sleepagent.observability import log_event, record_error
 
@@ -35,6 +38,23 @@ LEGACY_PRODUCT_LLM_TIMEOUT_SECONDS_ENV = (
 )
 PRODUCT_STRUCTURED_PROVIDER_VERSION = "sleepagent-product-structured-provider.v1"
 LLM_NOT_CONFIGURED_MESSAGE = "LLM is not configured"
+_EXACT_SUBSTRING_VALIDATION_ERROR = (
+    "every semantic binding rendered_text must be an exact substring "
+    "of Communication text"
+)
+_UNBOUND_NUMERIC_TOKEN_MARKER = "remove these unbound tokens:"
+_NUMERIC_TOKEN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?"
+)
+_NUMERIC_REPAIR_REPLACEMENTS = ("当晚", "夜间", "近期")
+_NUMERIC_REPAIR_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"(?<![A-Za-z0-9_.])\d{4}[-/.]\d{1,2}[-/.]\d{1,2}",
+        r"(?<![A-Za-z0-9_.])\d{4}年\d{1,2}月\d{1,2}日",
+        r"(?<![A-Za-z0-9_.])\d{1,2}月\d{1,2}日",
+    )
+)
 
 
 class ProductLLMProviderError(RuntimeError):
@@ -47,6 +67,45 @@ class ProductLLMNotConfiguredError(ProductLLMProviderError):
 
 class ProductLLMConfigurationError(ValueError):
     """A public Product LLM setting is malformed."""
+
+
+class _SemanticBindingRepair(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    binding_index: int = Field(..., ge=0)
+    binding_id: str = Field(..., min_length=1)
+    replacement_rendered_text: str = Field(..., min_length=1, max_length=1600)
+
+
+class _SemanticBindingRepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    repairs: list[_SemanticBindingRepair] = Field(default_factory=list, max_length=60)
+
+
+class _NumericTextRepairChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    candidate_id: str = Field(..., min_length=1)
+    replacement: Literal["当晚", "夜间", "近期"]
+
+
+class _NumericTextRepairPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    repairs: list[_NumericTextRepairChoice] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+
+
+@dataclass(frozen=True)
+class _NumericTextRepairCandidate:
+    candidate_id: str
+    start: int
+    end: int
+    original_text: str
+    offending_spans: tuple[tuple[int, int, str], ...]
 
 
 @dataclass(frozen=True)
@@ -303,6 +362,217 @@ class OpenAICompatibleStructuredAgentModel:
         configured = getattr(self._provider, "is_configured", None)
         return bool(configured) if configured is not None else True
 
+    def _request_content(self, messages: list[dict[str, str]]) -> str:
+        response = self._provider.create_chat_completion(
+            model=self.config.model,
+            messages=messages,
+            temperature=self.config.temperature,
+            max_output_tokens=self.config.max_output_tokens,
+            thinking_type=self.config.thinking_type,
+            retry=self.config.retry,
+        )
+        request_id = response.get("id") if isinstance(response, dict) else None
+        if isinstance(request_id, str) and request_id.strip():
+            self.last_provider_request_id = request_id.strip()
+        usage = response.get("usage") if isinstance(response, dict) else None
+        if isinstance(usage, Mapping):
+            prompt_tokens = usage.get("prompt_tokens")
+            if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
+                self.last_provider_input_tokens = prompt_tokens
+        return _message_content(response)
+
+    def _repair_semantic_binding_substrings(
+        self,
+        *,
+        payload: Any,
+        invalid_content: str,
+        messages: list[dict[str, str]],
+        schema: type[SchemaT],
+        validation_error: ValidationError,
+    ) -> SchemaT:
+        repair_context = _semantic_binding_substring_context(payload)
+        if repair_context is None:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair could not identify "
+                "mismatched semantic bindings."
+            ) from validation_error
+        repair_instruction = {
+            "role": "system",
+            "content": (
+                "Return one semantic-binding repair patch JSON object only. This "
+                "is an error-specific patch, not a regenerated Agent output. It "
+                "must validate against this exact patch schema: "
+                + json.dumps(
+                    _SemanticBindingRepairPatch.model_json_schema(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + " Communication.text is immutable and is the sole source of "
+                "replacement text. Return exactly one repair for every mismatch "
+                "listed in the context, using the same binding_index and binding_id. "
+                "replacement_rendered_text must be copied character-for-character "
+                "from one exact contiguous substring of communication_text and must "
+                "remain supported by the unchanged source_kind and source_ref shown "
+                "for that binding. Do not return Communication.text, a complete "
+                "Agent output, source_kind, source_ref, or independently paraphrased "
+                "wording. If no source-supported exact substring exists, do not "
+                "invent one; an empty or invalid patch will be rejected fail closed. "
+                "Repair context: "
+                + json.dumps(
+                    repair_context,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+        }
+        repair_content = self._request_content(
+            [
+                repair_instruction,
+                *messages,
+                {"role": "assistant", "content": invalid_content},
+                {
+                    "role": "user",
+                    "content": (
+                        "Return only the narrow semantic-binding repair patch. "
+                        "Select each replacement verbatim from the immutable "
+                        "communication_text."
+                    ),
+                },
+            ]
+        )
+        try:
+            raw_patch: Any = json.loads(repair_content)
+        except json.JSONDecodeError as exc:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair returned invalid JSON."
+            ) from exc
+        try:
+            patch = _SemanticBindingRepairPatch.model_validate(raw_patch)
+        except ValidationError as exc:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair returned an invalid patch."
+            ) from exc
+        repaired_payload = _apply_semantic_binding_repair_patch(
+            payload=payload,
+            repair_context=repair_context,
+            patch=patch,
+        )
+        try:
+            return schema.model_validate(repaired_payload)
+        except ValidationError as exc:
+            errors = exc.errors(include_url=False, include_input=False)
+            if _has_only_unbound_numeric_errors(errors):
+                return self._repair_unbound_numeric_tokens_once(
+                    payload=repaired_payload,
+                    errors=errors,
+                    messages=messages,
+                    schema=schema,
+                )
+            raise ProductLLMProviderError(
+                f"Structured Agent response failed {schema.__name__} validation "
+                "after constrained exact-substring repair."
+            ) from exc
+
+    def _repair_unbound_numeric_tokens_once(
+        self,
+        *,
+        payload: Any,
+        errors: list[dict[str, Any]],
+        messages: list[dict[str, str]],
+        schema: type[SchemaT],
+    ) -> SchemaT:
+        candidates, required_spans = _numeric_repair_candidates(
+            payload=payload,
+            errors=errors,
+        )
+        if not candidates or not _candidate_set_covers_required_spans(
+            candidates,
+            required_spans,
+        ):
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair found no safe incidental "
+                "calendar-date candidate."
+            )
+        candidate_context = [
+            {
+                "candidate_id": candidate.candidate_id,
+                "original_text": candidate.original_text,
+                "covered_offending_tokens": sorted(
+                    {span[2] for span in candidate.offending_spans}
+                ),
+                "allowed_replacements": list(_NUMERIC_REPAIR_REPLACEMENTS),
+            }
+            for candidate in candidates
+        ]
+        repair_instruction = {
+            "role": "system",
+            "content": (
+                "Return one numeric text repair patch JSON object only. This is an "
+                "error-specific candidate selection, not a regenerated Agent output. "
+                "It must validate against this exact patch schema: "
+                + json.dumps(
+                    _NumericTextRepairPatch.model_json_schema(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + " Select only candidate_id values supplied below and one of each "
+                "candidate's allowed replacement enum values. Return no complete "
+                "Agent output, Communication text, offsets, source_ref, binding, or "
+                "free-form replacement text. Every offending numeric occurrence must "
+                "be covered exactly once. If no candidate is safe, do not invent one; "
+                "an incomplete or invalid patch will be rejected fail closed. "
+                "Candidates: "
+                + json.dumps(
+                    candidate_context,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+        }
+        repair_content = self._request_content(
+            [
+                repair_instruction,
+                *messages,
+                {
+                    "role": "user",
+                    "content": (
+                        "Select the complete safe incidental calendar-date candidates "
+                        "needed to cover every offending numeric occurrence. Return "
+                        "only candidate_id and replacement enum values."
+                    ),
+                },
+            ]
+        )
+        try:
+            raw_patch: Any = json.loads(repair_content)
+        except json.JSONDecodeError as exc:
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair returned invalid patch JSON."
+            ) from exc
+        try:
+            patch = _NumericTextRepairPatch.model_validate(raw_patch)
+        except ValidationError as exc:
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair returned an invalid patch."
+            ) from exc
+        repaired_payload = _apply_numeric_text_repair_patch(
+            payload=payload,
+            candidates=candidates,
+            required_spans=required_spans,
+            patch=patch,
+        )
+        try:
+            return schema.model_validate(repaired_payload)
+        except ValidationError as exc:
+            raise ProductLLMProviderError(
+                f"Structured Agent response failed {schema.__name__} validation "
+                "after one constrained numeric repair attempt."
+            ) from exc
+
     def generate(
         self,
         *,
@@ -330,6 +600,7 @@ class OpenAICompatibleStructuredAgentModel:
             ),
         }
         correction = ""
+        previous_invalid_content: str | None = None
         last_error: Exception | None = None
         for semantic_attempt in range(2):
             current_schema_instruction = dict(schema_instruction)
@@ -337,43 +608,35 @@ class OpenAICompatibleStructuredAgentModel:
                 current_schema_instruction["content"] += (
                     " The previous live response failed strict validation. "
                     "Regenerate the complete JSON object and correct every listed "
-                    "error by changing the offending fields, not by explaining the "
-                    "error. If a validator reports unbound numeric tokens in "
-                    "Communication text, remove every reported number unless it is "
-                    "covered by an allowed semantic binding whose rendered_text is "
-                    "that exact contiguous substring. Never invent a source ref to "
-                    "retain a number. If the reported tokens form a date or "
-                    "timestamp, remove the entire date/time phrase, including its "
-                    "separators and year/month/day labels, and replace it with the "
-                    "number-free word '近期'. Do not respell the digits as Chinese "
-                    "numerals, words, or full-width digits. Every semantic binding "
-                    "rendered_text must be "
-                    "copied verbatim from one exact contiguous substring of the "
-                    "Communication text; replace a mismatched rendered_text with "
-                    "that exact substring, or remove the binding if no such "
-                    f"substring exists. Errors: {correction}"
+                    "error by changing the offending fields, not by explaining "
+                    "the error. Preserve fields that already validate. "
+                    f"Errors: {correction}"
                 )
-            response = self._provider.create_chat_completion(
-                model=self.config.model,
-                messages=[current_schema_instruction, *messages],
-                temperature=self.config.temperature,
-                max_output_tokens=self.config.max_output_tokens,
-                thinking_type=self.config.thinking_type,
-                retry=self.config.retry,
-            )
-            request_id = response.get("id") if isinstance(response, dict) else None
-            if isinstance(request_id, str) and request_id.strip():
-                self.last_provider_request_id = request_id.strip()
-            usage = response.get("usage") if isinstance(response, dict) else None
-            if isinstance(usage, Mapping):
-                prompt_tokens = usage.get("prompt_tokens")
-                if isinstance(prompt_tokens, int) and prompt_tokens >= 0:
-                    self.last_provider_input_tokens = prompt_tokens
-            content = _message_content(response)
+            request_messages = [current_schema_instruction, *messages]
+            if correction and previous_invalid_content is not None:
+                request_messages.extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": previous_invalid_content,
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                "Correct the preceding invalid JSON object in place "
+                                "using the validation errors and any exact offending "
+                                "tokens in the system instruction. Return the complete "
+                                "corrected JSON object only."
+                            ),
+                        },
+                    ]
+                )
+            content = self._request_content(request_messages)
             try:
                 payload: Any = json.loads(content)
             except json.JSONDecodeError as exc:
                 last_error = exc
+                previous_invalid_content = content
                 correction = (
                     "invalid JSON; return one syntactically complete object with "
                     "double-quoted property names and no trailing content."
@@ -388,11 +651,36 @@ class OpenAICompatibleStructuredAgentModel:
                 return schema.model_validate(payload)
             except ValidationError as exc:
                 last_error = exc
-                correction = json.dumps(
-                    exc.errors(include_url=False, include_input=False),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
+                errors = exc.errors(include_url=False, include_input=False)
+                if semantic_attempt == 0 and _has_exact_substring_error(errors):
+                    return self._repair_semantic_binding_substrings(
+                        payload=payload,
+                        invalid_content=content,
+                        messages=messages,
+                        schema=schema,
+                        validation_error=exc,
+                    )
+                if _has_only_unbound_numeric_errors(errors):
+                    if semantic_attempt == 0:
+                        return self._repair_unbound_numeric_tokens_once(
+                            payload=payload,
+                            errors=errors,
+                            messages=messages,
+                            schema=schema,
+                        )
+                    raise ProductLLMProviderError(
+                        f"Structured Agent response failed {schema.__name__} "
+                        "validation with unbound numeric tokens after one live "
+                        "correction attempt."
+                    ) from exc
+                if _has_unbound_numeric_error(errors):
+                    raise ProductLLMProviderError(
+                        f"Structured Agent response failed {schema.__name__} "
+                        "validation with mixed numeric and non-numeric errors."
+                    ) from exc
+                previous_invalid_content = content
+                correction = _validation_correction(
+                    errors,
                 )
                 if semantic_attempt == 0:
                     continue
@@ -403,6 +691,444 @@ class OpenAICompatibleStructuredAgentModel:
         raise ProductLLMProviderError(
             "Structured Agent live correction ended without a validated response."
         ) from last_error
+
+
+def _validation_correction(
+    errors: list[dict[str, Any]],
+) -> str:
+    offending_numeric_tokens = _offending_numeric_tokens(errors)
+    correction_context: dict[str, Any] = {
+        "validation_errors": errors,
+        "offending_numeric_tokens": sorted(offending_numeric_tokens),
+    }
+    return json.dumps(
+        correction_context,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _offending_numeric_tokens(errors: list[dict[str, Any]]) -> set[str]:
+    offending_numeric_tokens: set[str] = set()
+    for error in errors:
+        message = str(error.get("msg") or "")
+        if _UNBOUND_NUMERIC_TOKEN_MARKER not in message:
+            continue
+        serialized_tokens = message.split(
+            _UNBOUND_NUMERIC_TOKEN_MARKER, 1
+        )[1].strip()
+        try:
+            parsed_tokens = ast.literal_eval(serialized_tokens)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(parsed_tokens, list):
+            offending_numeric_tokens.update(
+                token for token in parsed_tokens if isinstance(token, str)
+            )
+    return offending_numeric_tokens
+
+
+def _has_exact_substring_error(errors: list[dict[str, Any]]) -> bool:
+    return any(
+        _EXACT_SUBSTRING_VALIDATION_ERROR in str(error.get("msg") or "")
+        for error in errors
+    )
+
+
+def _has_unbound_numeric_error(errors: list[dict[str, Any]]) -> bool:
+    return any(
+        _UNBOUND_NUMERIC_TOKEN_MARKER in str(error.get("msg") or "")
+        for error in errors
+    )
+
+
+def _has_only_unbound_numeric_errors(errors: list[dict[str, Any]]) -> bool:
+    return bool(errors) and all(
+        _UNBOUND_NUMERIC_TOKEN_MARKER in str(error.get("msg") or "")
+        for error in errors
+    )
+
+
+def _numeric_repair_candidates(
+    *,
+    payload: Any,
+    errors: list[dict[str, Any]],
+) -> tuple[
+    tuple[_NumericTextRepairCandidate, ...],
+    tuple[tuple[int, int, str], ...],
+]:
+    if not isinstance(payload, Mapping):
+        return (), ()
+    communication = payload.get("output_payload")
+    if not isinstance(communication, Mapping):
+        return (), ()
+    text = communication.get("text")
+    bindings = communication.get("semantic_bindings")
+    if not isinstance(text, str) or not isinstance(bindings, list):
+        return (), ()
+    offending_tokens = _offending_numeric_tokens(errors)
+    required_spans = tuple(
+        (match.start(), match.end(), match.group(0))
+        for match in _NUMERIC_TOKEN_PATTERN.finditer(text)
+        if match.group(0) in offending_tokens
+    )
+    if not offending_tokens or not required_spans:
+        return (), required_spans
+    binding_spans = _semantic_binding_spans(text=text, bindings=bindings)
+    raw_matches: dict[tuple[int, int], tuple[int, int, str]] = {}
+    for pattern in _NUMERIC_REPAIR_PATTERNS:
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            original_text = match.group(0)
+            numeric_tokens = {
+                item.group(0) for item in _NUMERIC_TOKEN_PATTERN.finditer(original_text)
+            }
+            if not numeric_tokens or not numeric_tokens.issubset(offending_tokens):
+                continue
+            if not any(
+                start <= required_start and required_end <= end
+                for required_start, required_end, _ in required_spans
+            ):
+                continue
+            if any(
+                _spans_overlap((start, end), binding_span)
+                for binding_span in binding_spans
+            ):
+                continue
+            raw_matches[(start, end)] = (start, end, original_text)
+
+    selected_matches: list[tuple[int, int, str]] = []
+    for candidate_match in sorted(
+        raw_matches.values(),
+        key=lambda item: (item[0], -(item[1] - item[0]), item[2]),
+    ):
+        candidate_span = candidate_match[:2]
+        if any(
+            _spans_overlap(candidate_span, selected[:2])
+            for selected in selected_matches
+        ):
+            continue
+        selected_matches.append(candidate_match)
+
+    text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    candidates: list[_NumericTextRepairCandidate] = []
+    for start, end, original_text in selected_matches:
+        covered_spans = tuple(
+            span
+            for span in required_spans
+            if start <= span[0] and span[1] <= end
+        )
+        if not covered_spans:
+            continue
+        candidate_material = json.dumps(
+            {
+                "text_hash": text_hash,
+                "start": start,
+                "end": end,
+                "original_text": original_text,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        candidates.append(
+            _NumericTextRepairCandidate(
+                candidate_id=(
+                    "numeric-candidate:"
+                    + hashlib.sha256(candidate_material.encode("utf-8")).hexdigest()[:24]
+                ),
+                start=start,
+                end=end,
+                original_text=original_text,
+                offending_spans=covered_spans,
+            )
+        )
+    return tuple(candidates), required_spans
+
+
+def _semantic_binding_spans(
+    *,
+    text: str,
+    bindings: list[Any],
+) -> tuple[tuple[int, int], ...]:
+    spans: list[tuple[int, int]] = []
+    for binding in bindings:
+        if not isinstance(binding, Mapping):
+            continue
+        rendered_text = binding.get("rendered_text")
+        if not isinstance(rendered_text, str) or not rendered_text:
+            continue
+        search_start = 0
+        while True:
+            start = text.find(rendered_text, search_start)
+            if start < 0:
+                break
+            end = start + len(rendered_text)
+            spans.append((start, end))
+            search_start = start + 1
+    return tuple(spans)
+
+
+def _candidate_set_covers_required_spans(
+    candidates: tuple[_NumericTextRepairCandidate, ...],
+    required_spans: tuple[tuple[int, int, str], ...],
+) -> bool:
+    return bool(required_spans) and all(
+        sum(
+            candidate.start <= required_start and required_end <= candidate.end
+            for candidate in candidates
+        )
+        == 1
+        for required_start, required_end, _ in required_spans
+    )
+
+
+def _apply_numeric_text_repair_patch(
+    *,
+    payload: Any,
+    candidates: tuple[_NumericTextRepairCandidate, ...],
+    required_spans: tuple[tuple[int, int, str], ...],
+    patch: _NumericTextRepairPatch,
+) -> Any:
+    candidate_by_id = {
+        candidate.candidate_id: candidate for candidate in candidates
+    }
+    selected: list[tuple[_NumericTextRepairCandidate, str]] = []
+    seen_ids: set[str] = set()
+    for repair in patch.repairs:
+        if repair.candidate_id in seen_ids:
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair duplicated a candidate."
+            )
+        seen_ids.add(repair.candidate_id)
+        candidate = candidate_by_id.get(repair.candidate_id)
+        if candidate is None:
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair selected an unknown candidate."
+            )
+        if repair.replacement not in _NUMERIC_REPAIR_REPLACEMENTS or (
+            _NUMERIC_TOKEN_PATTERN.search(repair.replacement) is not None
+        ):
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair selected an invalid replacement."
+            )
+        selected.append((candidate, repair.replacement))
+
+    selected_candidates = tuple(item[0] for item in selected)
+    ordered_candidates = sorted(
+        selected_candidates,
+        key=lambda candidate: (candidate.start, candidate.end),
+    )
+    if any(
+        _spans_overlap(
+            (left.start, left.end),
+            (right.start, right.end),
+        )
+        for left, right in zip(ordered_candidates, ordered_candidates[1:])
+    ):
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair selected overlapping candidates."
+        )
+    if not _candidate_set_covers_required_spans(
+        selected_candidates,
+        required_spans,
+    ):
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair did not cover every offending numeric "
+            "occurrence exactly once."
+        )
+
+    repaired_payload = copy.deepcopy(payload)
+    if not isinstance(repaired_payload, dict):
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair payload is malformed."
+        )
+    communication = repaired_payload.get("output_payload")
+    if not isinstance(communication, dict):
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair payload is malformed."
+        )
+    text = communication.get("text")
+    bindings = communication.get("semantic_bindings")
+    if not isinstance(text, str) or not isinstance(bindings, list):
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair payload is malformed."
+        )
+    binding_spans = _semantic_binding_spans(text=text, bindings=bindings)
+    replacement_by_id = {item[0].candidate_id: item[1] for item in selected}
+    for candidate in ordered_candidates:
+        if text[candidate.start : candidate.end] != candidate.original_text:
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair candidate original text changed."
+            )
+        if any(
+            _spans_overlap((candidate.start, candidate.end), binding_span)
+            for binding_span in binding_spans
+        ):
+            raise ProductLLMProviderError(
+                "Structured Agent numeric repair candidate overlaps a semantic binding."
+            )
+
+    original_frozen = _payload_without_communication_text(payload)
+    for candidate in reversed(ordered_candidates):
+        replacement = replacement_by_id[candidate.candidate_id]
+        text = text[: candidate.start] + replacement + text[candidate.end :]
+    communication["text"] = text
+    if _payload_without_communication_text(repaired_payload) != original_frozen:
+        raise ProductLLMProviderError(
+            "Structured Agent numeric repair changed frozen payload fields."
+        )
+    return repaired_payload
+
+
+def _payload_without_communication_text(payload: Any) -> Any:
+    frozen = copy.deepcopy(payload)
+    if not isinstance(frozen, dict):
+        return frozen
+    communication = frozen.get("output_payload")
+    if isinstance(communication, dict):
+        communication.pop("text", None)
+    return frozen
+
+
+def _spans_overlap(
+    left: tuple[int, int],
+    right: tuple[int, int],
+) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _semantic_binding_substring_context(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    communication = payload.get("output_payload")
+    if not isinstance(communication, Mapping):
+        return None
+    text = communication.get("text")
+    bindings = communication.get("semantic_bindings")
+    if not isinstance(text, str) or not isinstance(bindings, list):
+        return None
+    mismatches: list[dict[str, Any]] = []
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, Mapping):
+            continue
+        rendered_text = binding.get("rendered_text")
+        if not isinstance(rendered_text, str) or rendered_text in text:
+            continue
+        mismatches.append(
+            {
+                "binding_index": index,
+                "binding_id": binding.get("binding_id"),
+                "source_kind": binding.get("source_kind"),
+                "source_ref": binding.get("source_ref"),
+                "mismatched_rendered_text": rendered_text,
+            }
+        )
+    if not mismatches:
+        return None
+    return {
+        "audience_role": communication.get("audience_role"),
+        "communication_text": text,
+        "mismatched_bindings": mismatches,
+    }
+
+
+def _apply_semantic_binding_repair_patch(
+    *,
+    payload: Any,
+    repair_context: Mapping[str, Any],
+    patch: _SemanticBindingRepairPatch,
+) -> Any:
+    communication_text = repair_context.get("communication_text")
+    mismatch_entries = repair_context.get("mismatched_bindings")
+    if not isinstance(communication_text, str) or not isinstance(
+        mismatch_entries, list
+    ):
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair context is malformed."
+        )
+    expected_by_index: dict[int, Mapping[str, Any]] = {}
+    for entry in mismatch_entries:
+        if not isinstance(entry, Mapping):
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair context is malformed."
+            )
+        index = entry.get("binding_index")
+        if not isinstance(index, int) or index in expected_by_index:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair context is malformed."
+            )
+        expected_by_index[index] = entry
+    repairs_by_index: dict[int, _SemanticBindingRepair] = {}
+    for repair in patch.repairs:
+        if repair.binding_index in repairs_by_index:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair duplicated a binding."
+            )
+        repairs_by_index[repair.binding_index] = repair
+    if repairs_by_index.keys() != expected_by_index.keys():
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair did not exactly cover every "
+            "mismatched binding."
+        )
+
+    repaired_payload = copy.deepcopy(payload)
+    if not isinstance(repaired_payload, dict):
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair payload is malformed."
+        )
+    communication = repaired_payload.get("output_payload")
+    if not isinstance(communication, dict):
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair payload is malformed."
+        )
+    bindings = communication.get("semantic_bindings")
+    if communication.get("text") != communication_text or not isinstance(
+        bindings, list
+    ):
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair could not freeze Communication.text."
+        )
+
+    for index, expected in expected_by_index.items():
+        repair = repairs_by_index[index]
+        if repair.binding_id != expected.get("binding_id"):
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair changed binding identity."
+            )
+        if repair.replacement_rendered_text not in communication_text:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair replacement is not an "
+                "exact Communication.text substring."
+            )
+        try:
+            binding = bindings[index]
+        except IndexError as exc:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair binding index is invalid."
+            ) from exc
+        if not isinstance(binding, dict):
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair binding is malformed."
+            )
+        original_source = (binding.get("source_kind"), binding.get("source_ref"))
+        expected_source = (expected.get("source_kind"), expected.get("source_ref"))
+        if original_source != expected_source:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair source identity is malformed."
+            )
+        binding["rendered_text"] = repair.replacement_rendered_text
+        if (binding.get("source_kind"), binding.get("source_ref")) != original_source:
+            raise ProductLLMProviderError(
+                "Structured Agent exact-substring repair changed source identity."
+            )
+
+    if communication.get("text") != communication_text:
+        raise ProductLLMProviderError(
+            "Structured Agent exact-substring repair changed Communication.text."
+        )
+    return repaired_payload
 
 
 def _message_content(response: Any) -> str:

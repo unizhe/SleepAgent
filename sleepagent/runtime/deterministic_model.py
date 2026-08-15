@@ -11,9 +11,8 @@ remain on the real 1+2+1 path.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -27,8 +26,6 @@ from sleepagent.runtime.contracts import (
     AgentId,
     CareActionCandidate,
     CareStrategy,
-    CommunicationDraft,
-    CommunicationSemanticBinding,
     ContextPacket,
     EvidenceClaim,
     EvidencePacket,
@@ -56,6 +53,12 @@ from sleepagent.runtime.invocation import (
     SafetyReviewModelOutput,
     SleepCareModelOutput,
 )
+from sleepagent.runtime.agents import (
+    _SleepCareContentPlan,
+    _SleepCareSegmentSelection,
+    _assemble_sleepcare_output,
+    _build_sleepcare_source_catalog,
+)
 from sleepagent.runtime.registry import EPISODE_DEFINITIONS
 from sleepagent.runtime.contracts import (
     ProductEpisodeRunnerPort,
@@ -74,8 +77,6 @@ _RESTRICTED_SAFETY_TERMS = (
     "停药",
     "药物调整",
 )
-_NUMBER_PATTERN = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?%?")
-
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
@@ -147,6 +148,9 @@ class DeterministicReplayStructuredAgentModel:
         elif schema is SleepCareModelOutput:
             _require_agent(packet, AgentId.SLEEP_CARE)
             output = self._communication(packet, prompt_version=prompt_version)
+        elif schema is _SleepCareContentPlan:
+            _require_agent(packet, AgentId.SLEEP_CARE)
+            output = self._communication_plan(packet)
         else:
             raise ValueError(
                 f"unsupported deterministic structured schema: {schema.__name__}"
@@ -486,79 +490,27 @@ class DeterministicReplayStructuredAgentModel:
         *,
         prompt_version: str,
     ) -> SleepCareModelOutput:
-        evidence, _ = _accepted_payload(packet, "accepted:evidence_packet")
-        care, _ = _accepted_payload(packet, "accepted:care_strategy")
-        claim_refs: list[str] = []
-        care_refs: list[str] = []
-        bindings: list[CommunicationSemanticBinding] = []
-        segments: list[str] = []
-
-        if evidence is not None:
-            for raw_claim in evidence.get("claims", []):
-                if not isinstance(raw_claim, dict) or not raw_claim.get("claim_id"):
-                    continue
-                claim_id = str(raw_claim["claim_id"])
-                rendered = str(
-                    raw_claim.get("statement")
-                    or "当前证据仍有未知项，暂不作额外推断。"
-                )
-                claim_refs.append(claim_id)
-                segments.append(rendered)
-                bindings.append(
-                    CommunicationSemanticBinding(
-                        binding_id=f"claim-binding:{claim_id}",
-                        source_kind="evidence_claim",
-                        source_ref=claim_id,
-                        rendered_text=rendered,
-                        preserved_numbers=_numeric_tokens(rendered),
-                    )
-                )
-
-        if care is not None:
-            raw_action = care.get("primary_action")
-            if isinstance(raw_action, dict) and raw_action.get("candidate_id"):
-                candidate_id = str(raw_action["candidate_id"])
-                rendered = str(
-                    raw_action.get("title")
-                    or "请先确认建议的单一照护行动。"
-                )
-                care_refs.append(candidate_id)
-                segments.append(rendered)
-                bindings.append(
-                    CommunicationSemanticBinding(
-                        binding_id=f"care-binding:{candidate_id}",
-                        source_kind="care_candidate",
-                        source_ref=candidate_id,
-                        rendered_text=rendered,
-                        preserved_numbers=_numeric_tokens(rendered),
-                    )
-                )
-
-        for boundary in _degraded_boundaries(packet):
-            if boundary not in segments:
-                segments.append(boundary)
-        if not segments:
-            segments.append(
-                "当前没有可发布的个人结论；可继续提供一般性的睡眠说明。"
-            )
-        audience = _audience_role(packet)
-        return SleepCareModelOutput(
-            status=WorkProductStatus.COMPLETED,
-            summary="已仅使用验收工作产品形成统一表达。",
-            output_payload=CommunicationDraft(
-                draft_id=_stable_id("communication", packet),
-                audience_role=audience,
-                text=" ".join(dict.fromkeys(segments)),
-                claim_refs=list(dict.fromkeys(claim_refs)),
-                care_candidate_refs=list(dict.fromkeys(care_refs)),
-                semantic_bindings=bindings,
-                context_notice="内容仅覆盖当前授权的数据范围和已验收结果。",
-                artifact_kind=(
-                    "doctor_material"
-                    if "draft_doctor_material" in prompt_version
-                    else None
-                ),
+        catalog = _build_sleepcare_source_catalog(packet)
+        return _assemble_sleepcare_output(
+            catalog=catalog,
+            plan=DeterministicReplayStructuredAgentModel._communication_plan(
+                packet
             ),
+            doctor_material="draft_doctor_material" in prompt_version,
+        )
+
+    @staticmethod
+    def _communication_plan(packet: ContextPacket) -> _SleepCareContentPlan:
+        catalog = _build_sleepcare_source_catalog(packet)
+        return _SleepCareContentPlan(
+            status=WorkProductStatus.COMPLETED,
+            selected_segments=[
+                _SleepCareSegmentSelection(
+                    source_type=unit.source_type,
+                    source_ref=unit.source_ref,
+                )
+                for unit in catalog.units
+            ],
         )
 
 
@@ -794,30 +746,6 @@ def _active_care_action(packet: ContextPacket) -> dict[str, Any] | None:
             if isinstance(action, dict):
                 return cast(dict[str, Any], action)
     return None
-
-
-def _degraded_boundaries(packet: ContextPacket) -> list[str]:
-    return [
-        degraded_boundary_sentence(decision)
-        for decision in _readiness_decisions(packet)
-        if decision.response_mode == ResponseMode.DEGRADED
-    ]
-
-
-def _audience_role(
-    packet: ContextPacket,
-) -> Literal["elder", "family", "doctor"]:
-    for item in packet.items:
-        if item.key == "requested_audience_role":
-            value = str(item.value)
-            if value not in {"elder", "family", "doctor"}:
-                raise ValueError("requested audience role is unsupported")
-            return cast(Literal["elder", "family", "doctor"], value)
-    return "elder"
-
-
-def _numeric_tokens(value: str) -> list[str]:
-    return sorted(set(_NUMBER_PATTERN.findall(value)))
 
 
 def _stable_id(

@@ -12,6 +12,7 @@ from sleepagent.runtime.agents import (
     EpisodePlanProposal,
     EvaluationDecision,
     SleepCareEvaluation,
+    _SleepCareContentPlan,
 )
 from sleepagent.runtime.cold_start import (
     ClaimKind,
@@ -83,7 +84,11 @@ from sleepagent.runtime.results import (
 )
 from sleepagent.runtime.factory import (
     ProductRuntimeBundle,
+    build_deterministic_product_runtime_bundle,
     build_product_runtime_bundle,
+)
+from sleepagent.runtime.deterministic_model import (
+    DeterministicReplayStructuredAgentModel,
 )
 from sleepagent.runtime.registry import (
     SkillRegistry,
@@ -146,6 +151,48 @@ def test_legacy_entry_without_exact_cohort_publishes_reviewed_boundary() -> None
     assert result.receipt.status == EpisodeStatus.PARTIAL
     assert result.publication is not None
     assert "还没有可用于这项判断的个人记录" in result.publication.text
+
+
+def test_deterministic_assembly_preserves_cold_start_degraded_boundary() -> None:
+    model = DeterministicReplayStructuredAgentModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    base = request(EpisodeType.MORNING_REVIEW)
+    decisions = build_unavailable_entry_decisions(
+        decision_namespace="deterministic-runner-entry",
+        claim_kind=ClaimKind.DESCRIBE_CURRENT_NIGHT,
+    )
+    old_snapshot = base.fact_snapshot
+    guarded_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-deterministic-cold-start-entry",
+        binding=old_snapshot.binding,
+        source_scope=old_snapshot.source_scope.model_copy(
+            update={"valid_night_count": 0}
+        ),
+        canonical_data_version=old_snapshot.canonical_data_version,
+        care_context_version=old_snapshot.care_context_version,
+        memory_context_version=old_snapshot.memory_context_version,
+        source_refs=old_snapshot.source_refs,
+        **snapshot_binding_material(decisions=decisions),
+        created_at=NOW,
+    )
+    guarded = ProductEpisodeRunRequest.model_validate(
+        base.model_copy(
+            update={
+                "fact_snapshot": guarded_snapshot,
+                "runtime_readiness_decisions": decisions,
+            }
+        ).model_dump(mode="python")
+    )
+
+    result = instance.run(guarded)
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert result.publication is not None
+    assert "还没有可用于这项判断的个人记录" in result.publication.text
+    assert all(
+        binding.rendered_text in result.publication.text
+        for binding in result.publication.semantic_bindings
+    )
 
 
 def snapshot(
@@ -1039,7 +1086,7 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
     # Freeze invocation identity, including the runtime-bound Care receipt and
     # the reviewed Habit/Memory grounding instructions in the SkillLock.
     assert stable_hash(roster_projection) == (
-        "781daa98700f31a9288ddb643dae9146f8a7ea6d86fdfe25dd325523802267d2"
+        "8329d8424893f34bb1e0d20fb5c4dba64fce33c5d2c314fb6e8731b0cb239bbe"
     )
 
 
@@ -1157,6 +1204,74 @@ def test_morning_uses_sleepcare_evidence_sleepcare_without_fixed_safety() -> Non
         item.invocation_id for item in result.agent_invocations
     } == set(result.receipt.agent_invocation_ids)
     assert all(item.provider == "test" for item in result.agent_invocations)
+
+
+def test_deterministic_runtime_uses_shared_content_plan_and_omits_normal_care() -> None:
+    class CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas: list[type] = []
+
+        def generate(self, **kwargs):
+            self.schemas.append(kwargs["schema"])
+            return super().generate(**kwargs)
+
+    model = CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+
+    result = instance.run(request(EpisodeType.MORNING_REVIEW))
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert _SleepCareContentPlan in model.schemas
+    assert SleepCareModelOutput not in model.schemas
+    assert CareStrategyModelOutput not in model.schemas
+    communication = next(
+        item
+        for item in result.envelopes
+        if item.agent_id is AgentId.SLEEP_CARE
+    ).output_payload
+    assert isinstance(communication, CommunicationDraft)
+    assert all(
+        binding.rendered_text in communication.text
+        for binding in communication.semantic_bindings
+    )
+    record = next(
+        item
+        for item in result.agent_invocations
+        if item.agent_id is AgentId.SLEEP_CARE
+        and item.schema_version == "SleepCareModelOutput.v1"
+    )
+    assert record.schema_version == "SleepCareModelOutput.v1"
+
+
+def test_deterministic_urgent_path_has_zero_model_and_zero_care_calls() -> None:
+    class CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas: list[type] = []
+
+        def generate(self, **kwargs):
+            self.schemas.append(kwargs["schema"])
+            return super().generate(**kwargs)
+
+    model = CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+
+    result = instance.run(
+        request(
+            EpisodeType.MORNING_REVIEW,
+            user_text="我现在胸痛并且呼吸困难",
+        )
+    )
+
+    assert result.receipt.execution_mode is ExecutionMode.DETERMINISTIC_ONLY
+    assert result.receipt.episode_type is EpisodeType.URGENT_BOUNDARY
+    assert model.schemas == []
+    assert result.agent_invocations == []
+    assert not any(
+        item.agent_id is AgentId.CARE_STRATEGY
+        for item in result.accepted_work_products
+    )
 
 
 def test_trend_is_tool_inside_evidence_path() -> None:
