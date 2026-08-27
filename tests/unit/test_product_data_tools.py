@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 
 from sleepagent.runtime.contracts import (
     AgentId,
     AuthenticatedBinding,
+    ContextPacket,
     FactSnapshot,
     InvocationOutcome,
     SourceScope,
     SourceScopeKind,
+    TrustLabel,
+    TrustedContextItem,
+    provider_context_projection,
     stable_hash,
 )
 from sleepagent.runtime.tooling import (
@@ -102,18 +107,20 @@ def test_product_night_evidence_tool_rejects_cross_subject_canonical_facts() -> 
 
 
 def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() -> None:
+    facts = _product_facts()
     result = ProductToolExecutor(
         core_service=CoreProductToolService()
     ).execute(
         "radar.get_night_evidence",
         {
-            "data": _product_facts().model_dump(mode="json"),
-            "source_refs": ["night_episode_revision:live:1"],
+            "data": facts.model_dump(mode="json"),
+            "source_refs": list(facts.agent_source_refs()),
         },
         context=ProductToolExecutionContext(
             caller="runtime",
             fact_snapshot=_snapshot(
-                binding_subject="tenant-live::subject::elder-phase3a"
+                binding_subject="tenant-live::subject::elder-phase3a",
+                source_refs=facts.agent_source_refs(),
             ),
             episode_id="episode-phase3a-radar-data",
         ),
@@ -124,6 +131,7 @@ def test_product_night_evidence_accepts_explicit_namespaced_subject_binding() ->
 
 def test_product_night_evidence_accepts_privacy_safe_hashed_subject_binding() -> None:
     subject_id = "elder-phase3a"
+    facts = _product_facts(subject_id=subject_id)
     subject_ref = "subject:" + stable_hash(
         {"data_mode": "live", "subject_id": subject_id}
     )[:32]
@@ -132,12 +140,15 @@ def test_product_night_evidence_accepts_privacy_safe_hashed_subject_binding() ->
     ).execute(
         "radar.get_night_evidence",
         {
-            "data": _product_facts(subject_id=subject_id).model_dump(mode="json"),
-            "source_refs": ["night_episode_revision:live:1"],
+            "data": facts.model_dump(mode="json"),
+            "source_refs": list(facts.agent_source_refs()),
         },
         context=ProductToolExecutionContext(
             caller="runtime",
-            fact_snapshot=_snapshot(binding_subject=subject_ref),
+            fact_snapshot=_snapshot(
+                binding_subject=subject_ref,
+                source_refs=facts.agent_source_refs(),
+            ),
             episode_id="episode-phase3a-private-subject",
         ),
     )
@@ -185,9 +196,113 @@ def test_product_night_evidence_projects_large_provenance_to_bounded_summary() -
     assert result.receipt.output["data"]["schema_version"] == (
         "product_night_evidence.v1"
     )
-    assert result.receipt.output["data"]["provenance_ref_count"] == 101
+    assert result.receipt.source_refs == list(facts.agent_source_refs())
     assert "subject_id" not in result.receipt.output["data"]
     assert "canonical_observations" not in result.receipt.output["data"]
+    assert "provenance_set_sha256" not in result.receipt.output["data"]
+
+
+def test_provider_projection_growth_is_independent_of_membership_id_volume() -> None:
+    membership_ids = tuple(f"private-membership-{index}" for index in range(12_000))
+    subject_id = "private-subject-primary-key"
+    quality = {
+        **_product_facts().deterministic_quality,
+        "subject_id": subject_id,
+        "night_episode_id": "private-night-primary-key",
+        "assessment_id": "private-quality-primary-key",
+        "source_scope": {
+            "night_episode_id": "private-night-primary-key",
+            "night_episode_revision_id": "private-revision-primary-key",
+            "observation_ids": membership_ids,
+            "observation_types": ["heart_rate", "respiratory_rate"],
+            "device_binding_ids": ["private-device-binding-primary-key"],
+            "window_start_at": "2026-07-09T22:00:00+08:00",
+            "window_end_at": "2026-07-10T06:00:00+08:00",
+        },
+    }
+    facts = _product_facts(subject_id=subject_id).model_copy(
+        update={
+            "deterministic_quality": quality,
+            "deterministic_risk": {
+                "risk_state": "unknown",
+                "subject_id": subject_id,
+                "night_episode_id": "private-night-primary-key",
+                "current_risk_id": "private-risk-primary-key",
+                "source_scope": quality["source_scope"],
+                "reason_codes": ["partial_quality"],
+            },
+            "provenance_references": membership_ids,
+        }
+    )
+
+    provider_json = json.dumps(
+        facts.tool_inputs(), ensure_ascii=False, sort_keys=True
+    )
+    one_id_json = json.dumps(
+        facts.model_copy(
+            update={
+                "deterministic_quality": {
+                    **quality,
+                    "source_scope": {
+                        **quality["source_scope"],
+                        "observation_ids": membership_ids[:1],
+                    },
+                },
+                "provenance_references": membership_ids[:1],
+            }
+        ).tool_inputs(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+    assert len(facts.deterministic_quality["source_scope"]["observation_ids"]) == 12_000
+    assert subject_id not in provider_json
+    assert membership_ids[0] not in provider_json
+    assert membership_ids[-1] not in provider_json
+    assert "private-night-primary-key" not in provider_json
+    assert "private-device-binding-primary-key" not in provider_json
+    assert len(provider_json) - len(one_id_json) < 200
+
+
+def test_provider_context_projection_strips_local_runtime_and_subject_ids() -> None:
+    snapshot = _snapshot()
+    context = ContextPacket(
+        context_packet_id="private-context-id",
+        episode_id="private-product-episode-id",
+        invocation_id="private-invocation-id",
+        agent_id=AgentId.EVIDENCE_REASONING,
+        objective="Explain the governed night evidence.",
+        fact_snapshot_id="private-fact-snapshot-id",
+        fact_snapshot_hash="b" * 64,
+        source_scope=snapshot.source_scope,
+        items=(
+            TrustedContextItem(
+                key="canonical_fact",
+                trust_label=TrustLabel.TOOL_OUTPUT_UNTRUSTED,
+                value={
+                    "subject_id": "private-subject-id",
+                    "night_episode_id": "private-night-id",
+                    "quality_state": "partial",
+                    "valid_until": datetime(2026, 7, 10, 8, tzinfo=timezone.utc),
+                },
+                source_refs=("governed_evidence_set:sha256:" + "c" * 64,),
+            ),
+        ),
+    )
+
+    serialized = json.dumps(provider_context_projection(context), sort_keys=True)
+
+    for private_value in (
+        "private-context-id",
+        "private-product-episode-id",
+        "private-invocation-id",
+        "private-fact-snapshot-id",
+        "private-subject-id",
+        "private-night-id",
+    ):
+        assert private_value not in serialized
+    assert '"quality_state": "partial"' in serialized
+    assert '"valid_until": "2026-07-10T08:00:00+00:00"' in serialized
 
 
 def test_product_night_evidence_includes_deterministic_sleep_and_bed_exit_summary() -> None:
@@ -357,6 +472,45 @@ def test_product_quality_tool_preserves_pinned_fail_closed_assessment() -> None:
     assert result.receipt.output["reason_codes"] == ["device_offline"]
 
 
+def test_product_quality_tool_treats_partial_as_usable_with_limitations() -> None:
+    facts = _product_facts().model_copy(
+        update={
+            "data_sufficiency": "partial",
+            "deterministic_quality": {
+                "schema_version": "deterministic_quality_assessment.v1",
+                "policy_version": "quality-v2-semantic-missingness",
+                "quality_state": "partial",
+                "data_sufficiency": "partial",
+                "coverage_ratio": 1.0,
+                "explicit_missing_interval_count": 15,
+                "invalid_observation_count": 15,
+                "stale": False,
+                "offline": False,
+                "clock_invalid": False,
+                "reason_codes": ["explicit_missing_observations"],
+            },
+        }
+    )
+    result = ProductToolExecutor(
+        core_service=CoreProductToolService()
+    ).execute(
+        "radar.assess_data_quality",
+        facts.tool_inputs()["radar.assess_data_quality"],
+        context=ProductToolExecutionContext(
+            caller="runtime",
+            fact_snapshot=_snapshot(source_refs=facts.agent_source_refs()),
+            episode_id="episode-partial-quality",
+        ),
+    )
+
+    assert result.receipt.outcome is InvocationOutcome.SUCCEEDED
+    assert result.receipt.output["usable"] is True
+    assert result.receipt.output["data_sufficiency"] == "partial"
+    assert result.receipt.output["reason_codes"] == [
+        "explicit_missing_observations"
+    ]
+
+
 def test_agent_cannot_self_attest_pinned_quality_policy() -> None:
     result = ProductToolExecutor(
         core_service=CoreProductToolService()
@@ -410,7 +564,7 @@ def test_product_device_status_tool_uses_typed_canonical_projection() -> None:
         facts.tool_inputs()["radar.get_device_status"],
         context=ProductToolExecutionContext(
             caller="runtime",
-            fact_snapshot=_snapshot(),
+            fact_snapshot=_snapshot(source_refs=facts.agent_source_refs()),
             episode_id="episode-phase3a-radar-data",
         ),
     )
@@ -421,7 +575,7 @@ def test_product_device_status_tool_uses_typed_canonical_projection() -> None:
         "data_mode": "live",
         "offline": False,
         "stale": False,
-        "source_refs": ["night_episode_revision:live:1"],
+        "source_refs": list(facts.agent_source_refs()),
     }
 
 
@@ -446,6 +600,56 @@ def test_product_device_status_rejects_unbound_source() -> None:
     )
 
     assert result.receipt.outcome is InvocationOutcome.FAILED
+
+
+def test_agent_night_evidence_preserves_vendor_and_pull_authority() -> None:
+    facts = _product_facts().model_copy(
+        update={
+            "data_sufficiency": "partial",
+            "canonical_observations": (
+                {
+                    "source_kind": "vendor_derived",
+                    "acquisition_channels": ["PULL"],
+                    "payload": {
+                        "observation_type": "sleep_stage_interval",
+                        "stage": "deep",
+                        "start_at": "2026-07-09T22:00:00+08:00",
+                        "end_at": "2026-07-09T22:30:00+08:00",
+                    },
+                },
+                {
+                    "source_kind": "device_measured",
+                    "acquisition_channels": ["PULL"],
+                    "payload": {
+                        "observation_type": "heart_rate",
+                        "value": 60,
+                    },
+                },
+                {
+                    "source_kind": "device_measured",
+                    "acquisition_channels": ["PUSH"],
+                    "payload": {
+                        "observation_type": "respiratory_rate",
+                        "value": 14,
+                    },
+                },
+            ),
+        }
+    )
+
+    evidence = facts.agent_night_evidence()
+    authority = evidence["evidence_authority"]
+
+    assert authority["sleep_stage_authority"] == "vendor_derived"
+    assert authority["independent_sleepagent_stage_classification"] is False
+    assert authority["pull_backfilled_measurement_count"] == 1
+    assert authority["matched_push_pull_measurement_count"] == 0
+    assert authority["push_pull_relation"] == "non_identical_cadence"
+    assert authority["pull_timestamp_semantics"] == (
+        "reconstructed_from_vendor_batch_cadence"
+    )
+    assert "subject_id" not in evidence
+    assert "device_ref" not in evidence
 
 
 def _snapshot(

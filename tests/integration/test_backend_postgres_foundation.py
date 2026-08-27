@@ -343,6 +343,204 @@ def test_terminal_demo_trace_reads_the_habit_evidence_role_field() -> None:
     assert "revision.fact_json #> '{evidence,actor_role}'" not in source
 
 
+def test_perceptor_pull_migration_activates_exact_scoped_evidence() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/012_perceptor_pull_reconciliation.sql"
+    ).read_text(encoding="utf-8")
+
+    for table in (
+        "sleep_domain_source_reports",
+        "sleep_domain_pull_checkpoints",
+        "sleep_domain_observation_fact_values",
+        "sleep_domain_observation_acquisitions",
+        "sleep_domain_observation_conflicts",
+    ):
+        assert f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY" in body
+    for evidence_trigger in (
+        "sleep_domain_source_report_immutable",
+        "sleep_domain_fact_value_immutable",
+        "sleep_domain_acquisition_immutable",
+        "sleep_domain_conflict_immutable",
+    ):
+        assert f"CREATE TRIGGER {evidence_trigger}" in body
+    assert "acquisition_channel IN ('PUSH', 'PULL')" in body
+    assert "sleep_domain_acquisition_exact_candidate_raw_fk" in body
+    assert "ux_sleep_domain_fact_value_exact_observation" in body
+    assert "sleep_domain_acquisition_exact_fact_fk" in body
+    assert "sleep_domain_conflict_first_exact_fact_fk" in body
+    assert "sleep_domain_conflict_second_exact_fact_fk" in body
+    assert (
+        "namespace_id, data_mode, fact_slot_key, value_sha256, observation_id"
+        in body
+    )
+    assert "a later PUSH/PULL candidate may corroborate" in body
+    assert "sleep_domain_pull_checkpoint_v2_contract" in body
+    assert "WHEN data_surface = 'history' THEN 3" in body
+    assert "last_raw_ingress_record_id IS NOT NULL" in body
+    assert "last_normalization_work_id IS NOT NULL" in body
+    assert "last_canonical_commit_at IS NOT NULL" in body
+    assert "CREATE OR REPLACE FUNCTION sleepagent_plan_perceptor_history(" in body
+    assert "resolved_checkpoint_cursor - INTERVAL '3 seconds'" in body
+    assert body.count("sleepagent_subject_generation_scope_allows(") >= 10
+
+
+def test_perceptor_pull_retry_noop_migration_preserves_planner_authority() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/013_perceptor_pull_retry_noop.sql"
+    ).read_text(encoding="utf-8")
+
+    assert body.count(
+        "CREATE OR REPLACE FUNCTION sleepagent_plan_perceptor_history("
+    ) == 1
+    assert "SECURITY DEFINER" in body
+    assert "SET search_path = pg_catalog, public" in body
+    assert "resolved_window_start := resolved_lateness_watermark" in body
+    assert "resolved_window_end := resolved_checkpoint_cursor" in body
+    assert "resolved_window_end := requested_window_end" in body
+    assert "Perceptor history continuation must advance the cursor" not in body
+    assert "REVOKE ALL ON FUNCTION sleepagent_plan_perceptor_history(" in body
+
+
+def test_perceptor_pull_ingress_is_one_revoked_read_only_definer() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/012_perceptor_pull_reconciliation.sql"
+    ).read_text(encoding="utf-8")
+    function = body.split(
+        "CREATE OR REPLACE FUNCTION sleepagent_ingest_perceptor_pull", 1
+    )[1].split("REVOKE ALL ON FUNCTION", 1)[0]
+
+    assert "SECURITY DEFINER" in function
+    assert "SET search_path = pg_catalog, public" in function
+    assert "'perceptor_ingress'" in function
+    assert "account_metadata_json ->> 'client_id_sha256'" in function
+    assert "'normalizer', 'perceptor_pull'" in function
+    assert "'source_channel', 'PULL'" in function
+    assert "'perceptor-platform-read-response.v1', 'not_provided'" in function
+    assert "'semantic_duplicate'::TEXT" in function
+    assert "'response_device_mismatch'" in function
+    assert "jsonb_object_keys(safe_metadata_json)" in function
+    assert "Perceptor Pull safe metadata contract mismatch" in function
+    assert "safe_metadata_json ||" not in function
+    for safe_key in (
+        "schema_version",
+        "source_channel",
+        "endpoint",
+        "raw_sha256",
+        "response_semantic_sha256",
+        "normalizer_version",
+        "batch_identity",
+        "stream_key",
+        "checkpoint_cursor_at",
+        "lateness_watermark_at",
+        "requested_window_start",
+        "requested_window_end",
+        "requested_report_date",
+        "response_valid",
+        "response_has_data",
+        "provider_device_key",
+    ):
+        assert f"'{safe_key}'" in function
+    assert "provider_device_key !~ '^sha256:[0-9a-f]{64}$'" in function
+    assert "requested_window_end - requested_window_start > INTERVAL '1 hour'" in function
+    assert "WHEN '/vitalSigns/getHistoryData' THEN 'history'" in function
+    assert "WHEN '/vitalSigns/getSleepReport' THEN 'sleep_report'" in function
+    assert "binding.effective_from <= requested_window_start" in function
+    assert "binding.effective_until > requested_window_end" in function
+    assert "requested_report_date::TIMESTAMP AT TIME ZONE binding.timezone_name" in function
+    assert "(requested_report_date + 1)::TIMESTAMP" in function
+    assert "outside DeviceBinding effective interval" in function
+    assert function.index("outside DeviceBinding effective interval") < function.index(
+        "INSERT INTO public.sleep_domain_raw_inbox"
+    )
+    endpoint_case = function.split("resolved_surface := CASE pull_endpoint", 1)[1].split(
+        "END;", 1
+    )[0]
+    assert "/token/get" not in endpoint_case
+    assert "REVOKE ALL ON FUNCTION sleepagent_ingest_perceptor_pull(" in body
+    assert "FROM PUBLIC;" in body
+
+    role_bootstrap = Path("sleepagent/persistence/migrate.py").read_text(
+        encoding="utf-8"
+    )
+    worker_select = role_bootstrap.split("worker_tables = (", 1)[1].split(
+        ")", 1
+    )[0]
+    worker_insert = role_bootstrap.split("worker_insert_tables = (", 1)[1].split(
+        ")", 1
+    )[0]
+    api_read = role_bootstrap.split("api_read_tables = (", 1)[1].split(")", 1)[0]
+    api_insert = role_bootstrap.split("api_insert_tables = (", 1)[1].split(
+        ")", 1
+    )[0]
+    for table in (
+        "sleep_domain_source_reports",
+        "sleep_domain_pull_checkpoints",
+        "sleep_domain_observation_fact_values",
+        "sleep_domain_observation_acquisitions",
+        "sleep_domain_observation_conflicts",
+    ):
+        assert f'"{table}"' in worker_select
+        assert f'"{table}"' in worker_insert
+        assert f'"{table}"' not in api_read
+        assert f'"{table}"' not in api_insert
+    worker_updates = role_bootstrap.split("worker_update_tables = (", 1)[1].split(
+        ")", 1
+    )[0]
+    assert '"sleep_domain_pull_checkpoints"' not in worker_updates
+    assert 'sql.Identifier("public", "sleep_domain_pull_checkpoints")' in role_bootstrap
+    assert (
+        '"sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,'
+        'text,text,text,timestamptz,timestamptz,date,timestamptz,'
+        'timestamptz,text,text,text,bytea,text,text,integer,timestamptz,'
+        'boolean,boolean,text,text,text,text,text,jsonb)"'
+    ) in role_bootstrap
+    assert (
+        '"sleepagent_plan_perceptor_history(text,bigint,text,text,integer,'
+        'text,timestamptz,timestamptz)"'
+    ) in role_bootstrap
+
+
+def test_perceptor_history_planner_is_timestamp_only_and_exactly_scoped() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/012_perceptor_pull_reconciliation.sql"
+    ).read_text(encoding="utf-8")
+    function = body.split(
+        "CREATE OR REPLACE FUNCTION sleepagent_plan_perceptor_history", 1
+    )[1].split("REVOKE ALL ON FUNCTION", 1)[0]
+
+    assert "SECURITY DEFINER" in function
+    assert "SET search_path = pg_catalog, public" in function
+    assert "'perceptor_ingress'" in function
+    assert "principal.database_role_name::TEXT = session_user::TEXT" in function
+    assert "grant_row.authorization_epoch" in function
+    assert "checkpoint.namespace_generation = target_namespace_generation" in function
+    assert "checkpoint.subject_id = target_subject_id" in function
+    assert "checkpoint.device_binding_id = target_device_binding_id" in function
+    assert "checkpoint.data_surface = 'history'" in function
+    assert "resolved_overlap_seconds <> 3" in function
+    assert (
+        "resolved_lateness_watermark IS DISTINCT FROM\n"
+        "         resolved_checkpoint_cursor - INTERVAL '3 seconds'"
+    ) in function
+    assert "resolved_window_start := resolved_lateness_watermark" in function
+    assert "requested_window_end - resolved_window_start > INTERVAL '1 hour'" in function
+    assert "binding.effective_from <= resolved_window_start" in function
+    assert "binding.effective_until > requested_window_end" in function
+    returns = function.split("RETURNS TABLE (", 1)[1].split(")", 1)[0]
+    assert set(
+        line.strip().split()[0].rstrip(",")
+        for line in returns.splitlines()
+        if line.strip()
+    ) == {
+        "window_start_at",
+        "window_end_at",
+        "checkpoint_cursor_at",
+        "lateness_watermark_at",
+        "resumed_from_checkpoint",
+    }
+    assert "REVOKE ALL ON FUNCTION sleepagent_plan_perceptor_history(" in body
+
+
 def test_migration_runner_uses_public_as_the_ddl_target_schema() -> None:
     connection = FakeConnection()
     runner = PostgresMigrationRunner(connection, applied_by="test@ci")

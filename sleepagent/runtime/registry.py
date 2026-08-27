@@ -1,6 +1,7 @@
 # 本模块维护冻结的 Agent、Skill、Tool 与 Episode 注册表及一致性校验。
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -717,6 +718,7 @@ from sleepagent.runtime.contracts import (
     EpisodeType,
     FrozenContract,
     StrictContract,
+    provider_context_projection,
     stable_hash,
 )
 from sleepagent.runtime.registry import (
@@ -1042,7 +1044,15 @@ class PromptCompiler:
         }
         messages = (
             {"role": "system", "content": str(system)},
-            {"role": "user", "content": context.model_dump_json()},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    provider_context_projection(context),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            },
         )
         material = {
             "compiler_version": self.compiler_version,
@@ -1242,6 +1252,14 @@ def default_skill_packages() -> list[SkillPackage]:
         "source_kind confirmed_memory, copy its typed_value faithfully, and cite its "
         "exact retrieval_handle. Do not describe remembered context as sensor data or "
         "clinical truth.",
+        "Preserve governed source authority in every claim. Sleep stages marked "
+        "vendor_derived must be described explicitly as vendor-derived, never as "
+        "independent SleepAgent measurement or classification. Pull-backfilled "
+        "measurements use reconstructed cadence timestamps and must not be described "
+        "as exact Push/Pull agreement or directly sensor-emitted timestamps.",
+        "When deterministic quality is partial, state the material limitation and "
+        "do not convert unavailable or invalid observations into normal values or "
+        "physiological certainty.",
     )
     sleepcare_contract_instructions = (
         "Every semantic_bindings rendered_text must be copied verbatim as one "
@@ -1270,6 +1288,10 @@ def default_skill_packages() -> list[SkillPackage]:
         "offsets, spans, source text, or replacement text.",
         "Never guess, transform, or invent a source identity. Never select the same "
         "source more than once.",
+        "When accepted Evidence contains a material partial-quality, missing-data, "
+        "vendor-derived-authority, or reconstructed-timestamp limitation, select "
+        "that exact Evidence claim for the Product communication; never hide it to "
+        "make the result sound more reassuring.",
         "If no legal source is visible, return an empty selected_segments plan and "
         "use only the current status/request fields permitted by the strict plan "
         "schema; never fabricate content to make the plan non-empty.",
@@ -1287,8 +1309,10 @@ def default_skill_packages() -> list[SkillPackage]:
         SkillPackage.create(
             skill_id=skill_id,
             version=(
-                "3.0.0"
+                "4.0.0"
                 if skill_id in sleepcare_communication_skills
+                else "3.0.0"
+                if owner is AgentId.EVIDENCE_REASONING
                 else "2.0.0"
                 if skill_id in tool_contract_v2
                 else "1.0.0"

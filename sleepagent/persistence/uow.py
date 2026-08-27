@@ -243,6 +243,55 @@ class InternalControlScope:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalIngressScope:
+    """Namespace-scoped external-service context for a narrow ingress function.
+
+    The SECURITY DEFINER function resolves device/subject authority from
+    database-owned bindings.  The caller therefore cannot self-assert an actor
+    or subject while accepting a provider callback.
+    """
+
+    namespace_id: str
+    namespace_generation: int
+    service_principal_id: str
+    authorization_epoch: int
+    purpose: Literal["perceptor_ingress"] = "perceptor_ingress"
+    data_mode: Literal["live"] = "live"
+
+    def __post_init__(self) -> None:
+        if not self.namespace_id.startswith("live:") or self.namespace_id == "live:":
+            raise ValueError("external ingress requires an exact live namespace")
+        if self.namespace_generation < 1:
+            raise ValueError("namespace_generation must be positive")
+        if not self.service_principal_id.strip():
+            raise ValueError("service_principal_id is required")
+        if self.authorization_epoch < 0:
+            raise ValueError("authorization_epoch must be non-negative")
+
+    def guc_values(self) -> Mapping[str, str]:
+        values = dict(
+            _empty_scope_gucs(
+                data_mode="live",
+                process_role="api",
+                purpose=self.purpose,
+                service_principal_id=self.service_principal_id,
+            )
+        )
+        values.update(
+            {
+                "sleepagent.namespace_id": self.namespace_id,
+                "sleepagent.namespace_generation": str(
+                    self.namespace_generation
+                ),
+                "sleepagent.authorization_epoch": str(
+                    self.authorization_epoch
+                ),
+            }
+        )
+        return values
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerClaimScope:
     """Minimal cross-namespace context for audited SECURITY DEFINER claims."""
 

@@ -31,6 +31,7 @@ from sleepagent.api.product_contracts import (
     ProductSleepTodayResponse,
     ProductTrendsResponse,
 )
+from sleepagent.domain.product_data import public_product_subject_ref
 
 
 READ_SCOPES = {
@@ -211,12 +212,13 @@ class ProductApiService:
             return ProductSleepTodayNoData(
                 data_mode=cast(Literal["live", "replay"], context.data_mode),
                 synthetic_non_release=context.data_mode == "replay",
-                subject_ref=context.subject_id,
+                subject_ref=public_product_subject_ref(context.subject_id),
                 role=context.role,
             )
         if (
             projection.role != context.role
-            or projection.subject_ref != context.subject_id
+            or projection.subject_ref
+            != public_product_subject_ref(context.subject_id)
             or projection.data_mode != context.data_mode
         ):
             raise RuntimeError(

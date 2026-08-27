@@ -107,6 +107,19 @@ def create_sleep_backend_app(
     if ApiSurface.INTERNAL in surfaces:
         app.mount("/internal", _internal_app(runtime))
 
+    if ApiSurface.PERCEPTOR_PUSH in surfaces:
+        from sleepagent.integrations.perceptor.ingestion import (
+            PerceptorWebhookService,
+            create_perceptor_router,
+        )
+
+        perceptor = runtime.services.perceptor_push
+        if not isinstance(perceptor, PerceptorWebhookService):
+            raise ValueError(
+                "perceptor_push surface requires PerceptorWebhookService"
+            )
+        app.include_router(create_perceptor_router(perceptor))
+
     app.add_exception_handler(ProductApiError, _product_error_handler)
     app.add_exception_handler(DemoApiError, _demo_error_handler)
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
@@ -413,6 +426,10 @@ class BoundedRequestMiddleware:
                 bounded_scope = _replace_body_headers(scope, len(body))
                 state = dict(bounded_scope.get("state") or {})
                 state["sleepagent_validated_request_body"] = body
+                state["sleepagent_transport_request_body"] = raw
+                state["sleepagent_transport_content_encoding"] = (
+                    headers.get("content-encoding") or "identity"
+                ).strip().lower()
                 bounded_scope = {**bounded_scope, "state": state}
                 await self.app(bounded_scope, replay_receive, tracked_send)
         except RequestBoundaryError as exc:
@@ -669,6 +686,7 @@ def _safe_route_group(path: str) -> str:
         ("/product/sleep/", "product_sleep"),
         ("/demo/v1/", "demo_v1"),
         ("/internal/", "internal"),
+        ("/integrations/perceptor/", "perceptor_webhook"),
     ):
         if path.startswith(prefix):
             return name
@@ -821,6 +839,16 @@ def build_api_runtime_services(
             cursor_key=key_provider.encryption_key(settings.encryption_key_ref),
         )
         public_provider = lambda runtime=public_runtime: runtime
+    perceptor_push = None
+    if ApiSurface.PERCEPTOR_PUSH in settings.enabled_surfaces:
+        from sleepagent.integrations.perceptor.ingestion import (
+            PerceptorWebhookService,
+        )
+
+        perceptor_push = PerceptorWebhookService(
+            settings,
+            uow_factory,  # type: ignore[arg-type]
+        )
     return RuntimeServices(
         product=product,
         demo=demo,
@@ -830,6 +858,7 @@ def build_api_runtime_services(
             if ApiSurface.INTERNAL in settings.enabled_surfaces
             else None
         ),
+        perceptor_push=perceptor_push,
     )
 
 

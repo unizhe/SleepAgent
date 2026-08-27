@@ -27,6 +27,9 @@ from sleepagent.persistence.uow import (
 )
 from sleepagent.workers.runtime import (
     InvocationDispatcher,
+    InvocationKind,
+    InvocationState,
+    LeaseLostError,
     OutcomeUnknownError,
     PostgresDurableWorkStore,
     WorkDisposition,
@@ -834,6 +837,124 @@ def test_expired_claim_reuses_the_same_business_attempt(
         second,
         WorkResult(disposition=WorkDisposition.SUCCEEDED),
     ) is True
+
+
+def test_reserved_invocation_rebinds_once_and_old_generation_stays_fenced(
+    attempt_budget_harness: _AttemptBudgetHarness,
+) -> None:
+    queue, work_id = _queue_and_work_id(
+        attempt_budget_harness,
+        "operation",
+        max_attempts=1,
+    )
+    invocation_key = f"model:reserved-recovery:{attempt_budget_harness.suffix}"
+    request = {"frozen_source_sha256": "a" * 64}
+    request_sha256 = hashlib.sha256(
+        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    first = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="reserved-recovery-worker-1",
+        lease_seconds=30,
+    )
+    assert first is not None
+    reserved = attempt_budget_harness.store.reserve_invocation(
+        first,
+        invocation_kind=InvocationKind.MODEL,
+        invocation_key=invocation_key,
+        request_sha256=request_sha256,
+    )
+    assert reserved.state is InvocationState.RESERVED
+
+    _expire_work(
+        attempt_budget_harness,
+        kind="operation",
+        work_id=work_id,
+    )
+    second = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="reserved-recovery-worker-2",
+        lease_seconds=30,
+    )
+    assert second is not None
+    assert second.work_id == first.work_id
+    assert second.attempt == first.attempt == 1
+    assert second.lease_generation == first.lease_generation + 1
+
+    provider_calls = 0
+
+    def fake_sender():
+        nonlocal provider_calls
+        provider_calls += 1
+        return {"local": True}, None
+
+    with pytest.raises(LeaseLostError):
+        InvocationDispatcher(
+            store=attempt_budget_harness.store,
+            claim=first,
+            lease_lost=threading.Event(),
+        ).dispatch(
+            invocation_key=invocation_key,
+            request=request,
+            sender=fake_sender,
+            invocation_kind=InvocationKind.MODEL,
+        )
+    assert provider_calls == 0
+
+    response = InvocationDispatcher(
+        store=attempt_budget_harness.store,
+        claim=second,
+        lease_lost=threading.Event(),
+    ).dispatch(
+        invocation_key=invocation_key,
+        request=request,
+        sender=fake_sender,
+        invocation_kind=InvocationKind.MODEL,
+    )
+    assert response == {"local": True}
+    assert provider_calls == 1
+    assert attempt_budget_harness.store.finalize(
+        first,
+        WorkResult(disposition=WorkDisposition.SUCCEEDED),
+    ) is False
+    assert attempt_budget_harness.store.finalize(
+        second,
+        WorkResult(disposition=WorkDisposition.SUCCEEDED),
+    ) is True
+
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT invocation.invocation_id,
+                       invocation.current_state,
+                       invocation.lease_generation,
+                       array_agg(journal.to_state ORDER BY journal.sequence)
+                FROM public.backend_invocations AS invocation
+                JOIN public.backend_invocation_journal AS journal
+                  ON journal.invocation_id = invocation.invocation_id
+                WHERE invocation.operation_id = %s
+                  AND invocation.invocation_key = %s
+                GROUP BY invocation.invocation_id, invocation.current_state,
+                         invocation.lease_generation
+                """,
+                (work_id, invocation_key),
+            )
+            row = cursor.fetchone()
+    assert row is not None
+    assert str(row[0]) == reserved.invocation_id
+    assert (str(row[1]), int(row[2])) == (
+        InvocationState.RESPONSE_RECEIVED.value,
+        second.lease_generation,
+    )
+    assert list(row[3]) == [
+        InvocationState.RESERVED.value,
+        InvocationState.RESERVED.value,
+        InvocationState.SEND_STARTED.value,
+        InvocationState.RESPONSE_RECEIVED.value,
+    ]
 
 
 class _SimulatedProcessCrash(BaseException):

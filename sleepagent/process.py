@@ -83,6 +83,7 @@ class RuntimeServices:
     demo: object | None = None
     public_v1_runtime_provider: Callable[[], object] | None = None
     internal_status: object | None = None
+    perceptor_push: object | None = None
 
 
 _ACTIVE_LOCK = threading.RLock()

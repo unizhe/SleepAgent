@@ -111,9 +111,12 @@ class CanonicalRadarEvidenceTool:
             policy_version = str(data.get("policy_version", ""))
             if not policy_version:
                 raise ValueError("pinned quality assessment requires policy_version")
-            sufficient = data.get("data_sufficiency") == "sufficient"
+            usable_sufficiency = data.get("data_sufficiency") in {
+                "sufficient",
+                "partial",
+            }
             usable = bool(
-                sufficient
+                usable_sufficiency
                 and data.get("quality_state") != "data_insufficient"
                 and not data.get("stale", False)
                 and not data.get("offline", False)

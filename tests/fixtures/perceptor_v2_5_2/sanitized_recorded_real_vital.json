@@ -1,0 +1,16 @@
+{
+  "client_id": "sanitized-recorded-real-client-placeholder",
+  "version": "2.0",
+  "timestamp": 1768446245,
+  "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "sign_version": "2.0",
+  "sign_nonce": "sanitized-recorded-real-nonce-placeholder",
+  "sign_method": "HMAC-SHA1",
+  "message_id": "sanitized-recorded-real-message-placeholder",
+  "product_id": 9000000000000000001,
+  "device_id": 9000000000000000002,
+  "device_name": "SANITIZED-RECORDED-REAL-DEVICE",
+  "home_id": 9000000000000000003,
+  "type": "VitalSignsDataEvent",
+  "data": "{\"HeartRate\":72,\"BreathRate\":16,\"BodyShake\":1,\"OnBed\":1,\"ReportTime\":\"1768446245000\",\"DateTime\":\"2026-01-15T03:04:05.000\"}"
+}

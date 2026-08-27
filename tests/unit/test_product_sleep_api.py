@@ -24,6 +24,7 @@ from sleepagent.api.product_contracts import (
     PublicOperationState,
 )
 from sleepagent.domain.episodes import EpisodeAssignmentBasis
+from sleepagent.domain.product_data import public_product_subject_ref
 from sleepagent.api.product import (
     ProductApiError,
     ProductApiService,
@@ -137,7 +138,7 @@ class Backend:
             data_mode=context.data_mode,
             synthetic_non_release=context.data_mode == "replay",
             state=ProductTodayState.READY,
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             episode_id="night-1",
             episode_revision_id="night-revision-1",
@@ -175,7 +176,7 @@ class Backend:
         return ProductTrendsResponse(
             data_mode=context.data_mode,
             synthetic_non_release=True,
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=(),
         )
@@ -185,7 +186,7 @@ class Backend:
         return ProductRecordsResponse(
             data_mode=context.data_mode,
             synthetic_non_release=True,
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=(),
         )
@@ -195,7 +196,7 @@ class Backend:
         return ProductCareResponse(
             data_mode=context.data_mode,
             synthetic_non_release=True,
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=(),
         )
@@ -274,7 +275,8 @@ def test_queries_only_return_authoritative_role_projection() -> None:
     assert result.data_mode == "replay"
     assert result.synthetic_non_release is True
     assert result.role == ProductRole.FAMILY
-    assert result.subject_ref == "opaque-subject"
+    assert result.subject_ref == public_product_subject_ref("opaque-subject")
+    assert "opaque-subject" not in result.subject_ref
     assert result.content.audience == "family"
 
 
@@ -430,7 +432,7 @@ def test_backend_cross_role_projection_is_treated_as_integrity_failure() -> None
                 data_mode=context.data_mode,
                 synthetic_non_release=True,
                 state=ProductTodayState.READY,
-                subject_ref=context.subject_id,
+                subject_ref=public_product_subject_ref(context.subject_id),
                 role=ProductRole.DOCTOR,
                 episode_id="night-1",
                 episode_revision_id="night-revision-1",

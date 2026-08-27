@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-PRODUCT_AGENT_CONTRACT_VERSION = "sleepagent-product-agent.v14"
+PRODUCT_AGENT_CONTRACT_VERSION = "sleepagent-product-agent.v15"
 
 
 class StrictContract(BaseModel):
@@ -357,6 +357,76 @@ class ContextPacket(FrozenContract):
         if any(item.key in forbidden for item in self.items):
             raise ValueError("ContextPacket contains non-minimal identifiers")
         return self
+
+
+_PROVIDER_PRIVATE_CONTEXT_KEYS = frozenset(
+    {
+        "actor_id",
+        "assessment_id",
+        "canonical_observation_id",
+        "current_risk_id",
+        "device_binding_id",
+        "device_id",
+        "fact_snapshot_id",
+        "home_id",
+        "night_episode_id",
+        "night_episode_revision_id",
+        "provider_account_id",
+        "radar_device_id",
+        "subject_id",
+        "tool_invocation_id",
+    }
+)
+
+
+def provider_context_projection(context: ContextPacket) -> dict[str, Any]:
+    """Project a local ContextPacket into its identifier-free model DTO."""
+
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): sanitize(item)
+                for key, item in value.items()
+                if str(key).lower() not in _PROVIDER_PRIVATE_CONTEXT_KEYS
+            }
+        if isinstance(value, (list, tuple)):
+            return [sanitize(item) for item in value]
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        return value
+
+    scope = context.source_scope
+    return {
+        "agent_id": context.agent_id.value,
+        "objective": context.objective,
+        # This content hash binds Safety output to the exact local snapshot
+        # without disclosing the snapshot row identity or subject binding.
+        "fact_snapshot_hash": context.fact_snapshot_hash,
+        "episode_state_revision": context.episode_state_revision,
+        "care_context_version": context.care_context_version,
+        "source_scope": {
+            "kind": scope.kind.value,
+            "as_of": scope.as_of.isoformat(),
+            "timezone_name": scope.timezone_name,
+            "date_start": (
+                None if scope.date_start is None else scope.date_start.isoformat()
+            ),
+            "date_end": (
+                None if scope.date_end is None else scope.date_end.isoformat()
+            ),
+            "valid_night_count": scope.valid_night_count,
+        },
+        "authorization_scope": list(context.authorization_scope),
+        "items": [
+            {
+                "key": item.key,
+                "trust_label": item.trust_label.value,
+                "value": sanitize(item.value),
+                "source_refs": list(item.source_refs),
+            }
+            for item in context.items
+        ],
+    }
 
 
 class ToolRequest(StrictContract):

@@ -37,7 +37,9 @@ from sleepagent.runtime.memory import (
     SensitivityClass,
 )
 from sleepagent.domain.habit import HabitFact, HabitOperation
+from sleepagent.domain.product_data import public_product_subject_ref
 from sleepagent.workers.product import (
+    PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST,
     PostgresProductAgentRepository,
     PreparedProductAgentArtifact,
     ProductAgentConflict,
@@ -1283,6 +1285,31 @@ def _assert_committed_closure(
             )
             cursor.execute(
                 """
+                SELECT role, subject_id, view_json, public_today_json
+                FROM public.sleep_domain_analysis_role_views
+                WHERE analysis_revision_id = %s
+                ORDER BY role
+                """,
+                (analysis_revision_id,),
+            )
+            public_rows = cursor.fetchall()
+            assert len(public_rows) == 3
+            for role, subject_id, internal_view, public_view in public_rows:
+                assert internal_view["subject_id"] == subject_id
+                assert public_view["subject_ref"] == public_product_subject_ref(
+                    subject_id
+                )
+                assert public_view["subject_ref"] != subject_id
+                assert set(public_view) == PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST
+                assert "source_refs" not in public_view
+                assert "claim_refs" not in public_view
+                assert "product_agent_episode_id" not in public_view
+                if role == "doctor":
+                    assert public_view["content"]["evidence_refs"] == []
+                else:
+                    assert "evidence_refs" not in public_view["content"]
+            cursor.execute(
+                """
                 SELECT event_type, aggregate_type, aggregate_id, status,
                        protocol_version, namespace_generation, run_id, arm_id
                 FROM public.sleep_domain_domain_outbox
@@ -1685,6 +1712,69 @@ def test_prepared_product_attempt_is_not_query_visible_before_commit() -> None:
         product_attempt_id=committed.product_attempt_id,
         analysis_status=committed.analysis_status,
     )
+
+
+def test_source_load_releases_operation_lock_before_concurrent_heartbeat() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    load_started = threading.Event()
+    heartbeat_finished = threading.Event()
+    heartbeat_result: list[bool] = []
+
+    class ConcurrentLoadRepository(PostgresProductAgentRepository):
+        def load_source(self, lease: ProductAgentLease):
+            load_started.set()
+            assert heartbeat_finished.wait(timeout=5)
+            return super().load_source(lease)
+
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"source-heartbeat-worker-{uuid4().hex}",
+        )
+        scope = store.uow_scope_for_claim(claim)
+        lease = _lease_for_claim(claim)
+
+        def heartbeat() -> None:
+            assert load_started.wait(timeout=5)
+            heartbeat_result.append(store.heartbeat(claim, lease_seconds=30))
+            heartbeat_finished.set()
+
+        heartbeat_thread = threading.Thread(target=heartbeat)
+        heartbeat_thread.start()
+        processor = ProductAgentProcessor(
+            factory,
+            runtime_bundle=_deterministic_runtime_bundle(),
+            repository_factory=lambda connection, current_scope: (
+                ConcurrentLoadRepository(connection, current_scope)
+            ),
+        )
+        try:
+            source = processor.load_source(scope, lease)
+        finally:
+            heartbeat_thread.join(timeout=5)
+
+        assert heartbeat_thread.is_alive() is False
+        assert heartbeat_result == [True]
+        assert source.operation_id == claim.work_id
+        assert source.night_episode_revision_id == seed.night_episode_revision_id
+    finally:
+        provider.close()
 
 
 def test_reclaimed_prepared_artifact_is_taken_over_without_reinvocation() -> None:

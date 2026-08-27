@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,18 +38,22 @@ from sleepagent.domain.contracts import (
     CurrentRisk,
     DataMode,
     DataSufficiency,
+    DeterministicQualityAssessment,
     DeterministicQualityPolicy,
     DeterministicRiskPolicy,
+    DeterministicSourceScope,
     DeviceBindingReference,
     DomainRuleReviewStatus,
     EpisodeBoundaryPolicy,
     FastPathEventPolicy,
     MissingState,
+    MissingnessState,
     NightEpisode,
     NightEpisodeState,
     ObservationProvenance,
     ObservationQuality,
     ObservationType,
+    QualityState,
     ReviewedVendorAlertRule,
     RiskState,
     SleepObservation,
@@ -422,6 +427,29 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
         for statement, _params in cursor.statements
     )
 
+    batched_cursor = RecordingCursor()
+    batched_ids = tuple(f"observation-{index:03d}" for index in range(257))
+    repository._write_episode_mutation(
+        batched_cursor,
+        replace(closed, observation_ids=batched_ids),
+        _policy(),
+        wake_at + timedelta(seconds=2),
+    )
+    inserts = [
+        params[-1]
+        for statement, params in batched_cursor.statements
+        if "INSERT INTO public.sleep_domain_episode_observation_memberships"
+        in statement
+    ]
+    checks = [
+        params[0]
+        for statement, params in batched_cursor.statements
+        if "count(*) = cardinality" in statement
+    ]
+    assert [len(batch) for batch in inserts] == [128, 128, 1]
+    assert checks == inserts
+    assert tuple(item for batch in inserts for item in batch) == batched_ids
+
 
 def test_episode_without_wake_closes_on_estimated_deadline_date() -> None:
     ids = Ids()
@@ -645,6 +673,7 @@ class _FastRepository:
         )
         self.observations = {item.observation_id: item for item in observations}
         self.quality = None
+        self.current_quality = None
         self.risk = None
         self.persisted: dict[str, Any] | None = None
 
@@ -676,6 +705,10 @@ class _FastRepository:
     def get_quality_assessment(self, _namespace: Any, *, assessment_id: str) -> Any:
         del assessment_id
         return self.quality
+
+    def get_current_quality(self, _namespace: Any, *, night_episode_id: str) -> Any:
+        del night_episode_id
+        return self.current_quality
 
     def get_current_risk(self, _namespace: Any, *, night_episode_id: str) -> Any:
         del night_episode_id
@@ -725,9 +758,12 @@ class _FastRepository:
         *,
         quality: Any,
         risk: Any,
+        persist_quality: bool = True,
         **_kwargs: Any,
     ) -> bool:
-        self.quality = quality
+        if persist_quality:
+            self.quality = quality
+            self.current_quality = quality
         self.risk = risk
         return True
 
@@ -825,6 +861,39 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
         updated_at=end,
     )
     repository = _FastRepository(episode, observations)
+    frozen_quality = DeterministicQualityAssessment(
+        assessment_id="acquisition-quality-1",
+        data_mode=DataMode.REPLAY,
+        subject_id=episode.subject_id,
+        night_episode_id=episode.night_episode_id,
+        quality_state=QualityState.SUFFICIENT,
+        data_sufficiency=DataSufficiency.SUFFICIENT,
+        missingness_state=MissingnessState.COMPLETE,
+        coverage_ratio=1.0,
+        expected_bin_count=20,
+        covered_bin_count=20,
+        explicit_missing_interval_count=0,
+        invalid_observation_count=0,
+        stale=False,
+        offline=False,
+        clock_invalid=False,
+        latest_observed_at=end - timedelta(seconds=30),
+        source_scope=DeterministicSourceScope(
+            night_episode_id=episode.night_episode_id,
+            night_episode_revision_id="revision-1",
+            observation_ids=tuple(item.observation_id for item in observations),
+            observation_types=tuple(
+                dict.fromkeys(item.observation_type for item in observations)
+            ),
+            device_binding_ids=("binding-1",),
+            window_start_at=start,
+            window_end_at=end,
+        ),
+        policy_version="quality-v1",
+        reason_codes=("quality_sufficient",),
+        assessed_at=end,
+    )
+    repository.current_quality = frozen_quality
     uow = _FakeUow()
     handler = FastPathHandler(
         _FakeUowFactory(uow),  # type: ignore[arg-type]
@@ -850,6 +919,8 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
     assert result.model_invocation_count == 0
     assert result.product_agent_operation_id is None
     assert repository.risk.risk_state == RiskState.REVIEWED_SIGNAL
+    assert repository.current_quality is frozen_quality
+    assert repository.quality is None
     assert repository.persisted is not None
     assert repository.persisted["decision"].model_invocation_count == 0
     assert repository.persisted["product_agent_operation_id"] is None

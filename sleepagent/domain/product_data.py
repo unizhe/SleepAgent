@@ -55,6 +55,7 @@ ROLE_VIEW_SCOPES = {
     AnalysisRole.FAMILY: "read_family_view",
     AnalysisRole.DOCTOR: "read_doctor_view",
 }
+PUBLIC_SUBJECT_REF_PREFIX = "subject:sha256:"
 
 LONGITUDINAL_VITAL_MIN_NIGHTS = 3
 LONGITUDINAL_HEART_RATE_MIN_TOTAL_DELTA = 5.0
@@ -75,6 +76,19 @@ FORBIDDEN_AGENT_CONTEXT_KEYS = frozenset(
         "title",
     }
 )
+
+
+def public_product_subject_ref(subject_id: str) -> str:
+    """Return the stable public Product pseudonym for an internal subject ID."""
+
+    if not subject_id:
+        raise ValueError("public Product subject reference requires a subject ID")
+    return PUBLIC_SUBJECT_REF_PREFIX + stable_hash(
+        {
+            "schema_version": "public_product_subject_ref.v1",
+            "subject_id": subject_id,
+        }
+    )
 
 
 class ProductDataAuthorization(SleepDomainContract):
@@ -225,11 +239,14 @@ class ProductRevisionFacts(SleepDomainContract):
         return self
 
     def tool_inputs(self) -> dict[str, dict[str, Any]]:
-        evidence = self.model_dump(mode="json")
+        # ProductRevisionFacts is the local lineage DTO.  It deliberately
+        # contains subject and observation identities and must never double as
+        # the provider-facing DTO.
+        evidence = self.agent_night_evidence()
         agent_refs = list(self.agent_source_refs())
-        quality = dict(self.deterministic_quality)
+        quality = self.provider_quality_summary()
         coverage_ratio = quality.get("coverage_ratio", 0.0)
-        risk = dict(self.deterministic_risk)
+        risk = self.provider_risk_summary()
         risk.setdefault("data_sufficiency", self.data_sufficiency)
         risk_arguments: dict[str, Any] = {
             "data": risk,
@@ -237,7 +254,11 @@ class ProductRevisionFacts(SleepDomainContract):
         }
         if self.longitudinal_risk_context is not None:
             risk_arguments["trend_signals"] = [
-                item.model_dump(mode="json")
+                {
+                    "risk_level": item.risk_level,
+                    "confidence": item.confidence,
+                    "source_refs": agent_refs,
+                }
                 for item in self.longitudinal_risk_context.trend_signals
             ]
             risk_arguments["trend_observation"] = {
@@ -250,9 +271,7 @@ class ProductRevisionFacts(SleepDomainContract):
                 "health_conclusion_allowed": (
                     self.data_sufficiency == "sufficient"
                 ),
-                "source_refs": list(
-                    self.longitudinal_risk_context.trend_signals[0].source_refs
-                ),
+                "source_refs": agent_refs,
             }
         return {
             "radar.get_night_evidence": {
@@ -279,29 +298,93 @@ class ProductRevisionFacts(SleepDomainContract):
         }
 
     def agent_source_refs(self) -> tuple[str, ...]:
-        """Return a bounded, hash-bound projection of complete provenance."""
+        """Return one non-identifying, hash-bound provenance-set reference."""
 
-        if len(self.provenance_references) <= 50:
-            return self.provenance_references
-        selected = tuple(
-            ref
-            for ref in self.provenance_references
-            if ref.startswith(
-                (
-                    "night_episode_revision:",
-                    "quality_assessment:",
-                    "current_risk:",
-                    "source_report:",
-                    "observation_conflict:",
-                )
-            )
-        )
-        aggregate = (
-            "provenance_set:sha256:"
+        return (
+            "governed_evidence_set:sha256:"
             f"{stable_hash(self.provenance_references)}:"
-            f"count:{len(self.provenance_references)}"
+            f"count:{len(self.provenance_references)}",
         )
-        return tuple(dict.fromkeys((*selected[:49], aggregate)))
+
+    def provider_quality_summary(self) -> dict[str, Any]:
+        """Allowlist quality semantics; retain all row/scope IDs locally."""
+
+        quality = self.deterministic_quality
+        scope = quality.get("source_scope")
+        safe_scope = self._provider_source_scope(scope)
+        return {
+            key: quality[key]
+            for key in (
+                "schema_version",
+                "data_mode",
+                "quality_state",
+                "data_sufficiency",
+                "missingness_state",
+                "coverage_ratio",
+                "expected_bin_count",
+                "covered_bin_count",
+                "explicit_missing_interval_count",
+                "invalid_observation_count",
+                "stale",
+                "offline",
+                "clock_invalid",
+                "policy_version",
+                "reason_codes",
+            )
+            if key in quality
+        } | ({"source_scope": safe_scope} if safe_scope else {})
+
+    def provider_risk_summary(self) -> dict[str, Any]:
+        """Allowlist deterministic risk semantics without persistent IDs."""
+
+        risk = self.deterministic_risk
+        scope = risk.get("source_scope")
+        safe_scope = self._provider_source_scope(scope)
+        summary = {
+            key: risk[key]
+            for key in (
+                "schema_version",
+                "data_mode",
+                "risk_state",
+                "data_sufficiency",
+                "policy_version",
+                "reason_codes",
+                "health_escalation_allowed",
+                "is_all_clear",
+            )
+            if key in risk
+        }
+        if safe_scope:
+            summary["source_scope"] = safe_scope
+        if "active_vendor_alert_instance_ids" in risk:
+            summary["active_vendor_alert_count"] = len(
+                risk.get("active_vendor_alert_instance_ids") or ()
+            )
+        if "pending_domain_review_rule_ids" in risk:
+            summary["pending_domain_review_rule_count"] = len(
+                risk.get("pending_domain_review_rule_ids") or ()
+            )
+        return summary
+
+    @staticmethod
+    def _provider_source_scope(scope: Any) -> dict[str, Any]:
+        if not isinstance(scope, dict):
+            return {}
+        observation_ids = scope.get("observation_ids")
+        return {
+            key: value
+            for key, value in (
+                ("observation_count", (
+                    len(observation_ids)
+                    if isinstance(observation_ids, (list, tuple))
+                    else None
+                )),
+                ("observation_types", scope.get("observation_types")),
+                ("window_start_at", scope.get("window_start_at")),
+                ("window_end_at", scope.get("window_end_at")),
+            )
+            if value is not None
+        }
 
     def agent_night_evidence(self) -> dict[str, Any]:
         """Project exact revision facts into a bounded Agent-facing summary."""
@@ -309,25 +392,121 @@ class ProductRevisionFacts(SleepDomainContract):
         return {
             "schema_version": "product_night_evidence.v1",
             "data_mode": self.data_mode.value,
-            "night_episode_id": self.night_episode_id,
-            "night_episode_revision_id": self.night_episode_revision_id,
-            "night_episode_revision_number": self.night_episode_revision_number,
             "timezone_name": self.timezone_name,
             "local_sleep_date": self.local_sleep_date,
             "data_sufficiency": self.data_sufficiency,
             "canonical_observation_count": len(self.canonical_observations),
             "conflict_count": len(self.conflict_summaries),
-            "deterministic_quality": dict(self.deterministic_quality),
-            "deterministic_risk": dict(self.deterministic_risk),
+            "deterministic_quality": self.provider_quality_summary(),
+            "deterministic_risk": self.provider_risk_summary(),
             "deterministic_night_summary": self.deterministic_night_summary(),
+            "evidence_authority": self.evidence_authority_summary(),
             "longitudinal_risk_context": (
                 None
                 if self.longitudinal_risk_context is None
-                else self.longitudinal_risk_context.model_dump(mode="json")
+                else self._provider_longitudinal_risk_context()
             ),
-            "canonical_data_version": self.canonical_data_version,
-            "provenance_set_sha256": stable_hash(self.provenance_references),
-            "provenance_ref_count": len(self.provenance_references),
+        }
+
+    def _provider_longitudinal_risk_context(self) -> dict[str, Any]:
+        context = self.longitudinal_risk_context
+        if context is None:
+            return {}
+        source_refs = list(self.agent_source_refs())
+        return {
+            "schema_version": context.schema_version,
+            "policy_version": context.policy_version,
+            "date_start": context.date_start.isoformat(),
+            "date_end": context.date_end.isoformat(),
+            "valid_night_count": context.valid_night_count,
+            "night_summaries": [
+                {
+                    "local_sleep_date": item.local_sleep_date.isoformat(),
+                    "heart_rate_center": item.heart_rate_center,
+                    "respiratory_rate_center": item.respiratory_rate_center,
+                    "heart_rate_sample_count": item.heart_rate_sample_count,
+                    "respiratory_rate_sample_count": (
+                        item.respiratory_rate_sample_count
+                    ),
+                }
+                for item in context.night_summaries
+            ],
+            "trend_signals": [
+                {
+                    "risk_level": item.risk_level,
+                    "confidence": item.confidence,
+                    "source_refs": source_refs,
+                }
+                for item in context.trend_signals
+            ],
+            "reason_codes": list(context.reason_codes),
+        }
+
+    def evidence_authority_summary(self) -> dict[str, Any]:
+        """Expose governed source authority without identifiers or raw payloads."""
+
+        push_measurements = 0
+        pull_measurements = 0
+        matched_measurements = 0
+        pull_backfilled_measurements = 0
+        vendor_derived_stage_count = 0
+        independent_stage_count = 0
+        for observation in self.canonical_observations:
+            payload = observation.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            observation_type = str(payload.get("observation_type") or "")
+            source_kind = str(observation.get("source_kind") or "")
+            channels = {
+                str(item)
+                for item in observation.get("acquisition_channels", ())
+                if str(item) in {"PUSH", "PULL"}
+            }
+            device_measurement = observation_type in {
+                "heart_rate",
+                "respiratory_rate",
+                "movement",
+                "bed_presence",
+            }
+            if device_measurement:
+                push_measurements += int("PUSH" in channels)
+                pull_measurements += int("PULL" in channels)
+                matched_measurements += int(channels == {"PUSH", "PULL"})
+                pull_backfilled_measurements += int(channels == {"PULL"})
+            if observation_type == "sleep_stage_interval":
+                if source_kind == "vendor_derived":
+                    vendor_derived_stage_count += 1
+                else:
+                    independent_stage_count += 1
+
+        relation = "not_applicable"
+        if push_measurements and pull_measurements:
+            relation = (
+                "exact_semantic_overlap"
+                if matched_measurements
+                else "non_identical_cadence"
+            )
+        stage_authority = "unavailable"
+        if vendor_derived_stage_count and not independent_stage_count:
+            stage_authority = "vendor_derived"
+        elif vendor_derived_stage_count or independent_stage_count:
+            stage_authority = "mixed"
+        return {
+            "sleep_stage_authority": stage_authority,
+            "sleep_stage_vendor_derived_interval_count": (
+                vendor_derived_stage_count
+            ),
+            "pull_backfilled_measurement_count": pull_backfilled_measurements,
+            "push_measurement_count": push_measurements,
+            "pull_measurement_count": pull_measurements,
+            "matched_push_pull_measurement_count": matched_measurements,
+            "push_pull_relation": relation,
+            "pull_timestamp_semantics": (
+                "reconstructed_from_vendor_batch_cadence"
+                if pull_backfilled_measurements
+                else "not_applicable"
+            ),
+            "independent_sleepagent_stage_classification": False,
         }
 
     def deterministic_night_summary(self) -> dict[str, Any]:

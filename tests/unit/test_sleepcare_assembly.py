@@ -885,7 +885,7 @@ def test_sleepcare_agent_returns_final_schema_record_from_content_plan() -> None
     assert output.payload == output.envelope.output_payload
     assert output.record.invocation_id == context.invocation_id
     assert output.record.parent_invocation_id is None
-    assert output.record.skill_version == "3.0.0"
+    assert output.record.skill_version == "4.0.0"
     assert output.record.skill_package_hash == package.package_hash
     assert output.record.skill_lock_hash == skill_lock.lock_hash
     assert output.record.prompt_bundle_hash == compiled.receipt.prompt_bundle_hash

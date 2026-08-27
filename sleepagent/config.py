@@ -45,6 +45,7 @@ class ApiSurface(str, Enum):
     PRODUCT = "product"
     INTERNAL = "internal"
     DEMO = "demo"
+    PERCEPTOR_PUSH = "perceptor_push"
 
 
 class ProviderMode(str, Enum):
@@ -89,6 +90,12 @@ class SleepBackendSettings(BaseModel):
     service_credential_ref: str = Field(default="unconfigured", min_length=1)
     signing_key_ref: str = Field(min_length=1)
     encryption_key_ref: str = Field(min_length=1)
+    perceptor_client_secret_ref: str | None = None
+    perceptor_provider_account_id: str | None = Field(default=None, min_length=1)
+    perceptor_namespace_id: str | None = Field(default=None, min_length=1)
+    perceptor_namespace_generation: int = Field(default=1, ge=1)
+    perceptor_authorization_epoch: int = Field(default=1, ge=0)
+    perceptor_freshness_seconds: int = Field(default=300, ge=30, le=3_600)
     internal_auth_token: SecretStr | None = None
     demo_controller_token: SecretStr | None = None
     supported_schema_min: int = Field(
@@ -174,15 +181,21 @@ class SleepBackendSettings(BaseModel):
             elif self.enabled_surfaces.intersection(
                 {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
             ):
-                if self.enabled_surfaces != frozenset(
-                    {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
-                ):
+                allowed_bff = {ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT}
+                if ApiSurface.PERCEPTOR_PUSH in self.enabled_surfaces:
+                    allowed_bff.add(ApiSurface.PERCEPTOR_PUSH)
+                if self.enabled_surfaces != frozenset(allowed_bff):
                     raise ValueError(
-                        "BFF API profile must expose only public_v1 and product"
+                        "BFF API profile may expose only public_v1, product, "
+                        "and perceptor_push"
                     )
-            elif self.enabled_surfaces != frozenset({ApiSurface.INTERNAL}):
+            elif self.enabled_surfaces not in {
+                frozenset({ApiSurface.INTERNAL}),
+                frozenset({ApiSurface.PERCEPTOR_PUSH}),
+            }:
                 raise ValueError(
-                    "API profile must be demo-only, BFF-only, or internal-only"
+                    "API profile must be demo-only, BFF-only, Perceptor-only, "
+                    "or internal-only"
                 )
         elif self.process_role == ProcessRole.MIGRATION:
             if self.worker_queues or self.enabled_surfaces:
@@ -222,6 +235,27 @@ class SleepBackendSettings(BaseModel):
             if internal_token is None or len(internal_token.encode("utf-8")) < minimum:
                 raise ValueError(
                     "internal surface requires a dedicated strong token"
+                )
+        if ApiSurface.PERCEPTOR_PUSH in self.enabled_surfaces:
+            if self.data_mode != DataMode.LIVE:
+                raise ValueError("perceptor_push surface requires live data mode")
+            required_perceptor = {
+                "perceptor_client_secret_ref": self.perceptor_client_secret_ref,
+                "perceptor_provider_account_id": self.perceptor_provider_account_id,
+                "perceptor_namespace_id": self.perceptor_namespace_id,
+            }
+            missing_perceptor = sorted(
+                name for name, value in required_perceptor.items() if not value
+            )
+            if missing_perceptor:
+                raise ValueError(
+                    "perceptor_push surface requires: "
+                    + ", ".join(missing_perceptor)
+                )
+            assert self.perceptor_namespace_id is not None
+            if self.perceptor_namespace_id not in self.namespace_prefixes:
+                raise ValueError(
+                    "perceptor namespace must be one configured namespace prefix"
                 )
         if self.deployment_mode == DeploymentMode.PRODUCTION:
             if self.data_mode != DataMode.LIVE:
@@ -299,6 +333,24 @@ class SleepBackendSettings(BaseModel):
             service_credential_ref=required("SERVICE_CREDENTIAL_REF"),
             signing_key_ref=required("SIGNING_KEY_REF"),
             encryption_key_ref=required("ENCRYPTION_KEY_REF"),
+            perceptor_client_secret_ref=(
+                env.get(f"{SETTINGS_PREFIX}PERCEPTOR_CLIENT_SECRET_REF") or None
+            ),
+            perceptor_provider_account_id=(
+                env.get(f"{SETTINGS_PREFIX}PERCEPTOR_PROVIDER_ACCOUNT_ID") or None
+            ),
+            perceptor_namespace_id=(
+                env.get(f"{SETTINGS_PREFIX}PERCEPTOR_NAMESPACE_ID") or None
+            ),
+            perceptor_namespace_generation=_integer(
+                env, "PERCEPTOR_NAMESPACE_GENERATION", 1
+            ),
+            perceptor_authorization_epoch=_integer(
+                env, "PERCEPTOR_AUTHORIZATION_EPOCH", 1
+            ),
+            perceptor_freshness_seconds=_integer(
+                env, "PERCEPTOR_FRESHNESS_SECONDS", 300
+            ),
             internal_auth_token=(
                 None if internal_token is None else SecretStr(internal_token)
             ),

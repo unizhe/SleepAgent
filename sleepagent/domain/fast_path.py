@@ -56,6 +56,38 @@ class LifecycleBusyError(RuntimeError):
     """The subject-level lifecycle lease is owned by another worker."""
 
 
+def _quality_outcome(
+    *,
+    observations_present: bool,
+    coverage_ratio: float,
+    explicit_missing_count: int,
+    invalid_count: int,
+    stale: bool,
+    offline: bool,
+    clock_invalid: bool,
+    policy: DeterministicQualityPolicy,
+) -> tuple[QualityState, DataSufficiency]:
+    """Map existing policy dimensions to sufficient/partial/unusable states."""
+
+    unusable = bool(
+        not observations_present
+        or coverage_ratio < policy.partial_coverage_ratio
+        or stale
+        or offline
+        or clock_invalid
+    )
+    if unusable:
+        return QualityState.DATA_INSUFFICIENT, DataSufficiency.DATA_INSUFFICIENT
+    degraded = bool(
+        coverage_ratio < policy.minimum_coverage_ratio
+        or explicit_missing_count
+        or invalid_count
+    )
+    if degraded:
+        return QualityState.PARTIAL, DataSufficiency.PARTIAL
+    return QualityState.SUFFICIENT, DataSufficiency.SUFFICIENT
+
+
 @dataclass(frozen=True)
 class DeterministicFastPathResult:
     quality: DeterministicQualityAssessment
@@ -160,14 +192,22 @@ class DeterministicFastPathService:
             )
         try:
             observations = self._load_observations(namespace, episode)
-            quality = self._assess_quality(
+            quality = self._current_authoritative_quality(
                 namespace,
                 episode,
                 observations,
-                evaluation_id=evaluation_id,
-                assessed_at=assessed_at,
                 policy=quality_policy,
             )
+            persist_quality = quality is None
+            if quality is None:
+                quality = self._assess_quality(
+                    namespace,
+                    episode,
+                    observations,
+                    evaluation_id=evaluation_id,
+                    assessed_at=assessed_at,
+                    policy=quality_policy,
+                )
             alert_instances, alert_receipts = self._correlate_alerts(
                 namespace,
                 episode,
@@ -230,6 +270,7 @@ class DeterministicFastPathService:
             created = self.repository.commit_deterministic_fast_path(
                 namespace,
                 quality=quality,
+                persist_quality=persist_quality,
                 risk=risk,
                 alert_instances=alert_instances,
                 alert_receipts=alert_receipts,
@@ -248,6 +289,41 @@ class DeterministicFastPathService:
             )
         finally:
             self.repository.release_subject_lifecycle_lease(namespace, lease)
+
+    def _current_authoritative_quality(
+        self,
+        namespace: DomainNamespace,
+        episode: NightEpisode,
+        observations: tuple[SleepObservation, ...],
+        *,
+        policy: DeterministicQualityPolicy,
+    ) -> DeterministicQualityAssessment | None:
+        """Reuse an exact acquisition-owned quality projection read-only."""
+
+        quality = self.repository.get_current_quality(
+            namespace,
+            night_episode_id=episode.night_episode_id,
+        )
+        if quality is None:
+            return None
+        current_revision = self.repository.get_current_night_revision(
+            namespace,
+            night_episode_id=episode.night_episode_id,
+        )
+        scope = quality.source_scope
+        if (
+            quality.subject_id != episode.subject_id
+            or quality.data_mode != namespace.data_mode
+            or quality.night_episode_id != episode.night_episode_id
+            or quality.policy_version != policy.policy_version
+            or scope.night_episode_id != episode.night_episode_id
+            or scope.night_episode_revision_id
+            != current_revision.current_revision_id
+            or set(scope.observation_ids)
+            != {item.observation_id for item in observations}
+        ):
+            return None
+        return quality
 
     def _assess_quality(
         self,
@@ -354,24 +430,16 @@ class DeterministicFastPathService:
             reasons.add("device_offline_or_stream_gap")
         if clock_invalid:
             reasons.add("clock_or_timezone_invalid")
-        insufficient = bool(
-            not observations
-            or coverage_ratio < policy.minimum_coverage_ratio
-            or explicit_missing
-            or invalid
-            or stale
-            or offline
-            or clock_invalid
+        quality_state, sufficiency = _quality_outcome(
+            observations_present=bool(observations),
+            coverage_ratio=coverage_ratio,
+            explicit_missing_count=explicit_missing,
+            invalid_count=invalid,
+            stale=stale,
+            offline=offline,
+            clock_invalid=clock_invalid,
+            policy=policy,
         )
-        if insufficient:
-            quality_state = QualityState.DATA_INSUFFICIENT
-            sufficiency = DataSufficiency.DATA_INSUFFICIENT
-        elif coverage_ratio < 1.0:
-            quality_state = QualityState.PARTIAL
-            sufficiency = DataSufficiency.SUFFICIENT
-        else:
-            quality_state = QualityState.SUFFICIENT
-            sufficiency = DataSufficiency.SUFFICIENT
         missingness = (
             MissingnessState.UNKNOWN
             if not observations

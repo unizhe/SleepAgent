@@ -545,8 +545,22 @@ def _parse_context_packet(
     except StopIteration as exc:
         raise ValueError("compiled messages lack a user ContextPacket") from exc
     try:
-        packet = ContextPacket.model_validate_json(content)
-    except ValueError as exc:
+        payload = json.loads(content)
+        if not isinstance(payload, dict):
+            raise ValueError("compiled user message is not an object")
+        # Provider messages intentionally omit local row/run identities.  The
+        # deterministic non-provider adapter reconstructs only local placeholder
+        # bindings from the out-of-band invocation argument.
+        payload.setdefault("context_packet_id", expected_context_packet_id)
+        payload.setdefault("episode_id", expected_context_packet_id)
+        payload.setdefault("invocation_id", expected_context_packet_id)
+        payload.setdefault(
+            "fact_snapshot_id",
+            "provider-projection:"
+            + str(payload.get("fact_snapshot_hash", "0" * 64))[:32],
+        )
+        packet = ContextPacket.model_validate(payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("compiled user message is not a valid ContextPacket") from exc
     if packet.context_packet_id != expected_context_packet_id:
         raise ValueError("ContextPacket identity does not match invocation")

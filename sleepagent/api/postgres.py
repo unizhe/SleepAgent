@@ -81,6 +81,7 @@ from sleepagent.domain.habit import (
     propose_habit_change,
     select_habit_questions,
 )
+from sleepagent.domain.product_data import public_product_subject_ref
 from sleepagent.runtime.contracts import (
     AgentId,
     MemoryChangeCandidate,
@@ -583,7 +584,7 @@ class PostgresProductBackend(ProductBackend):
         return ProductTrendsResponse(
             data_mode=cast(Literal["live", "replay"], context.data_mode),
             synthetic_non_release=context.data_mode == "replay",
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=items,
             next_cursor=self._next_read_cursor(
@@ -700,7 +701,7 @@ class PostgresProductBackend(ProductBackend):
         return ProductRecordsResponse(
             data_mode=cast(Literal["live", "replay"], context.data_mode),
             synthetic_non_release=context.data_mode == "replay",
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=items,
             next_cursor=self._next_read_cursor(
@@ -814,7 +815,7 @@ class PostgresProductBackend(ProductBackend):
         return ProductCareResponse(
             data_mode=cast(Literal["live", "replay"], context.data_mode),
             synthetic_non_release=context.data_mode == "replay",
-            subject_ref=context.subject_id,
+            subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=items,
             next_cursor=self._next_read_cursor(
@@ -2439,7 +2440,7 @@ def _care_record(row: Any) -> CareActionRecord | CareFollowupRecord:
 
 
 def _subject_pseudonym(subject_id: str) -> str:
-    return hashlib.sha256(f"audit:{subject_id}".encode()).hexdigest()[:24]
+    return public_product_subject_ref(subject_id)
 
 
 def _json(value: Any) -> str:

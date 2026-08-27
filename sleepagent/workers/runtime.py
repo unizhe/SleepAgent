@@ -2012,9 +2012,20 @@ class _Heartbeat:
                     self.claim,
                     lease_seconds=self.lease_seconds,
                 )
-            except BaseException:
-                renewed = False
+            except Exception as exc:
+                # A database error (notably lock_timeout) is indeterminate, not
+                # durable evidence that ownership changed.  Keep the transport
+                # gates fail-closed: reservation, dispatch, completion, and the
+                # next successful heartbeat all revalidate the current fence.
+                log_event(
+                    "backend_worker_heartbeat_transient_failure",
+                    queue=self.claim.queue,
+                    error_type=type(exc).__name__,
+                )
+                continue
             if not renewed:
+                # The store's fenced heartbeat returned an authoritative
+                # rejection: the current generation can no longer renew.
                 self.lease_lost.set()
                 return
 
@@ -2148,7 +2159,8 @@ class DurableWorkerRuntime:
                 not lost.is_set()
                 and result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
             ):
-                self.store.finalize(claim, result)
+                if not self.store.finalize(claim, result):
+                    lost.set()
         finally:
             if result is not None:
                 metric_outcome = (

@@ -8,6 +8,7 @@ from pydantic import ValidationError, model_validator
 
 from sleepagent.runtime.invocation import SleepCareModelOutput
 from sleepagent.runtime.provider import (
+    OpenAICompatibleChatProvider,
     OpenAICompatibleProviderConfig,
     OpenAICompatibleStructuredAgentModel,
     ProductLLMProviderError,
@@ -16,6 +17,7 @@ from sleepagent.runtime.provider import (
     _NumericTextRepairPatch,
     _numeric_repair_candidates,
     openai_compatible_provider_config_from_env,
+    provider_transport_audit_scope,
 )
 from sleepagent.runtime.contracts import StrictContract
 
@@ -56,6 +58,43 @@ class SequencedRawProvider(RawProvider):
         return self.payloads.pop(0)
 
 
+class _AuditObserver:
+    def __init__(self, *, reject: bool = False) -> None:
+        self.reject = reject
+        self.events: list[tuple[str, dict]] = []
+
+    def before_request(self, **kwargs) -> None:
+        self.events.append(("before", kwargs))
+        if self.reject:
+            raise RuntimeError("audit rejected request")
+
+    def after_response(self, **kwargs) -> None:
+        self.events.append(("response", kwargs))
+
+    def after_failure(self, **kwargs) -> None:
+        self.events.append(("failure", kwargs))
+
+
+class _HTTPResponse:
+    status_code = 200
+
+    def json(self) -> dict:
+        return {
+            "id": "request-safe",
+            "usage": {"prompt_tokens": 19, "completion_tokens": 7},
+            "choices": [{"message": {"content": "{}"}}],
+        }
+
+
+class _HTTPClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(self, *args, **kwargs) -> _HTTPResponse:
+        self.calls += 1
+        return _HTTPResponse()
+
+
 def response(
     content: object,
     *,
@@ -69,6 +108,53 @@ def response(
     if prompt_tokens is not None:
         value["usage"] = {"prompt_tokens": prompt_tokens}
     return value
+
+
+def test_transport_audit_observes_exact_request_and_safe_usage_metadata() -> None:
+    client = _HTTPClient()
+    observer = _AuditObserver()
+    provider = OpenAICompatibleChatProvider(
+        api_key="configured-test-key",
+        http_client=client,
+    )
+    messages = [{"role": "user", "content": "governed context"}]
+
+    with provider_transport_audit_scope(observer):
+        payload = provider.create_chat_completion(
+            model="safe-model",
+            messages=messages,
+            temperature=0,
+            retry=0,
+        )
+
+    assert payload["id"] == "request-safe"
+    assert client.calls == 1
+    assert observer.events[0] == (
+        "before",
+        {"model": "safe-model", "messages": messages, "attempt": 1},
+    )
+    assert observer.events[1][0] == "response"
+    assert observer.events[1][1]["request_id_present"] is True
+    assert observer.events[1][1]["input_tokens"] == 19
+    assert observer.events[1][1]["output_tokens"] == 7
+    assert observer.events[1][1]["latency_ms"] >= 0
+
+
+def test_transport_audit_rejection_stops_before_http() -> None:
+    client = _HTTPClient()
+    provider = OpenAICompatibleChatProvider(
+        api_key="configured-test-key",
+        http_client=client,
+    )
+    with pytest.raises(RuntimeError, match="audit rejected request"):
+        with provider_transport_audit_scope(_AuditObserver(reject=True)):
+            provider.create_chat_completion(
+                model="safe-model",
+                messages=[{"role": "user", "content": "blocked"}],
+                temperature=0,
+                retry=1,
+            )
+    assert client.calls == 0
 
 
 def test_structured_provider_binds_schema_context_and_request_id() -> None:

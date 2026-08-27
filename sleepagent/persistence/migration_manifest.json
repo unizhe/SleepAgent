@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 10,
+  "target_version": 13,
   "migrations": [
     {
       "version": 1,
@@ -69,6 +69,27 @@
       "version": 10,
       "filename": "010_terminal_demo_technical_trace.sql",
       "sha256": "e4c227d4fea8e9616c146739e8ab57d5a744c1236fcb09bb1802c77ea93bbe85",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 11,
+      "filename": "011_perceptor_push_ingress.sql",
+      "sha256": "dd031b1058ba8d793b504da66c6e2124409238437cce2c50407837c410d25cbd",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 12,
+      "filename": "012_perceptor_pull_reconciliation.sql",
+      "sha256": "a29569521274a1e2bc823b24433249d2f94f91810a7f3c6a781eceed8b373b29",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 13,
+      "filename": "013_perceptor_pull_retry_noop.sql",
+      "sha256": "0809507f81dc2aa7a105d324338a26016fcbd3b84e5a08ff68dd9bf4c04822c1",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

@@ -79,6 +79,7 @@ from sleepagent.domain.product_data import (
     ProductRevisionFacts,
     _project_observation,
     build_longitudinal_vital_risk_context,
+    public_product_subject_ref,
 )
 from sleepagent.workers.runtime import (
     B3ClaimInvariantError,
@@ -108,6 +109,74 @@ CARE_MEMORY_CONCEPT_IDS = (
     "sleep.preference.care_delivery",
     "sleep.preference.communication",
 )
+
+PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST = frozenset(
+    {
+        "schema_version",
+        "data_mode",
+        "synthetic_non_release",
+        "state",
+        "subject_ref",
+        "role",
+        "episode_id",
+        "episode_revision_id",
+        "episode_local_date",
+        "assignment_basis",
+        "analysis_revision_id",
+        "projection_id",
+        "projection_version",
+        "committed_at",
+        "content",
+    }
+)
+
+
+class _PublicTodayContent(BaseModel):
+    """Typed allowlist for role-visible health content only."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    audience: AnalysisRole
+    summary_text: str = Field(min_length=1)
+    context_notice: str = Field(min_length=1)
+    evidence_refs: tuple[str, ...] | None = None
+
+    @model_validator(mode="after")
+    def enforce_role_specific_fields(self) -> "_PublicTodayContent":
+        if self.audience == AnalysisRole.DOCTOR:
+            if self.evidence_refs is None:
+                raise ValueError("doctor public content requires evidence_refs")
+        elif self.evidence_refs is not None:
+            raise ValueError("non-doctor public content cannot expose evidence_refs")
+        return self
+
+
+class _PublicTodayProjection(BaseModel):
+    """Typed public persistence contract; internal lineage fields are excluded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["product_sleep_today.v1"] = "product_sleep_today.v1"
+    data_mode: DataMode
+    synthetic_non_release: bool
+    state: RoleViewStatus
+    subject_ref: str = Field(pattern=r"^subject:sha256:[0-9a-f]{64}$")
+    role: AnalysisRole
+    episode_id: str = Field(min_length=1)
+    episode_revision_id: str = Field(min_length=1)
+    episode_local_date: str = Field(min_length=1)
+    assignment_basis: str = Field(min_length=1)
+    analysis_revision_id: str = Field(min_length=1)
+    projection_id: str = Field(min_length=1)
+    projection_version: int = Field(ge=1)
+    committed_at: str = Field(min_length=1)
+    content: _PublicTodayContent
+
+    @model_validator(mode="after")
+    def enforce_role_and_public_subject(self) -> "_PublicTodayProjection":
+        if self.content.audience != self.role:
+            raise ValueError("public content audience does not match its role")
+        return self
 
 
 class ProductAgentWorkerError(RuntimeError):
@@ -303,9 +372,17 @@ class ProductAgentProcessor:
         scope: UowScope,
         lease: ProductAgentLease,
     ) -> LoadedProductAgentSource:
-        """Load the exact source in a short transaction before model dispatch."""
+        """Fence briefly, then load the exact source without holding that lock."""
 
         _require_worker_subject_scope(scope)
+        # Lease/fence validation is authoritative, but the operation-row lock
+        # must not span the large immutable Episode membership load below.  A
+        # later invocation reservation and dispatch permit revalidate this same
+        # fence before any external transport can start.
+        with self.uow_factory.begin(scope) as uow:
+            repository = self.repository_factory(uow.connection, scope)
+            repository.lock_source_lease(lease)
+            uow.commit()
         with self.uow_factory.begin(scope) as uow:
             repository = self.repository_factory(uow.connection, scope)
             source = repository.load_source(lease)
@@ -494,7 +571,53 @@ class PostgresProductAgentRepository:
         self.scope = scope
         self.id_generator = id_generator or UUID7Generator()
 
+    def lock_source_lease(self, lease: ProductAgentLease) -> None:
+        """Lock and validate only the durable source pointer and current fence."""
+
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM public.sleep_domain_operations AS operation
+                JOIN public.sleep_domain_night_episodes AS episode
+                  ON episode.night_episode_id = operation.target_resource_id
+                 AND episode.namespace_id = operation.namespace_id
+                 AND episode.data_mode = operation.data_mode
+                 AND episode.namespace_generation = operation.namespace_generation
+                 AND episode.subject_id = operation.subject_id
+                WHERE operation.operation_id = %s
+                  AND operation.namespace_id = %s
+                  AND operation.data_mode = %s
+                  AND operation.namespace_generation = %s
+                  AND operation.subject_id = %s
+                  AND COALESCE(operation.run_id, '') = COALESCE(%s, '')
+                  AND COALESCE(operation.arm_id, '') = COALESCE(%s, '')
+                  AND operation.operation_type = 'product_agent'
+                  AND operation.queue_name = 'product_agent'
+                  AND operation.status = 'running'
+                  AND operation.lease_generation = %s
+                  AND operation.fencing_token = %s
+                  AND operation.worker_instance = %s
+                  AND operation.lease_expires_at > clock_timestamp()
+                  AND episode.current_revision_id =
+                       operation.operation_json ->> 'night_episode_revision_id'
+                  AND episode.date_state = 'finalized'
+                  AND episode.date_conflict = FALSE
+                FOR UPDATE OF operation
+                """,
+                self._lease_scope_params(lease),
+            )
+            if cursor.fetchone() is None:
+                raise ProductAgentLeaseLost(
+                    "Product operation fence or source revision was rejected"
+                )
+        finally:
+            cursor.close()
+
     def load_source(self, lease: ProductAgentLease) -> LoadedProductAgentSource:
+        """Load a pinned immutable source without retaining the operation lock."""
+
         cursor = self.connection.cursor()
         try:
             cursor.execute(
@@ -551,7 +674,6 @@ class PostgresProductAgentRepository:
                        operation.operation_json ->> 'night_episode_revision_id'
                   AND episode.date_state = 'finalized'
                   AND episode.date_conflict = FALSE
-                FOR UPDATE OF operation, episode
                 """,
                 self._lease_scope_params(lease),
             )
@@ -625,6 +747,25 @@ class PostgresProductAgentRepository:
                 observations_by_id[observation_id]
                 for observation_id in observation_ids
             )
+            cursor.execute(
+                """
+                SELECT observation_id, acquisition_channel
+                FROM public.sleep_domain_observation_acquisitions
+                WHERE namespace_id = %s AND data_mode = %s
+                  AND observation_id = ANY(%s)
+                ORDER BY observation_id, acquisition_channel
+                """,
+                (
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    list(observation_ids),
+                ),
+            )
+            acquisition_channels_by_observation: dict[str, list[str]] = {}
+            for observation_id, channel in cursor.fetchall():
+                acquisition_channels_by_observation.setdefault(
+                    str(observation_id), []
+                ).append(str(channel))
             longitudinal_risk_context = self._load_longitudinal_risk_context(
                 cursor,
                 episode=episode,
@@ -660,6 +801,11 @@ class PostgresProductAgentRepository:
             quality=quality,
             risk=risk,
             longitudinal_risk_context=longitudinal_risk_context,
+            acquisition_channels_by_observation={
+                observation_id: tuple(dict.fromkeys(channels))
+                for observation_id, channels
+                in acquisition_channels_by_observation.items()
+            },
         )
         policy_versions = {
             str(name): str(value)
@@ -1863,9 +2009,12 @@ def build_product_agent_worker_handlers(
         raise ProductAgentCompositionError(
             "Product Agent handlers require a worker profile"
         )
-    if settings.data_mode != BackendDataMode.REPLAY:
+    if (
+        settings.data_mode == BackendDataMode.LIVE
+        and settings.model_mode is not ModelMode.LIVE
+    ):
         raise ProductAgentCompositionError(
-            "the current Product Agent vertical slice requires replay data"
+            "live Product Agent data requires the live model runtime"
         )
     if settings.model_mode is ModelMode.DETERMINISTIC:
         from sleepagent.runtime.deterministic_model import (
@@ -2170,7 +2319,7 @@ def _public_today_projection(
     assignment_basis: str,
     committed_at: datetime,
 ) -> dict[str, Any]:
-    """Map one internal role view to the only Stage-1 public projection."""
+    """Map one internal role view through the typed public-only allowlist."""
 
     if view.status == RoleViewStatus.PENDING:
         raise ProductAgentInvariantError(
@@ -2185,32 +2334,34 @@ def _public_today_projection(
     else:
         fallback_summary = "The sleep summary is currently unavailable."
         fallback_notice = "No recommendation is available from this analysis."
-    content: dict[str, Any] = {
-        "audience": view.role.value,
-        "summary_text": view.content or fallback_summary,
-        "context_notice": view.context_notice or fallback_notice,
-    }
-    if view.role == AnalysisRole.DOCTOR:
+    content = _PublicTodayContent(
+        audience=view.role,
+        summary_text=view.content or fallback_summary,
+        context_notice=view.context_notice or fallback_notice,
         # Public evidence references are deliberately empty in the first slice.
         # Internal claim/source references never cross this mapper.
-        content["evidence_refs"] = []
-    return {
-        "schema_version": "product_sleep_today.v1",
-        "data_mode": analysis.data_mode.value,
-        "synthetic_non_release": analysis.data_mode == DataMode.REPLAY,
-        "state": view.status.value,
-        "subject_ref": analysis.subject_id,
-        "role": view.role.value,
-        "episode_id": analysis.night_episode_id,
-        "episode_revision_id": analysis.night_episode_revision_id,
-        "episode_local_date": episode_local_date.isoformat(),
-        "assignment_basis": assignment_basis,
-        "analysis_revision_id": analysis.analysis_revision_id,
-        "projection_id": view.role_view_id,
-        "projection_version": projection_version,
-        "committed_at": committed_at.isoformat(),
-        "content": content,
-    }
+        evidence_refs=() if view.role == AnalysisRole.DOCTOR else None,
+    )
+    projection = _PublicTodayProjection(
+        data_mode=analysis.data_mode,
+        synthetic_non_release=analysis.data_mode == DataMode.REPLAY,
+        state=view.status,
+        subject_ref=public_product_subject_ref(analysis.subject_id),
+        role=view.role,
+        episode_id=analysis.night_episode_id,
+        episode_revision_id=analysis.night_episode_revision_id,
+        episode_local_date=episode_local_date.isoformat(),
+        assignment_basis=assignment_basis,
+        analysis_revision_id=analysis.analysis_revision_id,
+        projection_id=view.role_view_id,
+        projection_version=projection_version,
+        committed_at=committed_at.isoformat(),
+        content=content,
+    )
+    payload = projection.model_dump(mode="json", exclude_none=True)
+    if set(payload) != PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST:
+        raise ProductAgentInvariantError("public Product field allowlist drifted")
+    return payload
 
 
 def _build_facts(
@@ -2222,6 +2373,9 @@ def _build_facts(
     quality: DeterministicQualityAssessment,
     risk: CurrentRisk,
     longitudinal_risk_context: ProductLongitudinalRiskContext | None,
+    acquisition_channels_by_observation: Mapping[
+        str, tuple[str, ...]
+    ] | None = None,
 ) -> tuple[ProductRevisionFacts, str, dict[str, str], tuple[str, ...]]:
     if episode.episode_local_date is None:
         raise ProductAgentInvariantError(
@@ -2235,6 +2389,19 @@ def _build_facts(
     observation_schemas: set[str] = set()
     for observation in observations:
         projected, refs = _project_observation(observation)
+        channels = tuple(
+            dict.fromkeys(
+                (acquisition_channels_by_observation or {}).get(
+                    observation.observation_id,
+                    (),
+                )
+            )
+        )
+        if channels:
+            projected = {
+                **projected,
+                "acquisition_channels": list(channels),
+            }
         safe_observations.append(projected)
         source_refs.extend(refs)
         adapters[observation.provenance.adapter_id] = (

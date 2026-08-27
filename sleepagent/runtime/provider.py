@@ -12,9 +12,12 @@ import logging
 import math
 import os
 import re
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, Protocol, TypeVar
+from typing import Any, Iterator, Literal, Mapping, Protocol, TypeVar
 from urllib.parse import urlparse
 
 import httpx
@@ -177,6 +180,59 @@ class ProductChatProvider(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class ProviderTransportAuditObserver(Protocol):
+    """Process-local audit hook that must retain only safe request metadata."""
+
+    def before_request(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        attempt: int,
+    ) -> None: ...
+
+    def after_response(
+        self,
+        *,
+        model: str,
+        attempt: int,
+        status_code: int,
+        request_id_present: bool,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        latency_ms: int,
+    ) -> None: ...
+
+    def after_failure(
+        self,
+        *,
+        model: str,
+        attempt: int,
+        error_type: str,
+        latency_ms: int,
+    ) -> None: ...
+
+
+_PROVIDER_TRANSPORT_AUDIT_OBSERVER: ContextVar[
+    ProviderTransportAuditObserver | None
+] = ContextVar("sleepagent_provider_transport_audit_observer", default=None)
+
+
+@contextmanager
+def provider_transport_audit_scope(
+    observer: ProviderTransportAuditObserver,
+) -> Iterator[None]:
+    """Observe the exact transport boundary without retaining prompt content."""
+
+    token: Token[ProviderTransportAuditObserver | None] = (
+        _PROVIDER_TRANSPORT_AUDIT_OBSERVER.set(observer)
+    )
+    try:
+        yield
+    finally:
+        _PROVIDER_TRANSPORT_AUDIT_OBSERVER.reset(token)
+
+
 class OpenAICompatibleChatProvider:
     """最小化 HTTP transport；密钥只保存在私有字段，不进入日志或 repr。"""
 
@@ -258,6 +314,7 @@ class OpenAICompatibleChatProvider:
         last_error: BaseException | None = None
         try:
             for attempt in range(max(0, retry) + 1):
+                started_ns = time.monotonic_ns()
                 try:
                     log_event(
                         "llm_call_start",
@@ -268,6 +325,16 @@ class OpenAICompatibleChatProvider:
                         attempt=attempt + 1,
                         response_format="json_object",
                     )
+                    observer = _PROVIDER_TRANSPORT_AUDIT_OBSERVER.get()
+                    if observer is not None:
+                        # The observer sees the exact messages synchronously and
+                        # must fail closed here, before bytes leave the process.
+                        # The provider boundary itself never persists them.
+                        observer.before_request(
+                            model=model,
+                            messages=messages,
+                            attempt=attempt + 1,
+                        )
                     response = client.post(
                         f"{self.base_url}/chat/completions",
                         headers=headers,
@@ -287,6 +354,39 @@ class OpenAICompatibleChatProvider:
                         raise ProductLLMProviderError(
                             "Product LLM response envelope must be an object."
                         )
+                    usage = payload.get("usage")
+                    prompt_tokens = None
+                    completion_tokens = None
+                    if isinstance(usage, Mapping):
+                        raw_prompt_tokens = usage.get("prompt_tokens")
+                        raw_completion_tokens = usage.get("completion_tokens")
+                        if (
+                            isinstance(raw_prompt_tokens, int)
+                            and raw_prompt_tokens >= 0
+                        ):
+                            prompt_tokens = raw_prompt_tokens
+                        if (
+                            isinstance(raw_completion_tokens, int)
+                            and raw_completion_tokens >= 0
+                        ):
+                            completion_tokens = raw_completion_tokens
+                    request_id = payload.get("id")
+                    if observer is not None:
+                        observer.after_response(
+                            model=model,
+                            attempt=attempt + 1,
+                            status_code=status,
+                            request_id_present=bool(
+                                isinstance(request_id, str)
+                                and request_id.strip()
+                            ),
+                            input_tokens=prompt_tokens,
+                            output_tokens=completion_tokens,
+                            latency_ms=max(
+                                0,
+                                int((time.monotonic_ns() - started_ns) / 1_000_000),
+                            ),
+                        )
                     log_event(
                         "llm_call_success",
                         source="product_dialogue",
@@ -305,6 +405,17 @@ class OpenAICompatibleChatProvider:
                     ValueError,
                 ) as exc:
                     last_error = exc
+                    observer = _PROVIDER_TRANSPORT_AUDIT_OBSERVER.get()
+                    if observer is not None:
+                        observer.after_failure(
+                            model=model,
+                            attempt=attempt + 1,
+                            error_type=type(exc).__name__,
+                            latency_ms=max(
+                                0,
+                                int((time.monotonic_ns() - started_ns) / 1_000_000),
+                            ),
+                        )
                     if attempt >= max(0, retry):
                         break
             error = ProductLLMProviderError("Product LLM request failed.")

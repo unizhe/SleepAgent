@@ -23,6 +23,13 @@ from sleepagent.runtime.contracts import (
     PRODUCT_AGENT_ROSTER,
     stable_hash,
 )
+from sleepagent.config import (
+    DataMode,
+    DeploymentMode,
+    ModelMode,
+    ProcessRole,
+    SleepBackendSettings,
+)
 from sleepagent.runtime.agent_invocation_coordinator import (
     AgentInvocationCoordinator,
 )
@@ -38,6 +45,7 @@ from sleepagent.runtime.factory import (
     build_product_runtime_bundle,
     product_episode_runner_is_configured,
 )
+from sleepagent.workers.product import build_product_agent_worker_handlers
 
 
 class NeverCalledModel:
@@ -84,6 +92,7 @@ def test_evidence_skills_compile_semantic_contract_instructions() -> None:
     )
 
     instructions = " ".join(package.instructions)
+    assert package.version == "3.0.0"
     assert "alternative_explanation" in instructions
     assert "If Context contains none, omit" in instructions
     assert "never invent a decision" in instructions
@@ -93,6 +102,9 @@ def test_evidence_skills_compile_semantic_contract_instructions() -> None:
     assert "exact fact_ref" in instructions
     assert "source_kind confirmed_memory" in instructions
     assert "exact retrieval_handle" in instructions
+    assert "vendor-derived" in instructions
+    assert "reconstructed cadence timestamps" in instructions
+    assert "deterministic quality is partial" in instructions
 
 
 def test_communication_and_safety_skills_compile_contract_instructions() -> None:
@@ -107,7 +119,7 @@ def test_communication_and_safety_skills_compile_contract_instructions() -> None
     )
 
     communication_instructions = " ".join(communication.instructions)
-    assert communication.version == "3.0.0"
+    assert communication.version == "4.0.0"
     assert communication.output_schema_id == "CommunicationDraft"
     assert "Return only a SleepCareContentPlan" in communication_instructions
     assert "source_type and source_ref" in communication_instructions
@@ -138,7 +150,7 @@ def test_every_sleepcare_communication_skill_uses_versioned_content_plan_contrac
         AgentId.SLEEP_CARE,
     )
 
-    assert package.version == "3.0.0"
+    assert package.version == "4.0.0"
     assert package.output_schema_id == "CommunicationDraft"
     assert "SleepCareContentPlan" in " ".join(package.instructions)
 
@@ -173,7 +185,39 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
     assert stable_hash(product_agent_manifest()) == (
         "8a618d48b1e5938d1e5fdca41172a0e7a9ba2c4e63b80bb1a4c73baa50e4505e"
     )
-    assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
+    assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v15"
+
+
+def test_live_product_worker_accepts_live_canonical_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-structural-test-only")
+    monkeypatch.setenv("SLEEPAGENT_PRODUCT_LLM_MODEL", "structural-model")
+    monkeypatch.setenv(
+        "SLEEPAGENT_PRODUCT_LLM_BASE_URL",
+        "https://provider.invalid/v1",
+    )
+    settings = SleepBackendSettings(
+        profile="p4e2-live-agent-structure",
+        deployment_mode=DeploymentMode.DEVELOPMENT,
+        process_role=ProcessRole.WORKER,
+        data_mode=DataMode.LIVE,
+        database_dsn="postgresql://worker@127.0.0.1/p4e2",
+        database_identity="p4e2",
+        database_role="worker",
+        service_principal_id="p4e2-worker",
+        database_scope=DataMode.LIVE,
+        namespace_prefixes=("live:p4e2",),
+        worker_queues=("product_agent",),
+        model_mode=ModelMode.LIVE,
+        service_credential_ref="env:P4E2_SERVICE_CREDENTIAL",
+        signing_key_ref="env:P4E2_SIGNING_KEY",
+        encryption_key_ref="env:P4E2_ENCRYPTION_KEY",
+    )
+
+    handlers = build_product_agent_worker_handlers(settings)
+
+    assert tuple(handlers) == ("product_agent",)
 
 
 def test_concrete_roles_declare_distinct_context_and_permission_boundaries() -> None:

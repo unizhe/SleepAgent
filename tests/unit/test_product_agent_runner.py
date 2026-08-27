@@ -422,7 +422,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="完成证据判断",
                 output_payload=EvidencePacket(
-                    packet_id=f"evidence:{context['episode_id']}",
+                    packet_id=f"evidence:{context_packet_id}",
                     source_scope=scope,
                     claims=[
                         EvidenceClaim(
@@ -466,7 +466,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="形成单一行动",
                 output_payload=CareStrategy(
-                    strategy_id=f"care:{context['episode_id']}",
+                    strategy_id=f"care:{context_packet_id}",
                     disposition="propose",
                     evidence_packet_refs=[evidence_ref],
                     primary_action=CareActionCandidate.create(
@@ -564,7 +564,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="发布统一表达",
                 output_payload=CommunicationDraft(
-                    draft_id=f"draft:{context['episode_id']}",
+                    draft_id=f"draft:{context_packet_id}",
                     audience_role=audience_role,
                     text=rendered,
                     claim_refs=sorted(set(claims)),
@@ -846,7 +846,7 @@ class ProfileAwareScenarioModel(ScenarioModel):
                     status=WorkProductStatus.COMPLETED,
                     summary="只使用当前问题相关的已确认画像",
                     output_payload=EvidencePacket(
-                        packet_id=f"evidence:{context['episode_id']}",
+                        packet_id=f"evidence:{context_packet_id}",
                         source_scope=SourceScope.model_validate(
                             context["source_scope"]
                         ),
@@ -891,7 +891,7 @@ class LongitudinalMemoryScenarioModel(ScenarioModel):
         if kwargs["schema"] is not EvidenceReasoningModelOutput:
             return result
         context = json.loads(kwargs["messages"][-1]["content"])
-        if not context["episode_id"].endswith(":query"):
+        if not kwargs["context_packet_id"].endswith(":query"):
             return result
         memory_read = next(
             (
@@ -956,11 +956,11 @@ class LongitudinalMemoryScenarioModel(ScenarioModel):
             update={
                 "tool_requests": [],
                 "output_payload": EvidencePacket(
-                    packet_id=f"memory-evidence:{context['episode_id']}",
+                    packet_id=f"memory-evidence:{kwargs['context_packet_id']}",
                     source_scope=scope,
                     claims=[
                         EvidenceClaim(
-                            claim_id=f"memory-claim:{context['episode_id']}",
+                            claim_id=f"memory-claim:{kwargs['context_packet_id']}",
                             semantic=EvidenceSemantic.OBSERVED_FACT,
                             statement="当前授权来源支持这项最小个人上下文。",
                             source_kind=source_kind,
@@ -1101,9 +1101,10 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
 
     roster_projection = audit_projection(roster_result)
     # Freeze invocation identity, including the runtime-bound Care receipt and
-    # the reviewed Habit/Memory grounding instructions in the SkillLock.
+    # the reviewed Habit/Memory grounding instructions in the SkillLock and
+    # the identifier-free provider Context projection.
     assert stable_hash(roster_projection) == (
-        "8329d8424893f34bb1e0d20fb5c4dba64fce33c5d2c314fb6e8731b0cb239bbe"
+        "740e195f09e49b6ed48699eaffd58688ff84cd18be591281ade5f517c223573e"
     )
 
 

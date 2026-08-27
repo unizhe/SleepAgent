@@ -28,7 +28,7 @@ scripts/verify_backend.sh core
 scripts/verify_backend.sh all
 ```
 
-迁移 `001–010`、manifest identity 与 checksum 是历史数据合同，不得重命名或 squash。API 入口为 `sleepagent.app:app`，Worker 入口为 `python -m sleepagent.workers.runtime run`，demo CLI 为 `python -m sleepagent.simulation.cli`。
+迁移 `001–013`、manifest identity 与 checksum 是历史数据合同，不得重命名或 squash。API 入口为 `sleepagent.app:app`，Worker 入口为 `python -m sleepagent.workers.runtime run`，demo CLI 为 `python -m sleepagent.simulation.cli`。真实雷达部署、恢复和当前人工编排边界见 [Perceptor operations](operations/perceptor.md)。
 
 ## P3 Terminal Product Demo
 

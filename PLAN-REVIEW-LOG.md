@@ -298,3 +298,22 @@ regression passed 249 tests. The loopback HTTP provider and live-configured
 urgent zero-provider regression passed 9 tests in an isolated local socket
 namespace. Python 3.11 imports and `git diff --check` passed. No real Demo,
 PostgreSQL operation, commit, or remote write was performed.
+
+## Act 3 — P4 real-radar completion and repository consolidation
+
+P4 now provides the production YunYun/Perceptor cloud boundary: authenticated
+Push, bounded read-only Pull, durable PostgreSQL canonicalization,
+Push/Pull reconciliation, NightEpisode quality semantics, and the unchanged
+downstream 1+2+1 Agent Runtime. The final engineering verdict remains
+`P4_COMPLETION = COMPLETE_WITH_LIMITATIONS` and `RELEASE_READY = NO`.
+
+The root execution plan, 17 construction reports, 13 one-shot stage scripts,
+10 script-only tests, and the full P4 construction diary were copied to a
+repository-external owner-only archive with a checksum manifest before removal.
+Stable source retains the Perceptor production package, migrations 011–013,
+sanitized contract fixtures, production regressions, and extracted frozen
+evidence integrity/restore-semantic checks. Current architecture, operations,
+final evidence, and cleanup verification are recorded under `docs/`.
+
+No vendor, model-provider, Git remote, commit, or tag operation was performed
+by this consolidation checkpoint.

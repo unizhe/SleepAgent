@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -485,7 +487,7 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
     class CapturingPersonalizationModel(
         DeterministicReplayStructuredAgentModel
     ):
-        memory_context_items: list[TrustedContextItem]
+        memory_context_items: list[dict[str, Any]]
 
         def __init__(self) -> None:
             super().__init__()
@@ -493,13 +495,11 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
 
         def generate(self, **kwargs):
             if kwargs["schema"] is CareStrategyModelOutput:
-                packet = ContextPacket.model_validate_json(
-                    kwargs["messages"][-1]["content"]
-                )
+                projection = json.loads(kwargs["messages"][-1]["content"])
                 self.memory_context_items.extend(
                     item
-                    for item in packet.items
-                    if item.key == "personalization:memory_slice"
+                    for item in projection["items"]
+                    if item["key"] == "personalization:memory_slice"
                 )
             return super().generate(**kwargs)
 
@@ -571,8 +571,8 @@ def test_real_runner_changes_behavior_only_with_pinned_l2_context() -> None:
     )
     expected_handle = receipt.handles[0].handle_id
     memory_context = model.memory_context_items[-1]
-    assert expected_handle in memory_context.source_refs
-    assert memory_context.value["items"][0]["retrieval_handle"] == expected_handle
+    assert expected_handle in memory_context["source_refs"]
+    assert memory_context["value"]["items"][0]["retrieval_handle"] == expected_handle
     baseline_care = next(
         item
         for item in baseline.accepted_work_products

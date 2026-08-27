@@ -790,9 +790,17 @@ def bootstrap_test_database_roles(
             "backend_command_receipts",
             "sleep_domain_raw_inbox",
             "sleep_domain_normalization_work",
+            "sleep_domain_provider_accounts",
+            "sleep_domain_device_bindings",
             "sleep_domain_processing_receipts",
+            "sleep_domain_quarantine",
             "sleep_domain_adapter_candidates",
             "sleep_domain_canonical_observations",
+            "sleep_domain_source_reports",
+            "sleep_domain_pull_checkpoints",
+            "sleep_domain_observation_fact_values",
+            "sleep_domain_observation_acquisitions",
+            "sleep_domain_observation_conflicts",
             "backend_monitoring_snapshots_v2",
             "backend_episode_date_reconciliation",
             "sleep_domain_night_episodes",
@@ -917,8 +925,14 @@ def bootstrap_test_database_roles(
             "sleep_domain_raw_inbox",
             "sleep_domain_normalization_work",
             "sleep_domain_processing_receipts",
+            "sleep_domain_quarantine",
             "sleep_domain_adapter_candidates",
             "sleep_domain_canonical_observations",
+            "sleep_domain_source_reports",
+            "sleep_domain_pull_checkpoints",
+            "sleep_domain_observation_fact_values",
+            "sleep_domain_observation_acquisitions",
+            "sleep_domain_observation_conflicts",
             "backend_monitoring_snapshots_v2",
             "backend_episode_date_reconciliation",
             "sleep_domain_night_episodes",
@@ -1017,6 +1031,31 @@ def bootstrap_test_database_roles(
             worker_update_tables,
             worker_role,
         )
+        # Pull evidence is append-only.  Only the cursor/commit fence of the
+        # exact v2 checkpoint may advance, and the Worker receives no UPDATE
+        # privilege over its provider, subject, binding, surface, or overlap.
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.SQL(", ").join(
+                    map(
+                        sql.Identifier,
+                        (
+                            "cursor_at",
+                            "lateness_watermark_at",
+                            "cas_version",
+                            "updated_at",
+                            "last_raw_ingress_record_id",
+                            "last_normalization_work_id",
+                            "last_canonical_observation_id",
+                            "last_canonical_commit_at",
+                        ),
+                    )
+                ),
+                sql.Identifier("public", "sleep_domain_pull_checkpoints"),
+                sql.Identifier(worker_role),
+            ),
+        )
         _connection_execute(
             connection,
             sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
@@ -1069,6 +1108,9 @@ def bootstrap_test_database_roles(
             "sleepagent_consume_actor_assertion(text,text,text,timestamptz)",
             "sleepagent_internal_reconciliation_status(text)",
             "sleepagent_internal_operational_metrics()",
+            "sleepagent_ingest_perceptor_push(text,bigint,text,text,text,text,text,text,timestamptz,timestamptz,text,text,bytea,text,text,integer,timestamptz,text,boolean,boolean,text,text,text,text,text,jsonb)",
+            "sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,text,text,text,timestamptz,timestamptz,date,timestamptz,timestamptz,text,text,text,bytea,text,text,integer,timestamptz,boolean,boolean,text,text,text,text,text,jsonb)",
+            "sleepagent_plan_perceptor_history(text,bigint,text,text,integer,text,timestamptz,timestamptz)",
         )
         worker_functions = (
             "sleepagent_bootstrap_demo_journey(text,text)",

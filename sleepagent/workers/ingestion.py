@@ -107,6 +107,17 @@ class NormalizationWorkHandlerAdapter:
             return _terminal("sleep_slice_invariant_violation")
         except SleepSliceConflict:
             return _retryable("sleep_slice_conflict")
+        except Exception:
+            # Normalization writes are fenced and idempotent.  A processor may
+            # fail after committing an internal crash boundary (for example,
+            # Pull reconciliation before checkpoint advancement), so an
+            # otherwise-unclassified exception must release the claim for a
+            # durable retry rather than quarantine it as outcome-unknown.  The
+            # exception is deliberately narrow: Push and replay normalization
+            # retain the runtime's existing outcome-unknown classification.
+            if context.claim.payload.get("normalizer") != "perceptor_pull":
+                raise
+            return _retryable("unclassified_normalization_processor_failure")
 
         return WorkResult(
             disposition=WorkDisposition.SUCCEEDED,
@@ -188,10 +199,6 @@ def build_b3_worker_handlers(
     cipher: RawPayloadCipher | None = None
     retention_keys: PostgresRetentionKeyCoordinator | None = None
     if {"ingestion", "replay_journey"}.intersection(settings.worker_queues):
-        if settings.data_mode != DataMode.REPLAY:
-            raise B3WorkerCompositionError(
-                "the current normalization adapter accepts replay ingress only"
-            )
         key = BackendKeyProvider(settings.deployment_mode).encryption_key(
             settings.encryption_key_ref
         )
@@ -205,6 +212,10 @@ def build_b3_worker_handlers(
 
     if "replay_journey" in settings.worker_queues:
         assert cipher is not None
+        if settings.data_mode != DataMode.REPLAY:
+            raise B3WorkerCompositionError(
+                "replay_journey requires replay data mode"
+            )
         from sleepagent.simulation.journey import ReplayJourneyWorkHandler
 
         journey_handler: ReplayJourneyWorkHandler | None = None
@@ -230,6 +241,18 @@ def build_b3_worker_handlers(
         def normalization_processor_factory(
             uow_factory: UnitOfWorkFactory[Any],
         ) -> NormalizationProcessor:
+            if settings.data_mode == DataMode.LIVE:
+                from sleepagent.integrations.perceptor.pull_ingestion import (
+                    PerceptorLiveNormalizationDispatcher,
+                )
+
+                return cast(
+                    NormalizationProcessor,
+                    PerceptorLiveNormalizationDispatcher(
+                        uow_factory,
+                        cipher=cipher,
+                    ),
+                )
             return cast(
                 NormalizationProcessor,
                 NormalizationHandler(

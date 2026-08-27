@@ -1,6 +1,7 @@
 # 本模块负责四智能体运行时的一项明确能力，不提供旧运行路径兼容层。
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from sleepagent.runtime.contracts import (
     ToolRequest,
     WorkProductStatus,
     agent_target_hash,
+    provider_context_projection,
     stable_hash,
 )
 from sleepagent.runtime.registry import (
@@ -351,7 +353,15 @@ def _agent_messages(context: ContextPacket) -> list[dict[str, str]]:
     )
     return [
         {"role": "system", "content": f"{policy} agent_id={context.agent_id.value}"},
-        {"role": "user", "content": context.model_dump_json()},
+        {
+            "role": "user",
+            "content": json.dumps(
+                provider_context_projection(context),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
     ]
 
 

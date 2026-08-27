@@ -95,6 +95,7 @@ from sleepagent.workers.retention import (
 
 UTC = timezone.utc
 MAX_REPLAY_INGRESS_BATCH = 100
+EPISODE_MEMBERSHIP_BATCH_SIZE = 128
 RAW_AAD_VERSION = b"sleepagent-replay-raw.v1"
 
 
@@ -448,7 +449,9 @@ def default_sleep_slice_policy() -> SleepSlicePolicy:
             maximum_episode_seconds=20 * 3600,
             allowed_lateness_seconds=2 * 3600,
         ),
-        quality=DeterministicQualityPolicy(policy_version="quality-v1"),
+        quality=DeterministicQualityPolicy(
+            policy_version="quality-v2-semantic-missingness"
+        ),
         risk=DeterministicRiskPolicy(
             policy_version="risk-v2-reviewed-replay-alert",
             vendor_alert_rules=(
@@ -698,7 +701,8 @@ def decide_fast_path_followup(
             not urgent
             and (
                 quality is None
-                or quality.data_sufficiency == DataSufficiency.SUFFICIENT
+                or quality.data_sufficiency
+                in {DataSufficiency.SUFFICIENT, DataSufficiency.PARTIAL}
             )
         ),
     )
@@ -2164,6 +2168,32 @@ class PostgresSleepSliceRepository:
             else DeterministicQualityAssessment.model_validate(_json_value(row[0]))
         )
 
+    def get_current_quality(
+        self,
+        namespace: DomainNamespace,
+        *,
+        night_episode_id: str,
+    ) -> DeterministicQualityAssessment | None:
+        self._require_namespace(namespace)
+        row = self._fetchone(
+            """
+            SELECT assessment_json FROM public.sleep_domain_current_quality
+            WHERE namespace_id = %s AND data_mode = %s
+              AND night_episode_id = %s AND subject_id = %s
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                night_episode_id,
+                self.scope.subject_id,
+            ),
+        )
+        return (
+            None
+            if row is None
+            else DeterministicQualityAssessment.model_validate(_json_value(row[0]))
+        )
+
     def get_current_risk(
         self,
         namespace: DomainNamespace,
@@ -2329,52 +2359,54 @@ class PostgresSleepSliceRepository:
         signal_projections: tuple[FastPathSignalProjection, ...],
         signal_receipts: tuple[FastPathSignalReceipt, ...],
         events: tuple[DomainEvent, ...],
+        persist_quality: bool = True,
     ) -> bool:
         self._require_namespace(namespace)
         cursor = self.connection.cursor()
         try:
-            cursor.execute(
-                """
-                INSERT INTO public.sleep_domain_quality_assessments (
-                  assessment_id, namespace_id, data_mode, subject_id,
-                  night_episode_id, assessed_at, policy_version,
-                  assessment_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                """,
-                (
-                    quality.assessment_id,
-                    self.scope.namespace_id,
-                    self.scope.data_mode,
-                    quality.subject_id,
-                    quality.night_episode_id,
-                    quality.assessed_at,
-                    quality.policy_version,
-                    quality.model_dump_json(),
-                ),
-            )
-            cursor.execute(
-                """
-                INSERT INTO public.sleep_domain_current_quality (
-                  namespace_id, data_mode, subject_id, night_episode_id,
-                  assessment_id, cas_version, assessment_json, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, 1, %s::jsonb, %s)
-                ON CONFLICT (namespace_id, data_mode, night_episode_id)
-                DO UPDATE SET subject_id = EXCLUDED.subject_id,
-                  assessment_id = EXCLUDED.assessment_id,
-                  cas_version = sleep_domain_current_quality.cas_version + 1,
-                  assessment_json = EXCLUDED.assessment_json,
-                  updated_at = EXCLUDED.updated_at
-                """,
-                (
-                    self.scope.namespace_id,
-                    self.scope.data_mode,
-                    quality.subject_id,
-                    quality.night_episode_id,
-                    quality.assessment_id,
-                    quality.model_dump_json(),
-                    quality.assessed_at,
-                ),
-            )
+            if persist_quality:
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_quality_assessments (
+                      assessment_id, namespace_id, data_mode, subject_id,
+                      night_episode_id, assessed_at, policy_version,
+                      assessment_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        quality.assessment_id,
+                        self.scope.namespace_id,
+                        self.scope.data_mode,
+                        quality.subject_id,
+                        quality.night_episode_id,
+                        quality.assessed_at,
+                        quality.policy_version,
+                        quality.model_dump_json(),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_current_quality (
+                      namespace_id, data_mode, subject_id, night_episode_id,
+                      assessment_id, cas_version, assessment_json, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, 1, %s::jsonb, %s)
+                    ON CONFLICT (namespace_id, data_mode, night_episode_id)
+                    DO UPDATE SET subject_id = EXCLUDED.subject_id,
+                      assessment_id = EXCLUDED.assessment_id,
+                      cas_version = sleep_domain_current_quality.cas_version + 1,
+                      assessment_json = EXCLUDED.assessment_json,
+                      updated_at = EXCLUDED.updated_at
+                    """,
+                    (
+                        self.scope.namespace_id,
+                        self.scope.data_mode,
+                        quality.subject_id,
+                        quality.night_episode_id,
+                        quality.assessment_id,
+                        quality.model_dump_json(),
+                        quality.assessed_at,
+                    ),
+                )
             cursor.execute(
                 """
                 INSERT INTO public.sleep_domain_risk_assessments (
@@ -2914,7 +2946,29 @@ class PostgresSleepSliceRepository:
             ),
         )
         new_membership_ids = mutation.new_membership_observation_ids
-        if not new_membership_ids:
+        for offset in range(
+            0, len(new_membership_ids), EPISODE_MEMBERSHIP_BATCH_SIZE
+        ):
+            self._write_episode_membership_batch(
+                cursor,
+                episode=episode,
+                observation_ids=new_membership_ids[
+                    offset : offset + EPISODE_MEMBERSHIP_BATCH_SIZE
+                ],
+                committed_at=committed_at,
+            )
+
+    def _write_episode_membership_batch(
+        self,
+        cursor: Any,
+        *,
+        episode: NightEpisodeV2,
+        observation_ids: tuple[str, ...],
+        committed_at: datetime,
+    ) -> None:
+        """Persist and verify one RLS-bounded immutable membership batch."""
+
+        if not observation_ids:
             return
         cursor.execute(
             """
@@ -2974,7 +3028,7 @@ class PostgresSleepSliceRepository:
                 self.scope.namespace_id,
                 self.scope.data_mode,
                 self.scope.subject_id,
-                list(new_membership_ids),
+                list(observation_ids),
             ),
         )
         cursor.execute(
@@ -3002,12 +3056,12 @@ class PostgresSleepSliceRepository:
               AND canonical.observation_id = ANY(%s::text[])
             """,
             (
-                list(new_membership_ids),
+                list(observation_ids),
                 episode.night_episode_id,
                 self.scope.namespace_id,
                 self.scope.data_mode,
                 self.scope.subject_id,
-                list(new_membership_ids),
+                list(observation_ids),
             ),
         )
         membership_match = cursor.fetchone()
