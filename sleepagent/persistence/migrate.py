@@ -745,6 +745,9 @@ def bootstrap_test_database_roles(
             "sleep_domain_current_risk",
             "sleep_domain_analysis_revisions",
             "sleep_domain_analysis_role_views",
+            "backend_product_attempts",
+            "backend_invocations",
+            "backend_invocation_journal",
             "backend_pending_handles",
             "backend_habit_question_selections_v2",
             "backend_habit_profile_revisions_v2",
@@ -871,6 +874,18 @@ def bootstrap_test_database_roles(
         )
         _grant_tables(connection, sql, "SELECT", api_read_tables, api_role)
         _grant_tables(connection, sql, "INSERT", api_insert_tables, api_role)
+        # Product report reservation locks the exact marked-current episode
+        # before deriving its durable semantic key. PostgreSQL row-locking
+        # SELECTs require UPDATE on at least one column, so expose only the
+        # immutable RLS scope anchor rather than mutable episode state.
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.Identifier("namespace_id"),
+                sql.Identifier("public", "sleep_domain_night_episodes"),
+                sql.Identifier(api_role),
+            ),
+        )
         _grant_tables(
             connection,
             sql,
@@ -911,6 +926,19 @@ def bootstrap_test_database_roles(
             sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
                 sql.Identifier("namespace_id"),
                 sql.Identifier("public", "backend_induction_manifests_v2"),
+                sql.Identifier(worker_role),
+            ),
+        )
+        # Product final gates share-lock the exact immutable episode revision
+        # alongside mutable current Episode/Quality/Risk rows.  Permit only a
+        # row-lock through its immutable RLS scope anchor.
+        _connection_execute(
+            connection,
+            sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                sql.Identifier("namespace_id"),
+                sql.Identifier(
+                    "public", "sleep_domain_night_episode_revisions"
+                ),
                 sql.Identifier(worker_role),
             ),
         )

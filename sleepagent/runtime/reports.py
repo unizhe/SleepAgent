@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import Field
+from pydantic import Field, field_serializer, model_validator
 
 from sleepagent.runtime.schemas import RadarAgentSchema, RoleReportArtifact
 
@@ -44,14 +44,6 @@ class RoleReportBundle(RadarAgentSchema):
         return next((report for report in self.reports if report.role == role.value), None)
 
 
-__all__ = [
-    "REPORT_ROLE_ORDER",
-    "ReportRole",
-    "RoleReportArtifact",
-    "RoleReportBundle",
-]
-
-
 # 合并自 reports/rendering.py。
 """从 ContextPacket 和 EvidenceLedger 确定性构造三角色报告。
 
@@ -61,10 +53,10 @@ __all__ = [
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, TypeAlias
+from datetime import date
+from typing import Any, Literal, TypeAlias
 
 from sleepagent.runtime.knowledge import grounded_citation_refs
-from sleepagent.runtime.reports import REPORT_ROLE_ORDER
 from sleepagent.runtime.schemas import (
     ContextPacket,
     EvidenceClaim,
@@ -73,6 +65,26 @@ from sleepagent.runtime.schemas import (
     RadarNightSummary,
     RiskLevel,
     RoleReportArtifact,
+)
+from sleepagent.runtime.contracts import (
+    AgentEnvelope,
+    AgentId,
+    CareStrategy as ProductCareStrategy,
+    CommunicationDraft,
+    EvidencePacket as ProductEvidencePacket,
+    SafetyDecision as ProductSafetyDecision,
+    SafetyVerdict,
+    StrictContract,
+    ToolReceipt,
+    WorkProductKind,
+    stable_hash,
+)
+from sleepagent.runtime.governance import AcceptedWorkProduct
+from sleepagent.runtime.invocation import AgentInvocationRecord
+from sleepagent.runtime.results import (
+    PRODUCT_EPISODE_RUNNER_VERSION,
+    ProductEpisodeRunRequest,
+    product_episode_request_hash,
 )
 
 
@@ -450,5 +462,791 @@ def _elder_suggestion(risk: RiskLevel) -> str:
     return "如有胸痛、严重呼吸困难或意识异常，请及时寻求线下医疗或急救评估。"
 
 
-__all__ = ["build_role_report_templates"]
+def build_safe_model_pin(
+    *,
+    implementation: str,
+    provider: str,
+    model_id: str,
+    temperature: float | None = None,
+    max_output_tokens: int | None = None,
+    thinking_type: str | None = None,
+    retry: int | None = None,
+    timeout_seconds: float | None = None,
+    provider_endpoint: str | None = None,
+    deployment_mode: str | None = None,
+    data_mode: str | None = None,
+) -> dict[str, Any]:
+    """Build a non-secret semantic model pin shared by API and worker."""
 
+    semantic_config: dict[str, Any] = {}
+    openai_config_present = any(
+        value is not None
+        for value in (
+            temperature,
+            max_output_tokens,
+            retry,
+            timeout_seconds,
+            provider_endpoint,
+        )
+    )
+    if temperature is not None:
+        semantic_config["temperature"] = temperature
+    if max_output_tokens is not None:
+        semantic_config["max_output_tokens"] = max_output_tokens
+    if openai_config_present:
+        semantic_config["thinking_type"] = thinking_type
+    if retry is not None:
+        semantic_config["retry"] = retry
+    if timeout_seconds is not None:
+        semantic_config["timeout_seconds"] = timeout_seconds
+    if provider_endpoint is not None and provider_endpoint.strip():
+        semantic_config["provider_endpoint_sha256"] = stable_hash(
+            provider_endpoint.rstrip("/")
+        )
+    if deployment_mode is not None:
+        semantic_config["deployment_mode"] = deployment_mode
+    if data_mode is not None:
+        semantic_config["data_mode"] = data_mode
+    return {
+        "implementation": implementation,
+        "provider": provider,
+        "model_id": model_id,
+        "semantic_config": semantic_config,
+    }
+
+
+def build_shared_analysis_runtime_manifest(
+    *,
+    sleepcare_control: Mapping[str, Any],
+    agents: Mapping[str, Any],
+    tools: Mapping[str, Any],
+    care_catalog: Mapping[str, Any],
+    prompt_compiler_version: str,
+    safety_policy_version: str,
+    runner_version: str = PRODUCT_EPISODE_RUNNER_VERSION,
+    analysis_topology_version: str = "shared-analysis-topology.v1",
+    personalization_projection_version: str = "selected_stable.v1",
+) -> dict[str, Any]:
+    """Canonical role-neutral manifest; excludes projection/render pins."""
+
+    catalog = dict(care_catalog)
+    return {
+        "schema_version": "shared_analysis_runtime_manifest.v2",
+        "runner_version": runner_version,
+        "shared_analysis_schema": SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION,
+        "prompt_compiler_version": prompt_compiler_version,
+        "safety_policy_version": safety_policy_version,
+        "analysis_topology_version": analysis_topology_version,
+        "personalization_projection_version": (
+            personalization_projection_version
+        ),
+        "sleepcare_control": dict(sleepcare_control),
+        "agents": {
+            key: dict(value)
+            for key, value in sorted(agents.items())
+        },
+        "tools": {
+            key: dict(value)
+            for key, value in sorted(tools.items())
+        },
+        "care_catalog_sha256": stable_hash(catalog),
+        "care_catalog": catalog,
+    }
+
+
+def build_elder_narrative_runtime_manifest(
+    *,
+    profile: Mapping[str, Any],
+    skill: Mapping[str, Any],
+    model: Mapping[str, Any],
+    prompt_compiler_version: str,
+    safety_policy_version: str,
+    content_plan_assembly: bool,
+    runner_version: str = PRODUCT_EPISODE_RUNNER_VERSION,
+    personalization_projection_version: str = "selected_stable.v1",
+) -> dict[str, Any]:
+    """Canonical render-only manifest shared by API and worker."""
+
+    return {
+        "schema_version": "elder_narrative_runtime_manifest.v1",
+        "runner_version": runner_version,
+        "personalization_projection_version": (
+            personalization_projection_version
+        ),
+        "request_schema": ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION,
+        "result_schema": ELDER_NARRATIVE_SCHEMA_VERSION,
+        "prompt_compiler_version": prompt_compiler_version,
+        "safety_policy_version": safety_policy_version,
+        "render_policy_version": "elder_narrative_render.v1",
+        "profile": dict(profile),
+        "skill": dict(skill),
+        "model": dict(model),
+        "content_plan_assembly": content_plan_assembly,
+    }
+
+
+SHARED_ANALYSIS_SOURCE_SCHEMA_VERSION = "shared_analysis_source.v1"
+SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION = "shared_night_analysis.v1"
+ROLE_PROJECTION_SCHEMA_VERSION = "role_projection.v1"
+ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION = "elder_narrative_request.v1"
+ELDER_NARRATIVE_SCHEMA_VERSION = "elder_narrative.v1"
+
+
+class RoleProjectionState(str, Enum):
+    READY = "ready"
+    POLICY_BLOCKED = "policy_blocked"
+
+
+class ElderNarrativeState(str, Enum):
+    READY = "ready"
+    FALLBACK = "fallback"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+class SharedAnalysisSourceV1(StrictContract):
+    """Exact, role-neutral source identity supplied by the Product worker."""
+
+    schema_version: Literal["shared_analysis_source.v1"] = (
+        SHARED_ANALYSIS_SOURCE_SCHEMA_VERSION
+    )
+    night_episode_id: str = Field(..., min_length=1)
+    night_episode_revision_id: str = Field(..., min_length=1)
+    night_episode_revision_number: int = Field(..., ge=1)
+    wake_date: date
+    observation_set_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    canonical_data_version: str = Field(..., min_length=1)
+    desired_analysis_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    consumed_context_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    runtime_manifest_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    data_sufficiency: Literal["sufficient", "partial"]
+    quality_state: Literal["good", "partial"]
+    risk_state: str = Field(..., min_length=1)
+    health_escalation_allowed: Literal[False] = False
+    quality_reason_codes: tuple[str, ...] = ()
+    risk_reason_codes: tuple[str, ...] = ()
+    limitations: tuple[str, ...] = ()
+    partial_caveat: str | None = Field(default=None, min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def require_partial_caveat(self) -> "SharedAnalysisSourceV1":
+        partial = self.data_sufficiency == "partial" or self.quality_state == "partial"
+        if partial != (self.partial_caveat is not None):
+            raise ValueError("PARTIAL shared analysis requires exactly one caveat")
+        return self
+
+
+class SharedAnalysisRunRequest(StrictContract):
+    """System-bound request for the one role-neutral Product analysis pass."""
+
+    source: SharedAnalysisSourceV1
+    runtime_request: ProductEpisodeRunRequest
+
+    @property
+    def episode_id(self) -> str:
+        return self.runtime_request.episode_id
+
+    @model_validator(mode="after")
+    def require_role_neutral_runtime_request(self) -> "SharedAnalysisRunRequest":
+        request = self.runtime_request
+        if request.episode_type.value != "morning_review":
+            raise ValueError("shared analysis requires MORNING_REVIEW")
+        if request.fact_snapshot.binding.role != "system":
+            raise ValueError("shared analysis requires a system-bound FactSnapshot")
+        if request.audience_role is not None or request.doctor_material:
+            raise ValueError("shared analysis cannot carry an audience")
+        if request.user_text or request.user_fact_responses:
+            raise ValueError("shared analysis cannot consume conversational input")
+        if (
+            request.fact_snapshot.canonical_data_version
+            != self.source.canonical_data_version
+        ):
+            raise ValueError("shared analysis canonical source mismatch")
+        if request.fact_snapshot.source_scope.date_end != self.source.wake_date:
+            raise ValueError("shared analysis wake-date scope mismatch")
+        return self
+
+
+def _shared_analysis_hash_material(
+    *,
+    source: SharedAnalysisSourceV1,
+    runner_version: str,
+    registry_hash: str,
+    runtime_request_sha256: str,
+    fact_snapshot_hash: str,
+    summary_lines: tuple[str, ...],
+    evidence: AcceptedWorkProduct,
+    care: AcceptedWorkProduct | None,
+    safety: AcceptedWorkProduct | None,
+    doctor_projection_allowed: bool,
+    doctor_failure_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "schema_version": SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION,
+        "source": source.model_dump(mode="json"),
+        "runner_version": runner_version,
+        "registry_hash": registry_hash,
+        "runtime_request_sha256": runtime_request_sha256,
+        "fact_snapshot_hash": fact_snapshot_hash,
+        "summary_lines": list(summary_lines),
+        "evidence_target_hash": evidence.target_hash,
+        "care_target_hash": None if care is None else care.target_hash,
+        "safety_target_hash": None if safety is None else safety.target_hash,
+        "doctor_projection_allowed": doctor_projection_allowed,
+        "doctor_failure_codes": list(doctor_failure_codes),
+    }
+
+
+class SharedNightAnalysis(StrictContract):
+    """One accepted, role-neutral Product result before any communication pass."""
+
+    schema_version: Literal["shared_night_analysis.v1"] = (
+        SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION
+    )
+    source: SharedAnalysisSourceV1
+    runner_version: str = PRODUCT_EPISODE_RUNNER_VERSION
+    registry_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    runtime_request_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    fact_snapshot_id: str = Field(..., min_length=1)
+    fact_snapshot_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    shared_analysis_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    summary_lines: tuple[str, ...] = Field(min_length=1)
+    evidence: AcceptedWorkProduct
+    care: AcceptedWorkProduct | None = None
+    safety: AcceptedWorkProduct | None = None
+    doctor_projection_allowed: bool
+    doctor_failure_codes: tuple[str, ...] = ()
+    envelopes: tuple[AgentEnvelope, ...] = ()
+    agent_invocations: tuple[AgentInvocationRecord, ...] = ()
+    tool_receipts: tuple[ToolReceipt, ...] = ()
+
+    @field_serializer("agent_invocations")
+    def serialize_safe_agent_invocations(
+        self,
+        records: tuple[AgentInvocationRecord, ...],
+    ) -> list[dict[str, Any]]:
+        """Keep full request IDs out of analysis/attempt JSON.
+
+        The worker copies them into the governed durable invocation-journal
+        response before serializing this shared artifact.
+        """
+
+        return [
+            record.model_dump(mode="json", exclude={"provider_request_id"})
+            for record in records
+        ]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        source: SharedAnalysisSourceV1,
+        registry_hash: str,
+        runtime_request: ProductEpisodeRunRequest,
+        summary_lines: tuple[str, ...],
+        evidence: AcceptedWorkProduct,
+        care: AcceptedWorkProduct | None,
+        safety: AcceptedWorkProduct | None,
+        doctor_projection_allowed: bool,
+        doctor_failure_codes: tuple[str, ...] = (),
+        envelopes: tuple[AgentEnvelope, ...] = (),
+        agent_invocations: tuple[AgentInvocationRecord, ...] = (),
+        tool_receipts: tuple[ToolReceipt, ...] = (),
+    ) -> "SharedNightAnalysis":
+        request_sha256 = product_episode_request_hash(runtime_request)
+        material = _shared_analysis_hash_material(
+            source=source,
+            runner_version=PRODUCT_EPISODE_RUNNER_VERSION,
+            registry_hash=registry_hash,
+            runtime_request_sha256=request_sha256,
+            fact_snapshot_hash=runtime_request.fact_snapshot.fact_snapshot_hash,
+            summary_lines=summary_lines,
+            evidence=evidence,
+            care=care,
+            safety=safety,
+            doctor_projection_allowed=doctor_projection_allowed,
+            doctor_failure_codes=doctor_failure_codes,
+        )
+        return cls(
+            source=source,
+            registry_hash=registry_hash,
+            runtime_request_sha256=request_sha256,
+            fact_snapshot_id=runtime_request.fact_snapshot.fact_snapshot_id,
+            fact_snapshot_hash=runtime_request.fact_snapshot.fact_snapshot_hash,
+            shared_analysis_sha256=stable_hash(material),
+            summary_lines=summary_lines,
+            evidence=evidence,
+            care=care,
+            safety=safety,
+            doctor_projection_allowed=doctor_projection_allowed,
+            doctor_failure_codes=doctor_failure_codes,
+            envelopes=envelopes,
+            agent_invocations=agent_invocations,
+            tool_receipts=tool_receipts,
+        )
+
+    @model_validator(mode="after")
+    def validate_shared_result(self) -> "SharedNightAnalysis":
+        products = tuple(
+            item for item in (self.evidence, self.care, self.safety) if item is not None
+        )
+        if any(item.fact_snapshot_hash != self.fact_snapshot_hash for item in products):
+            raise ValueError("shared work products bind different FactSnapshots")
+        if self.evidence.agent_id is not AgentId.EVIDENCE_REASONING:
+            raise ValueError("shared analysis requires accepted EvidenceReasoning output")
+        evidence = ProductEvidencePacket.model_validate(self.evidence.payload)
+        care = None
+        if self.care is not None:
+            if self.care.agent_id is not AgentId.CARE_STRATEGY:
+                raise ValueError("shared Care output has the wrong owner")
+            care = ProductCareStrategy.model_validate(self.care.payload)
+        decision = None
+        if self.safety is not None:
+            if self.safety.agent_id is not AgentId.SAFETY_REVIEW:
+                raise ValueError("shared Safety output has the wrong owner")
+            decision = ProductSafetyDecision.model_validate(self.safety.payload)
+            allowed_targets = {
+                self.evidence.target_hash,
+                *(() if self.care is None else (self.care.target_hash,)),
+            }
+            if decision.review_target_hash not in allowed_targets:
+                raise ValueError("shared Safety does not review an accepted target")
+        if self.doctor_projection_allowed and (
+            decision is None or decision.verdict is not SafetyVerdict.APPROVE
+        ):
+            raise ValueError("doctor projection requires approved Safety")
+        if self.doctor_projection_allowed and self.doctor_failure_codes:
+            raise ValueError("publishable doctor projection cannot carry failures")
+        if not self.doctor_projection_allowed and not self.doctor_failure_codes:
+            raise ValueError("blocked doctor projection requires a failure code")
+        expected_lines = tuple(claim.statement for claim in evidence.claims)
+        if care is not None and care.primary_action is not None:
+            expected_lines = (*expected_lines, care.primary_action.title)
+        if not expected_lines:
+            expected_lines = ("当前没有足够证据形成健康趋势结论。",)
+        if self.summary_lines != expected_lines:
+            raise ValueError("shared summary must be derived from accepted facts")
+        expected_hash = stable_hash(
+            _shared_analysis_hash_material(
+                source=self.source,
+                runner_version=self.runner_version,
+                registry_hash=self.registry_hash,
+                runtime_request_sha256=self.runtime_request_sha256,
+                fact_snapshot_hash=self.fact_snapshot_hash,
+                summary_lines=self.summary_lines,
+                evidence=self.evidence,
+                care=self.care,
+                safety=self.safety,
+                doctor_projection_allowed=self.doctor_projection_allowed,
+                doctor_failure_codes=self.doctor_failure_codes,
+            )
+        )
+        if self.shared_analysis_sha256 != expected_hash:
+            raise ValueError("shared analysis hash is inconsistent")
+        return self
+
+    def accepted_products(self) -> dict[WorkProductKind, AcceptedWorkProduct]:
+        products = {WorkProductKind.EVIDENCE_PACKET: self.evidence}
+        if self.care is not None:
+            products[WorkProductKind.CARE_STRATEGY] = self.care
+        if self.safety is not None:
+            products[WorkProductKind.SAFETY_DECISION] = self.safety
+        return products
+
+
+def _projection_hash_material(
+    *,
+    role: ReportRole,
+    state: RoleProjectionState,
+    source_shared_analysis_sha256: str,
+    data_sufficiency: Literal["sufficient", "partial"],
+    quality_state: Literal["good", "partial"],
+    risk_state: str,
+    title: str,
+    text: str | None,
+    context_notice: str,
+    claim_refs: tuple[str, ...],
+    care_candidate_refs: tuple[str, ...],
+    caveats: tuple[str, ...],
+    safety_notices: tuple[str, ...],
+    failure_codes: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "schema_version": ROLE_PROJECTION_SCHEMA_VERSION,
+        "role": role.value,
+        "state": state.value,
+        "source_shared_analysis_sha256": source_shared_analysis_sha256,
+        "data_sufficiency": data_sufficiency,
+        "quality_state": quality_state,
+        "risk_state": risk_state,
+        "title": title,
+        "text": text,
+        "context_notice": context_notice,
+        "claim_refs": list(claim_refs),
+        "care_candidate_refs": list(care_candidate_refs),
+        "caveats": list(caveats),
+        "safety_notices": list(safety_notices),
+        "failure_codes": list(failure_codes),
+    }
+
+
+class RoleProjection(StrictContract):
+    """Deterministic role view derived from exactly one shared analysis."""
+
+    schema_version: Literal["role_projection.v1"] = ROLE_PROJECTION_SCHEMA_VERSION
+    role: ReportRole
+    state: RoleProjectionState
+    source_shared_analysis_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    projection_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    data_sufficiency: Literal["sufficient", "partial"]
+    quality_state: Literal["good", "partial"]
+    risk_state: str = Field(..., min_length=1)
+    title: str = Field(..., min_length=1, max_length=200)
+    text: str | None = Field(default=None, min_length=1, max_length=6000)
+    context_notice: str = Field(..., min_length=1, max_length=500)
+    claim_refs: tuple[str, ...] = ()
+    care_candidate_refs: tuple[str, ...] = ()
+    caveats: tuple[str, ...] = ()
+    safety_notices: tuple[str, ...] = ()
+    failure_codes: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> "RoleProjection":
+        if self.state is RoleProjectionState.READY:
+            if self.text is None or self.failure_codes:
+                raise ValueError("ready projection requires text without failures")
+        elif self.role is not ReportRole.DOCTOR:
+            raise ValueError("only the doctor projection can be policy blocked")
+        elif self.text is not None or not self.failure_codes:
+            raise ValueError("blocked doctor projection requires only failure codes")
+        expected = stable_hash(
+            _projection_hash_material(
+                role=self.role,
+                state=self.state,
+                source_shared_analysis_sha256=self.source_shared_analysis_sha256,
+                data_sufficiency=self.data_sufficiency,
+                quality_state=self.quality_state,
+                risk_state=self.risk_state,
+                title=self.title,
+                text=self.text,
+                context_notice=self.context_notice,
+                claim_refs=self.claim_refs,
+                care_candidate_refs=self.care_candidate_refs,
+                caveats=self.caveats,
+                safety_notices=self.safety_notices,
+                failure_codes=self.failure_codes,
+            )
+        )
+        if self.projection_sha256 != expected:
+            raise ValueError("role projection hash is inconsistent")
+        return self
+
+
+_SHARED_REPORT_SAFETY_NOTICES = (
+    "本报告由 AI 辅助整理，内容来自结构化证据。",
+    "本报告仅用于睡眠健康观察。",
+    "本报告不构成临床诊断或医疗建议。",
+    "本项目不宣称 HIPAA/FDA、医疗器械或临床诊断合规。",
+)
+
+
+def build_role_projection_runtime_manifest(
+    *,
+    projection_policy_version: str = "shared_role_projection.v1",
+) -> dict[str, Any]:
+    """Canonical deterministic projection pins, independent of analysis."""
+
+    return {
+        "schema_version": "role_projection_runtime_manifest.v1",
+        "projection_schema": ROLE_PROJECTION_SCHEMA_VERSION,
+        "projection_policy_version": projection_policy_version,
+        "projector_version": "build_shared_role_projections.v1",
+        "safety_notices_sha256": stable_hash(_SHARED_REPORT_SAFETY_NOTICES),
+    }
+
+
+def role_projection_identity_sha256(
+    *,
+    desired_analysis_sha256: str,
+    role: ReportRole,
+    projection_sha256: str,
+    projection_manifest_sha256: str,
+) -> str:
+    """Bind one deterministic role artifact to analysis and projection pins."""
+
+    return stable_hash(
+        {
+            "schema_version": "role_projection_identity.v1",
+            "desired_analysis_sha256": desired_analysis_sha256,
+            "role": role.value,
+            "projection_sha256": projection_sha256,
+            "projection_manifest_sha256": projection_manifest_sha256,
+        }
+    )
+
+
+def build_shared_role_projections(
+    shared: SharedNightAnalysis,
+) -> tuple[RoleProjection, RoleProjection, RoleProjection]:
+    """Build all three deterministic views without invoking a model."""
+
+    evidence = ProductEvidencePacket.model_validate(shared.evidence.payload)
+    care = (
+        None
+        if shared.care is None
+        else ProductCareStrategy.model_validate(shared.care.payload)
+    )
+    claim_refs = tuple(claim.claim_id for claim in evidence.claims)
+    care_refs = (
+        ()
+        if care is None or care.primary_action is None
+        else (care.primary_action.candidate_id,)
+    )
+    caveats = tuple(
+        dict.fromkeys(
+            (
+                *shared.source.limitations,
+                *((shared.source.partial_caveat,) if shared.source.partial_caveat else ()),
+                "仅作睡眠健康观察参考，不构成诊断。",
+            )
+        )
+    )
+    projections: list[RoleProjection] = []
+    for role in REPORT_ROLE_ORDER:
+        title = {
+            ReportRole.ELDER: "昨夜睡眠观察",
+            ReportRole.FAMILY: "家属照护摘要",
+            ReportRole.DOCTOR: "睡眠观察证据摘要",
+        }[role]
+        context_notice = {
+            ReportRole.ELDER: "内容仅覆盖当前授权范围内的已验收信息。",
+            ReportRole.FAMILY: "内容仅供授权家属在当前范围内了解。",
+            ReportRole.DOCTOR: "材料仅包含当前授权范围内的已验收来源。",
+        }[role]
+        role_caveats = caveats
+        if role is ReportRole.DOCTOR:
+            role_caveats = tuple(
+                dict.fromkeys(
+                    (
+                        *caveats,
+                        "毫米波雷达不能替代 PSG、病史、查体或临床判断。",
+                    )
+                )
+            )
+        if role is ReportRole.DOCTOR and not shared.doctor_projection_allowed:
+            state = RoleProjectionState.POLICY_BLOCKED
+            text = None
+            failure_codes = shared.doctor_failure_codes
+        else:
+            state = RoleProjectionState.READY
+            failure_codes = ()
+            heading = {
+                ReportRole.ELDER: (
+                    "我们根据昨夜设备记录，为您整理了这些观察："
+                ),
+                ReportRole.FAMILY: "以下内容用于家属连续观察与照护协同：",
+                ReportRole.DOCTOR: "以下为已验收睡眠观察摘要：",
+            }[role]
+            lines = [heading, *[f"- {line}" for line in shared.summary_lines]]
+            if shared.source.partial_caveat:
+                lines.extend(("数据说明：", f"- {shared.source.partial_caveat}"))
+            lines.extend(
+                (
+                    "观察边界：",
+                    *[f"- {item}" for item in role_caveats],
+                    "安全说明：",
+                    *[f"- {item}" for item in _SHARED_REPORT_SAFETY_NOTICES],
+                )
+            )
+            text = "\n".join(lines)
+        material = _projection_hash_material(
+            role=role,
+            state=state,
+            source_shared_analysis_sha256=shared.shared_analysis_sha256,
+            data_sufficiency=shared.source.data_sufficiency,
+            quality_state=shared.source.quality_state,
+            risk_state=shared.source.risk_state,
+            title=title,
+            text=text,
+            context_notice=context_notice,
+            claim_refs=claim_refs,
+            care_candidate_refs=care_refs,
+            caveats=role_caveats,
+            safety_notices=_SHARED_REPORT_SAFETY_NOTICES,
+            failure_codes=failure_codes,
+        )
+        projections.append(
+            RoleProjection(
+                role=role,
+                state=state,
+                source_shared_analysis_sha256=shared.shared_analysis_sha256,
+                projection_sha256=stable_hash(material),
+                data_sufficiency=shared.source.data_sufficiency,
+                quality_state=shared.source.quality_state,
+                risk_state=shared.source.risk_state,
+                title=title,
+                text=text,
+                context_notice=context_notice,
+                claim_refs=claim_refs,
+                care_candidate_refs=care_refs,
+                caveats=role_caveats,
+                safety_notices=_SHARED_REPORT_SAFETY_NOTICES,
+                failure_codes=failure_codes,
+            )
+        )
+    return tuple(projections)  # type: ignore[return-value]
+
+
+class ElderNarrativeRequest(StrictContract):
+    schema_version: Literal["elder_narrative_request.v1"] = (
+        ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION
+    )
+    runtime_request: ProductEpisodeRunRequest
+    shared_analysis: SharedNightAnalysis
+    elder_projection: RoleProjection
+    source_projection_identity_sha256: str = Field(
+        ...,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    render_manifest_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    render_identity_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+    @property
+    def episode_id(self) -> str:
+        return self.runtime_request.episode_id
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        runtime_request: ProductEpisodeRunRequest,
+        shared_analysis: SharedNightAnalysis,
+        elder_projection: RoleProjection,
+        render_manifest_sha256: str,
+        source_projection_identity_sha256: str | None = None,
+    ) -> "ElderNarrativeRequest":
+        projection_identity = (
+            elder_projection.projection_sha256
+            if source_projection_identity_sha256 is None
+            else source_projection_identity_sha256
+        )
+        identity = stable_hash(
+            {
+                "schema_version": ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION,
+                "shared_analysis_sha256": shared_analysis.shared_analysis_sha256,
+                "elder_projection_sha256": projection_identity,
+                "render_manifest_sha256": render_manifest_sha256,
+            }
+        )
+        return cls(
+            runtime_request=runtime_request,
+            shared_analysis=shared_analysis,
+            elder_projection=elder_projection,
+            source_projection_identity_sha256=projection_identity,
+            render_manifest_sha256=render_manifest_sha256,
+            render_identity_sha256=identity,
+        )
+
+    @model_validator(mode="after")
+    def validate_narrative_request(self) -> "ElderNarrativeRequest":
+        request = self.runtime_request
+        projection = self.elder_projection
+        if request.episode_type.value != "morning_review":
+            raise ValueError("elder narrative requires MORNING_REVIEW")
+        if request.audience_role != "elder" or request.doctor_material:
+            raise ValueError("elder narrative requires exactly the elder audience")
+        if request.user_text or request.user_fact_responses:
+            raise ValueError("elder narrative cannot consume conversational input")
+        if request.fact_snapshot.fact_snapshot_hash != self.shared_analysis.fact_snapshot_hash:
+            raise ValueError("elder narrative FactSnapshot differs from shared analysis")
+        if (
+            projection.role is not ReportRole.ELDER
+            or projection.state is not RoleProjectionState.READY
+            or projection.source_shared_analysis_sha256
+            != self.shared_analysis.shared_analysis_sha256
+        ):
+            raise ValueError("elder narrative requires the ready shared elder projection")
+        expected = stable_hash(
+            {
+                "schema_version": ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION,
+                "shared_analysis_sha256": self.shared_analysis.shared_analysis_sha256,
+                "elder_projection_sha256": (
+                    self.source_projection_identity_sha256
+                ),
+                "render_manifest_sha256": self.render_manifest_sha256,
+            }
+        )
+        if self.render_identity_sha256 != expected:
+            raise ValueError("elder narrative render identity is inconsistent")
+        return self
+
+
+class ElderNarrative(StrictContract):
+    schema_version: Literal["elder_narrative.v1"] = ELDER_NARRATIVE_SCHEMA_VERSION
+    state: ElderNarrativeState
+    source_shared_analysis_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    source_projection_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    render_identity_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    text: str | None = Field(default=None, min_length=1, max_length=6000)
+    communication: CommunicationDraft | None = None
+    invocation: AgentInvocationRecord | None = None
+    failure_codes: tuple[str, ...] = ()
+
+    @field_serializer("invocation")
+    def serialize_safe_invocation(
+        self,
+        record: AgentInvocationRecord | None,
+    ) -> dict[str, Any] | None:
+        """Keep full request IDs only in the governed invocation journal."""
+
+        if record is None:
+            return None
+        return record.model_dump(mode="json", exclude={"provider_request_id"})
+
+    @model_validator(mode="after")
+    def validate_narrative(self) -> "ElderNarrative":
+        if self.invocation is not None and self.invocation.agent_id is not AgentId.SLEEP_CARE:
+            raise ValueError("elder narrative invocation must belong to SleepCare")
+        if self.state is ElderNarrativeState.READY:
+            if (
+                self.communication is None
+                or self.invocation is None
+                or self.text != self.communication.text
+                or self.communication.audience_role != "elder"
+                or self.failure_codes
+            ):
+                raise ValueError("ready elder narrative is incomplete")
+        elif self.state is ElderNarrativeState.FALLBACK:
+            if self.text is None or self.communication is not None or not self.failure_codes:
+                raise ValueError("fallback elder narrative requires safe fallback text")
+        elif self.text is not None or self.communication is not None:
+            raise ValueError("failed/stale elder narrative cannot carry content")
+        return self
+
+
+__all__ = [
+    "ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION",
+    "ELDER_NARRATIVE_SCHEMA_VERSION",
+    "REPORT_ROLE_ORDER",
+    "ROLE_PROJECTION_SCHEMA_VERSION",
+    "SHARED_ANALYSIS_SOURCE_SCHEMA_VERSION",
+    "SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION",
+    "ElderNarrative",
+    "ElderNarrativeRequest",
+    "ElderNarrativeState",
+    "ReportRole",
+    "RoleProjection",
+    "RoleProjectionState",
+    "RoleReportArtifact",
+    "RoleReportBundle",
+    "SharedAnalysisRunRequest",
+    "SharedAnalysisSourceV1",
+    "SharedNightAnalysis",
+    "build_elder_narrative_runtime_manifest",
+    "build_role_projection_runtime_manifest",
+    "build_role_report_templates",
+    "build_safe_model_pin",
+    "build_shared_analysis_runtime_manifest",
+    "build_shared_role_projections",
+    "role_projection_identity_sha256",
+]

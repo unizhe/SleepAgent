@@ -32,8 +32,10 @@ from sleepagent.workers.runtime import (
     LeaseLostError,
     OutcomeUnknownError,
     PostgresDurableWorkStore,
+    WorkContext,
     WorkDisposition,
     WorkResult,
+    exact_worker_scope,
 )
 
 
@@ -704,6 +706,17 @@ def test_worker_role_enforces_fence_and_persists_unknown_invocation() -> None:
         assert first_claim is not None
         assert first_claim.work_id == first_operation
         assert first_claim.metadata["lease_seconds"] == 30
+        first_scope = exact_worker_scope(
+            WorkContext(first_claim, store, threading.Event()),
+            allowed_handler="product_interaction",
+        )
+        assert first_scope.service_principal_id == worker_principal
+        assert first_claim.authorization_snapshot["schema_version"] == (
+            "workload_authorization_snapshot.v1"
+        )
+        assert first_claim.authorization_snapshot["workload_principal_id"] == (
+            worker_principal
+        )
         assert store.checkpoint(
             first_claim,
             checkpoint_type="postgres_integration",

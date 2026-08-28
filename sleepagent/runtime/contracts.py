@@ -362,21 +362,54 @@ class ContextPacket(FrozenContract):
 _PROVIDER_PRIVATE_CONTEXT_KEYS = frozenset(
     {
         "actor_id",
+        "authorization_scope",
+        "authorization_metadata",
+        "membership",
+        "membership_id",
+        "membership_ids",
+        "membership_record",
         "assessment_id",
         "canonical_observation_id",
+        "context_packet_id",
         "current_risk_id",
         "device_binding_id",
         "device_id",
+        "episode_id",
         "fact_snapshot_id",
         "home_id",
         "night_episode_id",
         "night_episode_revision_id",
+        "operation_id",
         "provider_account_id",
+        "provider_request_id",
+        "product_episode_id",
+        "query_id",
+        "raw_payload",
+        "raw_vendor_data",
+        "raw_vendor_payload",
         "radar_device_id",
+        "receipt_id",
+        "role_view_id",
         "subject_id",
+        "invocation_id",
         "tool_invocation_id",
     }
 )
+
+
+def _provider_key_is_private(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _PROVIDER_PRIVATE_CONTEXT_KEYS:
+        return True
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", normalized)
+        if token
+    }
+    return bool(
+        {"authorization", "membership"}.intersection(tokens)
+        or ({"raw", "vendor"}.issubset(tokens))
+    )
 
 
 def provider_context_projection(context: ContextPacket) -> dict[str, Any]:
@@ -387,7 +420,7 @@ def provider_context_projection(context: ContextPacket) -> dict[str, Any]:
             return {
                 str(key): sanitize(item)
                 for key, item in value.items()
-                if str(key).lower() not in _PROVIDER_PRIVATE_CONTEXT_KEYS
+                if not _provider_key_is_private(str(key))
             }
         if isinstance(value, (list, tuple)):
             return [sanitize(item) for item in value]
@@ -416,7 +449,6 @@ def provider_context_projection(context: ContextPacket) -> dict[str, Any]:
             ),
             "valid_night_count": scope.valid_night_count,
         },
-        "authorization_scope": list(context.authorization_scope),
         "items": [
             {
                 "key": item.key,
@@ -425,6 +457,7 @@ def provider_context_projection(context: ContextPacket) -> dict[str, Any]:
                 "source_refs": list(item.source_refs),
             }
             for item in context.items
+            if not _provider_key_is_private(item.key)
         ],
     }
 

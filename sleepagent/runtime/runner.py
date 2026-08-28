@@ -22,8 +22,10 @@ from sleepagent.runtime.contracts import (
     CrossAgentRequest,
     CrossAgentRequestType,
     EpisodeReceipt,
+    EpisodePlan,
     EpisodeStatus,
     EpisodeType,
+    EvidencePacket,
     ExecutionMode,
     InvocationOutcome,
     OnlineRiskLevel,
@@ -101,6 +103,14 @@ from sleepagent.runtime.memory import (
     InMemoryLongitudinalResultStore,
     LongitudinalMemoryService,
 )
+from sleepagent.runtime.invocation import AgentInvocationRecord
+from sleepagent.runtime.reports import (
+    ElderNarrative,
+    ElderNarrativeRequest,
+    ElderNarrativeState,
+    SharedAnalysisRunRequest,
+    SharedNightAnalysis,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -121,6 +131,33 @@ class AgentInteractionRequired(RuntimeError):
 
 class InMemoryProductEpisodeResultStore(InMemoryLongitudinalResultStore):
     """Product-facing name for the atomic longitudinal reference store."""
+
+
+class _DetachedNarrativeRuntime:
+    """One-call runtime view for an independently durable elder narrative."""
+
+    def __init__(self, shared: SharedNightAnalysis) -> None:
+        self.episode_state_revision = max(
+            item.episode_state_revision
+            for item in (
+                shared.evidence,
+                *(() if shared.care is None else (shared.care,)),
+                *(() if shared.safety is None else (shared.safety,)),
+            )
+        )
+        self.invocation_records: list[AgentInvocationRecord] = []
+        self.accepted_work_products = shared.accepted_products()
+        self.plan: EpisodePlan | None = None
+
+    def record_agent_invocation(self, record: AgentInvocationRecord) -> None:
+        if self.invocation_records:
+            raise RuntimeError("elder narrative permits exactly one Agent invocation")
+        if record.agent_id is not AgentId.SLEEP_CARE:
+            raise RuntimeError("elder narrative permits only SleepCare")
+        self.invocation_records.append(record)
+
+    def record_tool_call(self) -> None:
+        raise RuntimeError("elder narrative cannot invoke Tools")
 
 
 class ProductEpisodeRunner:
@@ -221,6 +258,417 @@ class ProductEpisodeRunner:
     @property
     def provider_input_budget(self) -> ProviderInputBudgetLedger:
         return self.agent_invocation_coordinator.provider_input_budget
+
+    @serialized_episode_execution
+    def analyze_shared(
+        self,
+        request: SharedAnalysisRunRequest,
+    ) -> SharedNightAnalysis:
+        """Run one role-neutral reasoning pass and stop before communication."""
+
+        runtime_request = request.runtime_request
+        if runtime_request.episode_type is EpisodeType.DATA_QUALITY_RECOVERY:
+            raise AcceptanceError("shared analysis cannot run data-quality recovery")
+
+        preflight_receipts: list[ToolReceipt] = []
+        if runtime_request.runtime_readiness_decisions:
+            preflight_receipts.append(
+                build_cold_start_receipt(
+                    snapshot=runtime_request.fact_snapshot,
+                    decisions=runtime_request.runtime_readiness_decisions,
+                    capability_receipts=runtime_request.runtime_capability_receipts,
+                    observed_at=datetime.now(timezone.utc),
+                )
+            )
+        runtime = ProductEpisodeRuntime(
+            episode_id=runtime_request.episode_id,
+            fact_snapshot=runtime_request.fact_snapshot,
+            sleepcare_agent=self.agent_roster.sleepcare,
+            skill_registry=self.skill_registry,
+        )
+        envelopes: list[AgentEnvelope] = []
+        tool_receipts: list[ToolReceipt] = list(preflight_receipts)
+        evidence: AcceptedWorkProduct | None = None
+        care: AcceptedWorkProduct | None = None
+        safety: AcceptedWorkProduct | None = None
+        try:
+            required, checkpoints = self._request_requirements(runtime_request)
+            plan = runtime.create_plan(
+                episode_type=runtime_request.episode_type,
+                objective=runtime_request.objective,
+                required_work_products=required,
+                required_safety_checkpoints=checkpoints,
+            )
+            for _ in preflight_receipts:
+                runtime.record_tool_call()
+            registered_receipts = self._run_registered_tools(
+                runtime_request,
+                runtime,
+            )
+            tool_receipts.extend(registered_receipts)
+            failed_required = [
+                receipt
+                for receipt in registered_receipts
+                if receipt.outcome != InvocationOutcome.SUCCEEDED
+            ]
+            if failed_required:
+                raise AcceptanceError(
+                    f"required Tool failed: {failed_required[0].tool_name}"
+                )
+
+            deterministic_risk_reasons: list[str] = []
+            policy_routed_care_required = False
+            planned = set(plan.required_work_products) | set(
+                plan.conditional_work_products
+            )
+            if WorkProductKind.EVIDENCE_PACKET in planned:
+                envelope, evidence = self._invoke_and_accept(
+                    request=runtime_request,
+                    runtime=runtime,
+                    agent=self.agent_roster.evidence_reasoning,
+                    tool_receipts=tool_receipts,
+                    accepted_evidence=None,
+                    accepted_care=None,
+                    safety_target=None,
+                )
+                envelopes.append(envelope)
+                risk_receipts: list[ToolReceipt] = []
+                if (
+                    "risk.classify_signal"
+                    in EPISODE_DEFINITIONS[
+                        runtime_request.episode_type
+                    ].required_tools
+                ):
+                    risk_arguments = dict(
+                        runtime_request.tool_inputs.get(
+                            "risk.classify_signal",
+                            {},
+                        )
+                    )
+                    trend_signals = tuple(
+                        risk_arguments.pop("trend_signals", ())
+                    )
+                    trend_observation = risk_arguments.pop(
+                        "trend_observation",
+                        None,
+                    )
+                    risk_arguments["accepted_evidence_ref"] = (
+                        evidence.work_product_ref
+                    )
+                    risk_arguments["accepted_claims"] = evidence.payload.get(
+                        "claims",
+                        [],
+                    )
+                    risk_result = self.tool_execution_coordinator.execute(
+                        "risk.classify_signal",
+                        risk_arguments,
+                        context=ProductToolExecutionContext(
+                            caller="runtime",
+                            fact_snapshot=runtime_request.fact_snapshot,
+                            episode_id=runtime_request.episode_id,
+                            authorization_scope=(
+                                runtime_request.fact_snapshot.binding.authorization_scope
+                            ),
+                        ),
+                        runtime=runtime,
+                        record_call=True,
+                    )
+                    tool_receipts.append(risk_result.receipt)
+                    if risk_result.receipt.outcome != InvocationOutcome.SUCCEEDED:
+                        raise AcceptanceError("Safety risk classification failed")
+                    risk_receipts.append(risk_result.receipt)
+                    if bool(
+                        risk_result.receipt.output.get("safety_required")
+                    ) or (
+                        risk_result.receipt.output.get("risk_level")
+                        == OnlineRiskLevel.ESCALATE.value
+                    ):
+                        deterministic_risk_reasons.extend(
+                            risk_result.receipt.output.get(
+                                "reason_codes",
+                                ("deterministic_risk_escalate",),
+                            )
+                        )
+                    if trend_signals:
+                        trend_result = self.tool_execution_coordinator.execute(
+                            "risk.classify_signal",
+                            {
+                                "observation": trend_observation,
+                                "trend_signals": trend_signals,
+                            },
+                            context=ProductToolExecutionContext(
+                                caller="runtime",
+                                fact_snapshot=runtime_request.fact_snapshot,
+                                episode_id=runtime_request.episode_id,
+                                authorization_scope=(
+                                    runtime_request.fact_snapshot.binding.authorization_scope
+                                ),
+                            ),
+                            runtime=runtime,
+                            record_call=True,
+                        )
+                        tool_receipts.append(trend_result.receipt)
+                        if (
+                            trend_result.receipt.outcome
+                            != InvocationOutcome.SUCCEEDED
+                        ):
+                            raise AcceptanceError(
+                                "Longitudinal risk classification failed"
+                            )
+                        risk_receipts.append(trend_result.receipt)
+                    if (
+                        "coordination.read_policy"
+                        in EPISODE_DEFINITIONS[
+                            runtime_request.episode_type
+                        ].required_tools
+                    ):
+                        policy_routed_care_required = (
+                            self._care_required_by_policy(
+                                request=runtime_request,
+                                runtime=runtime,
+                                evidence=evidence,
+                                risk_receipts=tuple(risk_receipts),
+                                tool_receipts=tool_receipts,
+                            )
+                        )
+
+            care_planned = WorkProductKind.CARE_STRATEGY in planned
+            care_policy_routed = (
+                "coordination.read_policy"
+                in EPISODE_DEFINITIONS[
+                    runtime_request.episode_type
+                ].required_tools
+            )
+            should_run_care = (
+                policy_routed_care_required
+                if care_policy_routed
+                else care_planned
+            )
+            if should_run_care:
+                if evidence is None:
+                    raise AcceptanceError("Care cannot run without accepted Evidence")
+                envelope, care = self._invoke_and_accept(
+                    request=runtime_request,
+                    runtime=runtime,
+                    agent=self.agent_roster.care_strategy,
+                    tool_receipts=tool_receipts,
+                    accepted_evidence=evidence,
+                    accepted_care=None,
+                    safety_target=None,
+                )
+                envelopes.append(envelope)
+                evidence = runtime.accepted_work_products.get(
+                    WorkProductKind.EVIDENCE_PACKET,
+                    evidence,
+                )
+
+            if evidence is None:
+                raise AcceptanceError("shared analysis requires accepted Evidence")
+            review_target = care or evidence
+            trigger_reasons = safety_trigger_reasons(
+                target=review_target,
+                episode_type=runtime_request.episode_type.value,
+                external_action=False,
+                doctor_material=False,
+            )
+            if deterministic_risk_reasons:
+                trigger_reasons = sorted(
+                    {
+                        *trigger_reasons,
+                        "deterministic_risk_escalate",
+                        *deterministic_risk_reasons,
+                    }
+                )
+            safety_planned = WorkProductKind.SAFETY_DECISION in planned
+            shared_safety_required = bool(trigger_reasons or safety_planned)
+            doctor_failure_codes: tuple[str, ...] = ()
+            safety_attempted = False
+            if shared_safety_required:
+                safety_attempted = True
+                try:
+                    safety, safety_envelopes, review_target = self._safety_loop(
+                        request=runtime_request,
+                        runtime=runtime,
+                        target=review_target,
+                        evidence=evidence,
+                        care=care,
+                        tool_receipts=tool_receipts,
+                        reasons=(
+                            trigger_reasons
+                            or ["registry_required_safety"]
+                        ),
+                        evaluate_result=False,
+                        return_non_approve=True,
+                    )
+                    envelopes.extend(safety_envelopes)
+                    if review_target.agent_id is AgentId.EVIDENCE_REASONING:
+                        evidence = review_target
+                    elif review_target.agent_id is AgentId.CARE_STRATEGY:
+                        care = review_target
+                except Exception:
+                    runtime.accepted_work_products.pop(
+                        WorkProductKind.SAFETY_DECISION,
+                        None,
+                    )
+                    safety = None
+                    doctor_failure_codes = ("DOCTOR_SAFETY_UNAVAILABLE",)
+
+            if safety is None and not safety_attempted:
+                try:
+                    safety, safety_envelopes, review_target = self._safety_loop(
+                        request=runtime_request,
+                        runtime=runtime,
+                        target=care or evidence,
+                        evidence=evidence,
+                        care=care,
+                        tool_receipts=tool_receipts,
+                        reasons=["doctor_projection_safety"],
+                        evaluate_result=False,
+                        return_non_approve=True,
+                    )
+                    envelopes.extend(safety_envelopes)
+                    if review_target.agent_id is AgentId.EVIDENCE_REASONING:
+                        evidence = review_target
+                    elif review_target.agent_id is AgentId.CARE_STRATEGY:
+                        care = review_target
+                except Exception:
+                    runtime.accepted_work_products.pop(
+                        WorkProductKind.SAFETY_DECISION,
+                        None,
+                    )
+                    safety = None
+                    doctor_failure_codes = ("DOCTOR_SAFETY_UNAVAILABLE",)
+
+            doctor_projection_allowed = False
+            if safety is not None:
+                safety_decision = SafetyDecision.model_validate(safety.payload)
+                doctor_projection_allowed = (
+                    safety_decision.verdict is SafetyVerdict.APPROVE
+                )
+                if not doctor_projection_allowed:
+                    doctor_failure_codes = (
+                        "DOCTOR_SAFETY_NOT_APPROVED",
+                    )
+
+            packet = EvidencePacket.model_validate(evidence.payload)
+            summary_lines = tuple(claim.statement for claim in packet.claims)
+            if care is not None:
+                strategy = CareStrategy.model_validate(care.payload)
+                if strategy.primary_action is not None:
+                    summary_lines = (*summary_lines, strategy.primary_action.title)
+            if not summary_lines:
+                summary_lines = ("当前没有足够证据形成健康趋势结论。",)
+            return SharedNightAnalysis.create(
+                source=request.source,
+                registry_hash=stable_hash(product_agent_manifest()),
+                runtime_request=runtime_request,
+                summary_lines=summary_lines,
+                evidence=evidence,
+                care=care,
+                safety=safety,
+                doctor_projection_allowed=doctor_projection_allowed,
+                doctor_failure_codes=doctor_failure_codes,
+                envelopes=tuple(envelopes),
+                agent_invocations=tuple(runtime.invocation_records),
+                tool_receipts=tuple(tool_receipts),
+            )
+        finally:
+            self._release_transient_episode_state(runtime_request.episode_id)
+
+    @serialized_episode_execution
+    def render_elder_narrative(
+        self,
+        request: ElderNarrativeRequest,
+    ) -> ElderNarrative:
+        """Run one bounded SleepCare content plan over accepted shared facts."""
+
+        runtime_request = request.runtime_request
+        runtime = _DetachedNarrativeRuntime(request.shared_analysis)
+        invocation: AgentInvocationRecord | None = None
+        fallback_text = request.elder_projection.text
+        assert fallback_text is not None
+        try:
+            turn = self.agent_invocation_coordinator.invoke_turn(
+                request=runtime_request,
+                runtime=runtime,
+                agent=self.agent_roster.sleepcare,
+                tool_receipts=[],
+                accepted_evidence=request.shared_analysis.evidence,
+                safety_target=None,
+            )
+            invocation = runtime.invocation_records[0]
+            envelope = turn.envelope
+            if envelope.tool_requests or envelope.collaboration_requests:
+                raise AcceptanceError("elder narrative requests are disallowed")
+            accepted = accept_communication(
+                envelope,
+                snapshot=runtime_request.fact_snapshot,
+                accepted_evidence=request.shared_analysis.evidence,
+                accepted_care=request.shared_analysis.care,
+                reviewed_knowledge_refs=set(),
+                reviewed_knowledge_payloads={},
+                require_personal_grounding=runtime_request.personalized,
+                authenticated_user_text="",
+                expected_audience_role="elder",
+            )
+            draft = CommunicationDraft.model_validate(accepted.payload)
+            if draft.memory_change_candidates:
+                raise AcceptanceError("elder narrative cannot propose Memory changes")
+            return ElderNarrative(
+                state=ElderNarrativeState.READY,
+                source_shared_analysis_sha256=(
+                    request.shared_analysis.shared_analysis_sha256
+                ),
+                source_projection_sha256=(
+                    request.source_projection_identity_sha256
+                ),
+                render_identity_sha256=request.render_identity_sha256,
+                text=draft.text,
+                communication=draft,
+                invocation=invocation,
+            )
+        except Exception as exc:
+            if runtime.invocation_records:
+                invocation = runtime.invocation_records[0]
+            return ElderNarrative(
+                state=ElderNarrativeState.FALLBACK,
+                source_shared_analysis_sha256=(
+                    request.shared_analysis.shared_analysis_sha256
+                ),
+                source_projection_sha256=(
+                    request.source_projection_identity_sha256
+                ),
+                render_identity_sha256=request.render_identity_sha256,
+                text=fallback_text,
+                invocation=invocation,
+                failure_codes=(self._elder_narrative_failure_code(exc),),
+            )
+        finally:
+            self._release_transient_episode_state(runtime_request.episode_id)
+
+    def _release_transient_episode_state(self, episode_id: str) -> None:
+        try:
+            self.tool_execution_coordinator.release_episode(episode_id)
+        except Exception:
+            LOGGER.exception(
+                "shared Product Tool cache cleanup failed for Episode %s",
+                episode_id,
+            )
+        try:
+            self.provider_input_budget.release_episode(episode_id)
+        except Exception:
+            LOGGER.exception(
+                "shared provider-ledger cleanup failed for Episode %s",
+                episode_id,
+            )
+
+    @staticmethod
+    def _elder_narrative_failure_code(exc: Exception) -> str:
+        if isinstance(exc, AcceptanceError):
+            return "ELDER_NARRATIVE_REQUEST_REJECTED"
+        if isinstance(exc, (TypeError, ValueError)):
+            return "ELDER_NARRATIVE_INVALID"
+        return "ELDER_NARRATIVE_UNAVAILABLE"
 
     @serialized_episode_execution
     def run(self, request: ProductEpisodeRunRequest) -> ProductEpisodeRunResult:
@@ -1129,6 +1577,8 @@ class ProductEpisodeRunner:
         tool_receipts: list[ToolReceipt],
         reasons: list[str],
         allow_revision: bool = True,
+        evaluate_result: bool = True,
+        return_non_approve: bool = False,
     ) -> tuple[AcceptedWorkProduct, list[AgentEnvelope], AcceptedWorkProduct]:
         envelopes: list[AgentEnvelope] = []
         current = target
@@ -1145,8 +1595,11 @@ class ProductEpisodeRunner:
             )
             envelopes.append(envelope)
             decision = SafetyDecision.model_validate(safety.payload)
-            self._evaluate(runtime, WorkProductKind.SAFETY_DECISION, safety)
+            if evaluate_result:
+                self._evaluate(runtime, WorkProductKind.SAFETY_DECISION, safety)
             if decision.verdict == SafetyVerdict.APPROVE:
+                return safety, envelopes, current
+            if return_non_approve:
                 return safety, envelopes, current
             if decision.verdict == SafetyVerdict.BLOCK:
                 raise AcceptanceError("Safety blocked target")

@@ -907,7 +907,7 @@ class CommandProcessor:
         )
         semantic_key = _sha256(
             {
-                "stage": "product_agent",
+                "stage": "product.report.run.v1",
                 "source_operation_id": claim.work_id,
                 "night_episode_revision_id": revision_id,
                 "trigger": trigger,
@@ -930,6 +930,7 @@ class CommandProcessor:
         }
         operation_json = {
             "schema_version": "backend_operation.v2",
+            "command_type": "product.report.run.v1",
             "trigger": trigger,
             "source_operation_id": claim.work_id,
             "night_episode_id": episode_id,
@@ -952,7 +953,7 @@ class CommandProcessor:
             "protocol_version, namespace_generation, run_id, arm_id, id_scheme, "
             "origin_kind, semantic_key, queue_name, priority, available_at, "
             "max_attempts, workload_authorization_snapshot_json, policy_sha256) "
-            "VALUES (%s, %s, %s, 'product_agent', %s, %s, NULL, %s, %s, %s, "
+            "VALUES (%s, %s, %s, 'product.report.run.v1', %s, %s, NULL, %s, %s, %s, "
             "%s, 'pending', 0, 0, %s::jsonb, clock_timestamp(), "
             "clock_timestamp(), 2, %s, %s, %s, 'uuidv7', 'system', %s, "
             "'product_agent', 0, clock_timestamp(), 5, %s::jsonb, %s)",

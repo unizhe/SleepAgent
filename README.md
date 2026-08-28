@@ -12,3 +12,15 @@ scripts/verify_backend.sh all
 ```
 
 `compose.yaml` 是 PostgreSQL + replay 的开发/集成 harness，不是 live production 部署清单。总体文档索引见 [docs/README.md](docs/README.md)，Perceptor 的当前[架构](docs/architecture/perceptor-real-radar.md)与[运维边界](docs/operations/perceptor.md)分别说明已交付能力和仍需部署方补齐的编排。
+
+## Product 睡眠报告 CLI
+
+`sleepagent-report` 是现有 Product HTTP API 的薄客户端，不会在本地构造 Agent Runtime、直接读取 PostgreSQL 或访问雷达厂商。它按认证主体的本地 wake date 运行、查询和分页列出报告：
+
+```bash
+sleepagent-report run --wake-date 2026-08-26
+sleepagent-report show --wake-date 2026-08-26 --json
+sleepagent-report list --limit 20
+```
+
+服务地址、service credential、actor identity/epochs 和绝对私钥路径只从环境配置读取；命令行不接受 role、subject 或密钥。`run` 默认轮询只读状态接口，可用 `--no-wait` 仅提交请求。部署和状态语义见 [Product report 运维说明](docs/operations/product-report.md)。

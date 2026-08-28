@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Callable, cast
 
 from fastapi import APIRouter, Header, Query, Request
@@ -28,7 +29,11 @@ from sleepagent.api.product_contracts import (
     MemoryQueryResponse,
     PendingL2Change,
     ProductCareResponse,
+    ProductReportRunAccepted,
+    ProductReportRunRequest,
     ProductRecordsResponse,
+    ProductSleepReportListResponse,
+    ProductSleepReportResponse,
     ProductSleepTodayResponse,
     ProductTrendsResponse,
 )
@@ -105,6 +110,57 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             limit=limit,
             cursor=cursor,
         ))
+
+    @router.post(
+        "/reports/run",
+        response_model=ProductReportRunAccepted,
+        status_code=202,
+    )
+    async def run_report(
+        payload: ProductReportRunRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> ProductReportRunAccepted:
+        return provider().run_report(
+            request,
+            payload,
+            idempotency_key=idempotency_key,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/reports",
+        response_model=ProductSleepReportListResponse,
+    )
+    async def list_reports(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
+        trace: bool = False,
+    ) -> ProductSleepReportListResponse:
+        return provider().list_reports(
+            request,
+            limit=limit,
+            cursor=cursor,
+            trace=trace,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/reports/{wake_date}",
+        response_model=ProductSleepReportResponse,
+    )
+    async def show_report(
+        wake_date: date,
+        request: Request,
+        trace: bool = False,
+    ) -> ProductSleepReportResponse:
+        return provider().show_report(
+            request,
+            wake_date=wake_date,
+            trace=trace,
+            request_body=await request.body(),
+        )
 
     @router.post(
         "/interactions/start",

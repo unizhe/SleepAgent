@@ -53,6 +53,7 @@ from sleepagent.runtime.invocation import (
 from sleepagent.runtime.results import (
     ProductEpisodeRunRequest,
     effective_audience_role,
+    stable_selected_personalization_projection,
     uses_doctor_material_semantics,
 )
 from sleepagent.runtime.contracts import (
@@ -531,7 +532,56 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
             AgentId.EVIDENCE_REASONING,
             AgentId.CARE_STRATEGY,
         }:
-            if pinned.habit_facts:
+            if request.personalization_projection_version == (
+                "selected_stable.v1"
+            ):
+                stable_projection = (
+                    stable_selected_personalization_projection(pinned)
+                )
+                assert stable_projection is not None
+                habit_facts = stable_projection["habit_facts"]
+                if habit_facts:
+                    personalization_items.append(
+                        TrustedContextItem(
+                            key="personalization:habit_profile",
+                            trust_label=TrustLabel.CONFIRMED_HABIT,
+                            value={
+                                "schema_version": (
+                                    "selected_habit_facts.v1"
+                                ),
+                                "facts": habit_facts,
+                            },
+                            source_refs=tuple(
+                                "habit-fact:sha256:"
+                                + str(item["fact_ref_sha256"])
+                                for item in habit_facts
+                            ),
+                        )
+                    )
+                memory_slice = next(
+                    (
+                        item
+                        for item in stable_projection["memory_slices"]
+                        if item["requesting_agent"] == agent_id.value
+                    ),
+                    None,
+                )
+                if memory_slice is not None:
+                    personalization_items.append(
+                        TrustedContextItem(
+                            key="personalization:memory_slice",
+                            trust_label=(
+                                TrustLabel.USER_MEMORY_UNTRUSTED_DATA
+                            ),
+                            value=memory_slice,
+                            source_refs=tuple(
+                                "memory-revision:sha256:"
+                                + str(item["revision_ref_sha256"])
+                                for item in memory_slice["items"]
+                            ),
+                        )
+                    )
+            elif pinned.habit_facts:
                 personalization_items.append(
                     TrustedContextItem(
                         key="personalization:habit_profile",
@@ -574,7 +624,10 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                 ),
                 None,
             )
-            if memory_receipt is not None:
+            if (
+                request.personalization_projection_version == "legacy"
+                and memory_receipt is not None
+            ):
                 personalization_items.append(
                     TrustedContextItem(
                         key="personalization:memory_slice",

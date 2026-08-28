@@ -275,6 +275,7 @@ def test_provider_context_projection_strips_local_runtime_and_subject_ids() -> N
         fact_snapshot_id="private-fact-snapshot-id",
         fact_snapshot_hash="b" * 64,
         source_scope=snapshot.source_scope,
+        authorization_scope=("private:membership:read",),
         items=(
             TrustedContextItem(
                 key="canonical_fact",
@@ -282,10 +283,23 @@ def test_provider_context_projection_strips_local_runtime_and_subject_ids() -> N
                 value={
                     "subject_id": "private-subject-id",
                     "night_episode_id": "private-night-id",
+                    "actor_id": "private-actor-id",
+                    "membership_id": "private-membership-id",
+                    "authorization_metadata": {
+                        "scope": "private-authorization-value"
+                    },
+                    "raw_vendor_payload": {
+                        "vendor_secret": "private-vendor-value"
+                    },
                     "quality_state": "partial",
                     "valid_until": datetime(2026, 7, 10, 8, tzinfo=timezone.utc),
                 },
                 source_refs=("governed_evidence_set:sha256:" + "c" * 64,),
+            ),
+            TrustedContextItem(
+                key="membership_record",
+                trust_label=TrustLabel.SYSTEM_POLICY,
+                value={"membership": "private-whole-membership-item"},
             ),
         ),
     )
@@ -299,8 +313,16 @@ def test_provider_context_projection_strips_local_runtime_and_subject_ids() -> N
         "private-fact-snapshot-id",
         "private-subject-id",
         "private-night-id",
+        "private-actor-id",
+        "private-membership-id",
+        "private-authorization-value",
+        "private-vendor-value",
+        "private-whole-membership-item",
+        "private:membership:read",
     ):
         assert private_value not in serialized
+    assert "authorization_scope" not in serialized
+    assert "membership_record" not in serialized
     assert '"quality_state": "partial"' in serialized
     assert '"valid_until": "2026-07-10T08:00:00+00:00"' in serialized
 

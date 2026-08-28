@@ -317,3 +317,105 @@ final evidence, and cleanup verification are recorded under `docs/`.
 
 No vendor, model-provider, Git remote, commit, or tag operation was performed
 by this consolidation checkpoint.
+
+## Act 5 — Build: Product report CLI and shared-analysis authority
+
+### Round 1 — Codex build
+
+Implemented the frozen Product report plan through the existing ASGI/Worker
+topology. Exact authenticated wake-date report requests now converge on one
+canonical `SharedNightAnalysis.v1`, one deterministic three-role projection
+set, and an independently reusable elder narrative. Automatic fast-path and
+public reanalysis work route through the same authoritative urgent/UNUSABLE
+gate and shared semantic identity; the legacy automatic Product operation is
+retained only as a non-claimable compatibility bridge.
+
+The shared identity binds the exact episode revision, canonical observations,
+quality/risk policy, selected stable Habit/Memory meaning, governance epochs,
+and semantic runtime manifest. Volatile receipt, invocation, timestamp, and
+unrelated global revision values are excluded. Provider work is fenced before
+every HTTP attempt and again at final commit. Safe call/token aggregates are
+retained for committed, failed, prepared, and journaled-success/staging-failure
+attempts, while full provider request IDs remain confined to the governed
+invocation journal.
+
+The Product API now exposes report run/show/list contracts without internal
+identifiers. POST retains replay-consuming command authentication; the two
+idempotent report GET routes use the tightly scoped stateless verifier and
+SELECT-only authority/report/context reads. The new `sleepagent-report` command
+is an authenticated HTTP-only client with `run`, `show`, and `list`, polling,
+bounded timeouts, strict response allowlists, safe JSON/text rendering, and
+environment-only identity/credential configuration. Existing `/today`, sole
+process roots, provider transports, schema, migrations, dependencies, and
+runtime roster remain unchanged.
+
+### Round 2 — adversarial fixes
+
+The bounded audit found and closed: stable narrative retry generation after
+known-not-sent/dead-letter outcomes; ambiguous-send non-replay; Memory revision
+references accidentally becoming canonical Evidence; narrative projection
+content-vs-identity binding drift; failed-provider aggregate persistence;
+query-invisible prepared and orphaned journal usage accounting; a nonempty
+Memory read-path string/enum mismatch; legacy retrieval-handle compatibility;
+and automatic compatibility-wrapper terminal behavior. Direct regressions now
+cover those boundaries, concurrent canonical reuse, projection refresh,
+provider request-ID redaction, urgent/UNUSABLE zero-provider handling, and
+stable provider input/request hashes.
+
+### Codex verification
+
+- Runtime/worker focused regression: 109 passed.
+- API/report focused regression: 84 passed.
+- CLI/client focused regression: 35 passed, 1 opt-in live E2E skipped.
+- Independent adversarial focused regression: 250 passed, 1 opt-in E2E skipped.
+- Full unit suite: 917 passed.
+- Complete repository suite with localhost loopback permission: 1,000 passed,
+  27 skipped.
+- The nine real loopback OpenAI-compatible HTTP tests passed separately after
+  the default sandbox denied local socket creation.
+- Python 3.11 and host-Python compilation, CLI help smoke proof, AST duplicate-
+  key scan, and `git diff --check` passed.
+
+The 27 skips are environment-only: the host Python lacks `psycopg` and no test
+PostgreSQL/compose profile is configured; the Product report CLI process E2E is
+opt-in through `SLEEPAGENT_E2E_REPORT_ENABLED=1`. No database, provider, radar
+service, Git remote, migration, commit, or tag was changed or contacted. No
+commit was created.
+
+## Act 6 — Build: Product report publication and final-fence repair
+
+### Round 1 — Codex build
+
+Repaired the three post-implementation audit findings without changing the
+Product report topology, schema, public contracts, provider transport, Agent
+roster, or legacy per-role execution path. Analysis publication now serializes
+per exact NightEpisode revision and a valid journaled v3 result may transfer to
+a later business attempt and rebase only its revision number/parent envelope
+under the final publication fence. Provider-derived content and stable artifact
+identifiers remain unchanged.
+
+Urgent and UNUSABLE request closure now locks and re-reads governance epochs,
+the finalized current Episode revision, and the exact current quality/risk
+authority. A changed gate is not terminalized: the durable request refreshes
+its exact pins, returns to `retry`, and re-resolves without Product Agent or
+provider work from the stale decision. Shared-analysis and elder-narrative
+final commits now acquire the existing L2 writer advisory keys in fixed
+`habit`, then `memory` order before re-reading context and hold them through
+the atomic commit.
+
+### Codex verification
+
+- Focused repair and Product/runtime/API/privacy regression: 178 passed.
+- Repair module regression after concurrency additions: 32 passed.
+- Full unit-marked suite with localhost loopback permission: 1,015 passed,
+  27 deselected.
+- Complete repository suite with localhost loopback permission: 1,015 passed,
+  27 skipped.
+- PostgreSQL/process-gated collection: 27 skipped; `psycopg`, test DSNs, the
+  compose test-postgres profile, and the opt-in report CLI E2E configuration
+  are unavailable.
+- Python compilation and `git diff --check` passed.
+
+No external provider, radar/device service, production database, migration,
+dependency, Git remote, commit, or tag was contacted or changed. No commit was
+created.

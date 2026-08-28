@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal, Mapping, Protocol, cast
 
 from starlette.requests import Request
@@ -24,8 +25,12 @@ from sleepagent.api.product_contracts import (
     MemoryQueryResponse,
     PendingL2Change,
     ProductCareResponse,
+    ProductReportRunAccepted,
+    ProductReportRunRequest,
     ProductRecordsResponse,
     ProductRole,
+    ProductSleepReportListResponse,
+    ProductSleepReportResponse,
     ProductSleepTodayNoData,
     ProductSleepTodayProjection,
     ProductSleepTodayResponse,
@@ -39,6 +44,7 @@ READ_SCOPES = {
     "trends": "product:sleep:trends:read",
     "care": "product:sleep:care:read",
     "records": "product:sleep:records:read",
+    "reports": "product:sleep:today:read",
 }
 COMMAND_SCOPES = {
     "interaction.start": "product:sleep:interaction:write",
@@ -47,6 +53,7 @@ COMMAND_SCOPES = {
     "interaction.confirm": "product:sleep:care:confirm",
     "interaction.decline": "product:sleep:care:confirm",
     "interaction.feedback": "product:sleep:feedback:write",
+    "product.report.run.v1": "sleep:reanalysis:write",
 }
 
 
@@ -102,6 +109,14 @@ class ProductIdentityResolver(Protocol):
         purpose: str,
     ) -> ProductRequestContext: ...
 
+    def resolve_read(
+        self,
+        request: Request,
+        *,
+        body: bytes,
+        purpose: str,
+    ) -> ProductRequestContext: ...
+
 
 class ProductBackend(Protocol):
     def get_today_projection(
@@ -132,6 +147,32 @@ class ProductBackend(Protocol):
         limit: int,
         cursor: str | None,
     ) -> ProductCareResponse: ...
+
+    def reserve_report_run(
+        self,
+        context: ProductRequestContext,
+        *,
+        wake_date: date,
+        idempotency_key: str,
+        body_sha256: str,
+    ) -> str: ...
+
+    def get_report(
+        self,
+        context: ProductRequestContext,
+        *,
+        wake_date: date,
+        trace: bool,
+    ) -> ProductSleepReportResponse | None: ...
+
+    def list_reports(
+        self,
+        context: ProductRequestContext,
+        *,
+        limit: int,
+        cursor: str | None,
+        trace: bool,
+    ) -> ProductSleepReportListResponse: ...
 
     def reserve_command(
         self,
@@ -255,6 +296,99 @@ class ProductApiService:
         if kind == "care":
             return self.backend.get_care(context, limit=limit, cursor=cursor)
         raise RuntimeError("Product read dispatch drifted")
+
+    def run_report(
+        self,
+        request: Request,
+        payload: ProductReportRunRequest,
+        *,
+        idempotency_key: str | None,
+        request_body: bytes | None,
+    ) -> ProductReportRunAccepted:
+        if request_body is None:
+            raise ProductApiError(
+                "authenticated_body_missing",
+                "The authenticated request body is required.",
+                status_code=400,
+            )
+        context = self.identity_resolver.resolve(
+            request,
+            body=request_body,
+            purpose="sleep_care",
+        )
+        context.require_scope(COMMAND_SCOPES["product.report.run.v1"])
+        caller_key = _idempotency_key(idempotency_key)
+        self.backend.reserve_report_run(
+            context,
+            wake_date=payload.wake_date,
+            idempotency_key=caller_key,
+            body_sha256=_sha256_bytes(request_body),
+        )
+        return ProductReportRunAccepted(
+            wake_date=payload.wake_date,
+            status_url=(
+                "/product/sleep/reports/" + payload.wake_date.isoformat()
+            ),
+        )
+
+    def show_report(
+        self,
+        request: Request,
+        *,
+        wake_date: date,
+        trace: bool,
+        request_body: bytes,
+    ) -> ProductSleepReportResponse:
+        context = self.identity_resolver.resolve_read(
+            request,
+            body=request_body,
+            purpose="sleep_care",
+        )
+        context.require_scope(READ_SCOPES["reports"])
+        result = self.backend.get_report(
+            context,
+            wake_date=wake_date,
+            trace=trace,
+        )
+        if result is None:
+            raise ProductApiError(
+                "not_found",
+                "A finalized report night was not found for that wake date.",
+                status_code=404,
+            )
+        if result.wake_date != wake_date or result.audience != context.role:
+            raise RuntimeError("backend returned a report outside its authority")
+        return result
+
+    def list_reports(
+        self,
+        request: Request,
+        *,
+        limit: int,
+        cursor: str | None,
+        trace: bool,
+        request_body: bytes,
+    ) -> ProductSleepReportListResponse:
+        context = self.identity_resolver.resolve_read(
+            request,
+            body=request_body,
+            purpose="sleep_care",
+        )
+        context.require_scope(READ_SCOPES["reports"])
+        result = self.backend.list_reports(
+            context,
+            limit=limit,
+            cursor=cursor,
+            trace=trace,
+        )
+        dates = tuple(item.wake_date for item in result.items)
+        if (
+            any(item.audience != context.role for item in result.items)
+            or len(dates) != len(set(dates))
+            or dates != tuple(sorted(dates, reverse=True))
+        ):
+            raise RuntimeError("backend returned reports outside their authority")
+        return result
 
     def submit(
         self,
@@ -466,6 +600,15 @@ class FailClosedProductIdentityResolver:
             status_code=503,
             retryable=True,
         )
+
+    def resolve_read(
+        self,
+        request: Request,
+        *,
+        body: bytes,
+        purpose: str,
+    ) -> ProductRequestContext:
+        return self.resolve(request, body=body, purpose=purpose)
 
 
 def _idempotency_key(value: str | None) -> str:

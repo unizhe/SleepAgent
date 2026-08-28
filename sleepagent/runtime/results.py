@@ -37,7 +37,101 @@ LEGACY_UNBOUND_WAITING_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
 def product_episode_request_hash(request: "ProductEpisodeRunRequest") -> str:
     """Bind a continuation to the exact request persisted at its checkpoint."""
 
-    return stable_hash(request.model_dump(mode="json"))
+    material = request.model_dump(mode="json")
+    if request.personalization_projection_version == "selected_stable.v1":
+        material["personalization"] = (
+            stable_selected_personalization_projection(
+                request.personalization
+            )
+        )
+    return stable_hash(material)
+
+
+def stable_selected_personalization_projection(
+    pinned: "PinnedPersonalizationContext | None",
+) -> dict[str, Any] | None:
+    """Project only selected L2 meaning; omit global/receipt/runtime identity."""
+
+    if pinned is None:
+        return None
+    habit_facts = sorted(
+        (
+            {
+                "fact_ref_sha256": stable_hash(item.fact_id),
+                "fact_hash": item.fact_hash,
+                "concept_id": item.concept_id,
+                "concept_version": item.concept_version,
+                "value": item.value,
+                "unit": item.unit,
+                "valid_until": (
+                    None
+                    if item.valid_until is None
+                    else item.valid_until.isoformat()
+                ),
+                "source_role": (
+                    item.evidence.role
+                    if item.evidence is not None
+                    else None
+                ),
+                "clinical_truth": False,
+            }
+            for item in pinned.habit_facts
+        ),
+        key=lambda item: (
+            item["fact_ref_sha256"],
+            item["fact_hash"],
+        ),
+    )
+    memory_slices = []
+    for receipt in sorted(
+        pinned.memory_read_receipts,
+        key=lambda item: (item.requesting_agent.value, item.purpose.value),
+    ):
+        items = sorted(
+            (
+                {
+                    "revision_ref_sha256": stable_hash(item.revision_ref),
+                    "concept_id": item.concept_id,
+                    "value_schema_id": str(item.value_schema_id),
+                    "value_schema_version": item.value_schema_version,
+                    "typed_value": item.typed_value,
+                    "value_hash": item.value_hash,
+                    "provenance_type": item.provenance_type.value,
+                    "source_scope_kind": item.source_scope_kind.value,
+                    "status": item.status.value,
+                    "valid_from": item.valid_from.isoformat(),
+                    "valid_until": (
+                        None
+                        if item.valid_until is None
+                        else item.valid_until.isoformat()
+                    ),
+                    "trust_label": item.trust_label.value,
+                    "verified_evidence": item.verified_evidence,
+                    "verified_medical_fact": item.verified_medical_fact,
+                }
+                for item in receipt.items
+            ),
+            key=lambda item: (
+                item["revision_ref_sha256"],
+                item["concept_id"],
+                item["value_hash"],
+            ),
+        )
+        memory_slices.append(
+            {
+                "requesting_agent": receipt.requesting_agent.value,
+                "purpose": receipt.purpose.value,
+                "items": items,
+                "untrusted_personal_context": True,
+                "verified_evidence": False,
+                "verified_medical_fact": False,
+            }
+        )
+    return {
+        "schema_version": "selected_personalization_projection.v1",
+        "habit_facts": habit_facts,
+        "memory_slices": memory_slices,
+    }
 
 
 class ProductUserFactResponse(StrictContract):
@@ -121,6 +215,10 @@ class ProductEpisodeRunRequest(StrictContract):
     ] | None = None
     profile_relevant_concept_ids: tuple[str, ...] = ()
     personalization: PinnedPersonalizationContext | None = None
+    personalization_projection_version: Literal[
+        "legacy",
+        "selected_stable.v1",
+    ] = "legacy"
 
     @model_validator(mode="after")
     def validate_current_inputs(self) -> ProductEpisodeRunRequest:
@@ -163,25 +261,36 @@ class ProductEpisodeRunRequest(StrictContract):
             raise ValueError("Profile concept read requires an explicit purpose")
         if self.personalization is not None:
             pinned = self.personalization
-            if (
-                self.fact_snapshot.habit_profile_version
-                != pinned.habit_profile_version
-                or self.fact_snapshot.habit_profile_hash
-                != pinned.habit_profile_hash
-                or self.fact_snapshot.memory_context_version
-                != pinned.memory_state_version
+            if self.personalization_projection_version == "legacy":
+                if (
+                    self.fact_snapshot.habit_profile_version
+                    != pinned.habit_profile_version
+                    or self.fact_snapshot.habit_profile_hash
+                    != pinned.habit_profile_hash
+                    or self.fact_snapshot.memory_context_version
+                    != pinned.memory_state_version
+                    or self.fact_snapshot.memory_read_receipt_refs
+                    != tuple(
+                        item.receipt_id for item in pinned.memory_read_receipts
+                    )
+                    or self.fact_snapshot.memory_read_receipt_hashes
+                    != tuple(
+                        str(item.receipt_hash)
+                        for item in pinned.memory_read_receipts
+                    )
+                ):
+                    raise ValueError(
+                        "Product personalization must exactly match FactSnapshot"
+                    )
+            elif (
+                self.fact_snapshot.binding.role != "system"
+                or self.audience_role is not None
+                or self.fact_snapshot.memory_context_version != 0
                 or self.fact_snapshot.memory_read_receipt_refs
-                != tuple(
-                    item.receipt_id for item in pinned.memory_read_receipts
-                )
                 or self.fact_snapshot.memory_read_receipt_hashes
-                != tuple(
-                    str(item.receipt_hash)
-                    for item in pinned.memory_read_receipts
-                )
             ):
                 raise ValueError(
-                    "Product personalization must exactly match FactSnapshot"
+                    "stable selected personalization requires a neutral snapshot"
                 )
             habit_fact_refs = {item.fact_id for item in pinned.habit_facts}
             if not habit_fact_refs.issubset(self.fact_snapshot.source_refs):
@@ -193,7 +302,12 @@ class ProductEpisodeRunRequest(StrictContract):
                 for receipt in pinned.memory_read_receipts
                 for handle in receipt.handles
             }
-            if not memory_handle_refs.issubset(self.fact_snapshot.source_refs):
+            if (
+                self.personalization_projection_version == "legacy"
+                and not memory_handle_refs.issubset(
+                    self.fact_snapshot.source_refs
+                )
+            ):
                 raise ValueError(
                     "pinned Memory handles must be bound as FactSnapshot sources"
                 )

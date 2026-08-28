@@ -390,6 +390,58 @@ class ActorAssertionVerifier:
         body: bytes,
         now: datetime,
     ) -> ActorAssertionClaims:
+        return self._verify(
+            compact_jws=compact_jws,
+            service_principal=service_principal,
+            method=method,
+            path=path,
+            body=body,
+            now=now,
+            replay_store=self._replay_store,
+        )
+
+    def verify_idempotent_read(
+        self,
+        *,
+        compact_jws: str,
+        service_principal: ServicePrincipal,
+        method: str,
+        path: str,
+        body: bytes,
+        now: datetime,
+    ) -> ActorAssertionClaims:
+        """Verify a signed side-effect-free GET without consuming its nonce."""
+
+        if (
+            method.upper() != "GET"
+            or body
+            or not _is_product_report_read_path(path)
+        ):
+            raise _invalid_assertion(
+                "Stateless actor verification is restricted to Product report "
+                "empty-body GETs."
+            )
+        return self._verify(
+            compact_jws=compact_jws,
+            service_principal=service_principal,
+            method=method,
+            path=path,
+            body=body,
+            now=now,
+            replay_store=None,
+        )
+
+    def _verify(
+        self,
+        *,
+        compact_jws: str,
+        service_principal: ServicePrincipal,
+        method: str,
+        path: str,
+        body: bytes,
+        now: datetime,
+        replay_store: AssertionReplayStore | None,
+    ) -> ActorAssertionClaims:
         try:
             encoded_header, encoded_payload, encoded_signature = compact_jws.split(".")
             header = json.loads(_b64url_decode(encoded_header))
@@ -441,19 +493,20 @@ class ActorAssertionVerifier:
             raise _invalid_assertion(
                 "The actor assertion is not bound to this request body."
             )
-        consumed = self._replay_store.consume(
-            issuer=claims.iss,
-            assertion_id=claims.jti,
-            nonce=claims.nonce,
-            expires_at=expires_at + self._clock_skew,
-            now=now,
-        )
-        if not consumed:
-            raise SleepApiSecurityError(
-                PublicErrorCode.ACTOR_ASSERTION_REPLAYED,
-                "The actor assertion id or nonce has already been used.",
-                status_code=401,
+        if replay_store is not None:
+            consumed = replay_store.consume(
+                issuer=claims.iss,
+                assertion_id=claims.jti,
+                nonce=claims.nonce,
+                expires_at=expires_at + self._clock_skew,
+                now=now,
             )
+            if not consumed:
+                raise SleepApiSecurityError(
+                    PublicErrorCode.ACTOR_ASSERTION_REPLAYED,
+                    "The actor assertion id or nonce has already been used.",
+                    status_code=401,
+                )
         return claims
 
     @staticmethod
@@ -539,6 +592,39 @@ class SleepApiAuthenticator:
         required_scopes: frozenset[str],
         allowed_roles: frozenset[PublicActorRole] | None = None,
     ) -> VerifiedActorIdentity:
+        return self._verify_identity(
+            request,
+            body=body,
+            required_scopes=required_scopes,
+            allowed_roles=allowed_roles,
+            assertion_verifier=self.actor_verifier.verify,
+        )
+
+    def verify_read_identity(
+        self,
+        request: Request,
+        *,
+        body: bytes,
+        required_scopes: frozenset[str],
+        allowed_roles: frozenset[PublicActorRole] | None = None,
+    ) -> VerifiedActorIdentity:
+        return self._verify_identity(
+            request,
+            body=body,
+            required_scopes=required_scopes,
+            allowed_roles=allowed_roles,
+            assertion_verifier=self.actor_verifier.verify_idempotent_read,
+        )
+
+    def _verify_identity(
+        self,
+        request: Request,
+        *,
+        body: bytes,
+        required_scopes: frozenset[str],
+        allowed_roles: frozenset[PublicActorRole] | None,
+        assertion_verifier: Callable[..., ActorAssertionClaims],
+    ) -> VerifiedActorIdentity:
         now = self.now_factory()
         service_principal = self.service_verifier.verify(request, now=now)
         assertion = request.headers.get("x-sleep-actor-assertion")
@@ -548,7 +634,7 @@ class SleepApiAuthenticator:
                 "An actor assertion is required.",
                 status_code=401,
             )
-        claims = self.actor_verifier.verify(
+        claims = assertion_verifier(
             compact_jws=assertion,
             service_principal=service_principal,
             method=request.method,
@@ -626,6 +712,20 @@ def _invalid_assertion(message: str) -> SleepApiSecurityError:
         message,
         status_code=401,
     )
+
+
+def _is_product_report_read_path(path: str) -> bool:
+    root = "/product/sleep/reports"
+    if path == root:
+        return True
+    if not path.startswith(root + "/"):
+        return False
+    candidate = path[len(root) + 1 :]
+    try:
+        parsed = datetime.strptime(candidate, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return candidate == parsed.isoformat()
 
 
 def _b64url_decode(value: str) -> bytes:

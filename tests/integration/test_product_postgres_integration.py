@@ -6,12 +6,39 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, NoReturn
 from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from starlette.requests import Request
+
+from reference_client.sleep_api_v1_client import Ed25519ActorSigner
+from sleepagent.api.postgres import (
+    PostgresAssertionReplayStore,
+    PostgresAuthorityStore,
+    PostgresProductBackend,
+    PostgresProductIdentityResolver,
+    _lock_l2_subject,
+)
+from sleepagent.api.product import ProductApiError, ProductApiService
+from sleepagent.api.product_contracts import (
+    ProductReportRunRequest,
+    ProductReportState,
+    ProductRole,
+)
+from sleepagent.api.public_auth import (
+    ActorAssertionVerifier,
+    ActorVerificationKey,
+    FailClosedRoleBindingResolver,
+    HttpsBearerServicePrincipalVerifier,
+    RotatingServiceCredential,
+    SleepApiAuthenticator,
+)
 
 from sleepagent.config import (
     DataMode as BackendDataMode,
@@ -39,6 +66,9 @@ from sleepagent.runtime.memory import (
 from sleepagent.domain.habit import HabitFact, HabitOperation
 from sleepagent.domain.product_data import public_product_subject_ref
 from sleepagent.workers.product import (
+    PRODUCT_ELDER_NARRATIVE_OPERATION,
+    PRODUCT_REPORT_RUN_OPERATION,
+    PRODUCT_SHARED_ANALYSIS_OPERATION,
     PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST,
     PostgresProductAgentRepository,
     PreparedProductAgentArtifact,
@@ -101,6 +131,18 @@ def _deterministic_runtime_bundle() -> ProductRuntimeBundle:
     )
 
 
+class _IdentityVariantDeterministicModel(
+    DeterministicReplayStructuredAgentModel
+):
+    def __init__(self, model_id: str) -> None:
+        super().__init__()
+        self._model_id = model_id
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+
 @dataclass(frozen=True, slots=True)
 class _ProductSeed:
     namespace_id: str
@@ -113,6 +155,20 @@ class _ProductSeed:
     quality_assessment_id: str
     current_risk_id: str
     policy_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedSharedCase:
+    seed: _ProductSeed
+    provider: PsycopgPoolProvider
+    factory: UnitOfWorkFactory[object]
+    store: PostgresDurableWorkStore
+    bundle: ProductRuntimeBundle
+    processor: ProductAgentProcessor
+    scope: UowScope
+    lease: ProductAgentLease
+    source: object
+    artifact: PreparedProductAgentArtifact
 
 
 def _required_environment(name: str) -> str:
@@ -846,6 +902,7 @@ def _claim_product_work(
     store: PostgresDurableWorkStore,
     *,
     worker_instance: str,
+    operation_type: str = "product_agent",
 ) -> LeaseClaim:
     claim = store.claim(
         queue="product_agent",
@@ -856,10 +913,369 @@ def _claim_product_work(
     assert claim.metadata == {
         "work_kind": "operation",
         "lease_seconds": 300,
-        "operation_type": "product_agent",
+        "operation_type": operation_type,
         "queue_name": "product_agent",
     }
     return claim
+
+
+def _convert_seed_to_report_request(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+) -> None:
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_operations
+                SET operation_type = %s,
+                    operation_json = operation_json || jsonb_build_object(
+                      'command_type', %s::text,
+                      'wake_date', (
+                        SELECT episode_local_date::text
+                        FROM public.sleep_domain_night_episodes
+                        WHERE night_episode_id = %s
+                      )
+                    )
+                WHERE operation_id = %s AND status = 'pending'
+                """,
+                (
+                    PRODUCT_REPORT_RUN_OPERATION,
+                    PRODUCT_REPORT_RUN_OPERATION,
+                    seed.night_episode_id,
+                    seed.operation_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+
+
+def _clone_report_request(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+) -> str:
+    operation_id = str(UUID7Generator()())
+    suffix = uuid4().hex
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_operations (
+                  operation_id, namespace_id, data_mode, operation_type,
+                  subject_id, service_principal_id, actor_id,
+                  target_resource_id, target_resource_key, idempotency_key,
+                  request_sha256, status, attempt_count, cas_version,
+                  operation_json, created_at, updated_at, protocol_version,
+                  namespace_generation, run_id, arm_id, id_scheme,
+                  origin_kind, semantic_key, queue_name, priority,
+                  available_at, max_attempts,
+                  workload_authorization_snapshot_json, policy_sha256
+                )
+                SELECT %s, namespace_id, data_mode, operation_type,
+                       subject_id, service_principal_id, actor_id,
+                       target_resource_id, target_resource_key || %s,
+                       idempotency_key || %s, request_sha256,
+                       'pending', 0, 0,
+                       operation_json || jsonb_build_object(
+                         'request_variant', %s::text
+                       ),
+                       clock_timestamp(), clock_timestamp(), protocol_version,
+                       namespace_generation, run_id, arm_id, id_scheme,
+                       origin_kind, %s, queue_name, priority,
+                       clock_timestamp(), max_attempts,
+                       workload_authorization_snapshot_json, policy_sha256
+                FROM public.sleep_domain_operations
+                WHERE operation_id = %s
+                """,
+                (
+                    operation_id,
+                    f":{suffix}",
+                    f":{suffix}",
+                    suffix,
+                    hashlib.sha256(f"report:{suffix}".encode()).hexdigest(),
+                    seed.operation_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+    return operation_id
+
+
+def _replace_current_risk(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+    urgent: bool,
+    update_operation: bool,
+) -> str:
+    risk_id = f"risk-gate-{uuid4().hex}"
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT risk_json
+                FROM public.sleep_domain_current_risk
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_id = %s
+                """,
+                (seed.namespace_id, seed.subject_id, seed.night_episode_id),
+            )
+            current = CurrentRisk.model_validate(cursor.fetchone()[0])
+            replacement = current.model_copy(
+                update={
+                    "current_risk_id": risk_id,
+                    "risk_state": (
+                        RiskState.REVIEWED_SIGNAL
+                        if urgent
+                        else RiskState.NO_REVIEWED_SIGNAL
+                    ),
+                    "reason_codes": (
+                        "acceptance_urgent"
+                        if urgent
+                        else "acceptance_nonurgent",
+                    ),
+                    "health_escalation_allowed": urgent,
+                    "updated_at": datetime.now(tz=UTC),
+                }
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_risk_assessments (
+                  current_risk_id, namespace_id, data_mode, subject_id,
+                  night_episode_id, observed_at, policy_version, risk_json
+                ) VALUES (%s, %s, 'replay', %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    risk_id,
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.night_episode_id,
+                    replacement.observed_at,
+                    replacement.policy_version,
+                    replacement.model_dump_json(),
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_current_risk
+                SET current_risk_id = %s, cas_version = cas_version + 1,
+                    risk_json = %s::jsonb, updated_at = %s
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_id = %s
+                """,
+                (
+                    risk_id,
+                    replacement.model_dump_json(),
+                    replacement.updated_at,
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.night_episode_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            if update_operation:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET operation_json = jsonb_set(
+                      operation_json, '{current_risk_id}', to_jsonb(%s::text)
+                    )
+                    WHERE operation_id = %s
+                    """,
+                    (risk_id, seed.operation_id),
+                )
+                assert cursor.rowcount == 1
+    return risk_id
+
+
+def _replace_current_quality(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    seed: _ProductSeed,
+    usable: bool,
+    update_operation: bool,
+) -> str:
+    quality_id = f"quality-gate-{uuid4().hex}"
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT assessment_json
+                FROM public.sleep_domain_current_quality
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_id = %s
+                """,
+                (seed.namespace_id, seed.subject_id, seed.night_episode_id),
+            )
+            current = DeterministicQualityAssessment.model_validate(
+                cursor.fetchone()[0]
+            )
+            replacement = current.model_copy(
+                update={
+                    "assessment_id": quality_id,
+                    "quality_state": (
+                        QualityState.SUFFICIENT
+                        if usable
+                        else QualityState.DATA_INSUFFICIENT
+                    ),
+                    "data_sufficiency": (
+                        DataSufficiency.SUFFICIENT
+                        if usable
+                        else DataSufficiency.DATA_INSUFFICIENT
+                    ),
+                    "coverage_ratio": 1.0 if usable else 0.0,
+                    "covered_bin_count": (
+                        current.expected_bin_count if usable else 0
+                    ),
+                    "reason_codes": (
+                        "acceptance_usable"
+                        if usable
+                        else "acceptance_unusable",
+                    ),
+                    "assessed_at": datetime.now(tz=UTC),
+                }
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_quality_assessments (
+                  assessment_id, namespace_id, data_mode, subject_id,
+                  night_episode_id, assessed_at, policy_version,
+                  assessment_json
+                ) VALUES (%s, %s, 'replay', %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    quality_id,
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.night_episode_id,
+                    replacement.assessed_at,
+                    replacement.policy_version,
+                    replacement.model_dump_json(),
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_current_quality
+                SET assessment_id = %s, cas_version = cas_version + 1,
+                    assessment_json = %s::jsonb, updated_at = %s
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_id = %s
+                """,
+                (
+                    quality_id,
+                    replacement.model_dump_json(),
+                    replacement.assessed_at,
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.night_episode_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            if update_operation:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET operation_json = jsonb_set(
+                      operation_json, '{quality_assessment_id}',
+                      to_jsonb(%s::text)
+                    )
+                    WHERE operation_id = %s
+                    """,
+                    (quality_id, seed.operation_id),
+                )
+                assert cursor.rowcount == 1
+    return quality_id
+
+
+def _cancel_pending_product_work(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    namespace_id: str,
+) -> None:
+    with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_operations
+                SET status = 'cancelled', outcome_class = 'cancelled',
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    fencing_token = NULL, worker_instance = NULL,
+                    heartbeat_at = NULL, updated_at = clock_timestamp()
+                WHERE namespace_id = %s AND queue_name = 'product_agent'
+                  AND status IN ('pending', 'retry', 'running')
+                """,
+                (namespace_id,),
+            )
+
+
+def _prepare_shared_acceptance_case(
+    psycopg: object,
+    *,
+    admin_dsn: str,
+    worker_dsn: str,
+    worker_principal: str,
+) -> _PreparedSharedCase:
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    _convert_seed_to_report_request(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+    bundle = _deterministic_runtime_bundle()
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    processor = ProductAgentProcessor(factory, runtime_bundle=bundle)
+    report_claim = _claim_product_work(
+        store,
+        worker_instance=f"l2-report-{uuid4().hex}",
+        operation_type=PRODUCT_REPORT_RUN_OPERATION,
+    )
+    routed = processor.route_report_request(
+        store.uow_scope_for_claim(report_claim),
+        _lease_for_claim(report_claim),
+    )
+    assert routed.state == "pending"
+    assert routed.shared_operation_created is True
+
+    shared_claim = _claim_product_work(
+        store,
+        worker_instance=f"l2-shared-{uuid4().hex}",
+        operation_type=PRODUCT_SHARED_ANALYSIS_OPERATION,
+    )
+    scope = store.uow_scope_for_claim(shared_claim)
+    lease = _lease_for_claim(shared_claim)
+    source = processor.load_source(scope, lease)
+    artifact = processor.prepare_shared(
+        scope=scope,
+        source=source,
+        lease=lease,
+        prepared_at=datetime.now(tz=UTC),
+    )
+    _persist_prepared(factory, scope, lease, artifact)
+    return _PreparedSharedCase(
+        seed=seed,
+        provider=provider,
+        factory=factory,
+        store=store,
+        bundle=bundle,
+        processor=processor,
+        scope=scope,
+        lease=lease,
+        source=source,
+        artifact=artifact,
+    )
 
 
 def _lease_for_claim(claim: LeaseClaim) -> ProductAgentLease:
@@ -1128,6 +1544,8 @@ class _PersistPreparedThenCrashProcessor(ProductAgentProcessor):
         scope: UowScope,
         lease: ProductAgentLease,
         artifact: PreparedProductAgentArtifact,
+        *,
+        source: object | None = None,
     ) -> NoReturn:
         self.persisted_artifact = artifact
         _persist_prepared(self.uow_factory, scope, lease, artifact)
@@ -2458,3 +2876,1054 @@ def test_namespace_capacity_and_fairness_hold_under_concurrent_claim_load() -> N
             assert cursor.fetchall() == sorted(
                 (seed.namespace_id, 1) for seed in seeds
             )
+
+
+def _report_write_counts(
+    cursor: Any,
+    *,
+    namespace_id: str,
+    subject_id: str,
+    assertion_issuer: str,
+) -> dict[str, int]:
+    statements: dict[str, tuple[str, tuple[object, ...]]] = {
+        "actor_assertion_replays": (
+            "SELECT count(*) FROM public.sleep_api_actor_assertion_replays "
+            "WHERE issuer = %s",
+            (assertion_issuer,),
+        ),
+        "memory_read_receipts": (
+            "SELECT count(*) FROM public.backend_memory_read_receipts_v2 "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "command_receipts": (
+            "SELECT count(*) FROM public.backend_command_receipts "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "operations": (
+            "SELECT count(*) FROM public.sleep_domain_operations "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "authorization_audit": (
+            "SELECT count(*) FROM public.backend_authorization_audit "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "domain_outbox": (
+            "SELECT count(*) FROM public.sleep_domain_domain_outbox "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "product_attempts": (
+            "SELECT count(*) FROM public.backend_product_attempts "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "invocations": (
+            "SELECT count(*) FROM public.backend_invocations "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "invocation_journal": (
+            "SELECT count(*) FROM public.backend_invocation_journal "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "analysis_revisions": (
+            "SELECT count(*) FROM public.sleep_domain_analysis_revisions "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "analysis_role_views": (
+            "SELECT count(*) FROM public.sleep_domain_analysis_role_views "
+            "WHERE namespace_id = %s AND subject_id = %s",
+            (namespace_id, subject_id),
+        ),
+        "api_operation_commands": (
+            "SELECT count(*) FROM public.sleep_api_operation_commands "
+            "WHERE namespace_id = %s",
+            (namespace_id,),
+        ),
+    }
+    counts: dict[str, int] = {}
+    for name, (statement, parameters) in statements.items():
+        cursor.execute(statement, parameters)
+        row = cursor.fetchone()
+        assert row is not None
+        counts[name] = int(row[0])
+    return counts
+
+
+def test_product_report_exact_reservation_and_stateless_reads_are_postgres_safe(
+) -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    api_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_API_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    api_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL",
+        "sleepagent-api-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    suffix = uuid4().hex
+    actor_id = f"report-actor-{suffix}"
+    binding_id = f"report-binding-{suffix}"
+    assertion_issuer = f"report-issuer-{suffix}"
+    service_secret = f"report-service-secret-{suffix}"
+    scopes = ["product:sleep:today:read", "sleep:reanalysis:write"]
+    higher_revision_id = str(UUID7Generator()())
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.backend_actors "
+                "(actor_id, actor_kind, status) "
+                "VALUES (%s, 'human', 'active')",
+                (actor_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_actor_subject_bindings (
+                  binding_id, namespace_id, data_mode, actor_id, subject_id,
+                  role, status, purpose_json, scopes_json,
+                  authorization_epoch, valid_from
+                ) VALUES (
+                  %s, %s, 'replay', %s, %s, 'elder', 'active',
+                  '["sleep_care"]'::jsonb, %s::jsonb, 1,
+                  clock_timestamp() - interval '1 minute'
+                )
+                """,
+                (
+                    binding_id,
+                    seed.namespace_id,
+                    actor_id,
+                    seed.subject_id,
+                    json.dumps(scopes),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_principal_grants (
+                  grant_id, principal_id, namespace_id, data_mode, purpose,
+                  scopes_json, allowed_handlers_json, authorization_epoch,
+                  status, valid_from
+                ) VALUES (
+                  %s, %s, %s, 'replay', 'sleep_care', %s::jsonb,
+                  '["product_agent"]'::jsonb, 1, 'active',
+                  clock_timestamp() - interval '1 minute'
+                )
+                """,
+                (
+                    f"report-grant-{suffix}",
+                    api_principal,
+                    seed.namespace_id,
+                    json.dumps(scopes),
+                ),
+            )
+            # A larger revision exists but is not the marked current revision.
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_night_episode_revisions (
+                  night_episode_revision_id, namespace_id, data_mode,
+                  night_episode_id, subject_id, revision_number,
+                  revision_json, created_at, protocol_version, id_scheme,
+                  namespace_generation, run_id, arm_id, episode_anchor_key,
+                  timezone_name, boundary_policy_version, bed_local_date,
+                  wake_local_date, episode_local_date, assignment_basis,
+                  date_confidence, assignment_estimated, date_state,
+                  date_conflict, episode_schema_version
+                )
+                SELECT %s, namespace_id, data_mode, night_episode_id,
+                       subject_id, revision_number + 1,
+                       revision_json || jsonb_build_object(
+                         'night_episode_revision_id', %s::text,
+                         'revision_number', revision_number + 1
+                       ),
+                       clock_timestamp(), protocol_version, id_scheme,
+                       namespace_generation, run_id, arm_id,
+                       episode_anchor_key, timezone_name,
+                       boundary_policy_version, bed_local_date,
+                       wake_local_date, episode_local_date, assignment_basis,
+                       date_confidence, assignment_estimated, date_state,
+                       date_conflict, episode_schema_version
+                FROM public.sleep_domain_night_episode_revisions
+                WHERE night_episode_revision_id = %s
+                """,
+                (
+                    higher_revision_id,
+                    higher_revision_id,
+                    seed.night_episode_revision_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                "SELECT episode_local_date "
+                "FROM public.sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (seed.night_episode_id,),
+            )
+            wake_date_row = cursor.fetchone()
+            assert wake_date_row is not None
+            report_wake_date = wake_date_row[0]
+            assert isinstance(report_wake_date, date)
+
+    provider = PsycopgPoolProvider.from_dsn(
+        api_dsn,
+        configuration=PoolConfiguration(min_size=1, max_size=2),
+        application_name="sleepagent-product-report-postgres-integration",
+    )
+    provider.open()
+    with psycopg.connect(api_dsn) as api:
+        assert api.execute(
+            """
+            SELECT
+              has_table_privilege(
+                current_user, 'public.sleep_domain_night_episodes', 'UPDATE'
+              ),
+              has_column_privilege(
+                current_user, 'public.sleep_domain_night_episodes',
+                'namespace_id', 'UPDATE'
+              ),
+              has_column_privilege(
+                current_user, 'public.sleep_domain_night_episodes',
+                'current_revision_id', 'UPDATE'
+              ),
+              has_column_privilege(
+                current_user, 'public.sleep_domain_night_episodes',
+                'date_state', 'UPDATE'
+              )
+            """
+        ).fetchone() == (False, True, False, False)
+    now = datetime.now(tz=UTC)
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    public_key_pem = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    settings = SimpleNamespace(
+        data_mode=SimpleNamespace(value="replay"),
+        service_principal_id=api_principal,
+    )
+    factory: UnitOfWorkFactory[object] = UnitOfWorkFactory(provider)
+    replay_store = PostgresAssertionReplayStore(
+        settings,  # type: ignore[arg-type]
+        factory,
+    )
+    authenticator = SleepApiAuthenticator(
+        service_verifier=HttpsBearerServicePrincipalVerifier(
+            (
+                RotatingServiceCredential.from_secret(
+                    credential_id=f"report-credential-{suffix}",
+                    principal_id=api_principal,
+                    secret=service_secret,
+                    not_before=now - timedelta(hours=1),
+                    not_after=now + timedelta(hours=1),
+                    allowed_actor_issuers=frozenset({assertion_issuer}),
+                ),
+            )
+        ),
+        actor_verifier=ActorAssertionVerifier(
+            (
+                ActorVerificationKey(
+                    issuer=assertion_issuer,
+                    key_id=f"report-key-{suffix}",
+                    algorithm="EdDSA",
+                    public_key_pem=public_key_pem,
+                    not_before=now - timedelta(hours=1),
+                    not_after=now + timedelta(hours=1),
+                ),
+            ),
+            audience="sleep-api",
+            replay_store=replay_store,
+        ),
+        role_binding_resolver=FailClosedRoleBindingResolver(),
+        now_factory=lambda: now,
+    )
+    service = ProductApiService(
+        identity_resolver=PostgresProductIdentityResolver(
+            authenticator=authenticator,
+            authority=PostgresAuthorityStore(
+                settings,  # type: ignore[arg-type]
+                factory,
+            ),
+        ),
+        backend=PostgresProductBackend(
+            factory,
+            cursor_key=b"r" * 32,
+            report_model_mode="deterministic",
+            report_deployment_mode="test",
+        ),
+    )
+    signer = Ed25519ActorSigner(
+        issuer=assertion_issuer,
+        audience="sleep-api",
+        key_id=f"report-key-{suffix}",
+        actor_id=actor_id,
+        subject_id=seed.subject_id,
+        role="elder",
+        scopes=tuple(scopes),
+        private_key=private_key,
+    )
+
+    def signed_request(method: str, path: str, body: bytes = b"") -> Request:
+        assertion = signer.sign(method=method, path=path, body=body, now=now)
+        return Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": method,
+                "scheme": "https",
+                "path": path,
+                "raw_path": path.encode("ascii"),
+                "query_string": b"",
+                "server": ("sleepagent.test", 443),
+                "headers": [
+                    (
+                        b"authorization",
+                        f"Bearer {service_secret}".encode("ascii"),
+                    ),
+                    (b"x-sleep-actor-assertion", assertion.encode("ascii")),
+                ],
+            }
+        )
+
+    try:
+        payload = ProductReportRunRequest(wake_date=report_wake_date)
+        request_body = _canonical_json(payload).encode("utf-8")
+        idempotency_key = f"report-run-{suffix}"
+        first = service.run_report(
+            signed_request(
+                "POST", "/product/sleep/reports/run", request_body
+            ),
+            payload,
+            idempotency_key=idempotency_key,
+            request_body=request_body,
+        )
+        second = service.run_report(
+            signed_request(
+                "POST", "/product/sleep/reports/run", request_body
+            ),
+            payload,
+            idempotency_key=idempotency_key,
+            request_body=request_body,
+        )
+        assert first == second
+        assert first.state == "accepted"
+
+        missing_date = report_wake_date - timedelta(days=30)
+        missing_payload = ProductReportRunRequest(wake_date=missing_date)
+        missing_body = _canonical_json(missing_payload).encode("utf-8")
+        with pytest.raises(ProductApiError) as missing_error:
+            service.run_report(
+                signed_request(
+                    "POST", "/product/sleep/reports/run", missing_body
+                ),
+                missing_payload,
+                idempotency_key=f"missing-report-{suffix}",
+                request_body=missing_body,
+            )
+        assert missing_error.value.status_code == 404
+
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*),
+                           min(operation_json ->> 'night_episode_revision_id'),
+                           min(operation_json ->> 'wake_date')
+                    FROM public.sleep_domain_operations
+                    WHERE namespace_id = %s AND subject_id = %s
+                      AND operation_type = 'product.report.run.v1'
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                operation_row = cursor.fetchone()
+                assert operation_row is not None
+                operation_count, resolved_revision_id, resolved_date = (
+                    operation_row
+                )
+                assert operation_count == 1
+                assert resolved_revision_id == seed.night_episode_revision_id
+                assert resolved_revision_id != higher_revision_id
+                assert resolved_date == report_wake_date.isoformat()
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM public.backend_command_receipts
+                    WHERE namespace_id = %s AND subject_id = %s
+                      AND route_template = '/product/sleep/reports/run'
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                assert cursor.fetchone()[0] == 1
+                before_reads = _report_write_counts(
+                    cursor,
+                    namespace_id=seed.namespace_id,
+                    subject_id=seed.subject_id,
+                    assertion_issuer=assertion_issuer,
+                )
+
+        show_path = "/product/sleep/reports/" + report_wake_date.isoformat()
+        reusable_show_request = signed_request("GET", show_path)
+        shown = service.show_report(
+            reusable_show_request,
+            wake_date=report_wake_date,
+            trace=True,
+            request_body=b"",
+        )
+        shown_again = service.show_report(
+            reusable_show_request,
+            wake_date=report_wake_date,
+            trace=True,
+            request_body=b"",
+        )
+        listing = service.list_reports(
+            signed_request("GET", "/product/sleep/reports"),
+            limit=20,
+            cursor=None,
+            trace=True,
+            request_body=b"",
+        )
+        assert shown == shown_again
+        assert shown.state == ProductReportState.PENDING
+        assert listing.items[0].wake_date == report_wake_date
+        assert listing.items[0].audience == ProductRole.ELDER
+
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                after_reads = _report_write_counts(
+                    cursor,
+                    namespace_id=seed.namespace_id,
+                    subject_id=seed.subject_id,
+                    assertion_issuer=assertion_issuer,
+                )
+        assert before_reads == after_reads
+        # POST consumed three nonces (including the safe missing-date command);
+        # repeated show/list signatures consumed none.
+        assert after_reads["actor_assertion_replays"] == 3
+        assert after_reads["memory_read_receipts"] == 0
+    finally:
+        provider.close()
+    _cancel_pending_product_work(
+        psycopg,
+        admin_dsn=admin_dsn,
+        namespace_id=seed.namespace_id,
+    )
+
+
+def test_shared_publication_cross_identity_rebases_in_real_postgres() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    _convert_seed_to_report_request(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+    same_request_id = _clone_report_request(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+    cross_request_id = _clone_report_request(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+
+    first_model = _IdentityVariantDeterministicModel("acceptance-model-a")
+    second_model = _IdentityVariantDeterministicModel("acceptance-model-b")
+    first_generate = Mock(wraps=first_model.generate)
+    second_generate = Mock(wraps=second_model.generate)
+    first_model.generate = first_generate  # type: ignore[method-assign]
+    second_model.generate = second_generate  # type: ignore[method-assign]
+    first_processor_bundle = build_deterministic_product_runtime_bundle(
+        model=first_model
+    )
+    second_processor_bundle = build_deterministic_product_runtime_bundle(
+        model=second_model
+    )
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+    first_processor = ProductAgentProcessor(
+        factory,
+        runtime_bundle=first_processor_bundle,
+    )
+    second_processor = ProductAgentProcessor(
+        factory,
+        runtime_bundle=second_processor_bundle,
+    )
+    try:
+        routed_requests = []
+        for index, processor in enumerate(
+            (first_processor, first_processor, second_processor)
+        ):
+            claim = _claim_product_work(
+                store,
+                worker_instance=f"report-route-{index}-{uuid4().hex}",
+                operation_type=PRODUCT_REPORT_RUN_OPERATION,
+            )
+            scope = store.uow_scope_for_claim(claim)
+            routed_requests.append(
+                (
+                    claim.work_id,
+                    processor.route_report_request(
+                        scope,
+                        _lease_for_claim(claim),
+                    ),
+                )
+            )
+
+        assert [item[0] for item in routed_requests] == [
+            seed.operation_id,
+            same_request_id,
+            cross_request_id,
+        ]
+        first_route = routed_requests[0][1]
+        same_route = routed_requests[1][1]
+        cross_route = routed_requests[2][1]
+        assert first_route.state == same_route.state == cross_route.state == "pending"
+        assert first_route.shared_operation_created is True
+        assert same_route.shared_operation_created is False
+        assert cross_route.shared_operation_created is True
+        assert same_route.shared_operation_id == first_route.shared_operation_id
+        assert cross_route.shared_operation_id != first_route.shared_operation_id
+
+        prepared: list[
+            tuple[
+                ProductAgentProcessor,
+                UowScope,
+                ProductAgentLease,
+                object,
+                PreparedProductAgentArtifact,
+            ]
+        ] = []
+        for index, processor in enumerate(
+            (first_processor, second_processor)
+        ):
+            claim = _claim_product_work(
+                store,
+                worker_instance=f"shared-prepare-{index}-{uuid4().hex}",
+                operation_type=PRODUCT_SHARED_ANALYSIS_OPERATION,
+            )
+            scope = store.uow_scope_for_claim(claim)
+            lease = _lease_for_claim(claim)
+            source = processor.load_source(scope, lease)
+            artifact = processor.prepare_shared(
+                scope=scope,
+                source=source,
+                lease=lease,
+                prepared_at=datetime.now(tz=UTC),
+            )
+            assert artifact.schema_version == "product_agent_prepared_attempt.v3"
+            _persist_prepared(factory, scope, lease, artifact)
+            prepared.append((processor, scope, lease, source, artifact))
+
+        calls_after_prepare = first_generate.call_count + second_generate.call_count
+        assert first_generate.call_count > 0
+        assert second_generate.call_count > 0
+
+        committed = []
+        for processor, scope, lease, source, artifact in prepared:
+            committed.append(
+                processor.persist_and_commit(
+                    scope,
+                    lease,
+                    artifact,
+                    source=source,  # type: ignore[arg-type]
+                )
+            )
+        assert first_generate.call_count + second_generate.call_count == (
+            calls_after_prepare
+        )
+    finally:
+        provider.close()
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT analysis_revision_id, revision_number,
+                       parent_analysis_revision_id,
+                       analysis_json ->> 'desired_analysis_sha256'
+                FROM public.sleep_domain_analysis_revisions
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_revision_id = %s
+                ORDER BY revision_number
+                """,
+                (
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.night_episode_revision_id,
+                ),
+            )
+            revisions = cursor.fetchall()
+            assert len(revisions) == 2
+            assert [int(row[1]) for row in revisions] == [1, 2]
+            assert revisions[0][2] is None
+            assert str(revisions[1][2]) == str(revisions[0][0])
+            assert len({str(row[0]) for row in revisions}) == 2
+            assert len({str(row[3]) for row in revisions}) == 2
+
+            shared_ids = (
+                first_route.shared_operation_id,
+                cross_route.shared_operation_id,
+            )
+            cursor.execute(
+                """
+                SELECT operation_id, status
+                FROM public.sleep_domain_operations
+                WHERE operation_id = ANY(%s)
+                ORDER BY operation_id
+                """,
+                (list(shared_ids),),
+            )
+            assert {str(row[0]): str(row[1]) for row in cursor.fetchall()} == {
+                str(shared_ids[0]): "succeeded",
+                str(shared_ids[1]): "succeeded",
+            }
+            cursor.execute(
+                """
+                SELECT count(*), count(DISTINCT product_attempt_id)
+                FROM public.backend_product_attempts
+                WHERE operation_id = ANY(%s)
+                  AND attempt_state = 'committed' AND query_visible = TRUE
+                """,
+                (list(shared_ids),),
+            )
+            assert cursor.fetchone() == (2, 2)
+            assert {item.operation_id for item in committed} == set(shared_ids)
+    _cancel_pending_product_work(
+        psycopg,
+        admin_dsn=admin_dsn,
+        namespace_id=seed.namespace_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("gate", "stale"),
+    (
+        ("urgent", False),
+        ("urgent", True),
+        ("unusable", False),
+        ("unusable", True),
+    ),
+)
+def test_report_final_gate_fences_authoritative_drift_in_real_postgres(
+    gate: str,
+    stale: bool,
+) -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+        care_required=gate == "urgent",
+    )
+    if gate == "unusable":
+        _replace_current_quality(
+            psycopg,
+            admin_dsn=admin_dsn,
+            seed=seed,
+            usable=False,
+            update_operation=True,
+        )
+    _convert_seed_to_report_request(
+        psycopg,
+        admin_dsn=admin_dsn,
+        seed=seed,
+    )
+
+    model = DeterministicReplayStructuredAgentModel()
+    counted_generate = Mock(wraps=model.generate)
+    model.generate = counted_generate  # type: ignore[method-assign]
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+    )
+
+    class _DriftingGateProcessor(ProductAgentProcessor):
+        def load_source(self, scope: UowScope, lease: ProductAgentLease):
+            source = super().load_source(scope, lease)
+            if gate == "urgent":
+                _replace_current_risk(
+                    psycopg,
+                    admin_dsn=admin_dsn,
+                    seed=seed,
+                    urgent=False,
+                    update_operation=False,
+                )
+            else:
+                _replace_current_quality(
+                    psycopg,
+                    admin_dsn=admin_dsn,
+                    seed=seed,
+                    usable=True,
+                    update_operation=False,
+                )
+            return source
+
+    processor_type = _DriftingGateProcessor if stale else ProductAgentProcessor
+    processor = processor_type(
+        factory,
+        runtime_bundle=build_deterministic_product_runtime_bundle(model=model),
+    )
+    try:
+        claim = _claim_product_work(
+            store,
+            worker_instance=f"gate-{gate}-{stale}-{uuid4().hex}",
+            operation_type=PRODUCT_REPORT_RUN_OPERATION,
+        )
+        result = processor.route_report_request(
+            store.uow_scope_for_claim(claim),
+            _lease_for_claim(claim),
+        )
+    finally:
+        provider.close()
+
+    expected_terminal = (
+        "urgent_handled" if gate == "urgent" else "unusable_blocked"
+    )
+    assert result.state == ("pending" if stale else expected_terminal)
+    assert counted_generate.call_count == 0
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT status, operation_json -> 'report_result',
+                       operation_json ->> 'gate_reroute_count'
+                FROM public.sleep_domain_operations
+                WHERE operation_id = %s
+                """,
+                (seed.operation_id,),
+            )
+            operation = cursor.fetchone()
+            assert operation is not None
+            if stale:
+                assert operation == ("retry", None, "1")
+            else:
+                assert operation[0] == "succeeded"
+                assert operation[1]["state"] == expected_terminal
+                assert operation[2] is None
+            cursor.execute(
+                """
+                SELECT
+                  count(*) FILTER (
+                    WHERE operation_type = 'product.shared_analysis.v1'
+                  ),
+                  (SELECT count(*)
+                   FROM public.backend_product_attempts
+                   WHERE namespace_id = %s AND subject_id = %s),
+                  (SELECT count(*)
+                   FROM public.backend_invocations
+                   WHERE namespace_id = %s AND subject_id = %s)
+                FROM public.sleep_domain_operations
+                WHERE namespace_id = %s AND subject_id = %s
+                """,
+                (
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.namespace_id,
+                    seed.subject_id,
+                    seed.namespace_id,
+                    seed.subject_id,
+                ),
+            )
+            assert cursor.fetchone() == (0, 0, 0)
+    _cancel_pending_product_work(
+        psycopg,
+        admin_dsn=admin_dsn,
+        namespace_id=seed.namespace_id,
+    )
+
+
+@pytest.mark.parametrize("capability", ("habit", "memory"))
+def test_shared_final_commit_serializes_real_l2_writer_lock(
+    capability: str,
+) -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    api_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_API_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    case = _prepare_shared_acceptance_case(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+    )
+    locks_acquired = threading.Event()
+    release_commit = threading.Event()
+    writer_started = threading.Event()
+    writer_acquired = threading.Event()
+    errors: list[BaseException] = []
+    results: list[object] = []
+
+    class _PausedFinalCommitRepository(PostgresProductAgentRepository):
+        def _lock_final_context_writers(self, cursor: Any) -> None:
+            super()._lock_final_context_writers(cursor)
+            locks_acquired.set()
+            assert release_commit.wait(timeout=5)
+
+    processor = ProductAgentProcessor(
+        case.factory,
+        runtime_bundle=case.bundle,
+        repository_factory=lambda connection, scope: (
+            _PausedFinalCommitRepository(connection, scope)
+        ),
+    )
+    writer_context = SimpleNamespace(
+        namespace_id=case.seed.namespace_id,
+        data_mode="replay",
+        namespace_generation=1,
+        run_id=case.seed.run_id,
+        arm_id=case.seed.arm_id,
+        subject_id=case.seed.subject_id,
+    )
+
+    def commit_shared() -> None:
+        try:
+            results.append(
+                processor.persist_and_commit(
+                    case.scope,
+                    case.lease,
+                    case.artifact,
+                    source=case.source,  # type: ignore[arg-type]
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    def lock_as_api_writer() -> None:
+        try:
+            with psycopg.connect(api_dsn) as api:
+                with api.cursor() as cursor:
+                    writer_started.set()
+                    _lock_l2_subject(
+                        cursor,
+                        writer_context,  # type: ignore[arg-type]
+                        capability=capability,  # type: ignore[arg-type]
+                    )
+                    writer_acquired.set()
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    commit_thread = threading.Thread(target=commit_shared)
+    commit_thread.start()
+    assert locks_acquired.wait(timeout=5)
+    writer_thread = threading.Thread(target=lock_as_api_writer)
+    writer_thread.start()
+    assert writer_started.wait(timeout=5)
+    assert writer_acquired.wait(timeout=0.1) is False
+    release_commit.set()
+    commit_thread.join(timeout=5)
+    writer_thread.join(timeout=5)
+    try:
+        assert errors == []
+        assert not commit_thread.is_alive()
+        assert not writer_thread.is_alive()
+        assert writer_acquired.is_set()
+        assert len(results) == 1
+        with psycopg.connect(admin_dsn) as admin:
+            assert admin.execute(
+                """
+                SELECT count(*)
+                FROM public.sleep_domain_analysis_revisions
+                WHERE namespace_id = %s AND subject_id = %s
+                  AND night_episode_revision_id = %s
+                """,
+                (
+                    case.seed.namespace_id,
+                    case.seed.subject_id,
+                    case.seed.night_episode_revision_id,
+                ),
+            ).fetchone() == (1,)
+    finally:
+        case.provider.close()
+        _cancel_pending_product_work(
+            psycopg,
+            admin_dsn=admin_dsn,
+            namespace_id=case.seed.namespace_id,
+        )
+
+
+def test_elder_narrative_final_commit_serializes_real_context_writer() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    api_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_API_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    case = _prepare_shared_acceptance_case(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+    )
+    case.processor.persist_and_commit(
+        case.scope,
+        case.lease,
+        case.artifact,
+        source=case.source,  # type: ignore[arg-type]
+    )
+    narrative_claim = _claim_product_work(
+        case.store,
+        worker_instance=f"narrative-{uuid4().hex}",
+        operation_type=PRODUCT_ELDER_NARRATIVE_OPERATION,
+    )
+    narrative_scope = case.store.uow_scope_for_claim(narrative_claim)
+    narrative_lease = _lease_for_claim(narrative_claim)
+    narrative_source = case.processor.load_source(
+        narrative_scope,
+        narrative_lease,
+    )
+    committed_shared = case.processor.load_committed_shared_for_narrative(
+        narrative_scope,
+        narrative_lease,
+        narrative_source,
+    )
+    narrative_artifact = case.processor.prepare_elder_narrative(
+        scope=narrative_scope,
+        source=narrative_source,
+        lease=narrative_lease,
+        committed_shared=committed_shared,
+        prepared_at=datetime.now(tz=UTC),
+    )
+    with case.factory.begin(narrative_scope) as uow:
+        PostgresProductAgentRepository(
+            uow.connection,
+            narrative_scope,
+        ).persist_elder_narrative_prepared(
+            narrative_lease,
+            narrative_artifact,
+        )
+        uow.commit()
+
+    locks_acquired = threading.Event()
+    release_commit = threading.Event()
+    writer_started = threading.Event()
+    writer_acquired = threading.Event()
+    errors: list[BaseException] = []
+
+    class _PausedNarrativeCommitRepository(PostgresProductAgentRepository):
+        def _lock_final_context_writers(self, cursor: Any) -> None:
+            super()._lock_final_context_writers(cursor)
+            locks_acquired.set()
+            assert release_commit.wait(timeout=5)
+
+    narrative_processor = ProductAgentProcessor(
+        case.factory,
+        runtime_bundle=case.bundle,
+        repository_factory=lambda connection, scope: (
+            _PausedNarrativeCommitRepository(connection, scope)
+        ),
+    )
+    writer_context = SimpleNamespace(
+        namespace_id=case.seed.namespace_id,
+        data_mode="replay",
+        namespace_generation=1,
+        run_id=case.seed.run_id,
+        arm_id=case.seed.arm_id,
+        subject_id=case.seed.subject_id,
+    )
+
+    def commit_narrative() -> None:
+        try:
+            narrative_processor.persist_and_commit_elder_narrative(
+                narrative_scope,
+                narrative_lease,
+                narrative_artifact,
+                source=narrative_source,
+                committed_shared=committed_shared,
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    def lock_memory_writer() -> None:
+        try:
+            with psycopg.connect(api_dsn) as api:
+                with api.cursor() as cursor:
+                    writer_started.set()
+                    _lock_l2_subject(
+                        cursor,
+                        writer_context,  # type: ignore[arg-type]
+                        capability="memory",
+                    )
+                    writer_acquired.set()
+        except BaseException as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    commit_thread = threading.Thread(target=commit_narrative)
+    commit_thread.start()
+    assert locks_acquired.wait(timeout=5)
+    writer_thread = threading.Thread(target=lock_memory_writer)
+    writer_thread.start()
+    assert writer_started.wait(timeout=5)
+    assert writer_acquired.wait(timeout=0.1) is False
+    release_commit.set()
+    commit_thread.join(timeout=5)
+    writer_thread.join(timeout=5)
+    try:
+        assert errors == []
+        assert not commit_thread.is_alive()
+        assert not writer_thread.is_alive()
+        assert writer_acquired.is_set()
+        with psycopg.connect(admin_dsn) as admin:
+            assert admin.execute(
+                """
+                SELECT operation.status,
+                       attempt.attempt_state,
+                       attempt.query_visible,
+                       (SELECT count(*)
+                        FROM public.sleep_domain_analysis_role_views
+                        WHERE analysis_revision_id = %s)
+                FROM public.sleep_domain_operations AS operation
+                JOIN public.backend_product_attempts AS attempt
+                  ON attempt.operation_id = operation.operation_id
+                WHERE operation.operation_id = %s
+                """,
+                (
+                    committed_shared.analysis.analysis_revision_id,
+                    narrative_lease.operation_id,
+                ),
+            ).fetchone() == ("succeeded", "committed", True, 3)
+    finally:
+        case.provider.close()
+        _cancel_pending_product_work(
+            psycopg,
+            admin_dsn=admin_dsn,
+            namespace_id=case.seed.namespace_id,
+        )

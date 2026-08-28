@@ -21,12 +21,12 @@ from sleepagent.runtime.agents import (
     _SleepCareContentPlan,
 )
 from sleepagent.runtime.contracts import (
-    ContextPacket,
     EpisodeType,
     ExecutionMode,
 )
 from sleepagent.runtime.deterministic_model import (
     DeterministicReplayStructuredAgentModel,
+    _parse_context_packet,
 )
 from sleepagent.runtime.invocation import (
     CareStrategyModelOutput,
@@ -151,10 +151,12 @@ def _structured_replay_responder(
     prompt_marker = " Prompt version: "
     context_marker = ". Context packet: "
     prompt_tail = instruction_content.rsplit(prompt_marker, 1)[1]
-    prompt_version, separator, _context_tail = prompt_tail.partition(
+    prompt_version, separator, context_tail = prompt_tail.partition(
         context_marker
     )
     assert separator and prompt_version
+    context_packet_id = context_tail.removesuffix(".").strip()
+    assert context_packet_id
 
     context_message = next(
         item
@@ -163,7 +165,10 @@ def _structured_replay_responder(
     )
     context_content = context_message.get("content")
     assert isinstance(context_content, str)
-    packet = ContextPacket.model_validate_json(context_content)
+    packet = _parse_context_packet(
+        [dict(item) for item in messages[1:]],
+        context_packet_id,
+    )
     output = DeterministicReplayStructuredAgentModel().generate(
         messages=[dict(item) for item in messages[1:]],
         schema=schema,
@@ -252,12 +257,12 @@ def test_live_product_worker_invokes_loopback_http_and_commits_postgres_closure(
             )
             result = handler(WorkContext(claim, store, threading.Event()))
 
+            assert server.errors == ()
             assert result.disposition is WorkDisposition.SUCCEEDED
             assert result.finalization_mode is WorkFinalizationMode.HANDLER_OWNED
             assert result.result["analysis_status"] == "ready"
             assert len(result.result["role_view_ids"]) == 3
             assert server.request_count > 0
-            assert server.errors == ()
             assert all(
                 item.path == "/v1/chat/completions"
                 for item in server.requests

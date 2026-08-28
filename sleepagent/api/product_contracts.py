@@ -42,6 +42,175 @@ class ProductRole(str, Enum):
     DOCTOR = "doctor"
 
 
+class ProductReportState(str, Enum):
+    NOT_RUN = "not_run"
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+    STALE = "stale"
+    POLICY_BLOCKED = "policy_blocked"
+    UNUSABLE_BLOCKED = "unusable_blocked"
+    URGENT_HANDLED = "urgent_handled"
+
+
+class ProductReportQuality(str, Enum):
+    GOOD = "good"
+    PARTIAL = "partial"
+    UNUSABLE = "unusable"
+
+
+class ProductNarrativeState(str, Enum):
+    PENDING = "pending"
+    READY = "ready"
+    FALLBACK = "fallback"
+    FAILED = "failed"
+    STALE = "stale"
+
+
+ProductReportFailureCode: TypeAlias = Literal[
+    "analysis_failed",
+    "doctor_safety_unavailable",
+    "policy_blocked",
+    "data_unusable",
+    "source_stale",
+]
+
+
+class ProductReportTrace(PublicModel):
+    """Strict, identifier-free operational trace for an explicit report read."""
+
+    gate: Literal["analyzable", "urgent", "unusable", "not_evaluated"]
+    shared_analysis: Literal[
+        "created", "reused", "pending", "not_applicable"
+    ]
+    elder_narrative: Literal[
+        "created", "reused", "pending", "fallback", "not_applicable"
+    ]
+    fallback_used: bool
+    provider_call_count: int = Field(ge=0)
+    provider_input_tokens: int = Field(ge=0)
+    provider_output_tokens: int = Field(ge=0)
+    provider_request_ids_present: bool
+
+
+class ProductReportProjection(PublicModel):
+    audience: ProductRole
+    summary_text: NonEmpty
+    context_notice: NonEmpty
+
+
+class ProductReportNarrative(PublicModel):
+    state: ProductNarrativeState
+    text: NonEmpty | None = None
+
+    @model_validator(mode="after")
+    def text_matches_state(self) -> "ProductReportNarrative":
+        if (self.state == ProductNarrativeState.READY) != (self.text is not None):
+            raise ValueError("only a ready elder narrative may carry text")
+        return self
+
+
+class ProductReportRunRequest(PublicModel):
+    schema_version: Literal["product_sleep_report_run.v1"] = (
+        "product_sleep_report_run.v1"
+    )
+    # JSON has no date scalar. Keep the model strict except for canonical ISO dates.
+    wake_date: date = Field(strict=False)
+
+    @field_validator("wake_date", mode="before")
+    @classmethod
+    def wake_date_is_canonical_iso_date(cls, value: Any) -> date:
+        if type(value) is date:
+            return value
+        if not isinstance(value, str):
+            raise ValueError("wake_date must be an ISO date in YYYY-MM-DD form")
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(
+                "wake_date must be an ISO date in YYYY-MM-DD form"
+            ) from exc
+        if value != parsed.isoformat():
+            raise ValueError("wake_date must be an ISO date in YYYY-MM-DD form")
+        return parsed
+
+
+class ProductReportRunAccepted(PublicModel):
+    schema_version: Literal["product_sleep_report_run_accepted.v1"] = (
+        "product_sleep_report_run_accepted.v1"
+    )
+    wake_date: date
+    state: Literal["accepted"] = "accepted"
+    status_url: NonEmpty
+
+
+class ProductSleepReportResponse(PublicModel):
+    schema_version: Literal["product_sleep_report.v1"] = (
+        "product_sleep_report.v1"
+    )
+    wake_date: date
+    state: ProductReportState
+    audience: ProductRole
+    quality: ProductReportQuality | None = None
+    quality_caveat: NonEmpty | None = None
+    projection: ProductReportProjection | None = None
+    narrative: ProductReportNarrative | None = None
+    failure_code: ProductReportFailureCode | None = None
+    trace: ProductReportTrace | None = None
+
+    @model_validator(mode="after")
+    def report_shape_is_safe(self) -> "ProductSleepReportResponse":
+        if self.quality == ProductReportQuality.PARTIAL and not self.quality_caveat:
+            raise ValueError("PARTIAL report quality requires a caveat")
+        if self.state == ProductReportState.READY:
+            if self.projection is None:
+                raise ValueError("ready report requires a projection")
+        elif self.projection is not None:
+            raise ValueError("only a ready report may carry a projection")
+        if self.projection is not None and self.projection.audience != self.audience:
+            raise ValueError("report projection audience must match authority")
+        if self.narrative is not None and self.audience != ProductRole.ELDER:
+            raise ValueError("elder narrative cannot cross an audience boundary")
+        if (
+            self.state == ProductReportState.UNUSABLE_BLOCKED
+            and self.quality != ProductReportQuality.UNUSABLE
+        ):
+            raise ValueError("unusable report state requires unusable quality")
+        return self
+
+
+class ProductSleepReportListItem(PublicModel):
+    wake_date: date
+    state: ProductReportState
+    audience: ProductRole
+    quality: ProductReportQuality | None = None
+    quality_caveat: NonEmpty | None = None
+    narrative_state: ProductNarrativeState | None = None
+    failure_code: ProductReportFailureCode | None = None
+
+    @model_validator(mode="after")
+    def list_item_is_safe(self) -> "ProductSleepReportListItem":
+        if self.quality == ProductReportQuality.PARTIAL and not self.quality_caveat:
+            raise ValueError("PARTIAL report quality requires a caveat")
+        if self.narrative_state is not None and self.audience != ProductRole.ELDER:
+            raise ValueError("elder narrative state cannot cross an audience boundary")
+        if (
+            self.state == ProductReportState.UNUSABLE_BLOCKED
+            and self.quality != ProductReportQuality.UNUSABLE
+        ):
+            raise ValueError("unusable report state requires unusable quality")
+        return self
+
+
+class ProductSleepReportListResponse(PublicModel):
+    schema_version: Literal["product_sleep_report_list.v1"] = (
+        "product_sleep_report_list.v1"
+    )
+    items: tuple[ProductSleepReportListItem, ...]
+    next_cursor: str | None = None
+    trace: ProductReportTrace | None = None
+
+
 class ProductTodayState(str, Enum):
     NO_DATA = "no_data"
     READY = "ready"
@@ -566,7 +735,19 @@ __all__ = [
     "PendingL2Change",
     "ProductRole",
     "ProductCareResponse",
+    "ProductNarrativeState",
+    "ProductReportFailureCode",
+    "ProductReportProjection",
+    "ProductReportQuality",
+    "ProductReportRunAccepted",
+    "ProductReportRunRequest",
+    "ProductReportState",
+    "ProductReportTrace",
+    "ProductReportNarrative",
     "ProductRecordsResponse",
+    "ProductSleepReportListItem",
+    "ProductSleepReportListResponse",
+    "ProductSleepReportResponse",
     "ProductSleepTodayNoData",
     "ProductSleepTodayProjection",
     "ProductSleepTodayResponse",

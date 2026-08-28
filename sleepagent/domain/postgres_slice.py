@@ -2607,9 +2607,10 @@ class PostgresSleepSliceRepository:
         cursor = self.connection.cursor()
         try:
             if product_agent_operation_id is not None:
-                semantic_key = _digest(
+                report_operation_id = self.id_generator(committed_at)
+                report_semantic_key = _digest(
                     {
-                        "stage": "product_agent",
+                        "stage": "product.report.run.v1",
                         "night_episode_id": operation.night_episode_id,
                         "night_episode_revision_id": (
                             result.current_risk.source_scope.night_episode_revision_id
@@ -2618,9 +2619,21 @@ class PostgresSleepSliceRepository:
                         "risk_policy": result.current_risk.policy_version,
                     }
                 )
+                compatibility_semantic_key = _digest(
+                    {
+                        "stage": "product_agent_compatibility.v1",
+                        "night_episode_id": operation.night_episode_id,
+                        "night_episode_revision_id": (
+                            result.current_risk.source_scope.night_episode_revision_id
+                        ),
+                        "report_operation_id": report_operation_id,
+                    }
+                )
                 workload = _workload_snapshot(self.scope, "product_agent")
-                operation_json = {
+                compatibility_json = {
                     "schema_version": "backend_operation.v2",
+                    "command_type": "product_agent",
+                    "compatibility_mode": "shared_analysis_bridge.v1",
                     "trigger": "fast_path_nonurgent",
                     "night_episode_id": operation.night_episode_id,
                     "night_episode_revision_id": (
@@ -2628,6 +2641,7 @@ class PostgresSleepSliceRepository:
                     ),
                     "quality_assessment_id": result.quality.assessment_id,
                     "current_risk_id": result.current_risk.current_risk_id,
+                    "report_request_operation_id": report_operation_id,
                     "authorization_snapshot": workload,
                 }
                 cursor.execute(
@@ -2646,7 +2660,8 @@ class PostgresSleepSliceRepository:
                       %s, %s, %s, 'product_agent', %s, %s, NULL,
                       %s, %s, %s, %s, 'pending', 0, 0, %s::jsonb,
                       %s, %s, 2, %s, %s, %s, 'uuidv7', 'system',
-                      %s, 'product_agent', 0, %s, 5, %s::jsonb, %s
+                      %s, 'product_agent_compatibility', 0, %s, 1,
+                      %s::jsonb, %s
                     )
                     """,
                     (
@@ -2660,15 +2675,74 @@ class PostgresSleepSliceRepository:
                             result.current_risk.source_scope.night_episode_revision_id
                             or operation.night_episode_id
                         ),
-                        semantic_key,
-                        semantic_key,
-                        _json(operation_json),
+                        compatibility_semantic_key,
+                        compatibility_semantic_key,
+                        _json(compatibility_json),
                         committed_at,
                         committed_at,
                         self.scope.namespace_generation,
                         self.scope.run_id,
                         self.scope.arm_id,
-                        semantic_key,
+                        compatibility_semantic_key,
+                        committed_at,
+                        _json(workload),
+                        policy.policy_sha256,
+                    ),
+                )
+                report_json = {
+                    "schema_version": "backend_operation.v2",
+                    "command_type": "product.report.run.v1",
+                    "trigger": "fast_path_nonurgent",
+                    "night_episode_id": operation.night_episode_id,
+                    "night_episode_revision_id": (
+                        result.current_risk.source_scope.night_episode_revision_id
+                    ),
+                    "quality_assessment_id": result.quality.assessment_id,
+                    "current_risk_id": result.current_risk.current_risk_id,
+                    "compatibility_product_agent_operation_id": (
+                        product_agent_operation_id
+                    ),
+                    "authorization_snapshot": workload,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_operations (
+                      operation_id, namespace_id, data_mode, operation_type,
+                      subject_id, service_principal_id, actor_id,
+                      target_resource_id, target_resource_key, idempotency_key,
+                      request_sha256, status, attempt_count, cas_version,
+                      operation_json, created_at, updated_at, protocol_version,
+                      namespace_generation, run_id, arm_id, id_scheme,
+                      origin_kind, semantic_key, queue_name, priority,
+                      available_at, max_attempts,
+                      workload_authorization_snapshot_json, policy_sha256
+                    ) VALUES (
+                      %s, %s, %s, 'product.report.run.v1', %s, %s, NULL,
+                      %s, %s, %s, %s, 'pending', 0, 0, %s::jsonb,
+                      %s, %s, 2, %s, %s, %s, 'uuidv7', 'system',
+                      %s, 'product_agent', 0, %s, 5, %s::jsonb, %s
+                    )
+                    """,
+                    (
+                        report_operation_id,
+                        self.scope.namespace_id,
+                        self.scope.data_mode,
+                        operation.subject_id,
+                        self.scope.service_principal_id,
+                        operation.night_episode_id,
+                        (
+                            result.current_risk.source_scope.night_episode_revision_id
+                            or operation.night_episode_id
+                        ),
+                        report_semantic_key,
+                        report_semantic_key,
+                        _json(report_json),
+                        committed_at,
+                        committed_at,
+                        self.scope.namespace_generation,
+                        self.scope.run_id,
+                        self.scope.arm_id,
+                        report_semantic_key,
                         committed_at,
                         _json(workload),
                         policy.policy_sha256,

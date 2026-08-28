@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import time
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 import sleepagent.runtime.runner as runner_module
+from sleepagent.domain.habit import HabitFact, HabitOperation
+from sleepagent.domain.contracts import DataMode
 from sleepagent.runtime.agents import ProductAgentFactory
 from sleepagent.runtime.agents import (
     EpisodePlanProposal,
@@ -56,6 +59,7 @@ from sleepagent.runtime.contracts import (
     RelativeBaselineDeviation,
     ToolEffect,
     ToolRequest,
+    TrustLabel,
     WorkProductKind,
     WorkProductStatus,
     stable_hash,
@@ -77,12 +81,22 @@ from sleepagent.runtime.invocation import (
     SafetyReviewModelOutput,
     SleepCareModelOutput,
 )
+from sleepagent.runtime.memory import (
+    MemoryHandle,
+    MemoryItemStatus,
+    MemoryPurpose,
+    MemoryReadReceipt,
+    MemorySliceItem,
+    ProvenanceType,
+)
 from sleepagent.runtime.registry import EPISODE_DEFINITIONS
 from sleepagent.runtime.runner import ProductEpisodeRunner
 from sleepagent.runtime.results import (
+    PinnedPersonalizationContext,
     ProductEpisodeRunRequest,
     ProductUserFactResponse,
     bind_product_episode_checkpoint,
+    product_episode_request_hash,
 )
 from sleepagent.runtime.factory import (
     ProductRuntimeBundle,
@@ -97,7 +111,22 @@ from sleepagent.runtime.registry import (
     default_agent_profiles,
     default_skill_packages,
 )
+from sleepagent.runtime.reports import (
+    ElderNarrativeRequest,
+    ElderNarrativeState,
+    ReportRole,
+    RoleProjectionState,
+    SharedAnalysisRunRequest,
+    SharedAnalysisSourceV1,
+    build_shared_role_projections,
+)
 from sleepagent.runtime.schemas import RadarNightSummary
+from sleepagent.persistence.uow import UowScope
+from sleepagent.workers.product import (
+    _consumed_context_sha256,
+    _desired_analysis_sha256,
+    _fact_snapshot_for_shared,
+)
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -1104,7 +1133,7 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
     # the reviewed Habit/Memory grounding instructions in the SkillLock and
     # the identifier-free provider Context projection.
     assert stable_hash(roster_projection) == (
-        "740e195f09e49b6ed48699eaffd58688ff84cd18be591281ade5f517c223573e"
+        "435fed6856df4e2098fc4ecfa6866e1dfbffebda2c36c552409e4e626ec7f0b6"
     )
 
 
@@ -1549,7 +1578,12 @@ def test_elder_role_material_does_not_fixed_call_safety() -> None:
     assert sleepcare_artifact["source_refs"][0] == (
         artifact.tool_invocation_id
     )
-    assert sleepcare_artifact["value"] == artifact.output
+    assert "episode_id" not in sleepcare_artifact["value"]
+    assert sleepcare_artifact["value"] == {
+        key: value
+        for key, value in artifact.output.items()
+        if key != "episode_id"
+    }
 
 
 def test_role_material_basis_binds_safety_revised_evidence() -> None:
@@ -1876,4 +1910,643 @@ def test_failed_required_evidence_tool_degrades_before_evidence_agent() -> None:
     assert not any(
         item.agent_id == AgentId.EVIDENCE_REASONING
         for item in result.accepted_work_products
+    )
+
+
+def _shared_analysis_request(*, partial: bool = False) -> SharedAnalysisRunRequest:
+    base = request(
+        EpisodeType.MORNING_REVIEW,
+        user_text="",
+        binding_role="system",
+    )
+    original = base.fact_snapshot
+    revision_id = "night-revision-shared-1"
+    shared_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-shared-analysis",
+        binding=original.binding,
+        source_scope=original.source_scope,
+        canonical_data_version=original.canonical_data_version,
+        care_context_version=original.care_context_version,
+        memory_context_version=original.memory_context_version,
+        source_refs=original.source_refs,
+        created_at=NOW,
+    )
+    runtime_request = base.model_copy(
+        update={
+            "episode_id": "product-shared-analysis-1",
+            "fact_snapshot": shared_snapshot,
+        }
+    )
+    return SharedAnalysisRunRequest(
+        source=SharedAnalysisSourceV1(
+            night_episode_id="night-episode-shared-1",
+            night_episode_revision_id=revision_id,
+            night_episode_revision_number=1,
+            wake_date=date(2026, 7, 26),
+            observation_set_sha256=stable_hash(("observation-1",)),
+            canonical_data_version=shared_snapshot.canonical_data_version,
+            desired_analysis_sha256=stable_hash("desired-analysis"),
+            consumed_context_sha256=stable_hash("consumed-context"),
+            runtime_manifest_sha256=stable_hash("runtime-manifest"),
+            data_sufficiency="partial" if partial else "sufficient",
+            quality_state="partial" if partial else "good",
+            risk_state="unknown" if partial else "no_reviewed_signal",
+            quality_reason_codes=("coverage_limited",) if partial else (),
+            limitations=("设备观察不能替代临床评估。",),
+            partial_caveat=(
+                "昨夜记录覆盖不完整，结论仅反映已观测时段。"
+                if partial
+                else None
+            ),
+        ),
+        runtime_request=runtime_request,
+    )
+
+
+class _CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.schemas: list[type] = []
+        self.message_payloads: list[str] = []
+
+    def generate(self, **kwargs):
+        self.schemas.append(kwargs["schema"])
+        self.message_payloads.append(
+            json.dumps(kwargs["messages"], ensure_ascii=False, sort_keys=True)
+        )
+        return super().generate(**kwargs)
+
+
+def _selected_personalization(
+    *,
+    profile_version: int,
+    memory_state_version: int,
+    volatile_suffix: str,
+    memory_value: str = "quiet_room",
+) -> PinnedPersonalizationContext:
+    habit = HabitFact(
+        fact_id="habit-fact:stable-selected",
+        fact_hash="a" * 64,
+        revision=1,
+        operation=HabitOperation.REMEMBER,
+        subject_id="subject-1",
+        concept_id="sleep.context.night_routine",
+        concept_version="1.0.0",
+        value="consistent bedtime",
+        value_hash="b" * 64,
+        confirmed_at=NOW,
+        valid_until=NOW + timedelta(days=90),
+        confirmation_ref="confirmation:habit:stable",
+        change_id="habit-change:stable",
+    )
+    item_value_hash = stable_hash(
+        {
+            "concept_id": "sleep.context.environment",
+            "value_schema_id": "enum.v1",
+            "value_schema_version": "1",
+            "typed_value": memory_value,
+        }
+    )
+    item = MemorySliceItem(
+        revision_ref="memory:environment:v1",
+        concept_id="sleep.context.environment",
+        value_schema_id="enum.v1",
+        value_schema_version="1",
+        typed_value=memory_value,
+        value_hash=item_value_hash,
+        provenance_type=ProvenanceType.ELDER_CONFIRMED,
+        source_ref="user-report:environment",
+        source_scope_kind=SourceScopeKind.HISTORICAL_RANGE,
+        status=MemoryItemStatus.ACTIVE,
+        valid_from=NOW - timedelta(days=30),
+        valid_until=NOW + timedelta(days=30),
+        trust_label=TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+        verified_evidence=False,
+        verified_medical_fact=False,
+    )
+    query_hash = stable_hash(f"query:{volatile_suffix}")
+    result_hash = stable_hash(
+        {
+            "query_hash": query_hash,
+            "items": [item.model_dump(mode="json")],
+        }
+    )
+    handle = MemoryHandle(
+        handle_id="mh_" + stable_hash(f"handle:{volatile_suffix}")[:48],
+        subject_id="subject-1",
+        actor_id="workload:worker",
+        requesting_agent=AgentId.EVIDENCE_REASONING,
+        purpose=MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT,
+        invocation_id=f"invocation:{volatile_suffix}",
+        query_id=f"memory-query:{volatile_suffix}",
+        query_hash=query_hash,
+        result_hash=result_hash,
+        revision_ref=item.revision_ref,
+        privacy_epoch=1,
+        authorization_epoch=1,
+        created_at=NOW,
+        expires_at=NOW + timedelta(minutes=15),
+    )
+    receipt = MemoryReadReceipt(
+        receipt_id=(
+            "memory-read:" + stable_hash(f"receipt:{volatile_suffix}")[:32]
+        ),
+        query_id=f"memory-query:{volatile_suffix}",
+        query_hash=query_hash,
+        invocation_id=f"invocation:{volatile_suffix}",
+        subject_id="subject-1",
+        requesting_agent=AgentId.EVIDENCE_REASONING,
+        purpose=MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT,
+        result_hash=result_hash,
+        items=(item,),
+        handles=(handle,),
+        candidate_count=1,
+        filter_reason_codes=(),
+        actual_tokens=12,
+        privacy_epoch=1,
+        authorization_epoch=1,
+        completed_at=NOW + timedelta(minutes=len(volatile_suffix)),
+    )
+    profile_hash = stable_hash(
+        {
+            "subject_id": "subject-1",
+            "profile_version": profile_version,
+            "fact_hashes": [habit.fact_hash],
+        }
+    )
+    return PinnedPersonalizationContext(
+        subject_id="subject-1",
+        habit_profile_version=profile_version,
+        habit_profile_hash=profile_hash,
+        habit_facts=(habit,),
+        memory_state_version=memory_state_version,
+        memory_read_receipts=(receipt,),
+    )
+
+
+def _stable_shared_request(
+    personalization: PinnedPersonalizationContext,
+) -> SharedAnalysisRunRequest:
+    command = _shared_analysis_request()
+    base = command.runtime_request
+    selected_habit_hash = stable_hash(
+        {
+            "schema_version": "selected_habit_facts.v1",
+            "facts": [
+                {
+                    "fact_id": personalization.habit_facts[0].fact_id,
+                    "fact_hash": personalization.habit_facts[0].fact_hash,
+                }
+            ],
+        }
+    )
+    snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-selected-stable",
+        binding=base.fact_snapshot.binding,
+        source_scope=base.fact_snapshot.source_scope,
+        canonical_data_version=base.fact_snapshot.canonical_data_version,
+        habit_profile_version=1,
+        habit_profile_hash=selected_habit_hash,
+        memory_context_version=0,
+        source_refs=(
+            *base.fact_snapshot.source_refs,
+            personalization.habit_facts[0].fact_id,
+            "consumed-context:stable",
+        ),
+        created_at=NOW,
+    )
+    runtime_request = ProductEpisodeRunRequest(
+        episode_id=base.episode_id,
+        episode_type=base.episode_type,
+        objective=base.objective,
+        fact_snapshot=snapshot,
+        tool_inputs=base.tool_inputs,
+        personalized=True,
+        personalization=personalization,
+        personalization_projection_version="selected_stable.v1",
+    )
+    return command.model_copy(update={"runtime_request": runtime_request})
+
+
+def _desired_identity_for_selected(
+    personalization: PinnedPersonalizationContext,
+) -> tuple[str, str]:
+    consumed = _consumed_context_sha256(
+        personalization,
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+    )
+    scope = UowScope(
+        namespace_id="replay:test",
+        data_mode="replay",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="worker-test",
+        namespace_generation=1,
+        run_id="run-test",
+        arm_id="arm-test",
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-test",
+    )
+    source = SimpleNamespace(
+        night_episode_id="night-1",
+        night_episode_revision_id="revision-1",
+        night_episode_revision_number=1,
+        observation_set_sha256=stable_hash("observations"),
+        policy_versions={"quality": "v1", "risk": "v1"},
+        facts=SimpleNamespace(
+            canonical_data_version="canonical-v1",
+            provider_quality_summary=lambda: {
+                "quality_state": "good",
+                "data_sufficiency": "sufficient",
+            },
+            provider_risk_summary=lambda: {
+                "risk_state": "no_reviewed_signal",
+                "health_escalation_allowed": False,
+            },
+        ),
+    )
+    return consumed, _desired_analysis_sha256(
+        scope=scope,
+        source=source,
+        consumed_context_sha256=consumed,
+        runtime_manifest_sha256=stable_hash("runtime-manifest"),
+    )
+
+
+def test_selected_context_ignores_volatile_l2_identity_in_every_provider_hash() -> None:
+    first_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=3,
+            volatile_suffix="first",
+    )
+    second_personalization = _selected_personalization(
+            profile_version=200,
+            memory_state_version=300,
+            volatile_suffix="second",
+    )
+    first_request = _stable_shared_request(first_personalization)
+    second_request = _stable_shared_request(second_personalization)
+    first_model = _CapturingDeterministicModel()
+    second_model = _CapturingDeterministicModel()
+    first_runner = build_deterministic_product_runtime_bundle(
+        model=first_model
+    ).runner
+    second_runner = build_deterministic_product_runtime_bundle(
+        model=second_model
+    ).runner
+
+    first_result = first_runner.analyze_shared(first_request)
+    second_result = second_runner.analyze_shared(second_request)
+
+    assert product_episode_request_hash(
+        first_request.runtime_request
+    ) == product_episode_request_hash(second_request.runtime_request)
+    assert _desired_identity_for_selected(
+        first_personalization
+    ) == _desired_identity_for_selected(second_personalization)
+    assert first_model.message_payloads == second_model.message_payloads
+    assert [item.context_hash for item in first_result.agent_invocations] == [
+        item.context_hash for item in second_result.agent_invocations
+    ]
+    provider_input = "\n".join(first_model.message_payloads)
+    assert "memory-read:" not in provider_input
+    assert "memory-query:" not in provider_input
+    assert "invocation:first" not in provider_input
+    assert "habit-fact:stable-selected" not in provider_input
+    assert "memory:environment:v1" not in provider_input
+
+
+def test_relevant_selected_memory_changes_request_and_provider_hashes() -> None:
+    first_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=3,
+            volatile_suffix="first",
+            memory_value="quiet_room",
+    )
+    changed_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=4,
+            volatile_suffix="changed",
+            memory_value="white_noise",
+    )
+    first_request = _stable_shared_request(first_personalization)
+    changed_request = _stable_shared_request(changed_personalization)
+    first_model = _CapturingDeterministicModel()
+    changed_model = _CapturingDeterministicModel()
+
+    build_deterministic_product_runtime_bundle(
+        model=first_model
+    ).runner.analyze_shared(first_request)
+    build_deterministic_product_runtime_bundle(
+        model=changed_model
+    ).runner.analyze_shared(changed_request)
+
+    assert product_episode_request_hash(
+        first_request.runtime_request
+    ) != product_episode_request_hash(changed_request.runtime_request)
+    assert _desired_identity_for_selected(
+        first_personalization
+    ) != _desired_identity_for_selected(changed_personalization)
+    assert first_model.message_payloads != changed_model.message_payloads
+
+
+def test_shared_fact_snapshot_does_not_promote_memory_to_evidence_sources() -> None:
+    personalization = _selected_personalization(
+        profile_version=2,
+        memory_state_version=3,
+        volatile_suffix="evidence-boundary",
+    )
+    consumed, _desired = _desired_identity_for_selected(personalization)
+    scope = UowScope(
+        namespace_id="replay:test",
+        data_mode="replay",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="worker-test",
+        namespace_generation=1,
+        run_id="run-test",
+        arm_id="arm-test",
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-test",
+    )
+    source = SimpleNamespace(
+        subject_id="subject-1",
+        episode=SimpleNamespace(
+            wake_at=NOW,
+            deterministic_close_deadline_at=NOW + timedelta(hours=1),
+        ),
+        facts=SimpleNamespace(
+            data_mode=DataMode.REPLAY,
+            local_sleep_date=NOW.date().isoformat(),
+            timezone_name="Asia/Shanghai",
+            longitudinal_risk_context=None,
+            canonical_data_version="canonical-v1",
+            deterministic_quality={"reason_codes": []},
+            deterministic_risk={"reason_codes": []},
+            agent_source_refs=lambda: ("canonical-night:sha256:safe",),
+        ),
+    )
+
+    snapshot = _fact_snapshot_for_shared(
+        scope=scope,
+        source=source,
+        fact_snapshot_id="snapshot-evidence-boundary",
+        created_at=NOW + timedelta(days=1),
+        consumed_context_sha256=consumed,
+        personalization=personalization,
+    )
+
+    memory_item = personalization.memory_read_receipts[0].items[0]
+    assert memory_item.revision_ref not in snapshot.source_refs
+    assert personalization.memory_read_receipts[0].receipt_id not in (
+        snapshot.source_refs
+    )
+    assert personalization.memory_read_receipts[0].handles[0].handle_id not in (
+        snapshot.source_refs
+    )
+    assert personalization.habit_facts[0].fact_id in snapshot.source_refs
+    assert snapshot.created_at == NOW
+
+
+def test_shared_analysis_stops_before_communication_and_result_store() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    command = _shared_analysis_request()
+
+    shared = instance.analyze_shared(command)
+
+    assert type(shared).model_validate(shared.model_dump(mode="json")) == shared
+    assert shared.evidence.agent_id is AgentId.EVIDENCE_REASONING
+    assert shared.doctor_projection_allowed is True
+    assert shared.safety is not None
+    assert shared.safety.agent_id is AgentId.SAFETY_REVIEW
+    assert WorkProductKind.COMMUNICATION not in shared.accepted_products()
+    assert SleepCareModelOutput not in model.schemas
+    assert _SleepCareContentPlan not in model.schemas
+    assert instance.result_store.history(command.episode_id) == []
+    assert all(item.agent_id is not AgentId.SLEEP_CARE for item in shared.envelopes)
+    provider_input = "\n".join(model.message_payloads)
+    assert command.source.night_episode_id not in provider_input
+    assert command.source.night_episode_revision_id not in provider_input
+
+
+def test_shared_role_projections_are_deterministic_and_keep_partial_caveat() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+
+    first = build_shared_role_projections(shared)
+    second = build_shared_role_projections(shared)
+
+    assert first == second
+    assert tuple(item.role for item in first) == (
+        ReportRole.ELDER,
+        ReportRole.FAMILY,
+        ReportRole.DOCTOR,
+    )
+    assert {item.source_shared_analysis_sha256 for item in first} == {
+        shared.shared_analysis_sha256
+    }
+    assert all(item.state is RoleProjectionState.READY for item in first)
+    assert all(
+        shared.source.partial_caveat in item.caveats
+        and shared.source.partial_caveat in (item.text or "")
+        for item in first
+    )
+    assert len({item.projection_sha256 for item in first}) == 3
+    assert tuple(
+        type(item).model_validate(item.model_dump(mode="json")) for item in first
+    ) == first
+
+
+def _policy_routed_care_shared_request() -> SharedAnalysisRunRequest:
+    command = _shared_analysis_request()
+    tool_inputs = dict(command.runtime_request.tool_inputs)
+    refs = list(command.runtime_request.fact_snapshot.source_refs)
+    tool_inputs["risk.classify_signal"] = {
+        "data": {
+            "risk_state": "no_reviewed_signal",
+            "data_sufficiency": "sufficient",
+            "health_escalation_allowed": False,
+            "reason_codes": ["no_reviewed_signal_in_source_scope"],
+        },
+        "source_refs": refs,
+        "trend_signals": [
+            {
+                "risk_level": "watch",
+                "confidence": 0.75,
+                "source_refs": refs,
+            }
+        ],
+        "trend_observation": {
+            "quality_status": "good",
+            "confidence_label": "normal",
+            "health_conclusion_allowed": True,
+            "source_refs": refs,
+        },
+    }
+    return command.model_copy(
+        update={
+            "runtime_request": command.runtime_request.model_copy(
+                update={"tool_inputs": tool_inputs}
+            )
+        }
+    )
+
+
+def test_shared_analysis_runs_care_only_when_deterministic_policy_routes_it() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+
+    shared = instance.analyze_shared(_policy_routed_care_shared_request())
+
+    assert shared.care is not None
+    strategy = CareStrategy.model_validate(shared.care.payload)
+    assert strategy.primary_action is not None
+    assert strategy.primary_action.title in shared.summary_lines
+    assert model.calls.count(_CareStrategyPlan.__name__) == 1
+
+
+def test_shared_safety_failure_blocks_doctor_without_losing_elder_family() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        fail_agent=AgentId.SAFETY_REVIEW,
+    )
+
+    shared = instance.analyze_shared(_policy_routed_care_shared_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.evidence is not None
+    assert shared.care is not None
+    assert shared.safety is None
+    assert shared.doctor_failure_codes == ("DOCTOR_SAFETY_UNAVAILABLE",)
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+
+
+def test_doctor_projection_blocks_without_approved_safety() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        fail_agent=AgentId.SAFETY_REVIEW,
+    )
+
+    shared = instance.analyze_shared(_shared_analysis_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.doctor_projection_allowed is False
+    assert shared.safety is None
+    assert shared.doctor_failure_codes
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+    assert doctor.text is None
+
+
+def test_doctor_projection_blocks_but_retains_accepted_nonapprove_safety() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        safety_verdicts=[SafetyVerdict.BLOCK],
+    )
+
+    shared = instance.analyze_shared(_shared_analysis_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.safety is not None
+    decision = SafetyDecision.model_validate(shared.safety.payload)
+    assert decision.verdict is SafetyVerdict.BLOCK
+    assert shared.doctor_projection_allowed is False
+    assert shared.doctor_failure_codes == ("DOCTOR_SAFETY_NOT_APPROVED",)
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+
+
+def _elder_narrative_request(
+    shared,
+    *,
+    episode_id: str = "product-elder-narrative-1",
+) -> ElderNarrativeRequest:
+    elder = build_shared_role_projections(shared)[0]
+    runtime_request = _shared_analysis_request().runtime_request.model_copy(
+        update={
+            "episode_id": episode_id,
+            "fact_snapshot": _shared_analysis_request().runtime_request.fact_snapshot,
+            "audience_role": "elder",
+        }
+    )
+    assert runtime_request.fact_snapshot.fact_snapshot_hash == shared.fact_snapshot_hash
+    return ElderNarrativeRequest.create(
+        runtime_request=runtime_request,
+        shared_analysis=shared,
+        elder_projection=elder,
+        render_manifest_sha256=stable_hash("elder-render-manifest"),
+    )
+
+
+def test_elder_narrative_uses_exactly_one_content_plan_call() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    schemas_before = list(model.schemas)
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    narrative_schemas = model.schemas[len(schemas_before) :]
+    assert narrative.state is ElderNarrativeState.READY
+    assert type(narrative).model_validate(
+        narrative.model_dump(mode="json")
+    ) == narrative
+    assert narrative.communication is not None
+    assert narrative.text == narrative.communication.text
+    assert narrative_schemas == [_SleepCareContentPlan]
+    assert instance.result_store.history(command.episode_id) == []
+    assert all(
+        binding.rendered_text in narrative.text
+        for binding in narrative.communication.semantic_bindings
+    )
+
+
+class _RequestingNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        if kwargs["schema"] is _SleepCareContentPlan:
+            self.schemas.append(kwargs["schema"])
+            return _SleepCareContentPlan(
+                status=WorkProductStatus.NEEDS_INPUT,
+                tool_requests=[
+                    ToolRequest(
+                        request_id="narrative-tool-request",
+                        tool_name="knowledge.retrieve_reviewed",
+                        arguments={"query": "more context"},
+                    )
+                ],
+            )
+        return super().generate(**kwargs)
+
+
+def test_elder_narrative_rejects_requests_and_returns_exact_fallback() -> None:
+    model = _RequestingNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    command = _elder_narrative_request(
+        shared,
+        episode_id="product-elder-narrative-fallback",
+    )
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.communication is None
+    assert narrative.invocation is not None
+    assert narrative.failure_codes == (
+        "ELDER_NARRATIVE_REQUEST_REJECTED",
     )

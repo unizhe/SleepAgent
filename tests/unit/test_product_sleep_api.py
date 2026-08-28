@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 import pytest
@@ -16,8 +16,17 @@ from sleepagent.api.product_contracts import (
     MemoryChangeRequest,
     MemoryQueryRequest,
     ProductCareResponse,
+    ProductNarrativeState,
+    ProductReportNarrative,
+    ProductReportProjection,
+    ProductReportQuality,
+    ProductReportRunRequest,
+    ProductReportState,
     ProductRecordsResponse,
     ProductRole,
+    ProductSleepReportListItem,
+    ProductSleepReportListResponse,
+    ProductSleepReportResponse,
     ProductSleepTodayProjection,
     ProductTrendsResponse,
     ProductTodayState,
@@ -113,6 +122,7 @@ class Identity:
     def __init__(self, context: ProductRequestContext) -> None:
         self.context = context
         self.calls: list[tuple[bytes, str]] = []
+        self.read_calls: list[tuple[bytes, str]] = []
 
     def resolve(
         self,
@@ -125,10 +135,22 @@ class Identity:
         self.calls.append((body, purpose))
         return self.context
 
+    def resolve_read(
+        self,
+        request: Request,
+        *,
+        body: bytes,
+        purpose: str,
+    ) -> ProductRequestContext:
+        del request
+        self.read_calls.append((body, purpose))
+        return self.context
+
 
 class Backend:
     def __init__(self) -> None:
         self.reservations: list[dict[str, Any]] = []
+        self.report_reservations: list[dict[str, Any]] = []
 
     def get_today_projection(
         self,
@@ -201,6 +223,43 @@ class Backend:
             items=(),
         )
 
+    def reserve_report_run(self, context, **values):
+        self.report_reservations.append({"context": context, **values})
+        return "internal-operation-never-published"
+
+    def get_report(self, context, *, wake_date, trace):
+        del trace
+        return ProductSleepReportResponse(
+            wake_date=wake_date,
+            state=ProductReportState.READY,
+            audience=context.role,
+            quality=ProductReportQuality.PARTIAL,
+            quality_caveat="Some intervals were unavailable.",
+            projection=ProductReportProjection(
+                audience=context.role,
+                summary_text="Role-minimized report.",
+                context_notice="Only authorized evidence is shown.",
+            ),
+            narrative=(
+                ProductReportNarrative(state=ProductNarrativeState.FALLBACK)
+                if context.role == ProductRole.ELDER
+                else None
+            ),
+        )
+
+    def list_reports(self, context, *, limit, cursor, trace):
+        del limit, cursor, trace
+        return ProductSleepReportListResponse(
+            items=(
+                ProductSleepReportListItem(
+                    wake_date=date(2026, 8, 26),
+                    state=ProductReportState.NOT_RUN,
+                    audience=context.role,
+                    quality=ProductReportQuality.GOOD,
+                ),
+            )
+        )
+
     def get_operation(
         self,
         context: ProductRequestContext,
@@ -234,6 +293,7 @@ def _context(role: ProductRole = ProductRole.ELDER) -> ProductRequestContext:
                 "product:sleep:care:confirm",
                 "product:sleep:feedback:write",
                 "product:sleep:operation:read",
+                "sleep:reanalysis:write",
             }
         ),
         namespace_id="replay:test",
@@ -474,3 +534,83 @@ def test_read_models_have_distinct_typed_contracts() -> None:
     assert care.schema_version == "product_sleep_care.v1"
     assert records.schema_version == "product_sleep_records.v1"
     assert identity.calls == [(b"", "sleep_care")] * 3
+
+
+def test_report_run_reserves_exact_date_without_publishing_internal_id() -> None:
+    identity = Identity(_context())
+    backend = Backend()
+    service = ProductApiService(identity_resolver=identity, backend=backend)
+    authenticated_body = (
+        b'{"schema_version":"product_sleep_report_run.v1",'
+        b'"wake_date":"2026-08-26"}'
+    )
+
+    result = service.run_report(
+        _request(),
+        ProductReportRunRequest.model_validate_json(authenticated_body),
+        idempotency_key="report-run-1",
+        request_body=authenticated_body,
+    )
+
+    assert result.model_dump(mode="json") == {
+        "schema_version": "product_sleep_report_run_accepted.v1",
+        "wake_date": "2026-08-26",
+        "state": "accepted",
+        "status_url": "/product/sleep/reports/2026-08-26",
+    }
+    assert identity.calls == [(authenticated_body, "sleep_care")]
+    assert identity.read_calls == []
+    assert len(backend.report_reservations) == 1
+    reservation = backend.report_reservations[0]
+    assert reservation["wake_date"] == date(2026, 8, 26)
+    assert reservation["idempotency_key"] == "report-run-1"
+    assert len(reservation["body_sha256"]) == 64
+    assert "internal-operation-never-published" not in result.model_dump_json()
+
+
+def test_report_reads_use_the_explicit_stateless_identity_path() -> None:
+    identity = Identity(_context(ProductRole.ELDER))
+    service = ProductApiService(identity_resolver=identity, backend=Backend())
+
+    report = service.show_report(
+        _request(),
+        wake_date=date(2026, 8, 26),
+        trace=True,
+        request_body=b"",
+    )
+    listing = service.list_reports(
+        _request(),
+        limit=20,
+        cursor=None,
+        trace=True,
+        request_body=b"",
+    )
+
+    assert report.state == ProductReportState.READY
+    assert report.audience == ProductRole.ELDER
+    assert listing.items[0].wake_date == date(2026, 8, 26)
+    assert identity.calls == []
+    assert identity.read_calls == [(b"", "sleep_care")] * 2
+
+
+def test_report_missing_exact_finalized_night_is_safe_not_found() -> None:
+    class MissingReportBackend(Backend):
+        def get_report(self, context, *, wake_date, trace):
+            del context, wake_date, trace
+            return None
+
+    service = ProductApiService(
+        identity_resolver=Identity(_context()),
+        backend=MissingReportBackend(),
+    )
+
+    with pytest.raises(ProductApiError, match="finalized report night") as captured:
+        service.show_report(
+            _request(),
+            wake_date=date(2026, 8, 26),
+            trace=False,
+            request_body=b"",
+        )
+
+    assert captured.value.status_code == 404
+    assert captured.value.code == "not_found"
