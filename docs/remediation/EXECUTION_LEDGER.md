@@ -1333,3 +1333,145 @@ committed.
 `G2B_M3_SAFE_TO_BEGIN = YES`
 
 G2B-Preflight stops here. M3 is not started.
+
+## G2B — M3 persisted Observation Semantics V2 and metric-safe analytics
+
+`G2B_M3_STATUS = PASS`
+
+### Entry, scope, and persistence authority
+
+- Entry was the exact clean G2B-Preflight commit
+  `3717c07d052feba42b3ecf4c912059a50a97eeb2`.
+- M3 adds only migration `014_observation_semantics_v2.sql`; migrations
+  001-013 retain the hashes recorded above. Migration 014 is
+  `96756b31a3515b82756ef2ab0c30b432a6b259a185000993002bfacbc661a368`.
+  The 014 manifest is
+  `ed1afd6c4ba76673d1530d4a3e988eba485c56f85b5a5d9573d38e4f2c52ba80`.
+- `sleep_domain_observation_semantics_v2` is an immutable, forced-RLS sidecar
+  keyed to the exact canonical observation/namespace/mode/subject. It is the
+  sole V2 semantic and analytic authority. The existing observation JSON is
+  retained only as the explicit V1 compatibility projection; raw/vendor rows
+  are not rewritten.
+- The sidecar persists the typed semantic payload/value, metric and unit,
+  authoritative and aggregation timestamps, source/provenance, vendor code,
+  semantic/ontology/normalizer versions, stable semantic identity, transport
+  identity, analytic trust, upcast status, and classification evidence.
+- Database checks enforce index versus count versus ambiguous Movement,
+  positive count windows, non-negative integral event counts, analytic trust,
+  non-movement separation, namespace/mode shape, and unique semantic identity.
+  The semantic-identity index and existing reconciliation advisory lock prevent
+  duplicate trusted facts. The bounded upcast adds its own per-identity
+  transaction advisory lock.
+
+### Native V2 persistence and historical classification
+
+- Push, Pull, and Replay now retain `CanonicalObservationV2` through their
+  transaction and write the sidecar beside the existing V1 compatibility row.
+  The global/default setting remains V1 and no V2 rejection falls back to V1.
+- Exact Push/Pull overlap attaches or validates one sidecar on the reconciler's
+  retained observation. Independent acquisition provenance remains in the
+  acquisition ledger; a later transport cannot mutate the first semantic row.
+- `observation_semantics_upcast` is a bounded, batch-committing, resumable CLI
+  with `--dry-run`, `--batch-size`, `--max-rows`, and explicit category counts.
+  It reports already-classified and error counts, uses scoped keyset pagination,
+  and keys its identity cache by namespace and data mode. Reruns skip existing
+  sidecars and cannot create a second semantic identity. A malformed row rolls
+  back to its own savepoint, increments the error count, and makes the CLI exit
+  nonzero without discarding successful rows in the bounded batch.
+- Historical classification is evidence-only:
+  Perceptor device-measured BodyShake with an allowlisted Push/Pull adapter and
+  legacy `index` unit becomes `movement_index`; the Pull report hour-bucket
+  flag plus the explicit vendor-count limitation and an integral value becomes
+  `movement_event_count` with its proved one-hour window. Unproved report
+  `{time_long,value}` and all other unsupported shapes become audit-visible,
+  analytically untrusted `legacy_ambiguous_movement`. Numeric magnitude is
+  never a classifier.
+
+### Metric-safe aggregation and Product integration
+
+- V2 aggregation keeps `movement_index` and `movement_event_count` in separate
+  structures. Index exposes mean/median/sample count. Event count exposes a
+  total and hourly maximum only after exact-duplicate deduplication and removal
+  of conflicting or overlapping windows. The aggregation boundary revalidates
+  source authority; non-hourly windows may contribute to a disjoint total but
+  are explicitly excluded from `hourly_max`. Coverage minutes, gaps, overlap,
+  conflicts, duplicates, incompatible windows, invalid semantics, and
+  ambiguous exclusions remain visible.
+- `legacy_ambiguous_movement` and any unclassified V1 row are excluded from V2
+  totals instead of becoming zero. Mixed V2 Product evidence has no generic
+  `vital_centers.movement` and cannot reconstruct the legacy `20.9` result.
+  The separate unchanged V1 characterization still produces exactly `20.9`.
+- The exact-revision Product loader joins sidecars by the pinned observation
+  set and carries explicit metric, unit, window, trust, classification, and
+  semantic identity through `ProductRevisionFacts`, deterministic night
+  evidence, and the provider-facing evidence tool input.
+- No new medical threshold was invented. The existing legacy
+  `RadarNightSummary.movement_count` trend/risk threshold cannot be proved to
+  mean either new metric and is classified `LEGACY_COMPAT_ONLY`. V2 Product
+  movement analytics publish `SEMANTIC_THRESHOLD_UNRESOLVED`; neither V2
+  movement metric enters that legacy trend/risk/care threshold.
+
+### Downstream consumer trace
+
+| Consumer | Classification and M3 result |
+|---|---|
+| Canonical observation persistence | `USES_BOTH_DISTINCTLY`; migrated to the V2 sidecar while retaining V1 compatibility. |
+| SQL functions/views | `SHOULD_NOT_USE_MOVEMENT`; no current SQL aggregate consumes generic Movement. |
+| `ProductRevisionFacts` and night/revision aggregation | `USES_BOTH_DISTINCTLY`; migrated to metric-safe V2 facts and aggregation. |
+| Longitudinal Product vital trend | `SHOULD_NOT_USE_MOVEMENT`; it consumes only HeartRate and Respiration and is unchanged. |
+| Runtime `RadarNightSummary.movement_count` trend/risk | `LEGACY_COMPAT_ONLY`; semantic threshold is unresolved and receives no V2 Movement mapping. |
+| EvidenceReasoning/shared-analysis input | `USES_BOTH_DISTINCTLY` through deterministic Product evidence; ambiguous numeric facts are excluded. |
+| CareStrategy/personalization inputs | `SHOULD_NOT_USE_MOVEMENT` directly; no generic canonical Movement field was found, and no new mapping was added. |
+| API/read models and CLI/Demo projections | `LEGACY_COMPAT_ONLY` or `SHOULD_NOT_USE_MOVEMENT`; no M3-owned public Movement projection required a contract change. |
+
+### PostgreSQL 16 proof
+
+- The verified user-owned PostgreSQL 16.14 runtime was started in a unique
+  loopback-only `/tmp/sleepagent-g2b-m3-pg16` cluster on port 15432. The
+  unrelated port-55448 cluster was not touched.
+- Fresh empty-database migration 001-014, canonical test-role bootstrap, and
+  read-only migration check all reported schema 014.
+- A separate temporary upgrade database applied 001-013, seeded proved index,
+  proved hourly count, unproved movement, a non-movement observation, and a
+  duplicate semantic fact, then applied 014 and ran dry-run plus real upcast.
+  Result: two index candidates (one semantic duplicate), one event count, one
+  ambiguous row, three inserted sidecars, one duplicate identity, zero
+  non-movement sidecars. Raw pre-normalization and encrypted-payload hashes
+  were identical before and after. The rerun inserted zero rows.
+- The PostgreSQL test exercises index/count/ambiguity checks and the immutable
+  trigger. Catalog and runtime proof confirm forced RLS, no PUBLIC grant,
+  Worker SELECT/INSERT only, no API INSERT, no Demo SELECT, and zero rows for an
+  unscoped Worker. Native Worker transactions successfully insert V2 rows.
+- Explicit V2 Push persisted four distinct semantic identities including one
+  Movement index; the raw retry created no duplicate. Explicit V2 Pull history
+  attached three semantics to retained Push facts, detected exact overlap, and
+  preserved one semantic identity per fact. Replay V2 retains its semantic
+  object through the repository handoff and the shared PostgreSQL adapter is
+  the same sidecar writer.
+
+### Verification and architecture
+
+- Focused G2B/M3 plus G2A/G1/Product/Perceptor selection: 113 passed.
+- Migration/tooling/architecture selection: 69 passed.
+- Unit-marked suite: 1,081 passed, 36 deselected.
+- Non-PostgreSQL/non-E2E/non-ASGI suite: 1,081 passed, 36 deselected.
+- PostgreSQL marker on a clean 001-014 database: 33 passed, one existing
+  completed-process evidence reader skipped, 1,083 deselected.
+- OpenAPI canonical snapshots, compileall, import smoke, migration discovery,
+  and `git diff --check`: PASS.
+- The G1 architecture executable reports no new SCC, self-import, or forbidden
+  edge. In particular `domain/canonical_observation.py` remains persistence
+  independent. No ADR is added because the sidecar directly implements the
+  frozen canonical-boundary and movement-separation ADRs without changing
+  their decision.
+
+`V2_PERSISTED_ANALYTICS_READY = YES`
+
+`V2_DEFAULT_CUTOVER_READY = NO`
+
+Default cutover remains a separate decision. Before it can be authorized, the
+legacy runtime `movement_count` threshold needs a proved metric or permanent
+retirement, and explicit-V2 coverage must resolve the existing vendor-derived
+realtime bed-presence ontology mismatch that remains outside M3. V1 therefore
+stays the global default. No reporting/localization, later remediation,
+DeviceBinding, scheduling, delivery, or topology work was started.

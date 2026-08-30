@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 13,
+  "target_version": 14,
   "migrations": [
     {
       "version": 1,
@@ -90,6 +90,13 @@
       "version": 13,
       "filename": "013_perceptor_pull_retry_noop.sql",
       "sha256": "0809507f81dc2aa7a105d324338a26016fcbd3b84e5a08ff68dd9bf4c04822c1",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 14,
+      "filename": "014_observation_semantics_v2.sql",
+      "sha256": "96756b31a3515b82756ef2ab0c30b432a6b259a185000993002bfacbc661a368",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

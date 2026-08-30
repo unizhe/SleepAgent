@@ -671,3 +671,58 @@ the final migration check remained at 013, and `git diff --check` passed. The
 Compose example is loopback-only and the new remediation document records
 canonical Compose plus verified native start/reset/test/stop commands. M3 was
 not started.
+
+## Act 7 — Build: G2B M3 persisted Observation Semantics V2
+
+### Round 1 — Codex build
+
+Added manifest-pinned migration 014 and an immutable forced-RLS semantic
+sidecar linked to the existing V1 canonical observation. The domain-owned
+persisted contract and PostgreSQL adapter carry metric/value/unit/window,
+source/provenance, semantic identity, version fields, analytic trust, and
+classification evidence without changing raw/vendor rows or migrations
+001-013.
+
+Retained the canonical V2 result through Push, Pull, and Replay persistence;
+added a bounded dry-run/resumable historical classifier; and implemented
+separate index and interval-aware count aggregation. Product exact-revision
+facts now join the semantic sidecar and expose metric-safe deterministic
+evidence. V1 remains the default and its legacy `20.9` characterization remains
+unchanged. The unresolved generic runtime Movement threshold is explicitly
+fail-closed as `SEMANTIC_THRESHOLD_UNRESOLVED` for V2.
+
+### Round 2 — Codex fix pass
+
+The first explicit-V2 run of the broad Pull integration correctly rejected an
+unrelated vendor-derived realtime bed-presence candidate under the frozen V2
+ontology. Kept that later legacy branch on V1 and narrowed explicit V2 to the
+Movement-relevant history/reconciliation segment instead of broadening M3.
+
+Hardened aggregation so identical count-window observations deduplicate to one
+fact while conflicting and overlapping windows are excluded. Added per-semantic
+advisory locking to make concurrent upcasts safe, tightened non-movement trust
+constraints, moved the runtime-role privilege proof to the canonically
+bootstrapped database, and added executable constraint/append-only evidence.
+The final audit also scoped the upcast identity cache and keyset cursor by
+namespace/data mode, made already-classified/error counts explicit, required
+source authority at the aggregation boundary, and excluded non-hourly windows
+from the hourly maximum without excluding them from a compatible disjoint
+total.
+
+### Codex verification
+
+- Focused semantic/Product/Perceptor selection: 113 passed.
+- Migration/tooling/architecture selection: 69 passed.
+- Unit-marked suite: 1,081 passed, 36 deselected.
+- Non-PostgreSQL/non-E2E/non-ASGI suite: 1,081 passed, 36 deselected.
+- PostgreSQL 16 marker from a clean 001-014 database: 33 passed, one expected
+  completed-process evidence-reader skip, 1,083 deselected.
+- Fresh 001-014 and realistic 013-to-014 upgrade/upcast/RLS/constraint proof:
+  PASS on isolated temporary databases, including unchanged raw hashes and
+  zero inserts on rerun.
+- Architecture no-growth, OpenAPI snapshot check, compileall/import smoke,
+  migration check, historical migration hashes, and `git diff --check`: PASS.
+
+Diff review confirms one V2 analytic authority, no generic mixed Movement in
+V2 Product evidence, no invented threshold, no default flip, and no work from
+later reporting or remediation phases. Two bounded fix rounds were used.

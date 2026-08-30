@@ -9,7 +9,7 @@ Radar ``raw_payload``/``data_payload`` compatibility shapes.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal, Mapping, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
@@ -46,6 +46,9 @@ from sleepagent.domain.contracts import (
     UnknownObservationPayload,
     VendorAlertPayload,
     VendorSleepProfileMetricPayload,
+)
+from sleepagent.domain.observation_semantics import (
+    aggregate_movement_semantics_v2,
 )
 
 
@@ -646,6 +649,9 @@ class ProductRevisionFacts(SleepDomainContract):
             "respiratory_rate": [],
             "movement": [],
         }
+        movement_semantics: list[dict[str, Any]] = []
+        unclassified_movement_count = 0
+        v2_semantics_present = False
         stage_minutes: dict[str, float] = {}
         bed_events: list[tuple[str, datetime]] = []
         window_start: datetime | None = None
@@ -654,9 +660,29 @@ class ProductRevisionFacts(SleepDomainContract):
             payload = observation.get("payload")
             if not isinstance(payload, dict):
                 continue
+            semantic = observation.get("observation_semantics_v2")
+            if isinstance(semantic, dict):
+                v2_semantics_present = True
             observation_type = str(payload.get("observation_type") or "")
             value = payload.get("value")
-            if observation_type in samples and isinstance(value, (int, float)):
+            if observation_type == "movement":
+                if isinstance(semantic, dict):
+                    movement_semantics.append(
+                        {
+                            **semantic,
+                            "value": semantic.get("value"),
+                            "aggregation_start_at": _semantic_datetime(
+                                semantic.get("aggregation_start_at")
+                            ),
+                            "aggregation_end_at": _semantic_datetime(
+                                semantic.get("aggregation_end_at")
+                            ),
+                        }
+                    )
+                elif isinstance(value, (int, float)):
+                    samples[observation_type].append(float(value))
+                    unclassified_movement_count += 1
+            elif observation_type in samples and isinstance(value, (int, float)):
                 samples[observation_type].append(float(value))
             if observation_type == "sleep_stage_interval":
                 start = _aware_wire_datetime(payload.get("start_at"))
@@ -706,7 +732,14 @@ class ProductRevisionFacts(SleepDomainContract):
                 }
             )
 
-        return {
+        v2_movement = v2_semantics_present and bool(
+            movement_semantics or unclassified_movement_count
+        )
+        movement_facts = [
+            *movement_semantics,
+            *({} for _ in range(unclassified_movement_count)),
+        ]
+        summary = {
             "schema_version": "product_deterministic_night_summary.v1",
             "sleep_window_start": (
                 None if window_start is None else window_start.isoformat()
@@ -723,11 +756,23 @@ class ProductRevisionFacts(SleepDomainContract):
             "vital_centers": {
                 key: (None if not values else round(sum(values) / len(values), 1))
                 for key, values in samples.items()
+                if key != "movement" or not v2_movement
             },
-            "sample_counts": {key: len(values) for key, values in samples.items()},
+            "sample_counts": {
+                key: len(values)
+                for key, values in samples.items()
+                if key != "movement" or not v2_movement
+            },
             "bed_exit_count": len(exits),
             "bed_exit_events": exits,
         }
+        if v2_movement:
+            summary["movement_semantics_v2"] = aggregate_movement_semantics_v2(
+                movement_facts,
+                expected_start_at=window_start,
+                expected_end_at=window_end,
+            )
+        return summary
 
     def elder_presentation_facts(self) -> ProductElderPresentationFacts:
         """Reduce canonical facts for Elder display without changing analysis input.
@@ -1216,6 +1261,7 @@ def assert_agent_safe_payload(
 
 def _project_observation(
     observation: SleepObservation,
+    observation_semantics_v2: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], tuple[str, ...]]:
     payload = observation.payload
     if isinstance(payload, (HeartRatePayload, RespiratoryRatePayload, MovementPayload)):
@@ -1332,6 +1378,10 @@ def _project_observation(
         "quality": observation.quality.model_dump(mode="json"),
         "provenance_references": list(refs[1:]),
     }
+    if observation_semantics_v2 is not None:
+        projected["observation_semantics_v2"] = dict(
+            observation_semantics_v2
+        )
     assert_agent_safe_payload(
         projected,
         expected_data_mode=observation.data_mode,
@@ -1349,6 +1399,16 @@ def _aware_wire_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed
+
+
+def _semantic_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return (
+            value
+            if value.tzinfo is not None and value.utcoffset() is not None
+            else None
+        )
+    return _aware_wire_datetime(value)
 
 
 def _require_aware_datetime(value: datetime, name: str) -> None:

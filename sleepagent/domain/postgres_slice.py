@@ -33,6 +33,9 @@ from sleepagent.persistence.uow import (
     UnitOfWorkFactory,
     UowScope,
 )
+from sleepagent.persistence.observation_semantics import (
+    persist_observation_semantics_v2,
+)
 from sleepagent.domain.contracts import (
     AdapterObservationCandidate,
     AlertCorrelationReceipt,
@@ -1028,7 +1031,7 @@ class NormalizationHandler:
                 raise SleepSliceInvariantError(
                     "replay observation semantics do not match configured authority"
                 )
-            observation, candidate = _normalize_replay_observation(
+            observation, candidate, canonical_semantics = _normalize_replay_observation(
                 replay_input,
                 raw_ingress_record_id=work.raw_ingress_record_id,
                 payload_sha256=work.payload_sha256,
@@ -1079,6 +1082,7 @@ class NormalizationHandler:
                 work=work,
                 candidate=candidate,
                 observation=observation,
+                canonical_semantics=canonical_semantics,
                 snapshot=snapshot,
                 mutation=mutation,
                 fast_path_operation_id=fast_path_operation_id,
@@ -1679,6 +1683,7 @@ class PostgresSleepSliceRepository:
         work: LoadedNormalizationWork,
         candidate: AdapterObservationCandidate,
         observation: SleepObservation,
+        canonical_semantics: CanonicalObservationV2 | None,
         snapshot: LifecycleSnapshotRecord,
         mutation: EpisodeRevisionMutation | None,
         fast_path_operation_id: str | None,
@@ -1744,6 +1749,15 @@ class PostgresSleepSliceRepository:
                     committed_at,
                 ),
             )
+            if canonical_semantics is not None:
+                persist_observation_semantics_v2(
+                    cursor,
+                    self.scope,
+                    observation_id=observation.observation_id,
+                    subject_id=observation.subject_id,
+                    semantics=canonical_semantics,
+                    created_at=committed_at,
+                )
             normalization_receipt_id = self.id_generator(committed_at)
             cursor.execute(
                 """
@@ -3574,22 +3588,28 @@ def _normalize_replay_observation(
     observation_id: str,
     candidate_id: str,
     observation_semantics_version: str = "v1",
-) -> tuple[SleepObservation, AdapterObservationCandidate]:
+) -> tuple[
+    SleepObservation,
+    AdapterObservationCandidate,
+    CanonicalObservationV2 | None,
+]:
     candidate = _replay_candidate(
         source,
         raw_ingress_record_id=raw_ingress_record_id,
         payload_sha256=payload_sha256,
         candidate_id=candidate_id,
     )
+    canonical_semantics: CanonicalObservationV2 | None = None
     if observation_semantics_version == "v2":
         if not isinstance(source, ReplayObservationInputV2):
             raise ValueError("V2 replay normalization requires V2 replay input")
-        candidate = canonicalize_replay_input_v2(
+        canonical_semantics = canonicalize_replay_input_v2(
             source,
             raw_ingress_record_id=raw_ingress_record_id,
             payload_sha256=payload_sha256,
             candidate_id=candidate_id,
-        ).compatibility_candidate
+        )
+        candidate = canonical_semantics.compatibility_candidate
     observation = SleepObservation(
         observation_id=observation_id,
         data_mode=DataMode.REPLAY,
@@ -3611,7 +3631,7 @@ def _normalize_replay_observation(
         source_key=candidate.source_key,
         idempotency_key=candidate.idempotency_key,
     )
-    return observation, candidate
+    return observation, candidate, canonical_semantics
 
 
 def _replay_candidate(

@@ -2061,6 +2061,53 @@ class PostgresProductAgentRepository:
             )
             cursor.execute(
                 """
+                SELECT observation_id, schema_version, semantics_version,
+                       metric_id, semantic_payload_json, canonical_unit,
+                       occurred_at, aggregation_start_at, aggregation_end_at,
+                       source_kind, vendor_semantic_code, ontology_version,
+                       normalizer_version, semantic_identity,
+                       trusted_for_analytics, upcast_status,
+                       classification_evidence
+                FROM public.sleep_domain_observation_semantics_v2
+                WHERE namespace_id = %s AND data_mode = %s
+                  AND subject_id = %s AND observation_id = ANY(%s)
+                """,
+                (
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.subject_id,
+                    list(observation_ids),
+                ),
+            )
+            semantics_by_observation: dict[str, dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                semantic_payload = _json_value(row[4])
+                semantics_by_observation[str(row[0])] = {
+                    "schema_version": str(row[1]),
+                    "semantics_version": str(row[2]),
+                    "metric_id": str(row[3]),
+                    "value": semantic_payload.get("value"),
+                    "unit": None if row[5] is None else str(row[5]),
+                    "occurred_at": row[6].isoformat(),
+                    "aggregation_start_at": (
+                        None if row[7] is None else row[7].isoformat()
+                    ),
+                    "aggregation_end_at": (
+                        None if row[8] is None else row[8].isoformat()
+                    ),
+                    "source_kind": str(row[9]),
+                    "vendor_semantic_code": (
+                        None if row[10] is None else str(row[10])
+                    ),
+                    "ontology_version": str(row[11]),
+                    "normalizer_version": str(row[12]),
+                    "semantic_identity": str(row[13]),
+                    "trusted_for_analytics": bool(row[14]),
+                    "upcast_status": str(row[15]),
+                    "classification_evidence": _json_value(row[16]),
+                }
+            cursor.execute(
+                """
                 SELECT observation_id, acquisition_channel
                 FROM public.sleep_domain_observation_acquisitions
                 WHERE namespace_id = %s AND data_mode = %s
@@ -2118,6 +2165,7 @@ class PostgresProductAgentRepository:
                 for observation_id, channels
                 in acquisition_channels_by_observation.items()
             },
+            semantics_by_observation=semantics_by_observation,
         )
         policy_versions = {
             str(name): str(value)
@@ -7370,6 +7418,7 @@ def _build_facts(
     acquisition_channels_by_observation: Mapping[
         str, tuple[str, ...]
     ] | None = None,
+    semantics_by_observation: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[ProductRevisionFacts, str, dict[str, str], tuple[str, ...]]:
     if episode.episode_local_date is None:
         raise ProductAgentInvariantError(
@@ -7382,7 +7431,10 @@ def _build_facts(
     adapters: dict[str, str] = {}
     observation_schemas: set[str] = set()
     for observation in observations:
-        projected, refs = _project_observation(observation)
+        projected, refs = _project_observation(
+            observation,
+            (semantics_by_observation or {}).get(observation.observation_id),
+        )
         channels = tuple(
             dict.fromkeys(
                 (acquisition_channels_by_observation or {}).get(

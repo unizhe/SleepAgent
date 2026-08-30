@@ -16,6 +16,7 @@ from sleepagent.config import (
     DataMode,
     DeploymentMode,
     ModelMode,
+    ObservationSemanticsVersion,
     ProcessRole,
     ProviderMode,
     SleepBackendSettings,
@@ -380,11 +381,15 @@ def _process_next(
     cipher: RawPayloadCipher,
     *,
     worker: str,
+    observation_semantics_version: ObservationSemanticsVersion = (
+        ObservationSemanticsVersion.V1
+    ),
 ) -> Any:
     claim, scope = _claim_scope(store, worker)
     return PerceptorLiveNormalizationDispatcher(
         worker_uow,
         cipher=cipher,
+        observation_semantics_version=observation_semantics_version,
     ).process(scope, _lease(claim))
 
 
@@ -428,6 +433,7 @@ def _count(admin_dsn: str, table: str) -> int:
         "sleep_domain_canonical_observations",
         "sleep_domain_observation_acquisitions",
         "sleep_domain_observation_conflicts",
+        "sleep_domain_observation_semantics_v2",
         "sleep_domain_night_episodes",
     }
     assert table in allowed
@@ -525,13 +531,20 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         )
         assert exact_ingress.disposition == "accepted"
         exact_result = _process_next(
-            store, worker_uow, cipher, worker="p4d2-b2-exact-pull-worker"
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-exact-pull-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert exact_result.canonical_created_count == 0
         assert exact_result.push_pull_overlap_count == 3
         assert exact_result.conflict_created_count == 0
         assert exact_result.checkpoint_advanced is True
         assert _count(admin_dsn, "sleep_domain_canonical_observations") == 4
+        assert _count(
+            admin_dsn, "sleep_domain_observation_semantics_v2"
+        ) == 3
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -562,7 +575,11 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         )
         assert overlapping_ingress.disposition == "accepted"
         overlapping_result = _process_next(
-            store, worker_uow, cipher, worker="p4d2-b2-overlap-window-worker"
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-overlap-window-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert overlapping_result.canonical_created_count == 0
         assert overlapping_result.push_pull_overlap_count == 3
@@ -615,7 +632,11 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         )
         assert conflict_ingress.disposition == "accepted"
         conflict_result = _process_next(
-            store, worker_uow, cipher, worker="p4d2-b2-conflict-worker"
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-conflict-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert conflict_result.canonical_created_count == 1
         assert conflict_result.push_pull_overlap_count == 2

@@ -18,6 +18,7 @@ from sleepagent.config import (
     DataMode,
     DeploymentMode,
     ModelMode,
+    ObservationSemanticsVersion,
     ProcessRole,
     ProviderMode,
     SleepBackendSettings,
@@ -114,6 +115,7 @@ def _worker_settings(dsn: str) -> SleepBackendSettings:
         model_mode=ModelMode.DISABLED,
         signing_key_ref="test:p4d-signing",
         encryption_key_ref="test:p4d-encryption",
+        observation_semantics_version=ObservationSemanticsVersion.V2,
     )
 
 
@@ -400,6 +402,38 @@ def test_production_push_to_canonical_postgres_boundary() -> None:
                     (NAMESPACE,),
                 )
                 assert cursor.fetchone() == (4, 4)
+                cursor.execute(
+                    "SELECT count(*), count(DISTINCT semantic_identity), "
+                    "count(*) FILTER (WHERE metric_id = 'movement_index') "
+                    "FROM sleep_domain_observation_semantics_v2 "
+                    "WHERE namespace_id = %s",
+                    (NAMESPACE,),
+                )
+                assert cursor.fetchone() == (4, 4, 1)
+                cursor.execute(
+                    "SELECT has_table_privilege(%s, %s, 'SELECT'), "
+                    "has_table_privilege(%s, %s, 'INSERT'), "
+                    "has_table_privilege(%s, %s, 'INSERT'), "
+                    "has_table_privilege(%s, %s, 'SELECT')",
+                    (
+                        _dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_USER"),
+                        "sleep_domain_observation_semantics_v2",
+                        _dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_USER"),
+                        "sleep_domain_observation_semantics_v2",
+                        _dsn("SLEEPAGENT_TEST_POSTGRES_API_USER"),
+                        "sleep_domain_observation_semantics_v2",
+                        _dsn("SLEEPAGENT_TEST_POSTGRES_DEMO_USER"),
+                        "sleep_domain_observation_semantics_v2",
+                    ),
+                )
+                assert cursor.fetchone() == (True, True, False, False)
+                with psycopg.connect(worker_dsn) as unscoped_worker:
+                    with unscoped_worker.cursor() as worker_cursor:
+                        worker_cursor.execute(
+                            "SELECT count(*) FROM "
+                            "sleep_domain_observation_semantics_v2"
+                        )
+                        assert worker_cursor.fetchone() == (0,)
                 cursor.execute(
                     "SELECT count(*) FROM sleep_domain_normalization_work "
                     "WHERE namespace_id = %s AND status = 'succeeded'",

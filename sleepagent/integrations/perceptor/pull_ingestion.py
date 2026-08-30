@@ -965,15 +965,22 @@ class PerceptorPullNormalizationProcessor:
                 ).candidates
             )
         )
+        canonical_semantics: tuple[Any | None, ...] = tuple(
+            None for _ in candidates
+        )
         if (
             result is not None
             and self.observation_semantics_version is ObservationSemanticsVersion.V2
         ):
-            canonical = canonicalize_pull_result_v2(
+            canonical_semantics = canonicalize_pull_result_v2(
                 replace(result, candidates=candidates)
             )
-            candidates = tuple(item.compatibility_candidate for item in canonical)
-        observations = tuple(bind_adapter_candidate(candidate, binding) for candidate in candidates)
+            candidates = tuple(
+                item.compatibility_candidate for item in canonical_semantics
+            )
+        observations = tuple(
+            bind_adapter_candidate(candidate, binding) for candidate in candidates
+        )
         history_classification = (
             None if result is None else result.history_window_classification
         )
@@ -982,6 +989,7 @@ class PerceptorPullNormalizationProcessor:
             "binding": binding,
             "candidates": candidates,
             "observations": observations,
+            "canonical_semantics": canonical_semantics,
             "no_data": no_data,
             "unknown_fields": () if result is None else result.unknown_fields,
             "history_window_classification": (
@@ -1043,8 +1051,11 @@ class PerceptorPullNormalizationProcessor:
                     uow.commit()
                     return dict(summary)
                 reconciliations: list[PerceptorReconciliationResult] = []
-                for candidate, observation in zip(
-                    normalized["candidates"], normalized["observations"], strict=True
+                for candidate, observation, semantics in zip(
+                    normalized["candidates"],
+                    normalized["observations"],
+                    normalized["canonical_semantics"],
+                    strict=True,
                 ):
                     reconciliations.append(
                         self.reconciler.reconcile(
@@ -1053,6 +1064,7 @@ class PerceptorPullNormalizationProcessor:
                             raw_ingress_record_id=str(loaded["raw_ingress_record_id"]),
                             candidate=candidate,
                             observation=observation,
+                            canonical_semantics=semantics,
                             semantic_surface=semantic_surface_for_pull(
                                 str(normalized["endpoint"]), observation
                             ),

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping
 
+from sleepagent.domain.canonical_observation import CanonicalObservationV2
 from sleepagent.domain.contracts import (
     AdapterObservationCandidate,
     MissingIntervalPayload,
@@ -25,6 +26,9 @@ from sleepagent.domain.reconciliation import (
     semantic_fact_slot_key,
     semantic_value_sha256,
     with_reconciliation_conflict,
+)
+from sleepagent.persistence.observation_semantics import (
+    persist_observation_semantics_v2,
 )
 from sleepagent.persistence.uow import UowScope
 
@@ -135,6 +139,7 @@ class PerceptorObservationReconciler:
         raw_ingress_record_id: str,
         candidate: Any,
         observation: SleepObservation,
+        canonical_semantics: CanonicalObservationV2 | None = None,
         semantic_surface: str,
         committed_at: datetime,
     ) -> PerceptorReconciliationResult:
@@ -188,6 +193,15 @@ class PerceptorObservationReconciler:
         channel = acquisition_channel_for_observation(observation)
         if exact is not None:
             retained_observation_id = str(exact[1])
+            if canonical_semantics is not None:
+                persist_observation_semantics_v2(
+                    cursor,
+                    scope,
+                    observation_id=retained_observation_id,
+                    subject_id=observation.subject_id,
+                    semantics=canonical_semantics,
+                    created_at=committed_at,
+                )
             cursor.execute(
                 """
                 SELECT acquisition_channel
@@ -249,6 +263,15 @@ class PerceptorObservationReconciler:
             candidate_id=candidate.candidate_id,
             created_at=committed_at,
         )
+        if canonical_semantics is not None:
+            persist_observation_semantics_v2(
+                cursor,
+                scope,
+                observation_id=stored_observation.observation_id,
+                subject_id=stored_observation.subject_id,
+                semantics=canonical_semantics,
+                created_at=committed_at,
+            )
         acquisition_created = self._insert_acquisition(
             cursor,
             scope,

@@ -384,11 +384,15 @@ class PerceptorNormalizationProcessor:
                         raw_ingress_record_id=loaded["raw_ingress_record_id"],
                     )
                 )
+                canonical_semantics: tuple[Any | None, ...]
                 if self.observation_semantics_version is ObservationSemanticsVersion.V2:
+                    canonical_semantics = canonicalize_push_candidates_v2(candidates)
                     candidates = tuple(
                         item.compatibility_candidate
-                        for item in canonicalize_push_candidates_v2(candidates)
+                        for item in canonical_semantics
                     )
+                else:
+                    canonical_semantics = tuple(None for _ in candidates)
                 binding = DeviceBinding.model_validate(loaded["binding_json"])
                 observations = tuple(
                     bind_adapter_candidate(candidate, binding)
@@ -417,6 +421,7 @@ class PerceptorNormalizationProcessor:
                 raw_ingress_record_id=loaded["raw_ingress_record_id"],
                 candidates=candidates,
                 observations=observations,
+                canonical_semantics=canonical_semantics,
                 committed_at=committed_at,
             )
             uow.commit()
@@ -528,12 +533,18 @@ class PerceptorNormalizationProcessor:
         raw_ingress_record_id: str,
         candidates: tuple[Any, ...],
         observations: tuple[Any, ...],
+        canonical_semantics: tuple[Any | None, ...],
         committed_at: datetime,
     ) -> tuple[PerceptorReconciliationResult, ...]:
         cursor = connection.cursor()
         try:
             reconciliations: list[PerceptorReconciliationResult] = []
-            for candidate, observation in zip(candidates, observations, strict=True):
+            for candidate, observation, semantics in zip(
+                candidates,
+                observations,
+                canonical_semantics,
+                strict=True,
+            ):
                 reconciliations.append(
                     self.reconciler.reconcile(
                         cursor,
@@ -541,6 +552,7 @@ class PerceptorNormalizationProcessor:
                         raw_ingress_record_id=raw_ingress_record_id,
                         candidate=candidate,
                         observation=observation,
+                        canonical_semantics=semantics,
                         semantic_surface=semantic_surface_for_push(observation),
                         committed_at=committed_at,
                     )
