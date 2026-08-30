@@ -1475,3 +1475,108 @@ retirement, and explicit-V2 coverage must resolve the existing vendor-derived
 realtime bed-presence ontology mismatch that remains outside M3. V1 therefore
 stays the global default. No reporting/localization, later remediation,
 DeviceBinding, scheduling, delivery, or topology work was started.
+
+## G2C — Default Observation Semantics V2 cutover
+
+`G2C_STATUS = PASS`
+
+### Entry and bounded scope
+
+- Entry HEAD: `d206ee20d4d1db39f1fa7316a6eefab1203eede1`.
+- Entry worktree: clean; authoritative migration level 014; PostgreSQL 16.14
+  verification profile available.
+- Scope: resolve or retire the generic Movement threshold, resolve the Pull
+  bed-presence ontology mismatch, exercise explicit V2 deployment paths, and
+  make the bounded default-cutover decision. No reporting, report-cutover,
+  architecture, scheduling, finalization, or delivery work is included.
+
+### Generic Movement threshold decision
+
+`GENERIC_MOVEMENT_THRESHOLD = OBSOLETE_LEGACY_THRESHOLD`
+
+Repository history proves that `RadarNightSummary.movement_count` did not own
+one stable vendor metric:
+
+- the original deterministic quality path computed it as the number of sampled
+  `body_movement` values satisfying an undocumented `>= 2.0` cutoff;
+- an alternate report path accepted a supplied `movement_count` with unit
+  `count`;
+- the authority-migration path later counted every legacy `MovementPayload`
+  observation regardless of value or cadence;
+- risk then used `movement_count >= 25`, and trend used absolute delta 3 / 20%,
+  without a pinned sampling interval or vendor semantic code.
+
+The value is therefore a cadence-dependent compatibility heuristic, not
+`movement_index` and not the proved hourly `movement_event_count`. Current
+production code has no authoritative V2 producer for `RadarNightSummary`; its
+remaining constructors are tests/legacy runtime contracts. M3 already keeps
+both V2 metrics separate, publishes `SEMANTIC_THRESHOLD_UNRESOLVED`, and never
+feeds either into this threshold. The threshold remains only in the explicit
+V1 legacy characterization surface and cannot influence V2 Product analytics.
+No guessed replacement threshold was added.
+
+### Pull bed-presence ontology decision
+
+`PULL_BED_PRESENCE_DECISION = WRONG_ONTOLOGY_SOURCE_ALLOWLIST`
+
+The recorded Perceptor contract establishes two different authorities:
+
+- Push `OnBed`/`Onbed` is retained as direct `device_measured` state.
+- Pull `smbdFlag` and `probStatus` are vendor status classifications and carry
+  explicit `vendor_*` quality flags/caveats, so `vendor_derived` is correct.
+
+The mismatch came from the V1 ontology's blanket fallback that required every
+non-sleep-profile observation to be `device_measured`. Ontology v2 now permits
+exactly `device_measured | vendor_derived` for `bed_presence`, while unproved
+user, external, and model-derived sources still fail closed. The numeric
+metric/unit registry is unchanged and the Pull mapping/caveats are preserved.
+
+### Default cutover and rollback
+
+`V2_DEFAULT_CUTOVER_READY = YES`
+
+The authoritative typed `SleepBackendSettings` default and its environment
+fallback are now `ObservationSemanticsVersion.V2`. Production worker
+composition already propagates that setting to Push, Pull, Replay journey, and
+normalization handlers. Explicit
+`SLEEPAGENT_BACKEND_OBSERVATION_SEMANTICS_VERSION=v1` remains accepted and
+continues to produce `movement_payload.v1`; the frozen G1 legacy aggregation
+characterization remains exactly `20.9`. Unsupported setting values still fail
+closed and no V2 rejection falls back to V1.
+
+### Verification evidence
+
+Authoritative Python: 3.11.15 at
+`/tmp/sleepagent-g1_5-py311/bin/python`.
+
+| Verification | Result |
+|---|---|
+| G2C semantic/settings/legacy/Product/Perceptor/Replay selection | 125 passed |
+| Explicit V2 Pull bed-presence source and fail-closed tests | 3 passed within the selection |
+| Fresh PostgreSQL 001-014 migration/bootstrap/check | PASS; schema 014 |
+| Explicit V2 PostgreSQL Push/Pull/semantic persistence | 3 passed in 10.59s |
+| Unit-marked regression | 1,085 passed; 36 deselected in 20.74s |
+| Architecture suite | 5 passed; no debt growth |
+| OpenAPI canonical check | PASS; no snapshot changed |
+| Compileall | PASS for source, reference client, scripts, and tests |
+| `git diff --check` | PASS |
+
+The unit regression includes deterministic Product aggregation and CLI/Demo
+coverage. Worker composition tests run with the new typed default and retain
+the explicit V1 rollback test. No real Perceptor request, external model,
+production operation, scheduler, delivery, email/SMS, or other external effect
+occurred.
+
+### Migrations, compatibility, and checkpoint
+
+- No migration was added or modified; migrations 001-014 retain their recorded
+  hashes.
+- V1 compatibility remains explicit and reversible.
+- The obsolete generic Movement threshold is retained for historical V1
+  characterization only; it is not reinterpreted as a V2 fact.
+- Checkpoint subject:
+  `remediation(g2c): resolve observation v2 cutover authority`.
+  Its commit hash is reported by the next execution record/final handoff
+  because a commit cannot contain its own hash.
+
+`G3_SAFE_TO_BEGIN = YES`

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from sleepagent.domain.contracts import ObservationType, SourceKind
 
 
-ONTOLOGY_VERSION = "sleep_observation_ontology.v1"
+ONTOLOGY_VERSION = "sleep_observation_ontology.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +36,22 @@ METRICS: Mapping[ObservationType, MetricDefinition] = {
         "minutes",
         frozenset({SourceKind.VENDOR_DERIVED}),
     ),
+}
+
+
+# Source authority is distinct from numeric metric/unit authority.  Perceptor
+# Push exposes the device's direct OnBed state, while Pull exposes vendor status
+# classifications (smbdFlag/probStatus).  Both are legitimate bed-presence
+# observations, but their provenance must remain distinguishable downstream.
+OBSERVATION_SOURCE_KINDS: Mapping[ObservationType, frozenset[SourceKind]] = {
+    ObservationType.BED_PRESENCE: frozenset(
+        {SourceKind.DEVICE_MEASURED, SourceKind.VENDOR_DERIVED}
+    ),
+    ObservationType.SLEEP_STAGE_INTERVAL: frozenset({SourceKind.VENDOR_DERIVED}),
+    ObservationType.VENDOR_SLEEP_PROFILE_METRIC: frozenset(
+        {SourceKind.VENDOR_DERIVED}
+    ),
+    ObservationType.VENDOR_ALERT: frozenset({SourceKind.VENDOR_DERIVED}),
 }
 
 
@@ -72,19 +88,18 @@ def validate_observation_ontology(
     payload: Any,
     source_kind: SourceKind,
 ) -> None:
-    expected_source = (
-        SourceKind.VENDOR_DERIVED
-        if observation_type
-        in {
-            ObservationType.SLEEP_STAGE_INTERVAL,
-            ObservationType.VENDOR_SLEEP_PROFILE_METRIC,
-            ObservationType.VENDOR_ALERT,
-        }
-        else SourceKind.DEVICE_MEASURED
+    allowed_sources = OBSERVATION_SOURCE_KINDS.get(
+        observation_type,
+        frozenset({SourceKind.DEVICE_MEASURED}),
     )
-    if source_kind != expected_source:
+    if source_kind not in allowed_sources:
+        expected = sorted(item.value for item in allowed_sources)
+        if len(expected) == 1:
+            raise ValueError(
+                f"{observation_type.value} requires {expected[0]} source"
+            )
         raise ValueError(
-            f"{observation_type.value} requires {expected_source.value} source"
+            f"{observation_type.value} requires one of [{', '.join(expected)}] sources"
         )
     definition = METRICS.get(observation_type)
     if definition is None:
@@ -101,6 +116,7 @@ def validate_observation_ontology(
 
 __all__ = [
     "METRICS",
+    "OBSERVATION_SOURCE_KINDS",
     "ONTOLOGY_VERSION",
     "MetricDefinition",
     "SOURCE_ALIASES",

@@ -726,3 +726,43 @@ total.
 Diff review confirms one V2 analytic authority, no generic mixed Movement in
 V2 Product evidence, no invented threshold, no default flip, and no work from
 later reporting or remediation phases. Two bounded fix rounds were used.
+
+## Act 8 — Build: G2C default Observation Semantics V2 cutover
+
+### Round 1 — Codex build
+
+Traced the generic `RadarNightSummary.movement_count` through current consumers,
+historical adapters, deleted quality aggregation, tests, fixtures, and the
+original risk/trend policy. The historical value mixed a sample-count-above-2.0
+heuristic, a supplied report count, and later a count of all Movement payloads;
+it has no authoritative V2 producer. Classified it as an obsolete legacy
+threshold, retained its V1 characterization, and kept both proved V2 Movement
+metrics excluded rather than guessing a replacement.
+
+Traced Pull `smbdFlag`/`probStatus` to vendor-derived bed-presence candidates
+and Push `OnBed` to device-measured state. Replaced the ontology's blanket
+device-source fallback with an exact bed-presence allowlist and bumped that
+ontology contract to v2. Unproved sources continue to fail closed. Changed the
+typed settings default and environment fallback to Observation Semantics V2,
+while retaining explicit V1 rollback.
+
+### Round 2 — Codex fix pass
+
+The first settings test exposed a second hard-coded V1 fallback in
+`from_environment`; changed it to V2. Restored the legacy single-source error
+wording while retaining the new multi-source form so the frozen G1 rejection
+characterization remained stable. No production scope expanded.
+
+### Codex verification
+
+- Focused G2C selection: 125 passed.
+- Fresh PostgreSQL 16.14 migration/bootstrap/check at schema 014: PASS.
+- Explicit V2 PostgreSQL Push/Pull/persistence: 3 passed.
+- Unit-marked regression: 1,085 passed, 36 deselected.
+- Architecture: 5 passed with no new debt.
+- OpenAPI check, compileall, and `git diff --check`: PASS.
+
+Diff review confirms the default cutover is a two-line typed configuration
+change, the ontology change is narrowly source-scoped, V1 rollback remains
+tested, the obsolete threshold cannot consume V2 analytics, and no later-phase
+or external-effect behavior was introduced. One bounded fix pass was used.

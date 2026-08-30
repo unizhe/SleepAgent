@@ -99,10 +99,11 @@ class SleepBackendSettings(BaseModel):
     # with an explicitly opted-in live Product model.
     provider_mode: ProviderMode = ProviderMode.DISABLED
     model_mode: ModelMode = ModelMode.DISABLED
-    # Remediation switches remain default-preserving. Observation V2 has a
-    # bounded ingestion consumer; later switches activate only in their goals.
+    # Observation V2 is the authoritative default after the bounded G2C
+    # cutover proof.  Explicit V1 remains available as the rollback contract;
+    # later remediation switches remain default-preserving until their goals.
     observation_semantics_version: ObservationSemanticsVersion = (
-        ObservationSemanticsVersion.V1
+        ObservationSemanticsVersion.V2
     )
     report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT
     emit_legacy_report_compatibility: bool = Field(default=True, strict=True)
@@ -354,7 +355,7 @@ class SleepBackendSettings(BaseModel):
             observation_semantics_version=ObservationSemanticsVersion(
                 env.get(
                     f"{SETTINGS_PREFIX}OBSERVATION_SEMANTICS_VERSION",
-                    "v1",
+                    "v2",
                 ).strip()
             ),
             report_pipeline_mode=ReportPipelineMode(

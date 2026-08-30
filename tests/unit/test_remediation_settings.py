@@ -33,10 +33,10 @@ def _environment() -> dict[str, str]:
     }
 
 
-def test_remediation_switch_defaults_preserve_g0_runtime_contract() -> None:
+def test_remediation_switch_defaults_use_v2_with_other_cutovers_unchanged() -> None:
     settings = SleepBackendSettings.from_environment(_environment())
 
-    assert settings.observation_semantics_version is ObservationSemanticsVersion.V1
+    assert settings.observation_semantics_version is ObservationSemanticsVersion.V2
     assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_COMPAT
     assert settings.emit_legacy_report_compatibility is True
     assert settings.acquisition_scheduler_enabled is False
@@ -76,9 +76,18 @@ def test_unprefixed_environment_values_are_not_silently_reinterpreted() -> None:
 
     settings = SleepBackendSettings.from_environment(environment)
 
-    assert settings.observation_semantics_version is ObservationSemanticsVersion.V1
+    assert settings.observation_semantics_version is ObservationSemanticsVersion.V2
     assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_COMPAT
     assert settings.live_delivery_enabled is False
+
+
+def test_explicit_v1_remains_the_observation_rollback_contract() -> None:
+    environment = _environment()
+    environment["SLEEPAGENT_BACKEND_OBSERVATION_SEMANTICS_VERSION"] = "v1"
+
+    settings = SleepBackendSettings.from_environment(environment)
+
+    assert settings.observation_semantics_version is ObservationSemanticsVersion.V1
 
 
 def test_direct_boolean_switch_values_are_strictly_typed() -> None:

@@ -38,7 +38,9 @@ from sleepagent.domain.postgres_slice import (
 )
 from sleepagent.integrations.perceptor.pull import (
     canonicalize_pull_result_v2,
+    normalize_current,
     normalize_history,
+    normalize_realtime,
     normalize_sleep_report,
 )
 from sleepagent.integrations.perceptor.push import (
@@ -446,15 +448,80 @@ def test_unproved_pull_vendor_series_semantics_fail_closed() -> None:
     )
 
 
-def test_feature_default_and_explicit_v1_preserve_legacy_payload() -> None:
+def test_feature_default_is_v2_and_explicit_v1_preserves_legacy_payload() -> None:
     assert (
         SleepBackendSettings.model_fields["observation_semantics_version"].default
-        is ObservationSemanticsVersion.V1
+        is ObservationSemanticsVersion.V2
     )
     candidate = _push_movement()
     assert isinstance(candidate.payload, MovementPayload)
     assert candidate.payload.schema_version == "movement_payload.v1"
     assert candidate.payload.unit == "index"
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_state"),
+    (
+        (
+            normalize_current(
+                {"smbdFlag": 1},
+                provider_account_id="semantic-account",
+                provider_device=DEVICE,
+                raw_sha256="d" * 64,
+                requested_at=AT,
+                received_at=RECEIVED,
+            ),
+            "in_bed",
+        ),
+        (
+            normalize_realtime(
+                {"probStatus": 6, "time": str(int(AT.timestamp() * 1000))},
+                provider_account_id="semantic-account",
+                provider_device=DEVICE,
+                raw_sha256="e" * 64,
+                requested_at=AT,
+                received_at=RECEIVED,
+                binding_timezone_name="Asia/Shanghai",
+            ),
+            "out_of_bed",
+        ),
+    ),
+)
+def test_explicit_v2_accepts_proved_vendor_derived_pull_bed_presence(
+    result,
+    expected_state: str,
+) -> None:
+    canonical = canonicalize_pull_result_v2(result)
+
+    assert len(canonical) == 1
+    assert canonical[0].metric_id == "bed_presence"
+    assert canonical[0].source_kind is SourceKind.VENDOR_DERIVED
+    assert canonical[0].payload.state.value == expected_state
+    assert canonical[0].ontology_version == "sleep_observation_ontology.v2"
+
+
+def test_v2_bed_presence_ontology_remains_fail_closed_for_unproved_sources() -> None:
+    result = normalize_current(
+        {"smbdFlag": 1},
+        provider_account_id="semantic-account",
+        provider_device=DEVICE,
+        raw_sha256="f" * 64,
+        requested_at=AT,
+        received_at=RECEIVED,
+    )
+    unsupported = result.candidates[0].model_copy(
+        update={"source_kind": SourceKind.USER_REPORTED}
+    )
+
+    with pytest.raises(CanonicalObservationRejected) as rejected:
+        CanonicalObservationFactoryV2().build(
+            candidate=unsupported,
+            normalizer_version="test.v1",
+        )
+    assert (
+        rejected.value.category
+        is SemanticRejectionCategory.INVALID_SOURCE_PROVENANCE
+    )
 
 
 def test_explicit_v2_uses_one_factory_and_failure_never_falls_back() -> None:
