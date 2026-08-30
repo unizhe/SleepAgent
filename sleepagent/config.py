@@ -105,8 +105,8 @@ class SleepBackendSettings(BaseModel):
     observation_semantics_version: ObservationSemanticsVersion = (
         ObservationSemanticsVersion.V2
     )
-    report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT
-    emit_legacy_report_compatibility: bool = Field(default=True, strict=True)
+    report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_ONLY
+    emit_legacy_report_compatibility: bool = Field(default=False, strict=True)
     acquisition_scheduler_enabled: bool = Field(default=False, strict=True)
     live_delivery_enabled: bool = Field(default=False, strict=True)
     service_credential_ref: str = Field(default="unconfigured", min_length=1)
@@ -162,6 +162,12 @@ class SleepBackendSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_deployment_contract(self) -> Self:
+        shared_only = self.report_pipeline_mode is ReportPipelineMode.SHARED_ONLY
+        if shared_only == self.emit_legacy_report_compatibility:
+            raise ValueError(
+                "shared_only must disable legacy report compatibility; "
+                "rollback/shadow modes must enable it explicitly"
+            )
         parsed = urlsplit(self.database_dsn.get_secret_value())
         if parsed.scheme not in {"postgres", "postgresql"}:
             raise ValueError("backend authority must use a PostgreSQL DSN")
@@ -361,11 +367,11 @@ class SleepBackendSettings(BaseModel):
             report_pipeline_mode=ReportPipelineMode(
                 env.get(
                     f"{SETTINGS_PREFIX}REPORT_PIPELINE_MODE",
-                    "shared_compat",
+                    "shared_only",
                 ).strip()
             ),
             emit_legacy_report_compatibility=_boolean(
-                env, "EMIT_LEGACY_REPORT_COMPATIBILITY", True
+                env, "EMIT_LEGACY_REPORT_COMPATIBILITY", False
             ),
             acquisition_scheduler_enabled=_boolean(
                 env, "ACQUISITION_SCHEDULER_ENABLED", False

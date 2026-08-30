@@ -857,3 +857,42 @@ authority, comparison ignores prose, current new-report consumers are
 shared-ready, and the remaining compatibility writes/reads are explicitly
 enumerated rather than hidden behind a zero claim. The two-fix-round limit was
 used and G5 cutover gates are satisfied.
+
+## Act 11 — Build: G5 shared-only report cutover
+
+### Round 1 — Codex build
+
+Flipped the typed report default and environment fallback to `shared_only` with
+legacy compatibility emission disabled, and made the pair a fail-closed
+configuration contract. Separated the authoritative fast-path report child ID
+from the optional compatibility-operation ID. New shared-only work creates the
+report request directly; explicit `shared_compat + true` retains rollback.
+
+Migrated Replay journey progress to follow the report request to its linked
+shared operation/result. Disabled direct legacy `product_agent` execution in
+the production shared-only handler while retaining the implementation for
+explicit rollback, shadow comparison, and historical characterization. Updated
+the executable consumer audit to distinguish default consumer zero from
+retained rollback/history code.
+
+### Round 2 — Codex fix pass
+
+The new FastPath ID-matrix test showed that an active but unreviewed vendor
+alert is correctly classified `operational_review`, not
+`no_reviewed_signal`; corrected only that test expectation. No production
+logic changed in the fix pass.
+
+### Codex verification
+
+- Focused settings/audit/FastPath/simulation/backend selection: 68 passed.
+- FastPath shared-only/rollback matrix: 3 passed.
+- Unit-marked regression: 1,095 passed, 38 deselected.
+- Fresh PostgreSQL 16.14 Product suite at schema 014: 19 passed.
+- Shared-only topology proof: one report request, one shared analysis, three
+  projections, zero legacy or compatibility operations.
+- Migration/hash/RLS check: PASS at schema 014.
+
+Diff review confirms the default path cannot create or execute legacy report
+work, simulation has a shared-native child identity, rollback is explicit and
+tested, and historical reads were not destructively removed. One bounded fix
+pass was used.

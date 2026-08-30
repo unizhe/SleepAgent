@@ -1355,6 +1355,66 @@ def test_shadow_mode_persists_structured_parity_without_legacy_publication() -> 
     )
 
 
+def test_shared_only_commit_creates_one_shared_result_without_legacy_bridge() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    case = _prepare_shared_acceptance_case(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        report_pipeline_mode=ReportPipelineMode.SHARED_ONLY,
+    )
+    case.processor.persist_and_commit(
+        case.scope,
+        case.lease,
+        case.artifact,
+        source=case.source,  # type: ignore[arg-type]
+    )
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                  count(*) FILTER (
+                    WHERE operation_type = 'product.report.run.v1'
+                  ),
+                  count(*) FILTER (
+                    WHERE operation_type = 'product.shared_analysis.v1'
+                  ),
+                  count(*) FILTER (
+                    WHERE operation_type = 'product_agent'
+                       OR queue_name = 'product_agent_compatibility'
+                  )
+                FROM public.sleep_domain_operations
+                WHERE namespace_id = %s AND subject_id = %s
+                """,
+                (case.seed.namespace_id, case.seed.subject_id),
+            )
+            assert cursor.fetchone() == (1, 1, 0)
+            cursor.execute(
+                """
+                SELECT count(*), count(DISTINCT view_json #>> '{role}')
+                FROM public.sleep_domain_analysis_role_views
+                WHERE namespace_id = %s AND subject_id = %s
+                """,
+                (case.seed.namespace_id, case.seed.subject_id),
+            )
+            assert cursor.fetchone() == (3, 3)
+    case.provider.close()
+    _cancel_pending_product_work(
+        psycopg,
+        admin_dsn=admin_dsn,
+        namespace_id=case.seed.namespace_id,
+    )
+
+
 def _lease_for_claim(claim: LeaseClaim) -> ProductAgentLease:
     return ProductAgentLease(
         operation_id=claim.work_id,

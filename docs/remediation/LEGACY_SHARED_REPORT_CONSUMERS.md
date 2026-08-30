@@ -85,3 +85,41 @@ accepting a grep-only zero claim.
   legacy write-path consumer zero.
 - Retained historical compatibility reads: nonzero by design; they do not
   authorize new CareAction, Habit/Memory, delivery, or external effects.
+
+## G5 shared-only cutover
+
+The default typed setting and environment fallback are now `shared_only` with
+`emit_legacy_report_compatibility=false`. The two switches are validated as one
+fail-closed contract: `shared_only + true`, `shared_compat + false`, and
+`shadow + false` are rejected. Explicit `shared_compat + true` remains the
+rollback mode.
+
+- Fast path now owns a distinct `report_operation_id`. In shared-only mode it
+  creates the report request without creating a `product_agent` compatibility
+  operation. The old `product_agent_operation_id` is populated only by an
+  explicit compatibility-enabled mode.
+- Replay/simulation follows `product.report.run.v1` to its linked
+  `product.shared_analysis.v1` result. It no longer needs the compatibility
+  operation as a child handle.
+- The production Product handler rejects direct legacy `product_agent` work in
+  shared-only mode with `legacy_report_write_path_retired`. The implementation
+  remains available only behind explicit rollback/shadow configuration and for
+  historical characterization.
+- Shared completion/failure bridge code is retained for rollback and already
+  behaves as a no-op when a report request has no compatibility ID. Applied SQL
+  and historical artifacts remain readable.
+
+The executable consumer audit now reports:
+
+```text
+new_legacy_per_role_operation_creation = false
+default_legacy_prepare_execution = false
+default_compatibility_bridge_write = false
+rollback_legacy_prepare_implementation_retained = true
+rollback_compatibility_bridge_implementation_retained = true
+historical_compatibility_reads_retained = true
+```
+
+A fresh PostgreSQL acceptance run proves one report operation, one shared
+analysis, three role projections, and zero `product_agent` or
+`product_agent_compatibility` operations for a new shared-only request.

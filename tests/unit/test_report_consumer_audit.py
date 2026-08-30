@@ -25,9 +25,14 @@ def test_report_consumer_audit_combines_runtime_ast_api_cli_and_sql_evidence() -
     assert audit["read_path_evidence"]["report_cli_product_routes"]
     assert audit["read_path_evidence"]["reference_client_product_routes"]
     assert audit["read_path_evidence"]["historical_sql_role_view_reads"]
+    assert audit["cutover_evidence"]["shared_only_defaults"]
+    assert audit["cutover_evidence"]["compatibility_switch_wiring"]
+    assert audit["cutover_evidence"]["legacy_execution_guard"]
     assert audit["consumer_zero"] == {
         "new_legacy_per_role_operation_creation": False,
-        "legacy_prepare_implementation_retained": True,
-        "compatibility_bridge_write_retained": True,
+        "default_legacy_prepare_execution": False,
+        "default_compatibility_bridge_write": False,
+        "rollback_legacy_prepare_implementation_retained": True,
+        "rollback_compatibility_bridge_implementation_retained": True,
         "historical_compatibility_reads_retained": True,
     }

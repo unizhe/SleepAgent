@@ -421,6 +421,7 @@ class FastPathCommitResult:
     current_risk_id: str
     urgent: bool
     product_agent_operation_id: str | None
+    report_operation_id: str | None = None
     model_invocation_count: Literal[0] = 0
 
 
@@ -1113,6 +1114,7 @@ class FastPathHandler:
         uow_factory: UnitOfWorkFactory[Any],
         *,
         policy: SleepSlicePolicy | None = None,
+        emit_legacy_report_compatibility: bool = False,
         id_generator: Callable[[datetime | None], str] | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         repository_factory: Callable[
@@ -1121,6 +1123,7 @@ class FastPathHandler:
     ) -> None:
         self.uow_factory = uow_factory
         self.policy = policy or default_sleep_slice_policy()
+        self.emit_legacy_report_compatibility = emit_legacy_report_compatibility
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
         self.repository_factory = repository_factory or (
@@ -1166,9 +1169,15 @@ class FastPathHandler:
                 result.current_risk,
                 quality=result.quality,
             )
+            report_operation_id = (
+                self.id_generator(assessed_at)
+                if decision.enqueue_product_agent
+                else None
+            )
             product_operation_id = (
                 self.id_generator(assessed_at)
                 if decision.enqueue_product_agent
+                and self.emit_legacy_report_compatibility
                 else None
             )
             repository.persist_fast_path_handoff(
@@ -1177,6 +1186,7 @@ class FastPathHandler:
                 result=result,
                 decision=decision,
                 product_agent_operation_id=product_operation_id,
+                report_operation_id=report_operation_id,
                 policy=self.policy,
                 committed_at=assessed_at,
             )
@@ -1186,6 +1196,7 @@ class FastPathHandler:
             current_risk_id=result.current_risk.current_risk_id,
             urgent=decision.urgent,
             product_agent_operation_id=product_operation_id,
+            report_operation_id=report_operation_id,
         )
 
 
@@ -2654,24 +2665,27 @@ class PostgresSleepSliceRepository:
         result: DeterministicFastPathResult,
         decision: FastPathRoutingDecision,
         product_agent_operation_id: str | None,
+        report_operation_id: str | None,
         policy: SleepSlicePolicy,
         committed_at: datetime,
     ) -> None:
         if (
             not decision.enqueue_product_agent
-            and product_agent_operation_id is not None
+            and (
+                product_agent_operation_id is not None
+                or report_operation_id is not None
+            )
         ):
             raise SleepSliceInvariantError(
-                "ineligible deterministic result cannot enqueue Product Agent"
+                "ineligible deterministic result cannot enqueue report work"
             )
-        if decision.enqueue_product_agent and product_agent_operation_id is None:
+        if decision.enqueue_product_agent and report_operation_id is None:
             raise SleepSliceInvariantError(
-                "eligible deterministic result requires Product operation"
+                "eligible deterministic result requires report operation"
             )
         cursor = self.connection.cursor()
         try:
-            if product_agent_operation_id is not None:
-                report_operation_id = self.id_generator(committed_at)
+            if report_operation_id is not None:
                 report_semantic_key = _digest(
                     {
                         "stage": "product.report.run.v1",
@@ -2683,76 +2697,77 @@ class PostgresSleepSliceRepository:
                         "risk_policy": result.current_risk.policy_version,
                     }
                 )
-                compatibility_semantic_key = _digest(
-                    {
-                        "stage": "product_agent_compatibility.v1",
+                workload = _workload_snapshot(self.scope, "product_agent")
+                if product_agent_operation_id is not None:
+                    compatibility_semantic_key = _digest(
+                        {
+                            "stage": "product_agent_compatibility.v1",
+                            "night_episode_id": operation.night_episode_id,
+                            "night_episode_revision_id": (
+                                result.current_risk.source_scope.night_episode_revision_id
+                            ),
+                            "report_operation_id": report_operation_id,
+                        }
+                    )
+                    compatibility_json = {
+                        "schema_version": "backend_operation.v2",
+                        "command_type": "product_agent",
+                        "compatibility_mode": "shared_analysis_bridge.v1",
+                        "trigger": "fast_path_nonurgent",
                         "night_episode_id": operation.night_episode_id,
                         "night_episode_revision_id": (
                             result.current_risk.source_scope.night_episode_revision_id
                         ),
-                        "report_operation_id": report_operation_id,
+                        "quality_assessment_id": result.quality.assessment_id,
+                        "current_risk_id": result.current_risk.current_risk_id,
+                        "report_request_operation_id": report_operation_id,
+                        "authorization_snapshot": workload,
                     }
-                )
-                workload = _workload_snapshot(self.scope, "product_agent")
-                compatibility_json = {
-                    "schema_version": "backend_operation.v2",
-                    "command_type": "product_agent",
-                    "compatibility_mode": "shared_analysis_bridge.v1",
-                    "trigger": "fast_path_nonurgent",
-                    "night_episode_id": operation.night_episode_id,
-                    "night_episode_revision_id": (
-                        result.current_risk.source_scope.night_episode_revision_id
-                    ),
-                    "quality_assessment_id": result.quality.assessment_id,
-                    "current_risk_id": result.current_risk.current_risk_id,
-                    "report_request_operation_id": report_operation_id,
-                    "authorization_snapshot": workload,
-                }
-                cursor.execute(
-                    """
-                    INSERT INTO public.sleep_domain_operations (
-                      operation_id, namespace_id, data_mode, operation_type,
-                      subject_id, service_principal_id, actor_id,
-                      target_resource_id, target_resource_key, idempotency_key,
-                      request_sha256, status, attempt_count, cas_version,
-                      operation_json, created_at, updated_at, protocol_version,
-                      namespace_generation, run_id, arm_id, id_scheme,
-                      origin_kind, semantic_key, queue_name, priority,
-                      available_at, max_attempts,
-                      workload_authorization_snapshot_json, policy_sha256
-                    ) VALUES (
-                      %s, %s, %s, 'product_agent', %s, %s, NULL,
-                      %s, %s, %s, %s, 'pending', 0, 0, %s::jsonb,
-                      %s, %s, 2, %s, %s, %s, 'uuidv7', 'system',
-                      %s, 'product_agent_compatibility', 0, %s, 1,
-                      %s::jsonb, %s
-                    )
-                    """,
-                    (
-                        product_agent_operation_id,
-                        self.scope.namespace_id,
-                        self.scope.data_mode,
-                        operation.subject_id,
-                        self.scope.service_principal_id,
-                        operation.night_episode_id,
+                    cursor.execute(
+                        """
+                        INSERT INTO public.sleep_domain_operations (
+                          operation_id, namespace_id, data_mode, operation_type,
+                          subject_id, service_principal_id, actor_id,
+                          target_resource_id, target_resource_key, idempotency_key,
+                          request_sha256, status, attempt_count, cas_version,
+                          operation_json, created_at, updated_at, protocol_version,
+                          namespace_generation, run_id, arm_id, id_scheme,
+                          origin_kind, semantic_key, queue_name, priority,
+                          available_at, max_attempts,
+                          workload_authorization_snapshot_json, policy_sha256
+                        ) VALUES (
+                          %s, %s, %s, 'product_agent', %s, %s, NULL,
+                          %s, %s, %s, %s, 'pending', 0, 0, %s::jsonb,
+                          %s, %s, 2, %s, %s, %s, 'uuidv7', 'system',
+                          %s, 'product_agent_compatibility', 0, %s, 1,
+                          %s::jsonb, %s
+                        )
+                        """,
                         (
-                            result.current_risk.source_scope.night_episode_revision_id
-                            or operation.night_episode_id
+                            product_agent_operation_id,
+                            self.scope.namespace_id,
+                            self.scope.data_mode,
+                            operation.subject_id,
+                            self.scope.service_principal_id,
+                            operation.night_episode_id,
+                            (
+                                result.current_risk.source_scope.night_episode_revision_id
+                                or operation.night_episode_id
+                            ),
+                            compatibility_semantic_key,
+                            compatibility_semantic_key,
+                            _json(compatibility_json),
+                            committed_at,
+                            committed_at,
+                            self.scope.namespace_generation,
+                            self.scope.run_id,
+                            self.scope.arm_id,
+                            compatibility_semantic_key,
+                            committed_at,
+                            _json(workload),
+                            policy.policy_sha256,
                         ),
-                        compatibility_semantic_key,
-                        compatibility_semantic_key,
-                        _json(compatibility_json),
-                        committed_at,
-                        committed_at,
-                        self.scope.namespace_generation,
-                        self.scope.run_id,
-                        self.scope.arm_id,
-                        compatibility_semantic_key,
-                        committed_at,
-                        _json(workload),
-                        policy.policy_sha256,
-                    ),
-                )
+                    )
                 report_json = {
                     "schema_version": "backend_operation.v2",
                     "command_type": "product.report.run.v1",
@@ -2763,8 +2778,14 @@ class PostgresSleepSliceRepository:
                     ),
                     "quality_assessment_id": result.quality.assessment_id,
                     "current_risk_id": result.current_risk.current_risk_id,
-                    "compatibility_product_agent_operation_id": (
-                        product_agent_operation_id
+                    **(
+                        {
+                            "compatibility_product_agent_operation_id": (
+                                product_agent_operation_id
+                            )
+                        }
+                        if product_agent_operation_id is not None
+                        else {}
                     ),
                     "authorization_snapshot": workload,
                 }
@@ -2815,13 +2836,14 @@ class PostgresSleepSliceRepository:
             operation_json = {
                 **operation.operation_json,
                 "result": {
-                    "schema_version": "fast_path_result.v2",
+                    "schema_version": "fast_path_result.v3",
                     "quality_assessment_id": result.quality.assessment_id,
                     "current_risk_id": result.current_risk.current_risk_id,
                     "risk_state": result.current_risk.risk_state.value,
                     "urgent": decision.urgent,
                     "model_invocation_count": 0,
                     "product_agent_operation_id": product_agent_operation_id,
+                    "report_operation_id": report_operation_id,
                 },
             }
             cursor.execute(
@@ -2888,6 +2910,7 @@ class PostgresSleepSliceRepository:
                     "urgent": decision.urgent,
                     "model_invocation_count": 0,
                     "product_agent_operation_id": product_agent_operation_id,
+                    "report_operation_id": report_operation_id,
                     "synthetic_non_release": self.scope.data_mode == "replay",
                 },
                 created_at=committed_at,

@@ -275,8 +275,18 @@ def build_b3_worker_handlers(
             processor_factory=normalization_processor_factory
         )
     if "fast_path" in settings.worker_queues:
+        def fast_path_processor_factory(
+            uow_factory: UnitOfWorkFactory[Any],
+        ) -> FastPathHandler:
+            return FastPathHandler(
+                uow_factory,
+                emit_legacy_report_compatibility=(
+                    settings.emit_legacy_report_compatibility
+                ),
+            )
+
         handlers["fast_path"] = FastPathWorkHandlerAdapter(
-            processor_factory=FastPathHandler
+            processor_factory=fast_path_processor_factory
         )
     return handlers
 

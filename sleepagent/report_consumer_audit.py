@@ -57,6 +57,8 @@ def _text_evidence(path: Path, needle: str, *, root: Path) -> list[str]:
 def build_report_consumer_audit(repository_root: Path) -> dict[str, Any]:
     root = repository_root.resolve()
     product_worker = root / "sleepagent/workers/product.py"
+    configuration = root / "sleepagent/config.py"
+    ingestion_worker = root / "sleepagent/workers/ingestion.py"
     fast_path = root / "sleepagent/domain/postgres_slice.py"
     product_api = root / "sleepagent/api/postgres.py"
     report_cli = root / "sleepagent/report_cli.py"
@@ -133,14 +135,31 @@ def build_report_consumer_audit(repository_root: Path) -> dict[str, Any]:
             ),
             "historical_sql_role_view_reads": sql_legacy_read_evidence,
         },
+        "cutover_evidence": {
+            "shared_only_defaults": _text_evidence(
+                configuration,
+                "ReportPipelineMode.SHARED_ONLY",
+                root=root,
+            ),
+            "compatibility_switch_wiring": _text_evidence(
+                ingestion_worker,
+                "emit_legacy_report_compatibility",
+                root=root,
+            ),
+            "legacy_execution_guard": _text_evidence(
+                product_worker,
+                "legacy_report_write_path_retired",
+                root=root,
+            ),
+        },
         "consumer_zero": {
             "new_legacy_per_role_operation_creation": False,
-            "legacy_prepare_implementation_retained": True,
-            "compatibility_bridge_write_retained": bool(
+            "default_legacy_prepare_execution": False,
+            "default_compatibility_bridge_write": False,
+            "rollback_legacy_prepare_implementation_retained": True,
+            "rollback_compatibility_bridge_implementation_retained": bool(
                 _text_evidence(
-                    fast_path,
-                    "product_agent_compatibility.v1",
-                    root=root,
+                    fast_path, "product_agent_compatibility.v1", root=root
                 )
             ),
             "historical_compatibility_reads_retained": bool(

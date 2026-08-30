@@ -33,12 +33,12 @@ def _environment() -> dict[str, str]:
     }
 
 
-def test_remediation_switch_defaults_use_v2_with_other_cutovers_unchanged() -> None:
+def test_remediation_switch_defaults_use_v2_and_shared_only() -> None:
     settings = SleepBackendSettings.from_environment(_environment())
 
     assert settings.observation_semantics_version is ObservationSemanticsVersion.V2
-    assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_COMPAT
-    assert settings.emit_legacy_report_compatibility is True
+    assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_ONLY
+    assert settings.emit_legacy_report_compatibility is False
     assert settings.acquisition_scheduler_enabled is False
     assert settings.live_delivery_enabled is False
 
@@ -77,7 +77,7 @@ def test_unprefixed_environment_values_are_not_silently_reinterpreted() -> None:
     settings = SleepBackendSettings.from_environment(environment)
 
     assert settings.observation_semantics_version is ObservationSemanticsVersion.V2
-    assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_COMPAT
+    assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_ONLY
     assert settings.live_delivery_enabled is False
 
 
@@ -88,6 +88,37 @@ def test_explicit_v1_remains_the_observation_rollback_contract() -> None:
     settings = SleepBackendSettings.from_environment(environment)
 
     assert settings.observation_semantics_version is ObservationSemanticsVersion.V1
+
+
+def test_shared_compat_remains_an_explicit_report_rollback_contract() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_REPORT_PIPELINE_MODE": "shared_compat",
+            "SLEEPAGENT_BACKEND_EMIT_LEGACY_REPORT_COMPATIBILITY": "true",
+        }
+    )
+
+    settings = SleepBackendSettings.from_environment(environment)
+
+    assert settings.report_pipeline_mode is ReportPipelineMode.SHARED_COMPAT
+    assert settings.emit_legacy_report_compatibility is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "emit"),
+    (("shared_only", "true"), ("shared_compat", "false"), ("shadow", "false")),
+)
+def test_report_mode_and_compatibility_write_switch_fail_closed(
+    mode: str,
+    emit: str,
+) -> None:
+    environment = _environment()
+    environment["SLEEPAGENT_BACKEND_REPORT_PIPELINE_MODE"] = mode
+    environment["SLEEPAGENT_BACKEND_EMIT_LEGACY_REPORT_COMPATIBILITY"] = emit
+
+    with pytest.raises((ValueError, ValidationError)):
+        SleepBackendSettings.from_environment(environment)
 
 
 def test_direct_boolean_switch_values_are_strictly_typed() -> None:

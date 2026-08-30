@@ -1773,3 +1773,78 @@ No external delivery or real care effect occurred.
 - Checkpoint subject: `remediation(g4): migrate reports to shared analysis`.
 
 `G5_SAFE_TO_BEGIN = YES`
+
+## G5 — Shared-only report cutover and legacy write retirement
+
+`G5_STATUS = PASS`
+
+### Gate decision and default cutover
+
+- Entry checkpoint: `c01ae23` (`remediation(g4): migrate reports to shared
+  analysis`); worktree clean at phase entry.
+- G4 established all conditional gates: Product/public reads are shared-ready,
+  all three projections bind one shared authority, the deterministic shadow
+  sample had zero semantic mismatches, shadow permitted no external effect,
+  no active consumer required a new legacy result, and `shared_compat` remained
+  an explicit rollback.
+- `SleepBackendSettings` now defaults to `report_pipeline_mode=shared_only` and
+  `emit_legacy_report_compatibility=false`, including environment fallbacks.
+  The pair fails closed unless shared-only disables compatibility or an
+  explicit rollback/shadow mode enables it.
+
+### Retired default write path
+
+- Fast path now creates and reports a distinct authoritative
+  `report_operation_id`. A compatibility operation ID is generated only when
+  the explicit compatibility switch is true. New shared-only fast-path work
+  therefore creates `product.report.run.v1` directly and no longer inserts the
+  non-claimable `product_agent_compatibility` operation.
+- Replay journey progress follows report request → linked shared operation →
+  authoritative shared result. It no longer uses a copied compatibility result
+  as the Product child authority.
+- The production Product handler disables direct legacy `product_agent`
+  execution under shared-only mode with a terminal retired-path result. The
+  three-Agent implementation is retained behind explicit shadow/rollback only;
+  it cannot receive new default work.
+- Shared compatibility completion/failure helpers and applied historical SQL
+  remain for rollback/history. They are no-ops for new requests without a
+  compatibility ID and cannot authorize new care, personalization, delivery,
+  or other effects.
+
+### Consumer-zero and rollback evidence
+
+The executable audit reports zero default legacy per-role creators, zero
+default legacy prepare execution, and zero default compatibility bridge writes.
+It separately reports retained rollback implementations and historical reads,
+avoiding a false deletion claim.
+
+Explicit rollback requires both:
+
+```text
+SLEEPAGENT_BACKEND_REPORT_PIPELINE_MODE=shared_compat
+SLEEPAGENT_BACKEND_EMIT_LEGACY_REPORT_COMPATIBILITY=true
+```
+
+The pair is covered by typed settings tests. Inconsistent combinations are
+rejected rather than silently re-enabling or dropping compatibility writes.
+
+### Verification evidence
+
+| Verification | Result |
+|---|---|
+| Settings/audit/FastPath/simulation/backend focused selection | 68 passed |
+| Fast-path shared-only/rollback ID matrix | 3 passed |
+| Unit-marked regression | 1,095 passed; 38 deselected |
+| Fresh PostgreSQL 001-014 Product integration suite | 19 passed |
+| Shared-only PostgreSQL topology | 1 report + 1 shared + 3 projections + 0 legacy/compat operations |
+| Migration/hash/RLS check | PASS; schema 014 |
+
+No migration or public OpenAPI schema was changed. No compatibility artifact
+was deleted, no external delivery occurred, and no email/SMS was sent.
+
+### Checkpoint
+
+Checkpoint subject:
+`remediation(g5): retire legacy report write path`.
+
+`G6_SAFE_TO_BEGIN = YES`

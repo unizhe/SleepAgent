@@ -6499,6 +6499,12 @@ class ProductAgentWorkHandlerAdapter:
                     },
                     finalization_mode=WorkFinalizationMode.HANDLER_OWNED,
                 )
+            if (
+                operation_type == "product_agent"
+                and isinstance(processor, ProductAgentProcessor)
+                and processor.report_pipeline_mode is ReportPipelineMode.SHARED_ONLY
+            ):
+                return _terminal("legacy_report_write_path_retired")
             if isinstance(processor, ProductAgentProcessor):
                 source = processor.load_source(scope, lease)
                 prepared_at = processor.now_factory()

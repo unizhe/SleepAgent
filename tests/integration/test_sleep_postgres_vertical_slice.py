@@ -809,7 +809,15 @@ def _fast_observation(
     )
 
 
-def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
+@pytest.mark.parametrize(
+    ("urgent", "emit_compatibility", "expect_compatibility"),
+    ((True, False, False), (False, False, False), (False, True, True)),
+)
+def test_fast_path_report_child_and_compatibility_cutover(
+    urgent: bool,
+    emit_compatibility: bool,
+    expect_compatibility: bool,
+) -> None:
     start = datetime(2026, 8, 7, 22, 0, tzinfo=UTC)
     end = start + timedelta(hours=1)
     observations = (
@@ -897,7 +905,8 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
     uow = _FakeUow()
     handler = FastPathHandler(
         _FakeUowFactory(uow),  # type: ignore[arg-type]
-        policy=_policy(urgent=True),
+        policy=_policy(urgent=urgent),
+        emit_legacy_report_compatibility=emit_compatibility,
         id_generator=Ids(),
         now_factory=lambda: end + timedelta(seconds=1),
         repository_factory=lambda _connection, _scope: repository,  # type: ignore[arg-type]
@@ -915,15 +924,23 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
         ),
     )
 
-    assert result.urgent is True
+    assert result.urgent is urgent
     assert result.model_invocation_count == 0
-    assert result.product_agent_operation_id is None
-    assert repository.risk.risk_state == RiskState.REVIEWED_SIGNAL
+    assert (result.product_agent_operation_id is not None) is expect_compatibility
+    assert (result.report_operation_id is not None) is (not urgent)
+    assert repository.risk.risk_state == (
+        RiskState.REVIEWED_SIGNAL if urgent else RiskState.OPERATIONAL_REVIEW
+    )
     assert repository.current_quality is frozen_quality
     assert repository.quality is None
     assert repository.persisted is not None
     assert repository.persisted["decision"].model_invocation_count == 0
-    assert repository.persisted["product_agent_operation_id"] is None
+    assert (
+        repository.persisted["product_agent_operation_id"] is not None
+    ) is expect_compatibility
+    assert (repository.persisted["report_operation_id"] is not None) is (
+        not urgent
+    )
     assert uow.commits == 1
 
 

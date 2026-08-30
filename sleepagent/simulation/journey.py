@@ -662,7 +662,7 @@ class PostgresReplayJourneyRepository:
             cursor = uow.connection.cursor()
             try:
                 cursor.execute(
-                    "SELECT status, operation_json FROM "
+                    "SELECT status, operation_json, operation_type FROM "
                     "public.sleep_domain_operations WHERE operation_id = %s "
                     "AND namespace_id = %s AND data_mode = %s "
                     "AND namespace_generation = %s AND subject_id = %s "
@@ -694,6 +694,11 @@ class PostgresReplayJourneyRepository:
                 quality_id = str(result.get("quality_assessment_id", ""))
                 risk_id = str(result.get("current_risk_id", ""))
                 product_id = str(result.get("product_agent_operation_id") or "")
+                report_id = str(result.get("report_operation_id") or "")
+                child_id = report_id or product_id
+                child_operation_type = (
+                    "product.report.run.v1" if report_id else "product_agent"
+                )
                 if not quality_id or not risk_id:
                     raise ReplayJourneyInvariantError(
                         "fast-path receipt is missing committed assessment references"
@@ -722,19 +727,20 @@ class PostgresReplayJourneyRepository:
                 )
                 assessment = cursor.fetchone()
                 product = None
-                if product_id:
+                if child_id:
                     cursor.execute(
                         "SELECT status, target_resource_key FROM "
                         "public.sleep_domain_operations WHERE operation_id = %s "
                         "AND namespace_id = %s AND data_mode = %s "
                         "AND namespace_generation = %s AND subject_id = %s "
-                        "AND operation_type = 'product_agent'",
+                        "AND operation_type = %s",
                         (
-                            product_id,
+                            child_id,
                             scope.namespace_id,
                             scope.data_mode,
                             scope.namespace_generation,
                             scope.subject_id,
+                            child_operation_type,
                         ),
                     )
                     product = cursor.fetchone()
@@ -754,12 +760,12 @@ class PostgresReplayJourneyRepository:
             or risk.get("risk_state") != "no_reviewed_signal"
         )
         if urgent:
-            if product_id or result.get("model_invocation_count") != 0:
+            if child_id or result.get("model_invocation_count") != 0:
                 raise ReplayJourneyInvariantError(
                     "urgent fast path crossed the zero-model Product boundary"
                 )
             raise ReplayJourneyTerminalError("unexpected_urgent_route")
-        if not product_id:
+        if not child_id:
             raise ReplayJourneyInvariantError(
                 "non-urgent fast path omitted its Product child"
             )
@@ -768,7 +774,7 @@ class PostgresReplayJourneyRepository:
         return FastPathProgress(
             status="succeeded",
             fast_path_operation_id=episode.fast_path_operation_id,
-            product_operation_id=product_id,
+            product_operation_id=child_id,
             quality_assessment_id=quality_id,
             current_risk_id=risk_id,
         )
@@ -788,7 +794,7 @@ class PostgresReplayJourneyRepository:
                     "public.sleep_domain_operations WHERE operation_id = %s "
                     "AND namespace_id = %s AND data_mode = %s "
                     "AND namespace_generation = %s AND subject_id = %s "
-                    "AND operation_type = 'product_agent' "
+                    "AND operation_type IN ('product_agent', 'product.report.run.v1') "
                     "AND target_resource_key = %s",
                     (
                         product_operation_id,
@@ -809,7 +815,52 @@ class PostgresReplayJourneyRepository:
         if status != "succeeded":
             return ProductProgress(status=status, product_operation_id=product_operation_id)
         operation = _json_object(row[1])
-        result = _json_object(operation.get("result"))
+        operation_type = str(row[2])
+        if operation_type == "product.report.run.v1":
+            report_result = _json_object(operation.get("report_result"))
+            shared_operation_id = str(
+                report_result.get("shared_operation_id") or ""
+            )
+            if not shared_operation_id:
+                raise ReplayJourneyInvariantError(
+                    "shared-only report omitted its shared operation"
+                )
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    cursor.execute(
+                        "SELECT status, operation_json FROM "
+                        "public.sleep_domain_operations WHERE operation_id = %s "
+                        "AND namespace_id = %s AND data_mode = %s "
+                        "AND namespace_generation = %s AND subject_id = %s "
+                        "AND operation_type = 'product.shared_analysis.v1' "
+                        "AND target_resource_key = %s",
+                        (
+                            shared_operation_id,
+                            scope.namespace_id,
+                            scope.data_mode,
+                            scope.namespace_generation,
+                            scope.subject_id,
+                            episode.night_episode_revision_id,
+                        ),
+                    )
+                    shared_row = cursor.fetchone()
+                finally:
+                    cursor.close()
+                uow.commit()
+            if shared_row is None:
+                raise ReplayJourneyInvariantError(
+                    "shared-only report lost its shared analysis operation"
+                )
+            shared_status = str(shared_row[0])
+            if shared_status != "succeeded":
+                return ProductProgress(
+                    status=shared_status,
+                    product_operation_id=product_operation_id,
+                )
+            result = _json_object(_json_object(shared_row[1]).get("result"))
+        else:
+            result = _json_object(operation.get("result"))
         analysis_revision_id = str(result.get("analysis_revision_id", ""))
         if (
             not analysis_revision_id
