@@ -39,6 +39,14 @@ from sleepagent.domain.contracts import (
     TimezoneStatus,
     VendorAlertPayload,
 )
+from sleepagent.domain.canonical_observation import (
+    CanonicalObservationFactoryV2,
+    CanonicalObservationV2,
+)
+from sleepagent.domain.observation_semantics import (
+    MovementMetricId,
+    MovementPayloadV2,
+)
 from .signing import (
     PUSH_SIGNING_PATH,
     PUSH_SIGNING_KEY_MODE,
@@ -391,6 +399,37 @@ def normalize_push_envelope(
     if isinstance(event, AlarmStopEvent):
         return (_normalize_alarm_stop(event, common),)
     raise AssertionError("unreachable supported event")
+
+
+def canonicalize_push_candidates_v2(
+    candidates: tuple[AdapterObservationCandidate, ...],
+    *,
+    factory: CanonicalObservationFactoryV2 | None = None,
+) -> tuple[CanonicalObservationV2, ...]:
+    """Map Push fields, then delegate V2 validity to the shared factory."""
+
+    authority = factory or CanonicalObservationFactoryV2()
+    canonical: list[CanonicalObservationV2] = []
+    for candidate in candidates:
+        movement_payload = None
+        if (
+            candidate.observation_type is ObservationType.MOVEMENT
+            and isinstance(candidate.payload, MovementPayload)
+        ):
+            movement_payload = MovementPayloadV2(
+                metric_id=MovementMetricId.MOVEMENT_INDEX,
+                value=candidate.payload.value,
+                unit="vendor_index",
+                vendor_semantic_code="perceptor.body_shake.index",
+            )
+        canonical.append(
+            authority.build(
+                candidate=candidate,
+                movement_payload=movement_payload,
+                normalizer_version=NORMALIZER_VERSION,
+            )
+        )
+    return tuple(canonical)
 
 
 @dataclass(frozen=True)
@@ -1072,6 +1111,7 @@ __all__ = [
     "UnknownPushEvent",
     "VendorField",
     "VitalSignsDataEvent",
+    "canonicalize_push_candidates_v2",
     "normalize_push_envelope",
     "parse_push_envelope",
     "push_request_signed_at",

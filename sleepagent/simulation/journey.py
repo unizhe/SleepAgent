@@ -1088,6 +1088,7 @@ class ReplayJourneyWorkHandler:
         generator: Any | None = None,
         adapter: Any | None = None,
         registry: Any | None = None,
+        observation_semantics_version: str = "v1",
     ) -> None:
         self.uow_factory = uow_factory
         self.repository = repository or PostgresReplayJourneyRepository(uow_factory)
@@ -1100,6 +1101,9 @@ class ReplayJourneyWorkHandler:
         self.generator = generator or CanonicalReplayGenerator()
         self.adapter = adapter
         self.registry = registry or load_replay_seed_registry()
+        if observation_semantics_version not in {"v1", "v2"}:
+            raise ValueError("unsupported observation semantics version")
+        self.observation_semantics_version = observation_semantics_version
         self._adapted: dict[str, AdaptedReplay] = {}
 
     def __call__(self, context: WorkContext) -> WorkResult:
@@ -1377,7 +1381,10 @@ class ReplayJourneyWorkHandler:
             raise ReplayJourneyInvariantError("journey seed is not in server registry")
         scenario = verify_packaged_seed(seed)
         generated = self.generator.generate(scenario)
-        adapter = self.adapter or replay_external_fact_adapter(seed.adapter_version)
+        adapter = self.adapter or replay_external_fact_adapter(
+            seed.adapter_version,
+            observation_semantics_version=self.observation_semantics_version,
+        )
         adapted = adapter.adapt(scenario, generated)
         if (
             adapted.manifest.scenario_sha256 != str(payload["scenario_sha256"])

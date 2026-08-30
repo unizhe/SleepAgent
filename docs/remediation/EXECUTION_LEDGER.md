@@ -1027,3 +1027,201 @@ which this environment cannot provide.
 
 The coherent recommendation is `G2A = M1-M2`, followed by PostgreSQL readiness
 and then `G2B = M3`. G1.5 does not begin either goal.
+
+## G2A — M1-M2 Observation Semantics V2 and canonical ingestion convergence
+
+`G2A_STATUS = PASS_WITH_LIMITATIONS`
+
+G2A implements only M1 and M2. Observation semantic definition and ingestion
+convergence are complete; persisted analytics migration remains deferred to
+G2B/M3. The PostgreSQL limitation does not weaken the deterministic M1/M2
+proof, but it prevents G2B and therefore remains explicit.
+
+### Entry baseline and scope
+
+- Entry HEAD: `cfa79ef46bb10a57dd9b83360fc1d5e00aae005d`
+  (`docs(remediation): attest g1.5 checkpoint`).
+- Entry worktree: clean; branch 15 commits ahead of upstream.
+- Implemented scope: M1 movement contracts/registry and M2 shared canonical
+  factory plus Push/Pull/Replay feature-gated convergence.
+- Excluded scope: every M3 migration, persisted semantic cutover, historical
+  upcast, aggregation/trend/risk/CareStrategy migration, and report change.
+
+### Exact Observation Semantics V2 movement contract
+
+The domain contract is `movement_payload.v2` under
+`observation_semantics.v2` and carries `metric_id`, numeric value, semantic
+unit, optional/required UTC aggregation boundaries, and preserved vendor
+semantic code.
+
+| Metric ID | Unit | Value | Window | Allowed source | Trusted V2 analytics |
+|---|---|---|---|---|---|
+| `movement_index` | `vendor_index` | non-negative int/float | optional | `device_measured` | yes |
+| `movement_event_count` | `count` | non-negative integer semantic value | both boundaries required; end after start | `vendor_derived` | yes |
+| `legacy_ambiguous_movement` | `legacy_unknown` | non-negative numeric audit value | not inferred | device or vendor historical evidence | no; rejected from new V2 ingestion |
+
+`legacy_ambiguous_movement` is an audit/compatibility identity only. It cannot
+enter trusted V2 aggregation, trends, risk, or recommendations. No historical
+row was classified or rewritten in G2A.
+
+### Semantic registry and error contract
+
+`sleepagent/domain/observation_semantics.py` is the minimal authoritative
+movement registry. Each definition owns metric identity, allowed units,
+allowed source kinds, window requirement, payload schema, semantic version,
+and trusted-analytics status. Unit alone cannot turn one movement metric into
+another.
+
+The single rejection type `CanonicalObservationRejected` exposes these stable
+categories: `invalid_schema`, `unsupported_metric`, `invalid_unit`,
+`invalid_value`, `missing_aggregation_window`,
+`invalid_aggregation_window`, `invalid_source_provenance`,
+`invalid_timestamp`, and `unsupported_vendor_semantics`.
+
+### Canonical factory authority and identity
+
+`CanonicalObservationFactoryV2` in
+`sleepagent/domain/canonical_observation.py` is the one explicit-V2 authority.
+It owns versioned schema acceptance, metric/unit/value/window validation,
+source/provenance validation, authoritative UTC normalization, semantic
+identity, ontology/normalizer versions, and trusted-analytics classification.
+
+The V2 canonical result separates a transport receipt identity from a
+SHA-256 semantic identity. The latter excludes adapter-specific receipt IDs
+and formatting, but includes provider/device semantic scope, metric, unit,
+value, authoritative instant, aggregation window, source kind, and normalized
+vendor semantic code. Equivalent Push/Pull/Replay facts therefore share a
+semantic identity while retaining distinct provenance.
+
+Current persistence accepts only `sleep_observation.v1`. The factory therefore
+returns a clearly named `compatibility_candidate` after V2 has accepted the
+fact. That projection is the only input to the unchanged persistence path; it
+does not revalidate, fall back, or mutate V2 authority. Persisting V2 metric
+columns/payloads is an explicit M3 prerequisite.
+
+### Push/Pull/Replay convergence and provenance decision
+
+Production worker composition passes the typed
+`observation_semantics_version` into live Push/Pull normalization, replay
+journey adaptation, and replay normalization.
+
+```text
+v1 -> unchanged adapter/candidate/legacy ontology behavior
+v2 -> transport field mapping -> CanonicalObservationFactoryV2
+      -> explicit v1 persistence compatibility candidate
+```
+
+Transport mappings are:
+
+- Push `BodyShake` -> `movement_index/vendor_index`, vendor semantic code
+  `perceptor.body_shake.index`, source `device_measured`.
+- Pull realtime/history `body_shake` -> the same movement-index identity.
+- Pull SleepReport `{hour,count}` ->
+  `movement_event_count/count`, source `vendor_derived`, explicit one-hour UTC
+  aggregation interval.
+- Replay `replay_observation_input.v2` carries the explicit V2 movement
+  payload. Generated replay movement is mapped to the same Perceptor movement
+  index identity; a replay event count is accepted only with its explicit
+  count window and vendor-derived provenance.
+- Pull SleepReport `{time_long,value}` movement has no proved vendor meaning
+  in the current contract and is rejected as `unsupported_vendor_semantics`.
+  It is not guessed into index or count.
+
+The G1 provenance mismatch is resolved by accepting a proved vendor-derived
+hourly count in both Pull and Replay. `movement_index` remains device-measured;
+`movement_event_count` remains vendor-derived. Push has no documented count
+field, so count acceptance is not invented for Push. Invalid count-window,
+metric/unit, and source combinations reach the same factory/category after
+transport decoding.
+
+### Feature-gate and V1 compatibility evidence
+
+- The authoritative default remains
+  `observation_semantics_version=ObservationSemanticsVersion.V1`.
+- Explicit V1 continues to construct `movement_payload.v1` with unit `index`
+  and retains Replay's legacy ontology behavior.
+- Explicit V2 creates `replay_observation_input.v2` and invokes the shared
+  factory for all three paths.
+- Unsupported setting values still fail enum/settings construction.
+- A V2 factory rejection propagates; no V1 retry/fallback exists.
+- `tests/unit/test_g1_characterization.py` remains unchanged and passing.
+- The known V1 mixed movement result remains exactly `20.9`.
+
+### M3 scope intentionally deferred
+
+G2A adds no migration and changes no Product aggregation, persisted canonical
+schema, historical row, trend cohort, risk policy, care recommendation, or
+report semantic. It does not claim the product-level movement defect is fully
+fixed. The compatibility candidate can still be persisted as legacy Movement
+until M3 creates and verifies the additive V2 storage/read boundary.
+
+### Verification evidence — Python 3.11.15
+
+Authoritative executable: `/tmp/sleepagent-g1_5-py311/bin/python`.
+
+| Verification | Result |
+|---|---|
+| G2A contract/factory/parity/feature tests | 24 passed |
+| Focused G2A + G1 + Perceptor + Pull + Replay + architecture selection | 190 passed in 6.04s |
+| G1 settings/characterization transition selection | 36 passed in 0.80s |
+| Unit-marked suite | 1,071 passed; 35 deselected in 20.65s |
+| Non-PostgreSQL/non-E2E/non-ASGI-lifespan suite | 1,068 passed; 38 deselected in 20.75s |
+| Full architecture suite | 5 passed in 3.34s |
+| OpenAPI canonical snapshot check | PASS; no snapshot changed |
+| Compileall | PASS for `sleepagent`, `reference_client`, `scripts`, `tests` |
+| Import smoke | PASS for settings, registry, factory, Push, Pull, Replay |
+| New semantic/factory mypy isolation | PASS with `--follow-imports=skip` |
+| Repository mypy | existing failure baseline remains; no broad typing cleanup |
+| `git diff --check` | PASS |
+
+The first sandboxed unit run reproduced the same eight local-loopback
+`PermissionError` failures recorded in G1/G1.5. The authoritative rerun with
+permission for the scripted `127.0.0.1` server passed; no external provider was
+contacted.
+
+### Architecture baseline comparison
+
+The executable snapshot remains at three grandfathered multi-module SCCs plus
+the standalone self-cycle baseline, six exact self-import edges, and 11 exact
+forbidden-direction edges. `new_debt` is empty for SCCs, self-imports, and
+forbidden edges. No M10-M11 cleanup was performed.
+
+The master plan suggested a future `application/observations/` package. G2A
+instead places the pure factory beside the current domain contracts because no
+application root exists and importing a new upper-layer factory from the
+existing replay persistence seam would worsen dependency direction. This is a
+material but plan-consistent implementation deviation; M10-M11 may move the
+boundary behind an application port after the current SCC cleanup.
+
+### PostgreSQL and G2B entry
+
+`POSTGRESQL_STATUS = ENV_BLOCKED`
+
+G2A did not attempt Docker repair, native installation, service mutation, or a
+database migration. The G1.5 evidence remains authoritative: no PostgreSQL
+client/server is available and the Docker socket is inaccessible.
+
+Exact G2B/M3 prerequisites:
+
+1. Provide an isolated PostgreSQL 16 test service/URL and verify all immutable
+   migrations through version 13 before adding the next migration.
+2. Design and apply an additive V2 persistence schema for metric ID, semantic
+   unit, aggregation boundaries, semantic/ontology/normalizer versions, and
+   ambiguity status without rewriting migrations 001-013.
+3. Implement evidence-based historical upcasting; unprovable Movement becomes
+   `legacy_ambiguous_movement`, never guessed.
+4. Cut Product aggregation, trends, risk, and CareStrategy to explicit
+   compatible metrics, with `movement_index` and event counts never mixed.
+5. Run migration application/rollback-forward checks, PostgreSQL ingestion and
+   deduplication tests, historical-read compatibility, and affected Product
+   integration/process suites.
+6. Only after that evidence, retire the V1 persistence compatibility projection
+   for new V2 observations.
+
+### Git isolation
+
+All G2A changes began from the clean authoritative baseline and are isolated
+for one local commit with subject
+`remediation(g2a): add canonical observation semantics v2`. The commit hash is
+reported in the G2A handoff because a commit cannot contain its own hash. No
+push is authorized or performed.

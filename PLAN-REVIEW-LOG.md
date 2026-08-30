@@ -586,3 +586,52 @@ untracked, deleted, or whitespace-error path. The local checkpoint is
 `0aa1674653da93e135572b06f858cd0d18f41926`, tree
 `3639228c82af4509c885ec23dc15459630b74eae`; this documentation-only follow-up
 records the hash that the checkpoint cannot self-contain.
+
+## Act 5 — Build: G2A M1-M2 Observation Semantics V2
+
+### Round 1 — Codex build
+
+Added a typed `movement_payload.v2` contract and minimal semantic registry for
+`movement_index`, `movement_event_count`, and audit-only
+`legacy_ambiguous_movement`, with stable categorized domain rejections. Added
+one `CanonicalObservationFactoryV2` for schema/semantic/provenance/time
+validation, UTC normalization, canonical semantic projection, and deterministic
+semantic identity distinct from transport receipt identity.
+
+Wired the existing typed setting into Push, Pull, replay journey generation,
+and replay normalization. V1 remains the default and unchanged. V2 maps proved
+vendor meanings before the shared factory and has no permissive fallback.
+Because M3 is excluded, accepted V2 facts cross the unchanged persistence
+boundary through an explicit legacy compatibility candidate; no migration,
+historical upcast, aggregation, trend, risk, CareStrategy, or report cutover was
+performed.
+
+The factory is placed in the current domain layer instead of the master plan's
+suggested future application package. This avoids a new reverse dependency from
+the existing replay persistence seam and produces no architecture-debt growth.
+
+### Round 2 — Codex fix pass
+
+The initial event-count parity assertion used different authoritative instants
+for Pull and Replay. The fixture was corrected to represent the same semantic
+observation, then semantic identity equality was added for both index and count
+parity. New mypy findings in the two semantic modules were resolved without
+touching the repository's existing failure baseline. No production behavior
+change was needed after the first implementation pass.
+
+### Codex verification
+
+- G2A contract/factory/parity/feature suite: 24 passed.
+- Focused G2A/G1/Perceptor/Pull/Replay/architecture selection: 190 passed.
+- Unit-marked suite under Python 3.11.15: 1,071 passed, 35 deselected.
+- Non-PostgreSQL/non-E2E/non-ASGI suite: 1,068 passed, 38 deselected.
+- Architecture suite: 5 passed; no new SCC, self-import, or forbidden edge.
+- OpenAPI canonical check, compileall/import smoke, and `git diff --check`: PASS.
+- The sandbox-only eight localhost bind failures disappeared in the approved
+  local-only rerun; no external provider was contacted.
+- PostgreSQL remains `ENV_BLOCKED`; no M3 work or host repair was attempted.
+
+Diff review confirms V1 default behavior and the G1 `20.9` characterization
+remain unchanged, V2 uses one semantic authority, all persistence/analytics
+work is deferred, and no OpenAPI snapshot or migration changed. One bounded
+fix pass was used.

@@ -21,7 +21,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Callable, Literal, Mapping, Protocol
+from typing import Annotated, Any, Callable, Literal, Mapping, Protocol, TypeAlias
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.exceptions import InvalidTag
@@ -84,6 +84,11 @@ from sleepagent.domain.fast_path import (
     DeterministicFastPathService,
 )
 from sleepagent.domain.ontology import validate_observation_ontology
+from sleepagent.domain.canonical_observation import (
+    CanonicalObservationFactoryV2,
+    CanonicalObservationV2,
+)
+from sleepagent.domain.observation_semantics import MovementPayloadV2
 from sleepagent.domain.schema_versions import dispatch_versioned_json
 from sleepagent.workers.retention import (
     PostgresRetentionKeyCoordinator,
@@ -119,7 +124,7 @@ class SleepSliceStaleRevision(SleepSliceConflict):
     """A durable stage targets a revision that is no longer current."""
 
 
-class ReplayObservationInput(SleepDomainContract):
+class _ReplayObservationInputBase(SleepDomainContract):
     """Strict replay-adapter payload encrypted in the immutable raw inbox.
 
     IDs belonging to the provider remain opaque.  Internal raw, candidate and
@@ -129,9 +134,6 @@ class ReplayObservationInput(SleepDomainContract):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["replay_observation_input.v1"] = (
-        "replay_observation_input.v1"
-    )
     provider_id: str = Field(min_length=1, max_length=200)
     provider_account_id: str = Field(min_length=1, max_length=200)
     provider_device_id: str = Field(min_length=1, max_length=500)
@@ -156,7 +158,7 @@ class ReplayObservationInput(SleepDomainContract):
     message_id: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
-    def validate_replay_input(self) -> "ReplayObservationInput":
+    def validate_replay_structure(self) -> "_ReplayObservationInputBase":
         if self.payload.observation_type.value != self.observation_type.value:
             raise ValueError("payload observation_type must match envelope")
         if self.measurement_at is None and self.event_occurred_at is None:
@@ -167,6 +169,19 @@ class ReplayObservationInput(SleepDomainContract):
             ZoneInfo(self.timezone_name)
         except ZoneInfoNotFoundError as exc:
             raise ValueError("timezone_name must be a valid IANA timezone") from exc
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return _canonical_json(self.model_dump(mode="json"))
+
+
+class ReplayObservationInput(_ReplayObservationInputBase):
+    schema_version: Literal["replay_observation_input.v1"] = (
+        "replay_observation_input.v1"
+    )
+
+    @model_validator(mode="after")
+    def validate_v1_ontology(self) -> "ReplayObservationInput":
         validate_observation_ontology(
             observation_type=self.observation_type,
             payload=self.payload,
@@ -174,13 +189,33 @@ class ReplayObservationInput(SleepDomainContract):
         )
         return self
 
-    def canonical_bytes(self) -> bytes:
-        return _canonical_json(self.model_dump(mode="json"))
+
+class ReplayObservationInputV2(_ReplayObservationInputBase):
+    schema_version: Literal["replay_observation_input.v2"] = (
+        "replay_observation_input.v2"
+    )
+    movement_payload_v2: MovementPayloadV2 | None = None
+
+    @model_validator(mode="after")
+    def semantic_payload_matches_envelope(self) -> "ReplayObservationInputV2":
+        if (
+            self.observation_type is ObservationType.MOVEMENT
+        ) != (self.movement_payload_v2 is not None):
+            raise ValueError(
+                "V2 movement semantic payload must be present exactly for movement"
+            )
+        return self
+
+
+ReplayObservationContract: TypeAlias = Annotated[
+    ReplayObservationInput | ReplayObservationInputV2,
+    Field(discriminator="schema_version"),
+]
 
 
 class ReplayRawBatch(SleepDomainContract):
     schema_version: Literal["replay_raw_batch.v1"] = "replay_raw_batch.v1"
-    items: tuple[ReplayObservationInput, ...] = Field(
+    items: tuple[ReplayObservationContract, ...] = Field(
         min_length=1,
         max_length=MAX_REPLAY_INGRESS_BATCH,
     )
@@ -252,7 +287,7 @@ class PreparedRawIngress:
     normalization_work_id: str
     intake_receipt_id: str
     event_id: str
-    source: ReplayObservationInput
+    source: ReplayObservationContract
     payload_sha256: str
     encrypted_payload: bytes
     encryption_key_id: str
@@ -893,6 +928,7 @@ class NormalizationHandler:
         repository_factory: Callable[
             [TransactionBoundConnection, UowScope], "PostgresSleepSliceRepository"
         ] | None = None,
+        observation_semantics_version: str = "v1",
     ) -> None:
         self.uow_factory = uow_factory
         self.cipher = cipher
@@ -911,6 +947,9 @@ class NormalizationHandler:
                 id_generator=self.id_generator,
             )
         )
+        if observation_semantics_version not in {"v1", "v2"}:
+            raise ValueError("unsupported observation semantics version")
+        self.observation_semantics_version = observation_semantics_version
 
     def process(
         self,
@@ -964,13 +1003,16 @@ class NormalizationHandler:
             if hashlib.sha256(raw).hexdigest() != work.payload_sha256:
                 raise SleepSliceInvariantError("raw payload hash mismatch")
             try:
-                replay_input = dispatch_versioned_json(
+                replay_input: ReplayObservationContract = dispatch_versioned_json(
                     raw,
                     family="replay_observation_input",
                     readers={
                         "replay_observation_input.v1": (
                             ReplayObservationInput.model_validate
-                        )
+                        ),
+                        "replay_observation_input.v2": (
+                            ReplayObservationInputV2.model_validate
+                        ),
                     },
                 )
             except Exception as exc:
@@ -979,12 +1021,20 @@ class NormalizationHandler:
                 ) from exc
             if replay_input.subject_id != scope.subject_id:
                 raise SleepSliceInvariantError("raw replay subject mismatch")
+            expected_schema = (
+                f"replay_observation_input.{self.observation_semantics_version}"
+            )
+            if replay_input.schema_version != expected_schema:
+                raise SleepSliceInvariantError(
+                    "replay observation semantics do not match configured authority"
+                )
             observation, candidate = _normalize_replay_observation(
                 replay_input,
                 raw_ingress_record_id=work.raw_ingress_record_id,
                 payload_sha256=work.payload_sha256,
                 observation_id=self.id_generator(committed_at),
                 candidate_id=self.id_generator(committed_at),
+                observation_semantics_version=self.observation_semantics_version,
             )
             repository.lock_subject_lifecycle()
             snapshot = repository.load_lifecycle()
@@ -3517,13 +3567,60 @@ class PostgresSleepSliceRepository:
 
 
 def _normalize_replay_observation(
-    source: ReplayObservationInput,
+    source: ReplayObservationContract,
     *,
     raw_ingress_record_id: str,
     payload_sha256: str,
     observation_id: str,
     candidate_id: str,
+    observation_semantics_version: str = "v1",
 ) -> tuple[SleepObservation, AdapterObservationCandidate]:
+    candidate = _replay_candidate(
+        source,
+        raw_ingress_record_id=raw_ingress_record_id,
+        payload_sha256=payload_sha256,
+        candidate_id=candidate_id,
+    )
+    if observation_semantics_version == "v2":
+        if not isinstance(source, ReplayObservationInputV2):
+            raise ValueError("V2 replay normalization requires V2 replay input")
+        candidate = canonicalize_replay_input_v2(
+            source,
+            raw_ingress_record_id=raw_ingress_record_id,
+            payload_sha256=payload_sha256,
+            candidate_id=candidate_id,
+        ).compatibility_candidate
+    observation = SleepObservation(
+        observation_id=observation_id,
+        data_mode=DataMode.REPLAY,
+        observation_type=source.observation_type,
+        payload=candidate.payload,
+        subject_id=source.subject_id,
+        device_id=source.device_id,
+        device_binding_id=source.device_binding_id,
+        binding_version=source.binding_version,
+        request_signed_at=candidate.request_signed_at,
+        measurement_at=candidate.measurement_at,
+        event_occurred_at=candidate.event_occurred_at,
+        received_at=candidate.received_at,
+        source_timestamp_text=candidate.source_timestamp_text,
+        timezone_status=candidate.timezone_status,
+        source_kind=candidate.source_kind,
+        quality=candidate.quality,
+        provenance=candidate.provenance,
+        source_key=candidate.source_key,
+        idempotency_key=candidate.idempotency_key,
+    )
+    return observation, candidate
+
+
+def _replay_candidate(
+    source: ReplayObservationContract,
+    *,
+    raw_ingress_record_id: str,
+    payload_sha256: str,
+    candidate_id: str,
+) -> AdapterObservationCandidate:
     provenance = ObservationProvenance(
         provider_id=source.provider_id,
         provider_account_id=source.provider_account_id,
@@ -3557,28 +3654,30 @@ def _normalize_replay_observation(
         source_key=source.source_key,
         idempotency_key=source.idempotency_identity,
     )
-    observation = SleepObservation(
-        observation_id=observation_id,
-        data_mode=DataMode.REPLAY,
-        observation_type=source.observation_type,
-        payload=source.payload,
-        subject_id=source.subject_id,
-        device_id=source.device_id,
-        device_binding_id=source.device_binding_id,
-        binding_version=source.binding_version,
-        request_signed_at=source.request_signed_at,
-        measurement_at=source.measurement_at,
-        event_occurred_at=source.event_occurred_at,
-        received_at=source.received_at,
-        source_timestamp_text=source.source_timestamp_text,
-        timezone_status=source.timezone_status,
-        source_kind=source.source_kind,
-        quality=source.quality,
-        provenance=provenance,
-        source_key=source.source_key,
-        idempotency_key=source.idempotency_identity,
+    return candidate
+
+
+def canonicalize_replay_input_v2(
+    source: ReplayObservationInputV2,
+    *,
+    raw_ingress_record_id: str = "replay-v2-parity-raw",
+    payload_sha256: str = "0" * 64,
+    candidate_id: str = "replay-v2-parity-candidate",
+    factory: CanonicalObservationFactoryV2 | None = None,
+) -> CanonicalObservationV2:
+    """Replay transport mapping into the one V2 semantic authority."""
+
+    candidate = _replay_candidate(
+        source,
+        raw_ingress_record_id=raw_ingress_record_id,
+        payload_sha256=payload_sha256,
+        candidate_id=candidate_id,
     )
-    return observation, candidate
+    return (factory or CanonicalObservationFactoryV2()).build(
+        candidate=candidate,
+        movement_payload=source.movement_payload_v2,
+        normalizer_version="replay-observation-adapter.v2",
+    )
 
 
 def _workload_snapshot(scope: UowScope, handler: str) -> dict[str, Any]:
@@ -3708,6 +3807,8 @@ __all__ = [
     "ReplayIngressHandler",
     "ReplayIngressOrder",
     "ReplayObservationInput",
+    "ReplayObservationInputV2",
+    "canonicalize_replay_input_v2",
     "ReplayRawBatch",
     "SleepSliceConflict",
     "SleepSliceError",

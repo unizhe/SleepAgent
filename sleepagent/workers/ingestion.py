@@ -230,6 +230,9 @@ def build_b3_worker_handlers(
                     retention=timedelta(
                         seconds=settings.raw_retention_seconds
                     ),
+                    observation_semantics_version=(
+                        settings.observation_semantics_version.value
+                    ),
                 )
             return journey_handler(context)
 
@@ -251,6 +254,9 @@ def build_b3_worker_handlers(
                     PerceptorLiveNormalizationDispatcher(
                         uow_factory,
                         cipher=cipher,
+                        observation_semantics_version=(
+                            settings.observation_semantics_version
+                        ),
                     ),
                 )
             return cast(
@@ -259,6 +265,9 @@ def build_b3_worker_handlers(
                     uow_factory,
                     cipher=cipher,
                     retention_keys=retention_keys,
+                    observation_semantics_version=(
+                        settings.observation_semantics_version.value
+                    ),
                 ),
             )
 

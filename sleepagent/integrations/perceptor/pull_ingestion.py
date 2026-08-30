@@ -11,12 +11,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Mapping, cast
 from zoneinfo import ZoneInfo
 
-from sleepagent.config import BackendKeyProvider, SleepBackendSettings
+from sleepagent.config import (
+    BackendKeyProvider,
+    ObservationSemanticsVersion,
+    SleepBackendSettings,
+)
 from sleepagent.domain.contracts import DataMode, DeviceBinding, bind_adapter_candidate
 from sleepagent.domain.postgres_slice import (
     NormalizationLease,
@@ -36,6 +40,7 @@ from sleepagent.integrations.perceptor.pull import (
     NORMALIZER_VERSION,
     PullContractError,
     assert_requested_device_matches_binding,
+    canonicalize_pull_result_v2,
     normalize_current,
     normalize_history,
     normalize_realtime,
@@ -689,11 +694,15 @@ class PerceptorPullNormalizationProcessor:
         cipher: RawPayloadCipher,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         fault_injector: Callable[[str], None] | None = None,
+        observation_semantics_version: ObservationSemanticsVersion = (
+            ObservationSemanticsVersion.V1
+        ),
     ) -> None:
         self.uow_factory = uow_factory
         self.cipher = cipher
         self.now_factory = now_factory
         self.fault_injector = fault_injector
+        self.observation_semantics_version = observation_semantics_version
         self.reconciler = PerceptorObservationReconciler()
 
     def process(
@@ -956,6 +965,14 @@ class PerceptorPullNormalizationProcessor:
                 ).candidates
             )
         )
+        if (
+            result is not None
+            and self.observation_semantics_version is ObservationSemanticsVersion.V2
+        ):
+            canonical = canonicalize_pull_result_v2(
+                replace(result, candidates=candidates)
+            )
+            candidates = tuple(item.compatibility_candidate for item in canonical)
         observations = tuple(bind_adapter_candidate(candidate, binding) for candidate in candidates)
         history_classification = (
             None if result is None else result.history_window_classification
@@ -1481,9 +1498,13 @@ class PerceptorLiveNormalizationDispatcher:
         uow_factory: UnitOfWorkFactory[Any],
         *,
         cipher: RawPayloadCipher,
+        observation_semantics_version: ObservationSemanticsVersion = (
+            ObservationSemanticsVersion.V1
+        ),
     ) -> None:
         self.uow_factory = uow_factory
         self.cipher = cipher
+        self.observation_semantics_version = observation_semantics_version
         self._push: Any | None = None
         self._pull: PerceptorPullNormalizationProcessor | None = None
 
@@ -1496,13 +1517,17 @@ class PerceptorLiveNormalizationDispatcher:
                 )
 
                 self._push = PerceptorNormalizationProcessor(
-                    self.uow_factory, cipher=self.cipher
+                    self.uow_factory,
+                    cipher=self.cipher,
+                    observation_semantics_version=self.observation_semantics_version,
                 )
             return self._push.process(scope, lease)
         if normalizer == PULL_NORMALIZER:
             if self._pull is None:
                 self._pull = PerceptorPullNormalizationProcessor(
-                    self.uow_factory, cipher=self.cipher
+                    self.uow_factory,
+                    cipher=self.cipher,
+                    observation_semantics_version=self.observation_semantics_version,
                 )
             return self._pull.process(scope, lease)
         raise SleepSliceInvariantError("unsupported live normalization work kind")

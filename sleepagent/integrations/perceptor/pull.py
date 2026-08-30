@@ -43,6 +43,14 @@ from sleepagent.domain.contracts import (
     TimezoneStatus,
     VendorSleepProfileMetricPayload,
 )
+from sleepagent.domain.canonical_observation import (
+    CanonicalObservationFactoryV2,
+    CanonicalObservationV2,
+)
+from sleepagent.domain.observation_semantics import (
+    MovementMetricId,
+    MovementPayloadV2,
+)
 
 
 UTC = timezone.utc
@@ -116,6 +124,61 @@ class HistoryWindowClassification:
     before_window_candidate_count: int
     in_window_candidate_count: int
     after_window_candidate_count: int
+
+
+def canonicalize_pull_result_v2(
+    result: PullNormalizationResult,
+    *,
+    factory: CanonicalObservationFactoryV2 | None = None,
+) -> tuple[CanonicalObservationV2, ...]:
+    """Map proved Pull vendor meanings, then use the shared V2 authority."""
+
+    authority = factory or CanonicalObservationFactoryV2()
+    canonical: list[CanonicalObservationV2] = []
+    for candidate in result.candidates:
+        movement_payload = None
+        if (
+            candidate.observation_type is ObservationType.MOVEMENT
+            and isinstance(candidate.payload, MovementPayload)
+        ):
+            if "vendor_report_hour_bucket" in candidate.quality.quality_flags:
+                value = candidate.payload.value
+                semantic_value: int | float = (
+                    int(value) if value.is_integer() else value
+                )
+                start = candidate.measurement_at
+                movement_payload = MovementPayloadV2(
+                    metric_id=MovementMetricId.MOVEMENT_EVENT_COUNT,
+                    value=semantic_value,
+                    unit="count",
+                    aggregation_start_at=start,
+                    aggregation_end_at=(
+                        None if start is None else start + timedelta(hours=1)
+                    ),
+                    vendor_semantic_code="perceptor.body_shake.hourly_count",
+                )
+            elif candidate.source_kind is SourceKind.DEVICE_MEASURED:
+                movement_payload = MovementPayloadV2(
+                    metric_id=MovementMetricId.MOVEMENT_INDEX,
+                    value=candidate.payload.value,
+                    unit="vendor_index",
+                    vendor_semantic_code="perceptor.body_shake.index",
+                )
+            else:
+                movement_payload = MovementPayloadV2(
+                    metric_id=MovementMetricId.LEGACY_AMBIGUOUS_MOVEMENT,
+                    value=candidate.payload.value,
+                    unit="legacy_unknown",
+                    vendor_semantic_code="body_shake_data.time_long.value",
+                )
+        canonical.append(
+            authority.build(
+                candidate=candidate,
+                movement_payload=movement_payload,
+                normalizer_version=NORMALIZER_VERSION,
+            )
+        )
+    return tuple(canonical)
 
 
 def with_durable_raw_reference(
@@ -992,6 +1055,7 @@ def _require_aware(value: datetime, field: str) -> None:
 __all__ = [
     "HISTORY_CADENCE", "HistoryWindowClassification", "PullContractError",
     "PullNormalizationResult",
+    "canonicalize_pull_result_v2",
     "assert_requested_device_matches_binding", "normalize_current", "normalize_history",
     "normalize_realtime", "normalize_sleep_report", "sleep_report_is_no_data",
     "validate_realtime_start", "with_durable_raw_reference",

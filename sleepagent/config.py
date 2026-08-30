@@ -99,8 +99,8 @@ class SleepBackendSettings(BaseModel):
     # with an explicitly opted-in live Product model.
     provider_mode: ProviderMode = ProviderMode.DISABLED
     model_mode: ModelMode = ModelMode.DISABLED
-    # M0 remediation switches are contracts only. Production code does not
-    # consume their future states until the owning migration goal cuts over.
+    # Remediation switches remain default-preserving. Observation V2 has a
+    # bounded ingestion consumer; later switches activate only in their goals.
     observation_semantics_version: ObservationSemanticsVersion = (
         ObservationSemanticsVersion.V1
     )

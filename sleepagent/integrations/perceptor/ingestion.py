@@ -13,7 +13,11 @@ from typing import Any, Callable, Mapping, cast
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from sleepagent.config import BackendKeyProvider, SleepBackendSettings
+from sleepagent.config import (
+    BackendKeyProvider,
+    ObservationSemanticsVersion,
+    SleepBackendSettings,
+)
 from sleepagent.domain.contracts import (
     DataMode,
     DeviceBinding,
@@ -33,6 +37,7 @@ from sleepagent.integrations.perceptor.push import (
     FieldState,
     ParsedPushEnvelope,
     PushContractError,
+    canonicalize_push_candidates_v2,
     normalize_push_envelope,
     parse_push_envelope,
     push_request_signed_at,
@@ -329,11 +334,15 @@ class PerceptorNormalizationProcessor:
         cipher: RawPayloadCipher,
         id_generator: Callable[[datetime | None], str] | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+        observation_semantics_version: ObservationSemanticsVersion = (
+            ObservationSemanticsVersion.V1
+        ),
     ) -> None:
         self.uow_factory = uow_factory
         self.cipher = cipher
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
+        self.observation_semantics_version = observation_semantics_version
         self.reconciler = PerceptorObservationReconciler()
 
     def process(
@@ -375,6 +384,11 @@ class PerceptorNormalizationProcessor:
                         raw_ingress_record_id=loaded["raw_ingress_record_id"],
                     )
                 )
+                if self.observation_semantics_version is ObservationSemanticsVersion.V2:
+                    candidates = tuple(
+                        item.compatibility_candidate
+                        for item in canonicalize_push_candidates_v2(candidates)
+                    )
                 binding = DeviceBinding.model_validate(loaded["binding_json"])
                 observations = tuple(
                     bind_adapter_candidate(candidate, binding)
