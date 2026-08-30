@@ -62,6 +62,7 @@ from sleepagent.runtime.reports import (
     ElderNarrative,
     ElderNarrativeRequest,
     ReportRole,
+    ReportingContextV1,
     RoleProjection,
     RoleProjectionState,
     SharedAnalysisRunRequest,
@@ -1540,6 +1541,23 @@ class ProductAgentProcessor:
                 )
             ),
             partial_caveat=partial_caveat,
+            reporting_context=ReportingContextV1(
+                timezone_name=source.facts.timezone_name,
+                locale="zh-CN",
+                audience="shared",
+                authoritative_start_at_utc=(
+                    source.episode.bed_at
+                    or source.episode.collection_start_at
+                ).astimezone(timezone.utc),
+                authoritative_end_at_utc=(
+                    source.episode.wake_at
+                    or source.episode.deterministic_close_deadline_at
+                ).astimezone(timezone.utc),
+                local_sleep_date=date.fromisoformat(
+                    source.facts.local_sleep_date
+                ),
+                renderer_version="shared_semantic_facts.v1",
+            ),
         )
         runtime_request = ProductEpisodeRunRequest(
             episode_id=shared_episode_id,
@@ -6917,6 +6935,7 @@ def _desired_analysis_sha256(
     consumed_context_sha256: str,
     runtime_manifest_sha256: str,
 ) -> str:
+    reporting_time_authority = _desired_reporting_time_authority(source)
     return stable_hash(
         {
             "schema_version": "desired_shared_analysis.v1",
@@ -6934,6 +6953,11 @@ def _desired_analysis_sha256(
             "observation_set_sha256": source.observation_set_sha256,
             "quality": source.facts.provider_quality_summary(),
             "risk": source.facts.provider_risk_summary(),
+            **(
+                {"reporting_time_authority": reporting_time_authority}
+                if reporting_time_authority is not None
+                else {}
+            ),
             # The operation policy hash binds the authenticated caller/role.
             # Desired shared work instead pins only role-neutral source policy.
             "source_policy_versions": dict(sorted(source.policy_versions.items())),
@@ -6944,6 +6968,33 @@ def _desired_analysis_sha256(
             "runtime_manifest_sha256": runtime_manifest_sha256,
         }
     )
+
+
+def _desired_reporting_time_authority(
+    source: LoadedProductAgentSource,
+) -> dict[str, Any] | None:
+    """Pin reporting time for real loaded sources; tolerate legacy test shims."""
+
+    episode = getattr(source, "episode", None)
+    facts = getattr(source, "facts", None)
+    timezone_name = getattr(facts, "timezone_name", None)
+    local_sleep_date = getattr(facts, "local_sleep_date", None)
+    if episode is None or timezone_name is None or local_sleep_date is None:
+        return None
+    start = getattr(episode, "bed_at", None) or getattr(
+        episode, "collection_start_at", None
+    )
+    end = getattr(episode, "wake_at", None) or getattr(
+        episode, "deterministic_close_deadline_at", None
+    )
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return None
+    return {
+        "timezone_name": timezone_name,
+        "authoritative_start_at_utc": start.astimezone(timezone.utc),
+        "authoritative_end_at_utc": end.astimezone(timezone.utc),
+        "local_sleep_date": local_sleep_date,
+    }
 
 
 def _recompute_shared_identity(

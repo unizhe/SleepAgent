@@ -4,6 +4,7 @@ import json
 import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -115,9 +116,11 @@ from sleepagent.runtime.reports import (
     ElderNarrativeRequest,
     ElderNarrativeState,
     ReportRole,
+    ReportingContextV1,
     RoleProjectionState,
     SharedAnalysisRunRequest,
     SharedAnalysisSourceV1,
+    ZH_CN_ROLE_RENDERER_VERSION,
     build_elder_message_atoms,
     build_shared_role_projections,
 )
@@ -1964,6 +1967,19 @@ def _shared_analysis_request(*, partial: bool = False) -> SharedAnalysisRunReque
                 if partial
                 else None
             ),
+            reporting_context=ReportingContextV1(
+                timezone_name="Asia/Shanghai",
+                locale="zh-CN",
+                audience="shared",
+                authoritative_start_at_utc=datetime(
+                    2026, 7, 25, 14, 30, tzinfo=timezone.utc
+                ),
+                authoritative_end_at_utc=datetime(
+                    2026, 7, 25, 22, 30, tzinfo=timezone.utc
+                ),
+                local_sleep_date=date(2026, 7, 26),
+                renderer_version="shared_semantic_facts.v1",
+            ),
         ),
         runtime_request=runtime_request,
     )
@@ -2371,6 +2387,121 @@ def test_shared_role_projections_are_deterministic_and_keep_partial_caveat() -> 
     assert tuple(
         type(item).model_validate(item.model_dump(mode="json")) for item in first
     ) == first
+
+
+def test_reporting_context_converts_cross_midnight_and_dst_with_zoneinfo() -> None:
+    shanghai = ReportingContextV1(
+        timezone_name="Asia/Shanghai",
+        authoritative_start_at_utc=datetime(
+            2026, 8, 25, 17, 35, tzinfo=timezone.utc
+        ),
+        authoritative_end_at_utc=datetime(
+            2026, 8, 25, 22, 30, tzinfo=timezone.utc
+        ),
+        local_sleep_date=date(2026, 8, 26),
+        renderer_version="shared_semantic_facts.v1",
+    )
+    assert shanghai.authoritative_start_at_utc.astimezone(
+        ZoneInfo("Asia/Shanghai")
+    ).strftime("%Y-%m-%d %H:%M") == "2026-08-26 01:35"
+
+    los_angeles = ReportingContextV1(
+        timezone_name="America/Los_Angeles",
+        authoritative_start_at_utc=datetime(
+            2026, 11, 1, 8, 30, tzinfo=timezone.utc
+        ),
+        authoritative_end_at_utc=datetime(
+            2026, 11, 1, 9, 30, tzinfo=timezone.utc
+        ),
+        local_sleep_date=date(2026, 11, 1),
+        renderer_version="shared_semantic_facts.v1",
+    )
+    local_start = los_angeles.authoritative_start_at_utc.astimezone(
+        ZoneInfo("America/Los_Angeles")
+    )
+    local_end = los_angeles.authoritative_end_at_utc.astimezone(
+        ZoneInfo("America/Los_Angeles")
+    )
+    assert local_start.utcoffset() != local_end.utcoffset()
+    assert local_start.fold == 0
+    assert local_end.fold == 1
+
+
+def test_renderer_version_changes_projection_not_shared_semantic_hash() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    semantic_hash = shared.shared_analysis_sha256
+
+    first = build_shared_role_projections(
+        shared,
+        renderer_version=ZH_CN_ROLE_RENDERER_VERSION,
+    )
+    second = build_shared_role_projections(
+        shared,
+        renderer_version="zh_cn_role_renderer.v2-test",
+    )
+
+    assert shared.semantic_hash_version == "structured_facts.v1"
+    assert shared.shared_analysis_sha256 == semantic_hash
+    assert {item.projection_sha256 for item in first}.isdisjoint(
+        item.projection_sha256 for item in second
+    )
+    assert all(
+        item.reporting_context is not None
+        and item.reporting_context.renderer_version == ZH_CN_ROLE_RENDERER_VERSION
+        for item in first
+    )
+
+
+def test_structured_facts_drive_zh_cn_roles_without_english_claim_leakage() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    command = _shared_analysis_request()
+    night_request = command.runtime_request.model_copy(
+        update={
+            "tool_inputs": {
+                **command.runtime_request.tool_inputs,
+                "radar.get_night_evidence": {
+                    "data": {
+                        "deterministic_night_summary": {
+                            "sleep_window_minutes": 455,
+                            "stage_minutes": {"deep": 72, "rem": 64},
+                            "vital_centers": {
+                                "heart_rate": 63,
+                                "respiratory_rate": 15,
+                            },
+                            "bed_exit_count": 2,
+                        }
+                    }
+                },
+            }
+        }
+    )
+    shared = instance.analyze_shared(
+        command.model_copy(update={"runtime_request": night_request})
+    )
+    structured = shared.model_copy(
+        update={
+            "summary_lines": ("English claim must not leak",),
+        }
+    )
+    elder, family, doctor = build_shared_role_projections(structured)
+
+    assert any(
+        item.metric_id == "sleep_window_minutes"
+        for item in shared.semantic_facts
+    )
+    assert "455分钟" in (family.text or "")
+    assert "平均心率：63bpm" in (doctor.text or "")
+    assert "质量限定：完整" in (doctor.text or "")
+    assert "quality" not in (doctor.text or "").lower()
+    assert "good" not in (doctor.text or "").lower()
+    for projection in (elder, family, doctor):
+        if projection.text is not None:
+            assert "English claim must not leak" not in projection.text
 
 
 def test_elder_projection_is_localized_chinese_dense_and_nonduplicative() -> None:

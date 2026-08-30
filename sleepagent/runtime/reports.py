@@ -60,8 +60,9 @@ class RoleReportBundle(RadarAgentSchema):
 """
 
 from collections.abc import Mapping, Sequence
-from datetime import date
-from typing import Any, Literal, Protocol, TypeAlias
+from datetime import date, datetime, timezone
+from typing import Any, Final, Literal, Protocol, TypeAlias, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sleepagent.runtime.knowledge import grounded_citation_refs
 from sleepagent.runtime.schemas import (
@@ -597,6 +598,13 @@ def build_elder_narrative_runtime_manifest(
 SHARED_ANALYSIS_SOURCE_SCHEMA_VERSION = "shared_analysis_source.v1"
 SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION = "shared_night_analysis.v1"
 ROLE_PROJECTION_SCHEMA_VERSION = "role_projection.v1"
+REPORTING_CONTEXT_SCHEMA_VERSION: Final[Literal["reporting_context.v1"]] = (
+    "reporting_context.v1"
+)
+REPORT_SEMANTIC_FACT_SCHEMA_VERSION: Final[Literal["report_semantic_fact.v1"]] = (
+    "report_semantic_fact.v1"
+)
+ZH_CN_ROLE_RENDERER_VERSION = "zh_cn_role_renderer.v1"
 ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION = "elder_narrative_request.v1"
 ELDER_NARRATIVE_SCHEMA_VERSION = "elder_narrative.v1"
 
@@ -611,6 +619,116 @@ class ElderNarrativeState(str, Enum):
     FALLBACK = "fallback"
     FAILED = "failed"
     STALE = "stale"
+
+
+class ReportingContextV1(StrictContract):
+    """Pinned time, locale, audience, and renderer authority for one report."""
+
+    schema_version: Literal["reporting_context.v1"] = (
+        REPORTING_CONTEXT_SCHEMA_VERSION
+    )
+    timezone_name: str = Field(..., min_length=1)
+    locale: Literal["zh-CN"] = "zh-CN"
+    audience: Literal["shared", "elder", "family", "doctor"] = "shared"
+    authoritative_start_at_utc: datetime
+    authoritative_end_at_utc: datetime
+    local_sleep_date: date
+    renderer_version: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def validate_reporting_authority(self) -> "ReportingContextV1":
+        try:
+            zone = ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("reporting timezone must be a valid IANA timezone") from exc
+        for value, label in (
+            (self.authoritative_start_at_utc, "authoritative_start_at_utc"),
+            (self.authoritative_end_at_utc, "authoritative_end_at_utc"),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{label} must be timezone-aware")
+            if value.utcoffset() != timezone.utc.utcoffset(value):
+                raise ValueError(f"{label} must be normalized to UTC")
+        if self.authoritative_end_at_utc <= self.authoritative_start_at_utc:
+            raise ValueError("reporting end boundary must follow start boundary")
+        if self.authoritative_end_at_utc.astimezone(zone).date() != self.local_sleep_date:
+            raise ValueError("local sleep date must be owned by the local end boundary")
+        return self
+
+    def for_audience(
+        self,
+        audience: Literal["elder", "family", "doctor"],
+        *,
+        renderer_version: str = ZH_CN_ROLE_RENDERER_VERSION,
+    ) -> "ReportingContextV1":
+        return cast(
+            ReportingContextV1,
+            self.model_copy(
+                update={
+                    "audience": audience,
+                    "renderer_version": renderer_version,
+                }
+            ),
+        )
+
+    def semantic_time_material(self) -> dict[str, Any]:
+        """Return meaning that changes facts, excluding wording/projection pins."""
+
+        return {
+            "timezone_name": self.timezone_name,
+            "authoritative_start_at_utc": self.authoritative_start_at_utc,
+            "authoritative_end_at_utc": self.authoritative_end_at_utc,
+            "local_sleep_date": self.local_sleep_date,
+        }
+
+
+class ReportSemanticFact(StrictContract):
+    """Structured reporting fact; prose is never its authority."""
+
+    schema_version: Literal["report_semantic_fact.v1"] = (
+        REPORT_SEMANTIC_FACT_SCHEMA_VERSION
+    )
+    fact_id: str = Field(..., pattern=r"^report-fact:[0-9a-f]{32}$")
+    fact_kind: Literal[
+        "direct_metric",
+        "accepted_claim",
+        "quality",
+        "care_candidate",
+    ]
+    metric_id: str = Field(..., min_length=1)
+    value: str | int | float | bool | None = None
+    unit: str | None = Field(default=None, min_length=1)
+    window: str | None = Field(default=None, min_length=1)
+    comparison: str | None = Field(default=None, min_length=1)
+    quality_qualifier: str | None = Field(default=None, min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    authority: str = Field(..., min_length=1)
+    caveat: str | None = Field(default=None, min_length=1)
+
+    @classmethod
+    def create(cls, **values: Any) -> "ReportSemanticFact":
+        material = dict(values)
+        material.pop("fact_id", None)
+        candidate = cls.model_construct(
+            fact_id="report-fact:" + "0" * 32,
+            **material,
+        )
+        normalized = candidate.model_dump(mode="json", exclude={"fact_id"})
+        return cls(
+            fact_id="report-fact:" + stable_hash(normalized)[:32],
+            **material,
+        )
+
+    @model_validator(mode="after")
+    def validate_fact_identity(self) -> "ReportSemanticFact":
+        expected = "report-fact:" + stable_hash(
+            self.model_dump(mode="json", exclude={"fact_id"})
+        )[:32]
+        if self.fact_id != expected:
+            raise ValueError("report semantic fact ID is inconsistent")
+        if self.fact_kind == "direct_metric" and self.value is None:
+            raise ValueError("direct metric fact requires a value")
+        return self
 
 
 class SharedAnalysisSourceV1(StrictContract):
@@ -636,12 +754,18 @@ class SharedAnalysisSourceV1(StrictContract):
     risk_reason_codes: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     partial_caveat: str | None = Field(default=None, min_length=1, max_length=1000)
+    reporting_context: ReportingContextV1 | None = None
 
     @model_validator(mode="after")
     def require_partial_caveat(self) -> "SharedAnalysisSourceV1":
         partial = self.data_sufficiency == "partial" or self.quality_state == "partial"
         if partial != (self.partial_caveat is not None):
             raise ValueError("PARTIAL shared analysis requires exactly one caveat")
+        if self.reporting_context is not None:
+            if self.reporting_context.audience != "shared":
+                raise ValueError("shared source requires a shared reporting audience")
+            if self.reporting_context.local_sleep_date != self.wake_date:
+                raise ValueError("reporting context local date must match wake date")
         return self
 
 
@@ -666,6 +790,8 @@ class SharedAnalysisRunRequest(StrictContract):
             raise ValueError("shared analysis cannot carry an audience")
         if request.user_text or request.user_fact_responses:
             raise ValueError("shared analysis cannot consume conversational input")
+        if self.source.reporting_context is None:
+            raise ValueError("new shared analysis requires a reporting context")
         if (
             request.fact_snapshot.canonical_data_version
             != self.source.canonical_data_version
@@ -674,6 +800,134 @@ class SharedAnalysisRunRequest(StrictContract):
         if request.fact_snapshot.source_scope.date_end != self.source.wake_date:
             raise ValueError("shared analysis wake-date scope mismatch")
         return self
+
+
+def build_report_semantic_facts(
+    *,
+    runtime_request: ProductEpisodeRunRequest,
+    evidence: AcceptedWorkProduct,
+    care: AcceptedWorkProduct | None,
+    source: SharedAnalysisSourceV1,
+) -> tuple[ReportSemanticFact, ...]:
+    """Build deterministic facts without treating Agent prose as data."""
+
+    packet = ProductEvidencePacket.model_validate(evidence.payload)
+    default_refs = tuple(runtime_request.fact_snapshot.source_refs) or (
+        evidence.work_product_ref,
+    )
+    quality = source.quality_state
+    facts: list[ReportSemanticFact] = []
+
+    night_input = runtime_request.tool_inputs.get("radar.get_night_evidence", {})
+    night_data = night_input.get("data")
+    if isinstance(night_data, Mapping):
+        summary = night_data.get("deterministic_night_summary")
+        if isinstance(summary, Mapping):
+            scalar_metrics = (
+                ("sleep_window_minutes", summary.get("sleep_window_minutes"), "minutes"),
+                ("bed_exit_count", summary.get("bed_exit_count"), "count"),
+            )
+            for metric_id, value, unit in scalar_metrics:
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    facts.append(
+                        ReportSemanticFact.create(
+                            fact_kind="direct_metric",
+                            metric_id=metric_id,
+                            value=value,
+                            unit=unit,
+                            window="authoritative_sleep_window",
+                            quality_qualifier=quality,
+                            source_refs=default_refs,
+                            authority="deterministic_product_summary",
+                        )
+                    )
+            stage_minutes = summary.get("stage_minutes")
+            if isinstance(stage_minutes, Mapping):
+                for stage, value in sorted(stage_minutes.items()):
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        facts.append(
+                            ReportSemanticFact.create(
+                                fact_kind="direct_metric",
+                                metric_id=f"sleep_stage.{stage}_minutes",
+                                value=value,
+                                unit="minutes",
+                                window="authoritative_sleep_window",
+                                quality_qualifier=quality,
+                                source_refs=default_refs,
+                                authority="canonical_sleep_stage_intervals",
+                            )
+                        )
+            vital_centers = summary.get("vital_centers")
+            if isinstance(vital_centers, Mapping):
+                vital_units = {
+                    "heart_rate": "bpm",
+                    "respiratory_rate": "breaths_per_minute",
+                }
+                for metric_id, unit in vital_units.items():
+                    value = vital_centers.get(metric_id)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        facts.append(
+                            ReportSemanticFact.create(
+                                fact_kind="direct_metric",
+                                metric_id=f"{metric_id}_mean",
+                                value=value,
+                                unit=unit,
+                                window="authoritative_sleep_window",
+                                quality_qualifier=quality,
+                                source_refs=default_refs,
+                                authority="canonical_device_observations",
+                            )
+                        )
+
+    for claim in packet.claims:
+        claim_refs = tuple(claim.evidence_refs) or default_refs
+        facts.append(
+            ReportSemanticFact.create(
+                fact_kind="accepted_claim",
+                metric_id=claim.metric_id or f"claim.{claim.semantic.value}",
+                comparison=claim.semantic.value,
+                quality_qualifier=quality,
+                source_refs=claim_refs,
+                authority=claim.source_kind.value,
+                caveat=(
+                    "inference_has_alternatives"
+                    if claim.alternative_explanations
+                    else None
+                ),
+            )
+        )
+
+    coverage = packet.coverage_ratio
+    facts.append(
+        ReportSemanticFact.create(
+            fact_kind="quality",
+            metric_id="data_coverage_ratio",
+            value=coverage,
+            unit="ratio" if coverage is not None else None,
+            quality_qualifier=quality,
+            source_refs=default_refs,
+            authority="accepted_evidence_packet",
+            caveat=source.partial_caveat,
+        )
+    )
+    if care is not None:
+        strategy = ProductCareStrategy.model_validate(care.payload)
+        if strategy.primary_action is not None:
+            facts.append(
+                ReportSemanticFact.create(
+                    fact_kind="care_candidate",
+                    metric_id="care_candidate.pending_confirmation",
+                    value=True,
+                    quality_qualifier=quality,
+                    source_refs=tuple(
+                        strategy.primary_action.rationale_evidence_refs
+                    )
+                    or default_refs,
+                    authority="accepted_care_strategy",
+                    caveat="candidate_not_executed",
+                )
+            )
+    return tuple(facts)
 
 
 def _shared_analysis_hash_material(
@@ -689,7 +943,38 @@ def _shared_analysis_hash_material(
     safety: AcceptedWorkProduct | None,
     doctor_projection_allowed: bool,
     doctor_failure_codes: tuple[str, ...],
+    semantic_facts: tuple[ReportSemanticFact, ...] = (),
+    semantic_hash_version: Literal[
+        "legacy_summary.v1", "structured_facts.v1"
+    ] = "legacy_summary.v1",
 ) -> dict[str, Any]:
+    if semantic_hash_version == "structured_facts.v1":
+        if source.reporting_context is None:
+            raise ValueError("structured shared hash requires reporting context")
+        source_material = source.model_dump(
+            mode="json",
+            exclude={"reporting_context"},
+        )
+        return {
+            "schema_version": SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION,
+            "semantic_hash_version": semantic_hash_version,
+            "source": source_material,
+            "reporting_time_authority": (
+                source.reporting_context.semantic_time_material()
+            ),
+            "runner_version": runner_version,
+            "registry_hash": registry_hash,
+            "runtime_request_sha256": runtime_request_sha256,
+            "fact_snapshot_hash": fact_snapshot_hash,
+            "semantic_facts": [
+                item.model_dump(mode="json") for item in semantic_facts
+            ],
+            "evidence_target_hash": evidence.target_hash,
+            "care_target_hash": None if care is None else care.target_hash,
+            "safety_target_hash": None if safety is None else safety.target_hash,
+            "doctor_projection_allowed": doctor_projection_allowed,
+            "doctor_failure_codes": list(doctor_failure_codes),
+        }
     return {
         "schema_version": SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION,
         "source": source.model_dump(mode="json"),
@@ -720,6 +1005,10 @@ class SharedNightAnalysis(StrictContract):
     fact_snapshot_hash: str = Field(..., pattern=r"^[0-9a-f]{64}$")
     shared_analysis_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
     summary_lines: tuple[str, ...] = Field(min_length=1)
+    semantic_hash_version: Literal[
+        "legacy_summary.v1", "structured_facts.v1"
+    ] = "legacy_summary.v1"
+    semantic_facts: tuple[ReportSemanticFact, ...] = ()
     evidence: AcceptedWorkProduct
     care: AcceptedWorkProduct | None = None
     safety: AcceptedWorkProduct | None = None
@@ -753,6 +1042,7 @@ class SharedNightAnalysis(StrictContract):
         registry_hash: str,
         runtime_request: ProductEpisodeRunRequest,
         summary_lines: tuple[str, ...],
+        semantic_facts: tuple[ReportSemanticFact, ...] | None = None,
         evidence: AcceptedWorkProduct,
         care: AcceptedWorkProduct | None,
         safety: AcceptedWorkProduct | None,
@@ -763,6 +1053,16 @@ class SharedNightAnalysis(StrictContract):
         tool_receipts: tuple[ToolReceipt, ...] = (),
     ) -> "SharedNightAnalysis":
         request_sha256 = product_episode_request_hash(runtime_request)
+        resolved_facts = (
+            build_report_semantic_facts(
+                runtime_request=runtime_request,
+                evidence=evidence,
+                care=care,
+                source=source,
+            )
+            if semantic_facts is None
+            else semantic_facts
+        )
         material = _shared_analysis_hash_material(
             source=source,
             runner_version=PRODUCT_EPISODE_RUNNER_VERSION,
@@ -775,6 +1075,8 @@ class SharedNightAnalysis(StrictContract):
             safety=safety,
             doctor_projection_allowed=doctor_projection_allowed,
             doctor_failure_codes=doctor_failure_codes,
+            semantic_facts=resolved_facts,
+            semantic_hash_version="structured_facts.v1",
         )
         return cls(
             source=source,
@@ -784,6 +1086,8 @@ class SharedNightAnalysis(StrictContract):
             fact_snapshot_hash=runtime_request.fact_snapshot.fact_snapshot_hash,
             shared_analysis_sha256=stable_hash(material),
             summary_lines=summary_lines,
+            semantic_hash_version="structured_facts.v1",
+            semantic_facts=resolved_facts,
             evidence=evidence,
             care=care,
             safety=safety,
@@ -835,6 +1139,11 @@ class SharedNightAnalysis(StrictContract):
             expected_lines = ("当前没有足够证据形成健康趋势结论。",)
         if self.summary_lines != expected_lines:
             raise ValueError("shared summary must be derived from accepted facts")
+        if self.semantic_hash_version == "structured_facts.v1":
+            if self.source.reporting_context is None or not self.semantic_facts:
+                raise ValueError(
+                    "structured shared analysis requires context and semantic facts"
+                )
         expected_hash = stable_hash(
             _shared_analysis_hash_material(
                 source=self.source,
@@ -848,6 +1157,8 @@ class SharedNightAnalysis(StrictContract):
                 safety=self.safety,
                 doctor_projection_allowed=self.doctor_projection_allowed,
                 doctor_failure_codes=self.doctor_failure_codes,
+                semantic_facts=self.semantic_facts,
+                semantic_hash_version=self.semantic_hash_version,
             )
         )
         if self.shared_analysis_sha256 != expected_hash:
@@ -880,6 +1191,7 @@ def _projection_hash_material(
     safety_notices: tuple[str, ...],
     failure_codes: tuple[str, ...],
     presentation_authority_sha256: str | None = None,
+    reporting_context: ReportingContextV1 | None = None,
 ) -> dict[str, Any]:
     material = {
         "schema_version": ROLE_PROJECTION_SCHEMA_VERSION,
@@ -902,6 +1214,8 @@ def _projection_hash_material(
         material["presentation_authority_sha256"] = (
             presentation_authority_sha256
         )
+    if reporting_context is not None:
+        material["reporting_context"] = reporting_context.model_dump(mode="json")
     return material
 
 
@@ -1474,6 +1788,7 @@ class RoleProjection(StrictContract):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    reporting_context: ReportingContextV1 | None = None
 
     @model_serializer(mode="wrap")
     def serialize_projection(
@@ -1494,6 +1809,9 @@ class RoleProjection(StrictContract):
             raise ValueError(
                 "presentation authority is limited to the ready Elder projection"
             )
+        if self.reporting_context is not None:
+            if self.reporting_context.audience != self.role.value:
+                raise ValueError("projection reporting audience must match role")
         if self.state is RoleProjectionState.READY:
             if self.text is None or self.failure_codes:
                 raise ValueError("ready projection requires text without failures")
@@ -1520,6 +1838,7 @@ class RoleProjection(StrictContract):
                 presentation_authority_sha256=(
                     self.presentation_authority_sha256
                 ),
+                reporting_context=self.reporting_context,
             )
         )
         if self.projection_sha256 != expected:
@@ -1537,7 +1856,8 @@ _SHARED_REPORT_SAFETY_NOTICES = (
 
 def build_role_projection_runtime_manifest(
     *,
-    projection_policy_version: str = "shared_role_projection.v2",
+    projection_policy_version: str = "shared_role_projection.v3",
+    renderer_version: str = ZH_CN_ROLE_RENDERER_VERSION,
 ) -> dict[str, Any]:
     """Canonical deterministic projection pins, independent of analysis."""
 
@@ -1545,7 +1865,9 @@ def build_role_projection_runtime_manifest(
         "schema_version": "role_projection_runtime_manifest.v1",
         "projection_schema": ROLE_PROJECTION_SCHEMA_VERSION,
         "projection_policy_version": projection_policy_version,
-        "projector_version": "build_shared_role_projections.v2",
+        "projector_version": "build_shared_role_projections.v3",
+        "locale": "zh-CN",
+        "renderer_version": renderer_version,
         "elder_presentation_policy_version": (
             "bounded_semantic_elder_atoms.v1"
         ),
@@ -1576,10 +1898,158 @@ def role_projection_identity_sha256(
     )
 
 
+_ZH_CN_METRIC_LABELS = {
+    "sleep_window_minutes": "记录时段",
+    "bed_exit_count": "离床次数",
+    "sleep_stage.light_minutes": "浅睡",
+    "sleep_stage.deep_minutes": "深睡",
+    "sleep_stage.rem_minutes": "REM 睡眠",
+    "sleep_stage.awake_minutes": "清醒",
+    "heart_rate_mean": "平均心率",
+    "respiratory_rate_mean": "平均呼吸率",
+    "data_coverage_ratio": "数据覆盖率",
+}
+_ZH_CN_UNIT_LABELS = {
+    "minutes": "分钟",
+    "count": "次",
+    "bpm": "bpm",
+    "breaths_per_minute": "次/分钟",
+    "ratio": "",
+}
+_ZH_CN_QUALITY_LABELS = {
+    "good": "完整",
+    "partial": "部分完整",
+}
+
+
+def _report_value_text(fact: ReportSemanticFact) -> str:
+    value = fact.value
+    if fact.unit == "ratio" and isinstance(value, (int, float)):
+        return f"{round(float(value) * 100)}%"
+    if isinstance(value, float):
+        rendered = str(int(value)) if value.is_integer() else f"{value:.1f}"
+    else:
+        rendered = str(value)
+    return rendered + _ZH_CN_UNIT_LABELS.get(fact.unit or "", fact.unit or "")
+
+
+def _localized_report_span(context: ReportingContextV1) -> str:
+    zone = ZoneInfo(context.timezone_name)
+    start = context.authoritative_start_at_utc.astimezone(zone)
+    end = context.authoritative_end_at_utc.astimezone(zone)
+    if start.date() == end.date():
+        return f"{start:%m月%d日 %H:%M}至{end:%H:%M}"
+    return f"{start:%m月%d日 %H:%M}至{end:%m月%d日 %H:%M}"
+
+
+def _render_zh_cn_role(
+    *,
+    role: ReportRole,
+    shared: SharedNightAnalysis,
+    caveats: tuple[str, ...],
+) -> str:
+    """Render only structured authority; accepted free-form prose is ignored."""
+
+    context = shared.source.reporting_context
+    local_date = shared.source.wake_date
+    span = None if context is None else _localized_report_span(context)
+    direct = tuple(
+        item for item in shared.semantic_facts
+        if item.fact_kind == "direct_metric" and item.value is not None
+    )
+    by_metric = {item.metric_id: item for item in direct}
+    care_pending = any(
+        item.fact_kind == "care_candidate" and item.value is True
+        for item in shared.semantic_facts
+    )
+    quality_text = "数据完整" if shared.source.quality_state == "good" else "数据部分完整"
+    risk_text = {
+        "no_reviewed_signal": "未见经确认的风险信号",
+        "unknown": "风险状态暂不确定",
+        "no_active_alert": "未见当前告警",
+    }.get(shared.source.risk_state, "风险状态需结合证据审阅")
+
+    if role is ReportRole.ELDER:
+        lines = [f"您好。我们已为您整理{local_date:%m月%d日}的睡眠观察。"]
+        if span is not None:
+            lines.append(f"设备记录时段为{span}。")
+        duration = by_metric.get("sleep_window_minutes")
+        if duration is not None:
+            lines.append(f"本次记录时段约{_report_value_text(duration)}。")
+        exits = by_metric.get("bed_exit_count")
+        if exits is not None:
+            lines.append(f"设备记录到离床{_report_value_text(exits)}。")
+        if shared.source.partial_caveat:
+            lines.append(shared.source.partial_caveat)
+        lines.append("以上内容仅用于睡眠观察，不构成诊断或医疗建议。")
+        return "\n".join(lines)
+
+    if role is ReportRole.FAMILY:
+        lines = [f"{local_date:%Y年%m月%d日}家属睡眠照护摘要"]
+        if span is not None:
+            lines.append(f"睡眠记录时段：{span}。")
+        lines.append(f"整体状态：{quality_text}；{risk_text}。")
+        for metric_id in (
+            "sleep_window_minutes",
+            "bed_exit_count",
+            "heart_rate_mean",
+            "respiratory_rate_mean",
+        ):
+            fact = by_metric.get(metric_id)
+            if fact is not None:
+                lines.append(
+                    f"{_ZH_CN_METRIC_LABELS[metric_id]}：{_report_value_text(fact)}。"
+                )
+        lines.append(
+            "照护建议：有一项建议待确认。"
+            if care_pending
+            else "照护建议：继续按现有方式观察后续几晚。"
+        )
+        if shared.source.partial_caveat:
+            lines.append(f"不确定性：{shared.source.partial_caveat}")
+        lines.append("本摘要仅用于睡眠健康观察，不构成诊断或医疗建议。")
+        return "\n".join(lines)
+
+    lines = [f"{local_date:%Y年%m月%d日}睡眠观察证据摘要"]
+    if span is not None and context is not None:
+        lines.extend(
+            (
+                f"权威记录时段：{span}。",
+                f"时区：{context.timezone_name}；本地睡眠日期：{local_date.isoformat()}。",
+            )
+        )
+    lines.append(f"数据质量：{quality_text}；{risk_text}。")
+    for fact in direct:
+        label = _ZH_CN_METRIC_LABELS.get(fact.metric_id)
+        if label is None:
+            continue
+        lines.append(
+            f"{label}：{_report_value_text(fact)}；"
+            "质量限定："
+            f"{_ZH_CN_QUALITY_LABELS.get(fact.quality_qualifier or '', '未标注')}。"
+        )
+    authority_count = len(
+        {
+            ref
+            for fact in shared.semantic_facts
+            for ref in fact.source_refs
+        }
+    )
+    lines.append(f"证据来源：{authority_count}项受治理来源引用。")
+    if care_pending:
+        lines.append("照护候选：存在待确认候选，尚未执行。")
+    if shared.source.partial_caveat:
+        lines.append(f"数据限制：{shared.source.partial_caveat}")
+    lines.extend(f"观察边界：{item}" for item in caveats)
+    lines.append("不得据此形成未经支持的诊断结论。")
+    return "\n".join(lines)
+
+
 def build_shared_role_projections(
     shared: SharedNightAnalysis,
     *,
     elder_message_atoms: tuple[ElderMessageAtom, ...] = (),
+    renderer_version: str = ZH_CN_ROLE_RENDERER_VERSION,
 ) -> tuple[RoleProjection, RoleProjection, RoleProjection]:
     """Build all three deterministic views without invoking a model."""
 
@@ -1639,29 +2109,23 @@ def build_shared_role_projections(
             if role is ReportRole.ELDER and elder_message_atoms:
                 text = deterministic_elder_fallback(elder_message_atoms)
             else:
-                heading = {
-                    ReportRole.ELDER: (
-                        "我们根据昨夜设备记录，为您整理了这些观察："
-                    ),
-                    ReportRole.FAMILY: "以下内容用于家属连续观察与照护协同：",
-                    ReportRole.DOCTOR: "以下为已验收睡眠观察摘要：",
-                }[role]
-                lines = [heading, *[f"- {line}" for line in shared.summary_lines]]
-                if shared.source.partial_caveat:
-                    lines.extend(("数据说明：", f"- {shared.source.partial_caveat}"))
-                lines.extend(
-                    (
-                        "观察边界：",
-                        *[f"- {item}" for item in role_caveats],
-                        "安全说明：",
-                        *[f"- {item}" for item in _SHARED_REPORT_SAFETY_NOTICES],
-                    )
+                text = _render_zh_cn_role(
+                    role=role,
+                    shared=shared,
+                    caveats=role_caveats,
                 )
-                text = "\n".join(lines)
         presentation_authority_sha256 = (
             elder_presentation_authority_sha256(elder_message_atoms)
             if role is ReportRole.ELDER and elder_message_atoms
             else None
+        )
+        reporting_context = (
+            None
+            if shared.source.reporting_context is None
+            else shared.source.reporting_context.for_audience(
+                role.value,
+                renderer_version=renderer_version,
+            )
         )
         material = _projection_hash_material(
             role=role,
@@ -1681,6 +2145,7 @@ def build_shared_role_projections(
             presentation_authority_sha256=(
                 presentation_authority_sha256
             ),
+            reporting_context=reporting_context,
         )
         projections.append(
             RoleProjection(
@@ -1702,6 +2167,7 @@ def build_shared_role_projections(
                 presentation_authority_sha256=(
                     presentation_authority_sha256
                 ),
+                reporting_context=reporting_context,
             )
         )
     return tuple(projections)  # type: ignore[return-value]
@@ -1850,6 +2316,8 @@ __all__ = [
     "ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION",
     "ELDER_NARRATIVE_SCHEMA_VERSION",
     "REPORT_ROLE_ORDER",
+    "REPORTING_CONTEXT_SCHEMA_VERSION",
+    "REPORT_SEMANTIC_FACT_SCHEMA_VERSION",
     "ROLE_PROJECTION_SCHEMA_VERSION",
     "SHARED_ANALYSIS_SOURCE_SCHEMA_VERSION",
     "SHARED_NIGHT_ANALYSIS_SCHEMA_VERSION",
@@ -1860,6 +2328,8 @@ __all__ = [
     "ElderMessageAtom",
     "ElderNumericBinding",
     "ReportRole",
+    "ReportingContextV1",
+    "ReportSemanticFact",
     "RoleProjection",
     "RoleProjectionState",
     "RoleReportArtifact",
@@ -1871,6 +2341,7 @@ __all__ = [
     "build_elder_message_atoms",
     "build_role_projection_runtime_manifest",
     "build_role_report_templates",
+    "build_report_semantic_facts",
     "build_safe_model_pin",
     "build_shared_analysis_runtime_manifest",
     "build_shared_role_projections",
@@ -1879,4 +2350,5 @@ __all__ = [
     "validate_elder_communication_draft",
     "validate_elder_message_atoms",
     "role_projection_identity_sha256",
+    "ZH_CN_ROLE_RENDERER_VERSION",
 ]

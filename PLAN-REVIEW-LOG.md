@@ -766,3 +766,48 @@ Diff review confirms the default cutover is a two-line typed configuration
 change, the ontology change is narrowly source-scoped, V1 rollback remains
 tested, the obsolete threshold cannot consume V2 analytics, and no later-phase
 or external-effect behavior was introduced. One bounded fix pass was used.
+
+## Act 9 — Build: G3 reporting time and locale semantics
+
+### Round 1 — Codex build
+
+Added a single reporting context to the existing shared-analysis/report
+framework, pinning IANA timezone, zh-CN locale, audience, UTC boundaries, local
+sleep date, and renderer version. Product desired identity and new shared
+analysis now bind the reporting time authority. Fixed deterministic bed-exit
+display conversion to use the exact-revision timezone instead of labeling a
+UTC clock as local.
+
+Introduced content-addressed structured report facts derived from deterministic
+Product metrics and typed accepted-claim semantics. New semantic hashes exclude
+free-form summary prose and localized wording; role projection hashes include
+audience, renderer, and localized context. Replaced Family/Doctor compatibility
+prose projection with deterministic zh-CN role rendering and kept the existing
+bounded Elder atom path. Historical serialized artifacts retain the exact
+legacy hash-validation branch.
+
+### Round 2 — Codex fix pass
+
+The initial focused run exposed two bounded implementation defects: defaulted
+fact fields were absent from the pre-validation hash material, and legacy test
+shims lacked real episode/timezone fields expected by desired identity. Built
+fact IDs from fully defaulted model material and limited the compatibility
+omission to non-production source shims. A final integrity review then changed
+the new localization test to produce its semantic facts through the real
+shared-analysis path rather than mutating hashed fact content after creation.
+
+### Codex verification
+
+- Focused report/shared-analysis suite: 169 passed.
+- Reporting/time/Product characterization selection: 84 passed.
+- Broader Product/report regression: 347 passed.
+- Unit-marked regression: 1,088 passed, 36 deselected.
+- Fresh PostgreSQL 16.14 Product/report integration at schema 014: 19 passed.
+- Architecture: 5 passed with no new debt.
+- OpenAPI check, compileall, and `git diff --check`: PASS.
+
+Diff review confirms one local-night authority, no UTC clock mislabeled as
+local, no arbitrary English claim prose entering zh-CN role projections, and
+semantic identity stability across renderer changes. Existing public API and
+migrations remain unchanged, later report cutover and external-effect phases
+were not started, and the bounded two-fix-round limit was respected.

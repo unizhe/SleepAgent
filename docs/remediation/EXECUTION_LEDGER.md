@@ -1580,3 +1580,104 @@ occurred.
   because a commit cannot contain its own hash.
 
 `G3_SAFE_TO_BEGIN = YES`
+
+## G3 — Reporting time and locale semantics
+
+`G3_STATUS = PASS`
+
+### Entry and bounded scope
+
+- Entry checkpoint: `5119826` (`remediation(g2c): resolve observation v2
+  cutover authority`); worktree clean at phase entry.
+- Scope: one UTC-authoritative reporting context, deterministic local-date/time
+  conversion, a minimal structured reporting-fact layer, deterministic zh-CN
+  role rendering, and separate semantic/projection identities. No report-chain
+  cutover, architecture extraction, scheduling, delivery, or external action
+  was included.
+- No migration was added or modified. Existing JSON contracts accept the new
+  fields, while historical serialized shared analyses and projections retain
+  their explicit legacy hash path.
+
+### Time and local-night authority
+
+- `ReportingContextV1` pins the IANA timezone, `zh-CN` locale, audience,
+  authoritative UTC start/end boundaries, local sleep date, and renderer
+  version. New shared analysis requires this context; each role projection
+  receives the same time authority with its own audience and renderer pin.
+- UTC boundaries must be timezone-aware and normalized to UTC. The local sleep
+  date is owned once by the authoritative end boundary converted with
+  `zoneinfo.ZoneInfo`; role renderers do not derive their own report date.
+- Product desired-work identity now includes timezone, UTC boundaries, and
+  local sleep date. The source timezone is the exact-revision Product fact,
+  preserving historical-night interpretation rather than consulting a future
+  mutable binding.
+- `ProductRevisionFacts.deterministic_night_summary` now converts bed-exit
+  timestamps with the revision timezone before labeling `local_time`. The
+  characterized `17:35Z` defect is intentionally retired: Asia/Shanghai emits
+  the next-day local clock, and Los Angeles repeated-hour behavior retains the
+  correct offset and `fold`.
+
+### Structured semantics and deterministic zh-CN projections
+
+- `ReportSemanticFact` is the minimal report-facing structured layer. It binds
+  fact kind, metric/value/unit/window/comparison, quality, sources, authority,
+  and caveat under a content-derived fact ID.
+- Direct Product metrics come only from deterministic night evidence; accepted
+  Agent claims contribute their typed semantic/comparison metadata and source
+  authority, never `EvidenceClaim.statement` as fact authority. Quality and
+  pending-care facts remain explicit.
+- New shared-analysis hashes use `structured_facts.v1`: they bind semantic
+  facts, accepted-product target identities, and time semantics while excluding
+  arbitrary summary prose, locale wording, audience, and renderer version.
+  Historical JSON keeps the exact `legacy_summary.v1` verification branch.
+- Elder, Family, and Doctor projections are deterministic `zh-CN` views of one
+  shared semantic identity. Elder remains respectful and concise; Family shows
+  timing, state, uncertainty, and pending care; Doctor shows metrics, units,
+  quality, provenance, and caveats without diagnostic claims. Arbitrary English
+  claim statements may remain on the internal compatibility surface but are
+  not rendered into product role text.
+- Projection hashes bind audience, localized text, reporting context, and
+  renderer version. Changing the renderer changes all role projection hashes
+  without changing the shared semantic analysis hash.
+
+### Verification evidence
+
+Authoritative Python: 3.11.15 at
+`/tmp/sleepagent-g1_5-py311/bin/python`.
+
+| Verification | Result |
+|---|---|
+| Focused report/shared-analysis suite | 169 passed |
+| Reporting/time/Product characterization selection | 84 passed |
+| Broader Product/report regression | 347 passed |
+| Unit-marked regression | 1,088 passed; 36 deselected |
+| Fresh PostgreSQL 001-014 Product/report integration | 19 passed |
+| Architecture suite | 5 passed; no debt growth |
+| OpenAPI canonical check | PASS; no public snapshot changed |
+| Compileall and `git diff --check` | PASS |
+
+The PostgreSQL proof used a fresh database on the existing isolated PostgreSQL
+16.14 cluster and reapplied migrations 001-014 before the integration run.
+Strict isolated mypy scanning found no diagnostic in the newly added reporting
+context/fact definitions after the fix pass; the touched large modules retain
+their previously recorded unrelated strict-typing debt. No production
+Perceptor call, external model, scheduler, email/SMS, or other external effect
+occurred.
+
+### Compatibility, limitations, and checkpoint
+
+- Public API/OpenAPI contracts are unchanged. New context and semantic facts
+  live inside existing governed JSON artifacts; old artifacts remain readable
+  and hash-verifiable through the explicit legacy branch.
+- `summary_lines` remains serialized for historical/debug compatibility but is
+  no longer a localized fact source. Its final retirement belongs to G4 after
+  shadow equivalence and rollback evidence.
+- DeviceBinding temporal persistence is not redesigned here. G3 preserves the
+  correct contract by consuming the timezone already pinned to exact-revision
+  Product facts; Phase F owns formal binding lifecycle/version persistence.
+- Checkpoint subject:
+  `remediation(g3): normalize reporting time and locale`.
+  Its hash is reported by the next execution record/final handoff because a
+  commit cannot contain its own hash.
+
+`G4_SAFE_TO_BEGIN = YES`

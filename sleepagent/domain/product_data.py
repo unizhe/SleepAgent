@@ -644,6 +644,7 @@ class ProductRevisionFacts(SleepDomainContract):
     def deterministic_night_summary(self) -> dict[str, Any]:
         """Reduce canonical samples to bounded facts before Agent reasoning."""
 
+        zone = ZoneInfo(self.timezone_name)
         samples: dict[str, list[float]] = {
             "heart_rate": [],
             "respiratory_rate": [],
@@ -713,7 +714,7 @@ class ProductRevisionFacts(SleepDomainContract):
                 exits.append(
                     {
                         "left_bed_at": pending_exit.isoformat(),
-                        "local_time": pending_exit.strftime("%H:%M"),
+                        "local_time": pending_exit.astimezone(zone).strftime("%H:%M"),
                         "returned_at": event_at.isoformat(),
                         "duration_minutes": round(
                             (event_at - pending_exit).total_seconds() / 60,
@@ -726,7 +727,7 @@ class ProductRevisionFacts(SleepDomainContract):
             exits.append(
                 {
                     "left_bed_at": pending_exit.isoformat(),
-                    "local_time": pending_exit.strftime("%H:%M"),
+                    "local_time": pending_exit.astimezone(zone).strftime("%H:%M"),
                     "returned_at": None,
                     "duration_minutes": None,
                 }

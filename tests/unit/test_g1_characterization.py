@@ -280,7 +280,7 @@ def test_pull_accepts_vendor_count_that_equivalent_replay_rejects() -> None:
         )
 
 
-def test_timezone_legacy_characterization_exposes_utc_as_local_clock_gap() -> None:
+def test_timezone_characterization_now_projects_utc_to_local_clock() -> None:
     fixture = _fixture()["timezone_legacy_characterization"]
     assert isinstance(fixture, dict)
     bed_exit = datetime.fromisoformat(str(fixture["utc_bed_exit"]))
@@ -311,10 +311,10 @@ def test_timezone_legacy_characterization_exposes_utc_as_local_clock_gap() -> No
     assert summary["sleep_window_minutes"] == 360.0
     assert summary["sleep_window_start"] == start.isoformat()
     assert summary["bed_exit_events"][0]["local_time"] == fixture[
-        "current_mislabeled_local_clock"
+        "correct_local_clock"
     ]
     assert summary["bed_exit_events"][0]["local_time"] != fixture[
-        "correct_local_clock"
+        "current_mislabeled_local_clock"
     ]
 
 
@@ -335,7 +335,7 @@ class _EnglishClaimModel(DeterministicReplayStructuredAgentModel):
         )
 
 
-def test_english_evidence_claim_leaks_into_chinese_family_projection() -> None:
+def test_english_evidence_claim_is_retained_but_not_rendered_to_family() -> None:
     fixture = _fixture()["localization_legacy_characterization"]
     assert isinstance(fixture, dict)
     runner = build_deterministic_product_runtime_bundle(
@@ -349,6 +349,6 @@ def test_english_evidence_claim_leaks_into_chinese_family_projection() -> None:
     )
 
     assert family.text is not None
-    assert fixture["chinese_family_heading"] in family.text
+    assert "家属睡眠照护摘要" in family.text
     assert fixture["english_claim"] in shared.summary_lines
-    assert fixture["english_claim"] in family.text
+    assert fixture["english_claim"] not in family.text
