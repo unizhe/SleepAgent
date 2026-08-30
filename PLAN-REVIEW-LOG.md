@@ -581,5 +581,8 @@ server/client exists. This yields separate M1/M2 readiness from M3 readiness.
 The exact 40-path checkpoint candidate is classified in
 `docs/remediation/G1_5_CHECKPOINT_COMPOSITION.md`. Ignored environments,
 caches, secrets, key material, attachments, and unrelated files are excluded.
-The checkpoint commit and its documentation-only hash attestation are pending
-the final staged-diff audit.
+The final staged audit proved a 40/40 manifest match with no unstaged,
+untracked, deleted, or whitespace-error path. The local checkpoint is
+`0aa1674653da93e135572b06f858cd0d18f41926`, tree
+`3639228c82af4509c885ec23dc15459630b74eae`; this documentation-only follow-up
+records the hash that the checkpoint cannot self-contain.

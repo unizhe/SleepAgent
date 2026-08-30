@@ -905,12 +905,16 @@ The 18-path frozen patch remains byte-identical at SHA-256
 Ignored environments, caches, secrets, key material, generated junk, local
 attachments, and all unlisted paths are excluded.
 
-`CHECKPOINT_RESULT = PENDING_COMMIT`
+`CHECKPOINT_RESULT = PASS`
 
-`CHECKPOINT_COMMIT_SHA = PENDING_POST_COMMIT_ATTESTATION`
+`CHECKPOINT_COMMIT_SHA = 0aa1674653da93e135572b06f858cd0d18f41926`
 
-The commit hash must be populated by a documentation-only follow-up commit;
-including a commit's own hash in its tree is impossible by construction.
+`CHECKPOINT_TREE_SHA = 3639228c82af4509c885ec23dc15459630b74eae`
+
+The checkpoint has parent `51947e6da69d9d8e0e0eeb36669e227865fc26ff`
+and subject `checkpoint(remediation): freeze pre-g2 baseline`. This hash is
+recorded by the required documentation-only follow-up commit because including
+a commit's own hash in its tree is impossible by construction.
 
 ### OpenAPI reconciliation
 

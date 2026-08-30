@@ -99,3 +99,8 @@ not permitted.
 The checkpoint commit hash is necessarily recorded by a subsequent
 documentation-only attestation commit because a commit cannot contain its own
 hash.
+
+Checkpoint commit:
+`0aa1674653da93e135572b06f858cd0d18f41926`.
+
+Checkpoint tree: `3639228c82af4509c885ec23dc15459630b74eae`.
