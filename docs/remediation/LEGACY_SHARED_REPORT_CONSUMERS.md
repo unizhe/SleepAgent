@@ -47,3 +47,41 @@ Classification vocabulary:
 - Operation/result IDs remain cross-cutting compatibility contracts. Absence of
   a direct public field does not prove consumer-zero.
 - No consumer in this inventory is removed in G1.
+
+## G4 rescan at entry checkpoint `857249c`
+
+This section supersedes the G1 classifications for forward writes and current
+reads. The original table remains above as frozen migration evidence. The
+executable inventory is `python -m sleepagent.report_consumer_audit`; its unit
+test requires AST call-site evidence, worker routes, Product API joins,
+Product/Demo/reference-client flows, and historical SQL references rather than
+accepting a grep-only zero claim.
+
+| Consumer / exact current call site | G4 classification | Evidence and disposition |
+|---|---|---|
+| Product report command/router — `workers/product.py:1069,1155,3338` | `SHARED_READY` | Every new `product.report.run.v1` converges on `product.shared_analysis.v1`; one shared commit owns externally visible semantics. |
+| Product report API — `api/postgres.py:893,926,1052,3745` | `SHARED_READY` | Current report reads join the linked shared operation and require `role_projection.v1`; generic historical rows remain an internal compatibility read. |
+| Product `/today` and public v1 role views — `workers/product.py` role-projection persistence plus `api/postgres.py` current-revision reads | `SHARED_READY` | New rows serialize the deterministic `RoleProjection` as `view_json`; no per-role Agent result is required. Historical generic role-view JSON remains readable. |
+| `sleepagent-report`, Demo CLI/API, simulation presentation, and reference client — paths recorded by `report_consumer_audit.v1` | `SHARED_READY` | They consume Product/public projection DTOs produced from the current shared-backed role-view row. They do not create or select a legacy analysis authority. |
+| Shared worker execution — `workers/product.py:1514` | `SHARED_READY` | One role-neutral Agent analysis produces exactly three deterministic projections. Optional Elder narrative is presentation-only and cannot change facts. |
+| Shadow comparator — `workers/product.py:1808,7193` | `SHARED_READY` | `report_pipeline_mode=shadow` executes the dormant legacy preparation only for structured comparison. It persists category hashes/mismatches, declares shared authority, and permits no external effects. |
+| Three-Agent legacy preparation — `workers/product.py:1372` and the guarded shadow call at `:1804` | `LEGACY_ONLY` | No new production operation creator targets this path. It remains temporarily executable for explicit shadow evidence and historical direct-operation characterization. |
+| Automatic compatibility operation creator — `domain/postgres_slice.py` `product_agent_compatibility.v1` insert | `COMPAT_ONLY` | Still writes a non-claimable bridge operation in `shared_compat`; this is the principal G5 write-path retirement target. |
+| Compatibility completion/failure — `workers/product.py:3138,3330,3651` | `COMPAT_ONLY` | Copies the authoritative shared result identity into the old operation/result envelope. It does not run legacy role Agents or create a second analysis. |
+| Applied SQL role-view/today/demo/technical-trace functions | `COMPAT_ONLY` | Historical reads must remain. New writes behind these functions are shared projections; applied migrations are immutable. |
+| Unit/integration legacy fixtures | `COMPAT_ONLY` | Kept as rollback, historical-read, and shadow-characterization evidence; they are not runtime consumers. |
+
+### G4 consumer-zero status
+
+- New legacy per-role operation creators: zero, confirmed by the executable AST
+  and operation-literal inventory plus the report/fast-path PostgreSQL tests.
+- Active new report reads requiring a legacy per-role Agent result: zero. The
+  Product API resolves the shared operation and deterministic projection for
+  new report requests.
+- Retained legacy `prepare` implementations/call sites: nonzero, intentionally
+  limited to shadow comparison and historical direct-operation handling.
+- Retained compatibility bridge writes: nonzero in `shared_compat`; therefore
+  G5 must disable them under a proved `shared_only` mode before claiming full
+  legacy write-path consumer zero.
+- Retained historical compatibility reads: nonzero by design; they do not
+  authorize new CareAction, Habit/Memory, delivery, or external effects.

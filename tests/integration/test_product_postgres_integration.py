@@ -45,6 +45,7 @@ from sleepagent.config import (
     DeploymentMode,
     ModelMode,
     ProcessRole,
+    ReportPipelineMode,
     SleepBackendSettings,
 )
 from sleepagent.persistence.uow import (
@@ -1219,6 +1220,7 @@ def _prepare_shared_acceptance_case(
     admin_dsn: str,
     worker_dsn: str,
     worker_principal: str,
+    report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT,
 ) -> _PreparedSharedCase:
     seed = _seed_product_scope(
         psycopg,
@@ -1236,7 +1238,11 @@ def _prepare_shared_acceptance_case(
         worker_principal=worker_principal,
         namespace_id=seed.namespace_id,
     )
-    processor = ProductAgentProcessor(factory, runtime_bundle=bundle)
+    processor = ProductAgentProcessor(
+        factory,
+        runtime_bundle=bundle,
+        report_pipeline_mode=report_pipeline_mode,
+    )
     report_claim = _claim_product_work(
         store,
         worker_instance=f"l2-report-{uuid4().hex}",
@@ -1275,6 +1281,77 @@ def _prepare_shared_acceptance_case(
         lease=lease,
         source=source,
         artifact=artifact,
+    )
+
+
+def test_shadow_mode_persists_structured_parity_without_legacy_publication() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    case = _prepare_shared_acceptance_case(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        report_pipeline_mode=ReportPipelineMode.SHADOW,
+    )
+
+    comparison = case.artifact.shadow_comparison
+    assert comparison is not None
+    assert comparison.authoritative_path == "shared"
+    assert comparison.external_side_effects_permitted is False
+    assert comparison.mismatch_categories == ()
+    assert set(comparison.category_material_sha256) == {
+        "fact_identities",
+        "metric_values_units",
+        "quality_status",
+        "risk_classification",
+        "care_candidate_semantics",
+        "role_visible_fact_sets",
+        "source_references",
+    }
+    assert (
+        comparison.category_material_sha256["metric_values_units"]["legacy"]
+        == comparison.category_material_sha256["metric_values_units"]["shared"]
+    )
+
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT attempt_json #>> '{shadow_comparison,comparison_sha256}'
+                FROM public.backend_product_attempts
+                WHERE product_attempt_id = %s
+                """,
+                (case.artifact.product_attempt_id,),
+            )
+            assert cursor.fetchone() == (comparison.comparison_sha256,)
+            cursor.execute(
+                """
+                SELECT count(*)
+                FROM public.sleep_domain_analysis_revisions
+                WHERE namespace_id = %s
+                """,
+                (case.seed.namespace_id,),
+            )
+            assert cursor.fetchone() == (0,)
+            cursor.execute(
+                """
+                SELECT count(*)
+                FROM public.sleep_domain_analysis_role_views
+                WHERE namespace_id = %s
+                """,
+                (case.seed.namespace_id,),
+            )
+            assert cursor.fetchone() == (0,)
+    _cancel_pending_product_work(
+        psycopg,
+        admin_dsn=admin_dsn,
+        namespace_id=case.seed.namespace_id,
     )
 
 

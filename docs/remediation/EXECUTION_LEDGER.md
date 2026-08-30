@@ -1681,3 +1681,95 @@ occurred.
   commit cannot contain its own hash.
 
 `G4_SAFE_TO_BEGIN = YES`
+
+## G4 — Shared report shadow migration
+
+`G4_STATUS = PASS`
+
+### Entry and authority
+
+- Entry checkpoint: `857249c` (`remediation(g3): normalize reporting time and
+  locale`); worktree clean at phase entry.
+- Current new-report routing was re-read rather than inferred from the G1
+  inventory. The default `shared_compat` path already creates one
+  `product.shared_analysis.v1`, commits one shared analysis, and publishes
+  exactly three deterministic role projections. The dormant three-Agent
+  `prepare` path has no new per-role operation creator.
+- Shared analysis is the sole externally visible authority in both
+  `shared_compat` and the newly active `shadow` mode. Shadow legacy output is
+  never committed as an AnalysisRevision, role view, compatibility result,
+  Induction input, CareAction, Habit/Memory mutation, delivery, or outbox
+  authority.
+
+### Structured shadow parity
+
+- `report_pipeline_mode=shadow` now runs the retained legacy preparation only
+  inside the already governed model invocation and compares it with the shared
+  artifact before persistence. Other modes do not pay the extra execution
+  cost.
+- `ReportShadowComparison` records the shared authority, an invariant
+  `external_side_effects_permitted=false`, the legacy attempt hash, shared
+  analysis hash, per-category material hashes, explicit mismatch categories,
+  and a content-derived comparison identity.
+- The comparison is semantic, never textual. It covers accepted fact
+  identities, metric values/units/windows, quality status, risk classification,
+  CareCandidate semantics, role-visible fact sets, and evidence source
+  references. Generated claim IDs are resolved to semantic signatures before
+  role-visible comparison, so deterministic wording and ID differences do not
+  create false blockers.
+- A clean deterministic PostgreSQL sample produced `mismatch_categories=[]`
+  across all seven categories. The prepared audit row was durable while the
+  legacy shadow created zero analysis revisions and zero role-view rows; only
+  the later shared commit may publish those tables.
+
+### Consumer migration and executable inventory
+
+- `docs/remediation/LEGACY_SHARED_REPORT_CONSUMERS.md` now contains the G4
+  rescan with exact current symbols/call sites. Product report/today, public
+  role-view, report CLI, Demo API/CLI, simulation presentation, and reference
+  client are classified `SHARED_READY` for new data. Applied SQL and generic
+  historical role-view reads remain `COMPAT_ONLY`.
+- `python -m sleepagent.report_consumer_audit` produces deterministic JSON from
+  AST call sites plus worker, API, CLI/reference-client, and SQL evidence. Its
+  regression test refuses a grep-only zero claim.
+- Machine audit result: zero new legacy per-role operation creators and zero
+  active new-report readers requiring a legacy Agent result. Nonzero retained
+  items are the explicit shadow/historical legacy implementation, the
+  non-claimable compatibility bridge write, and historical compatibility
+  reads.
+
+### Verification evidence
+
+| Verification | Result |
+|---|---|
+| Shadow/config/Product focused unit selection | 81 passed |
+| Executable consumer-audit unit proof | 1 passed |
+| Fresh PostgreSQL 001-014 shadow persistence/no-publication proof | 1 passed |
+| Structured parity categories on deterministic sample | 7/7 equal; zero mismatches |
+| Unit-marked regression with loopback provider profile | 1,089 passed; 37 deselected |
+| Architecture suite | 5 passed; no debt growth |
+| Compile, consumer-audit CLI, and `git diff --check` | PASS |
+
+The first unit regression attempt was sandboxed: 1,081 tests passed and eight
+existing loopback HTTP-provider tests could not create sockets. The identical
+approved loopback-only rerun passed all 1,089 unit-marked tests. The first
+PostgreSQL attempt found stale pending work from the prior phase; the exact
+isolated `sleepagent_replay_test` database was recreated, migrations 001-014
+and canonical test bootstrap were applied, and the fresh shadow proof passed.
+No external delivery or real care effect occurred.
+
+### Compatibility and G5 gate
+
+- No migration or public OpenAPI contract changed. Shadow evidence is internal
+  governed JSON on the prepared/shared result.
+- `shared_compat` remains the default at this G4 checkpoint. It is the rollback
+  mode and still creates/completes the non-claimable compatibility operation.
+- All G5 cutover gates are satisfied for the tested Product reporting path:
+  authoritative reads are shared-ready, role projections bind shared
+  authority, the structured sample has no unresolved parity mismatch, shadow
+  has no external effect, active consumers do not require new legacy work, and
+  rollback exists. G5 may therefore disable new compatibility writes while
+  preserving historical reads and explicit `shared_compat` rollback.
+- Checkpoint subject: `remediation(g4): migrate reports to shared analysis`.
+
+`G5_SAFE_TO_BEGIN = YES`

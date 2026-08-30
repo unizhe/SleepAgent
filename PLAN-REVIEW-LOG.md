@@ -811,3 +811,49 @@ local, no arbitrary English claim prose entering zh-CN role projections, and
 semantic identity stability across renderer changes. Existing public API and
 migrations remain unchanged, later report cutover and external-effect phases
 were not started, and the bounded two-fix-round limit was respected.
+
+## Act 10 — Build: G4 shared report shadow migration
+
+### Round 1 — Codex build
+
+Re-scanned runtime operation creators, worker routing, API joins, CLI/Demo and
+reference-client flows, and applied SQL consumers. Confirmed the current
+forward path already converges on one SharedNightAnalysis and three
+deterministic projections; the remaining automatic legacy-shaped operation is
+a non-claimable compatibility result bridge, not a second Agent analysis.
+
+Activated the existing `shadow` configuration at the Product processor. Shadow
+now prepares the dormant three-Agent path without publishing it and persists a
+content-addressed structured comparison on the authoritative shared artifact.
+The comparator covers seven required semantic categories and explicitly
+forbids external side effects. Added a deterministic executable consumer audit
+that combines AST call sites with worker/API/CLI/client/SQL evidence, and
+updated the frozen consumer document with current classifications.
+
+### Round 2 — Codex fix pass
+
+The first fresh PostgreSQL shadow run exposed that `prepare_shared` deleted its
+lease argument before the audit-only legacy preparation could receive it.
+Retained the lease and reran from a recreated isolated database. The first
+successful comparison then correctly showed one false source-reference
+mismatch because legacy role views cite raw facts while shared role views cite
+their analysis/projection authority. Changed that category to compare the
+evidence facts' actual source references on both paths. The final sample was
+equal in all seven semantic categories.
+
+### Codex verification
+
+- Focused shadow/config/Product unit selection: 81 passed.
+- Consumer audit executable/unit proof: PASS / 1 passed.
+- Fresh PostgreSQL 16.14 schema-014 shadow persistence/no-publication proof:
+  1 passed; seven categories equal and zero mismatches.
+- Unit-marked regression: 1,089 passed, 37 deselected under the required
+  loopback provider-test profile.
+- Architecture: 5 passed with no new debt.
+- Compile and `git diff --check`: PASS.
+
+Diff review confirms shadow cannot become a second publication/effect
+authority, comparison ignores prose, current new-report consumers are
+shared-ready, and the remaining compatibility writes/reads are explicitly
+enumerated rather than hidden behind a zero claim. The two-fix-round limit was
+used and G5 cutover gates are satisfied.

@@ -32,6 +32,7 @@ from sleepagent.config import (
     DataMode as BackendDataMode,
     ModelMode,
     ProcessRole,
+    ReportPipelineMode,
     SleepBackendSettings,
 )
 from sleepagent.persistence.uow import (
@@ -42,8 +43,10 @@ from sleepagent.persistence.uow import (
 from sleepagent.runtime.contracts import (
     AgentId,
     AuthenticatedBinding,
+    CareStrategy,
     EpisodeStatus,
     EpisodeType,
+    EvidencePacket,
     ExecutionMode,
     FactSnapshot,
     SourceScope,
@@ -76,7 +79,10 @@ from sleepagent.runtime.reports import (
     build_shared_role_projections,
     role_projection_identity_sha256,
 )
-from sleepagent.runtime.governance import PRODUCT_SAFETY_POLICY_VERSION
+from sleepagent.runtime.governance import (
+    PRODUCT_SAFETY_POLICY_VERSION,
+    AcceptedWorkProduct,
+)
 from sleepagent.runtime.provider import (
     ProviderTransportAuditObserver,
     provider_transport_audit_scope,
@@ -325,6 +331,92 @@ class ProductProviderUsage(BaseModel):
     failure_count: int = Field(default=0, ge=0)
 
 
+ReportParityCategory = Literal[
+    "fact_identities",
+    "metric_values_units",
+    "quality_status",
+    "risk_classification",
+    "care_candidate_semantics",
+    "role_visible_fact_sets",
+    "source_references",
+]
+
+
+class ReportShadowComparison(BaseModel):
+    """Audit-only structured parity evidence; shared remains authoritative."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["report_shadow_comparison.v1"] = (
+        "report_shadow_comparison.v1"
+    )
+    authoritative_path: Literal["shared"] = "shared"
+    external_side_effects_permitted: Literal[False] = False
+    legacy_attempt_sha256: str = Field(min_length=64, max_length=64)
+    shared_analysis_sha256: str = Field(min_length=64, max_length=64)
+    category_material_sha256: dict[str, dict[Literal["legacy", "shared"], str]]
+    mismatch_categories: tuple[ReportParityCategory, ...] = ()
+    comparison_sha256: str = Field(min_length=64, max_length=64)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        legacy_attempt_sha256: str,
+        shared_analysis_sha256: str,
+        category_material: Mapping[
+            ReportParityCategory,
+            tuple[Any, Any],
+        ],
+    ) -> "ReportShadowComparison":
+        category_hashes: dict[
+            str,
+            dict[Literal["legacy", "shared"], str],
+        ] = {}
+        mismatches: list[ReportParityCategory] = []
+        for category, (legacy_material, shared_material) in category_material.items():
+            legacy_hash = stable_hash(legacy_material)
+            shared_hash = stable_hash(shared_material)
+            category_hashes[category] = {
+                "legacy": legacy_hash,
+                "shared": shared_hash,
+            }
+            if legacy_hash != shared_hash:
+                mismatches.append(category)
+        material = {
+            "schema_version": "report_shadow_comparison.v1",
+            "authoritative_path": "shared",
+            "external_side_effects_permitted": False,
+            "legacy_attempt_sha256": legacy_attempt_sha256,
+            "shared_analysis_sha256": shared_analysis_sha256,
+            "category_material_sha256": category_hashes,
+            "mismatch_categories": mismatches,
+        }
+        return cls(
+            legacy_attempt_sha256=legacy_attempt_sha256,
+            shared_analysis_sha256=shared_analysis_sha256,
+            category_material_sha256=category_hashes,
+            mismatch_categories=tuple(mismatches),
+            comparison_sha256=stable_hash(material),
+        )
+
+    @model_validator(mode="after")
+    def validate_comparison_identity(self) -> "ReportShadowComparison":
+        expected_mismatches = tuple(
+            cast(ReportParityCategory, category)
+            for category, values in self.category_material_sha256.items()
+            if values["legacy"] != values["shared"]
+        )
+        if self.mismatch_categories != expected_mismatches:
+            raise ValueError("shadow mismatch categories are inconsistent")
+        expected = stable_hash(
+            self.model_dump(mode="json", exclude={"comparison_sha256"})
+        )
+        if self.comparison_sha256 != expected:
+            raise ValueError("shadow comparison hash is inconsistent")
+        return self
+
+
 class FailedProductProviderAttempt(BaseModel):
     """Query-invisible audit row for provider work without an artifact."""
 
@@ -492,6 +584,7 @@ class PreparedProductAgentArtifact(BaseModel):
     provider_usage: ProductProviderUsage = Field(
         default_factory=ProductProviderUsage
     )
+    shadow_comparison: ReportShadowComparison | None = None
     prepared_at: datetime
 
     @model_validator(mode="after")
@@ -548,6 +641,7 @@ class PreparedProductAgentArtifact(BaseModel):
                     self.elder_narrative_manifest_sha256,
                     self.elder_narrative_manifest,
                     self.elder_narrative_identity_sha256,
+                    self.shadow_comparison,
                 )
             ):
                 raise ValueError("v2 attempts cannot contain shared analysis fields")
@@ -681,6 +775,7 @@ class PreparedProductAgentArtifact(BaseModel):
                 "elder_narrative_manifest",
                 "elder_narrative_identity_sha256",
                 "provider_usage",
+                "shadow_comparison",
             ):
                 payload.pop(key, None)
         return payload
@@ -782,6 +877,7 @@ class ProductAgentProcessor:
         uow_factory: UnitOfWorkFactory[Any],
         *,
         runtime_bundle: ProductRuntimeBundle,
+        report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT,
         id_generator: Callable[[datetime | None], str] | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         repository_factory: Callable[
@@ -792,6 +888,7 @@ class ProductAgentProcessor:
     ) -> None:
         self.uow_factory = uow_factory
         self.runtime_bundle = runtime_bundle
+        self.report_pipeline_mode = report_pipeline_mode
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
         self.repository_factory = repository_factory or (
@@ -1424,7 +1521,6 @@ class ProductAgentProcessor:
     ) -> PreparedProductAgentArtifact:
         """Prepare one role-neutral analysis and three deterministic views."""
 
-        del lease
         if source.subject_id != scope.subject_id:
             raise ProductAgentInvariantError("shared Product source subject mismatch")
         if source.facts.data_sufficiency not in {
@@ -1672,7 +1768,7 @@ class ProductAgentProcessor:
                 for item in role_runs
             }
         )
-        return PreparedProductAgentArtifact(
+        artifact = PreparedProductAgentArtifact(
             schema_version="product_agent_prepared_attempt.v3",
             product_attempt_id=self.id_generator(prepared_at),
             operation_id=source.operation_id,
@@ -1700,6 +1796,23 @@ class ProductAgentProcessor:
             ),
             prepared_at=prepared_at,
         )
+        if self.report_pipeline_mode is ReportPipelineMode.SHADOW:
+            legacy_artifact = self.prepare(
+                scope=scope,
+                source=source,
+                lease=lease,
+                prepared_at=prepared_at,
+            )
+            artifact = artifact.model_copy(
+                update={
+                    "shadow_comparison": build_report_shadow_comparison(
+                        legacy=legacy_artifact,
+                        shared=artifact,
+                        source=source,
+                    )
+                }
+            )
+        return artifact
 
     def prepare_elder_narrative(
         self,
@@ -4971,6 +5084,15 @@ class PostgresProductAgentRepository:
                     "provider_usage": artifact.provider_usage.model_dump(
                         mode="json"
                     ),
+                    **(
+                        {
+                            "shadow_comparison": (
+                                artifact.shadow_comparison.model_dump(mode="json")
+                            )
+                        }
+                        if artifact.shadow_comparison is not None
+                        else {}
+                    ),
                     "shared_analysis": (
                         None
                         if artifact.shared_analysis is None
@@ -5322,6 +5444,15 @@ class PostgresProductAgentRepository:
                     "analysis_status": analysis.status.value,
                     "induction_operation_id": induction_operation_id,
                     "induction_manifest_id": induction_manifest_id,
+                    **(
+                        {
+                            "shadow_comparison": (
+                                artifact.shadow_comparison.model_dump(mode="json")
+                            )
+                        }
+                        if artifact.shadow_comparison is not None
+                        else {}
+                    ),
                     **(
                         {
                             "elder_narrative_operation_id": (
@@ -6634,6 +6765,7 @@ def build_product_agent_worker_handlers(
         return ProductAgentProcessor(
             uow_factory,
             runtime_bundle=runtime_bundle,
+            report_pipeline_mode=settings.report_pipeline_mode,
         )
 
     return {
@@ -6926,6 +7058,296 @@ def _workload_snapshot(scope: UowScope, handler: str) -> dict[str, Any]:
         "privacy_epoch": scope.privacy_epoch,
         "retrieval_policy_epoch": scope.retrieval_policy_epoch,
     }
+
+
+def _evidence_claim_material(
+    product: AcceptedWorkProduct,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, str]]:
+    packet = EvidencePacket.model_validate(product.payload)
+    material_by_id = {
+        claim.claim_id: {
+            "semantic": claim.semantic.value,
+            "metric_id": claim.metric_id,
+            "source_kind": claim.source_kind.value,
+            "evidence_refs": sorted(claim.evidence_refs),
+            "claim_strength": claim.claim_strength,
+        }
+        for claim in packet.claims
+    }
+    signatures = {
+        claim_id: stable_hash(material)
+        for claim_id, material in material_by_id.items()
+    }
+    return tuple(sorted(material_by_id.values(), key=stable_hash)), signatures
+
+
+def _care_semantic_material(product: AcceptedWorkProduct | None) -> Any:
+    if product is None:
+        return None
+    strategy = CareStrategy.model_validate(product.payload)
+    action = strategy.primary_action
+    return {
+        "disposition": strategy.disposition,
+        "transition_confirmation_required": (
+            strategy.transition_confirmation_required
+        ),
+        "primary_action": (
+            None
+            if action is None
+            else action.model_dump(
+                mode="json",
+                exclude={"candidate_id", "candidate_hash"},
+            )
+        ),
+        "coordination_candidates": sorted(
+            (
+                item.model_dump(
+                    mode="json",
+                    exclude={"candidate_id", "dedupe_key"},
+                )
+                for item in strategy.coordination_candidates
+            ),
+            key=stable_hash,
+        ),
+    }
+
+
+def _accepted_product_for_agent(
+    products: list[AcceptedWorkProduct],
+    agent_id: AgentId,
+) -> AcceptedWorkProduct | None:
+    matches = tuple(item for item in products if item.agent_id is agent_id)
+    if len(matches) > 1:
+        raise ProductAgentInvariantError(
+            f"shadow legacy result has duplicate {agent_id.value} products"
+        )
+    return None if not matches else matches[0]
+
+
+def _shared_metric_material(shared: SharedNightAnalysis) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        sorted(
+            (
+                {
+                    "metric_id": fact.metric_id,
+                    "value": fact.value,
+                    "unit": fact.unit,
+                    "window": fact.window,
+                }
+                for fact in shared.semantic_facts
+                if fact.fact_kind == "direct_metric"
+            ),
+            key=stable_hash,
+        )
+    )
+
+
+def _source_metric_material(source: LoadedProductAgentSource) -> tuple[dict[str, Any], ...]:
+    summary = source.facts.deterministic_night_summary()
+    metrics: list[dict[str, Any]] = []
+    for metric_id, unit in (
+        ("sleep_window_minutes", "minutes"),
+        ("bed_exit_count", "count"),
+    ):
+        value = summary.get(metric_id)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics.append(
+                {
+                    "metric_id": metric_id,
+                    "value": value,
+                    "unit": unit,
+                    "window": "authoritative_sleep_window",
+                }
+            )
+    stages = summary.get("stage_minutes")
+    if isinstance(stages, Mapping):
+        for stage, value in stages.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                metrics.append(
+                    {
+                        "metric_id": f"sleep_stage.{stage}_minutes",
+                        "value": value,
+                        "unit": "minutes",
+                        "window": "authoritative_sleep_window",
+                    }
+                )
+    vital_centers = summary.get("vital_centers")
+    if isinstance(vital_centers, Mapping):
+        for metric_id, unit in (
+            ("heart_rate", "bpm"),
+            ("respiratory_rate", "breaths_per_minute"),
+        ):
+            value = vital_centers.get(metric_id)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                metrics.append(
+                    {
+                        "metric_id": f"{metric_id}_mean",
+                        "value": value,
+                        "unit": unit,
+                        "window": "authoritative_sleep_window",
+                    }
+                )
+    return tuple(sorted(metrics, key=stable_hash))
+
+
+def build_report_shadow_comparison(
+    *,
+    legacy: PreparedProductAgentArtifact,
+    shared: PreparedProductAgentArtifact,
+    source: LoadedProductAgentSource,
+) -> ReportShadowComparison:
+    """Compare structured semantics; never compare localized wording."""
+
+    if (
+        legacy.schema_version != "product_agent_prepared_attempt.v2"
+        or shared.schema_version != "product_agent_prepared_attempt.v3"
+        or shared.shared_analysis is None
+        or shared.shadow_comparison is not None
+        or legacy.night_episode_revision_id != shared.night_episode_revision_id
+        or legacy.night_episode_revision_id != source.night_episode_revision_id
+    ):
+        raise ProductAgentInvariantError("shadow comparison paths are not comparable")
+
+    legacy_claims: list[dict[str, Any]] = []
+    legacy_visible: dict[str, tuple[str, ...]] = {}
+    legacy_source_refs: dict[str, tuple[str, ...]] = {}
+    legacy_care: list[Any] = []
+    for role_run in legacy.role_runs:
+        assert role_run.result is not None
+        evidence = _accepted_product_for_agent(
+            role_run.result.accepted_work_products,
+            AgentId.EVIDENCE_REASONING,
+        )
+        if evidence is None:
+            claim_material: tuple[dict[str, Any], ...] = ()
+            claim_signatures: dict[str, str] = {}
+        else:
+            claim_material, claim_signatures = _evidence_claim_material(evidence)
+        legacy_claims.extend(claim_material)
+        legacy_source_refs[role_run.role.value] = tuple(
+            sorted(
+                {
+                    str(ref)
+                    for claim in claim_material
+                    for ref in claim["evidence_refs"]
+                }
+            )
+        )
+        publication_refs = (
+            ()
+            if role_run.result.publication is None
+            else tuple(role_run.result.publication.claim_refs)
+        )
+        legacy_visible[role_run.role.value] = tuple(
+            sorted(
+                claim_signatures.get(ref, "unresolved:" + stable_hash(ref))
+                for ref in publication_refs
+            )
+        )
+        legacy_care.append(
+            _care_semantic_material(
+                _accepted_product_for_agent(
+                    role_run.result.accepted_work_products,
+                    AgentId.CARE_STRATEGY,
+                )
+            )
+        )
+
+    shared_claim_material, shared_claim_signatures = _evidence_claim_material(
+        shared.shared_analysis.evidence
+    )
+    shared_visible = {
+        role_run.role.value: tuple(
+            sorted(
+                shared_claim_signatures.get(
+                    ref,
+                    "unresolved:" + stable_hash(ref),
+                )
+                for ref in (
+                    ()
+                    if role_run.role_projection is None
+                    else role_run.role_projection.claim_refs
+                )
+            )
+        )
+        for role_run in shared.role_runs
+    }
+    legacy_fact_material = tuple(
+        sorted(
+            {stable_hash(item): item for item in legacy_claims}.values(),
+            key=stable_hash,
+        )
+    )
+    shared_fact_material = tuple(sorted(shared_claim_material, key=stable_hash))
+    risk_summary = source.facts.provider_risk_summary()
+    shared_risk = {
+        "risk_state": shared.shared_analysis.source.risk_state,
+        "reason_codes": sorted(shared.shared_analysis.source.risk_reason_codes),
+    }
+    source_risk = {
+        "risk_state": str(risk_summary.get("risk_state") or "unknown"),
+        "reason_codes": sorted(
+            str(item) for item in risk_summary.get("reason_codes", ())
+        ),
+    }
+    shared_care = _care_semantic_material(shared.shared_analysis.care)
+    shared_claim_source_refs = tuple(
+        sorted(
+            {
+                str(ref)
+                for claim in shared_claim_material
+                for ref in claim["evidence_refs"]
+            }
+        )
+    )
+    shared_source_refs = {
+        item.role.value: shared_claim_source_refs
+        for item in shared.role_runs
+    }
+    quality_state = (
+        "partial"
+        if legacy.analysis.data_sufficiency is DataSufficiency.PARTIAL
+        else "good"
+    )
+    return ReportShadowComparison.create(
+        legacy_attempt_sha256=legacy.attempt_sha256,
+        shared_analysis_sha256=shared.shared_analysis.shared_analysis_sha256,
+        category_material={
+            "fact_identities": (legacy_fact_material, shared_fact_material),
+            "metric_values_units": (
+                _source_metric_material(source),
+                _shared_metric_material(shared.shared_analysis),
+            ),
+            "quality_status": (
+                {
+                    "data_sufficiency": legacy.analysis.data_sufficiency.value,
+                    "quality_state": quality_state,
+                },
+                {
+                    "data_sufficiency": (
+                        shared.shared_analysis.source.data_sufficiency
+                    ),
+                    "quality_state": shared.shared_analysis.source.quality_state,
+                },
+            ),
+            "risk_classification": (source_risk, shared_risk),
+            "care_candidate_semantics": (
+                tuple(
+                    sorted(
+                        {
+                            stable_hash(item): item
+                            for item in legacy_care
+                            if item is not None
+                        }.values(),
+                        key=stable_hash,
+                    )
+                ),
+                (() if shared_care is None else (shared_care,)),
+            ),
+            "role_visible_fact_sets": (legacy_visible, shared_visible),
+            "source_references": (legacy_source_refs, shared_source_refs),
+        },
+    )
 
 
 def _desired_analysis_sha256(
