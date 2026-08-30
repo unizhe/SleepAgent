@@ -118,7 +118,13 @@ from sleepagent.runtime.reports import (
     RoleProjectionState,
     SharedAnalysisRunRequest,
     SharedAnalysisSourceV1,
+    build_elder_message_atoms,
     build_shared_role_projections,
+)
+from sleepagent.domain.product_data import ProductElderPresentationFacts
+from sleepagent.runtime.agents import (
+    _ElderNarrativeRenderingSelection,
+    _ElderNarrativeRewritePlan,
 )
 from sleepagent.runtime.schemas import RadarNightSummary
 from sleepagent.persistence.uow import UowScope
@@ -2367,6 +2373,105 @@ def test_shared_role_projections_are_deterministic_and_keep_partial_caveat() -> 
     ) == first
 
 
+def test_elder_projection_is_localized_chinese_dense_and_nonduplicative() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    stage_start = episode_start + timedelta(minutes=35)
+    stage_end = stage_start + timedelta(minutes=80)
+    presentation = ProductElderPresentationFacts(
+        timezone_name="Asia/Shanghai",
+        episode_observation_start_at=episode_start,
+        episode_observation_end_at=episode_start + timedelta(hours=8),
+        episode_observation_minutes=480,
+        episode_local_display="01:00–09:00",
+        vendor_stage_span_start_at=stage_start,
+        vendor_stage_span_end_at=stage_end,
+        vendor_stage_span_minutes=80,
+        vendor_stage_local_display="01:35–02:55",
+        presented_stage_start_at=stage_start,
+        presented_stage_end_at=stage_end,
+        presented_stage_local_display="01:35–02:55",
+        stage_observation_minutes=80,
+        classified_stage_minutes={"light": 57, "deep": 13, "rem": 10},
+        classified_totals_state="reliable",
+        stage_boundary_state="within_episode",
+        bed_exit_count=0,
+        source_refs=("governed_evidence_set:test",),
+    )
+    atoms = build_elder_message_atoms(shared, presentation)
+
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
+
+    assert elder.text is not None
+    assert "设备在01:35–02:55记录到约80分钟的睡眠分期数据" in elder.text
+    assert "浅睡约57分钟" in elder.text
+    assert "深睡约13分钟" in elder.text
+    assert "REM 睡眠约10分钟" in elder.text
+    assert "您睡了" not in elder.text
+    assert "sleep window" not in elder.text.lower()
+    assert "UTC" not in elder.text
+    assert "sample" not in elder.text.lower()
+    assert "pull-backfilled" not in elder.text
+    assert "reconstructed" not in elder.text.lower()
+    assert "movement" not in elder.text.lower()
+    assert "%" not in elder.text
+    assert "HIPAA" not in elder.text
+    assert "FDA" not in elder.text
+    assert "本次已验收信息：" not in elder.text
+    assert elder.text.count("数据不完整") == 1
+    assert elder.text.count("不构成诊断或医疗建议") == 1
+    assert elder.presentation_authority_sha256 is not None
+
+
+def test_elder_projection_flags_constrained_bounds_and_hides_overlap_totals() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    stage_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    presentation = ProductElderPresentationFacts(
+        timezone_name="Asia/Shanghai",
+        presented_stage_start_at=stage_start,
+        presented_stage_end_at=stage_start + timedelta(hours=4),
+        presented_stage_local_display="01:00–05:00",
+        stage_observation_minutes=90,
+        classified_stage_minutes={"light": 60, "deep": 60},
+        classified_totals_state="overlap_ambiguous",
+        stage_boundary_state="constrained_to_episode",
+        out_of_episode_interval_count=1,
+        source_refs=("governed_evidence_set:test",),
+    )
+
+    atoms = build_elder_message_atoms(shared, presentation)
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
+
+    assert elder.text is not None
+    assert "按夜间时段范围" in elder.text
+    assert "分期区间存在重叠" in elder.text
+    assert "浅睡约60分钟" not in elder.text
+    assert "深睡约60分钟" not in elder.text
+    assert elder.text.count("数据不完整") == 1
+
+
+def test_elder_rewrite_schema_cannot_carry_provider_authored_facts_or_numbers() -> None:
+    with pytest.raises(ValueError):
+        _ElderNarrativeRewritePlan.model_validate(
+            {
+                "status": "completed",
+                "selections": [],
+                "text": "新增了不受支持的事实 999。",
+            }
+        )
+
+
 def _policy_routed_care_shared_request() -> SharedAnalysisRunRequest:
     command = _shared_analysis_request()
     tool_inputs = dict(command.runtime_request.tool_inputs)
@@ -2474,7 +2579,19 @@ def _elder_narrative_request(
     *,
     episode_id: str = "product-elder-narrative-1",
 ) -> ElderNarrativeRequest:
-    elder = build_shared_role_projections(shared)[0]
+    atoms = build_elder_message_atoms(
+        shared,
+        ProductElderPresentationFacts(
+            timezone_name="Asia/Shanghai",
+            classified_totals_state="reliable",
+            stage_boundary_state="episode_bounds_unavailable",
+            source_refs=("governed_evidence_set:test",),
+        ),
+    )
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
     runtime_request = _shared_analysis_request().runtime_request.model_copy(
         update={
             "episode_id": episode_id,
@@ -2487,6 +2604,7 @@ def _elder_narrative_request(
         runtime_request=runtime_request,
         shared_analysis=shared,
         elder_projection=elder,
+        message_atoms=atoms,
         render_manifest_sha256=stable_hash("elder-render-manifest"),
     )
 
@@ -2507,29 +2625,61 @@ def test_elder_narrative_uses_exactly_one_content_plan_call() -> None:
     ) == narrative
     assert narrative.communication is not None
     assert narrative.text == narrative.communication.text
-    assert narrative_schemas == [_SleepCareContentPlan]
+    assert narrative_schemas == [_ElderNarrativeRewritePlan]
     assert instance.result_store.history(command.episode_id) == []
     assert all(
         binding.rendered_text in narrative.text
         for binding in narrative.communication.semantic_bindings
     )
+    narrative_provider_input = model.message_payloads[-1]
+    packet = EvidencePacket.model_validate(shared.evidence.payload)
+    assert all(
+        claim.statement not in narrative_provider_input
+        for claim in packet.claims
+    )
+    assert "sample_counts" not in narrative_provider_input
+    assert "pull_backfilled_measurement_count" not in narrative_provider_input
 
 
 class _RequestingNarrativeModel(_CapturingDeterministicModel):
     def generate(self, **kwargs):
-        if kwargs["schema"] is _SleepCareContentPlan:
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
             self.schemas.append(kwargs["schema"])
-            return _SleepCareContentPlan(
+            return _ElderNarrativeRewritePlan(
                 status=WorkProductStatus.NEEDS_INPUT,
-                tool_requests=[
-                    ToolRequest(
-                        request_id="narrative-tool-request",
-                        tool_name="knowledge.retrieve_reviewed",
-                        arguments={"query": "more context"},
+            )
+        return super().generate(**kwargs)
+
+
+class _UnknownAtomNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
+            self.schemas.append(kwargs["schema"])
+            return _ElderNarrativeRewritePlan(
+                status=WorkProductStatus.COMPLETED,
+                selections=[
+                    _ElderNarrativeRenderingSelection(
+                        atom_id="elder-atom:" + "0" * 32,
+                        rendering_id="invented.rendering",
                     )
                 ],
             )
         return super().generate(**kwargs)
+
+
+class _OmitPartialAtomNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        plan = super().generate(**kwargs)
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
+            assert isinstance(plan, _ElderNarrativeRewritePlan)
+            assert len(plan.selections) == 4
+            return plan.model_copy(
+                update={"selections": [
+                    *plan.selections[:2],
+                    plan.selections[-1],
+                ]}
+            )
+        return plan
 
 
 def test_elder_narrative_rejects_requests_and_returns_exact_fallback() -> None:
@@ -2546,7 +2696,34 @@ def test_elder_narrative_rejects_requests_and_returns_exact_fallback() -> None:
     assert narrative.state is ElderNarrativeState.FALLBACK
     assert narrative.text == command.elder_projection.text
     assert narrative.communication is None
-    assert narrative.invocation is not None
+    assert narrative.invocation is None
     assert narrative.failure_codes == (
-        "ELDER_NARRATIVE_REQUEST_REJECTED",
+        "ELDER_NARRATIVE_INVALID",
     )
+
+
+def test_elder_rewrite_unknown_atom_fails_to_deterministic_fallback() -> None:
+    model = _UnknownAtomNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.failure_codes == ("ELDER_NARRATIVE_INVALID",)
+
+
+def test_elder_rewrite_cannot_omit_mandatory_partial_meaning() -> None:
+    model = _OmitPartialAtomNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.text is not None
+    assert narrative.text.count("数据不完整") == 1

@@ -867,7 +867,12 @@ class SafetyDecision(StrictContract):
 
 class CommunicationSemanticBinding(StrictContract):
     binding_id: str = Field(..., min_length=1)
-    source_kind: Literal["evidence_claim", "care_candidate", "general_knowledge"]
+    source_kind: Literal[
+        "evidence_claim",
+        "care_candidate",
+        "general_knowledge",
+        "elder_atom",
+    ]
     source_ref: str = Field(..., min_length=1)
     rendered_text: str = Field(..., min_length=1, max_length=1600)
     preserved_numbers: list[str] = Field(default_factory=list, max_length=20)

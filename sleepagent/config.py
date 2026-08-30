@@ -60,6 +60,18 @@ class ModelMode(str, Enum):
     LIVE = "live"
 
 
+class ObservationSemanticsVersion(str, Enum):
+    V1 = "v1"
+    V2 = "v2"
+
+
+class ReportPipelineMode(str, Enum):
+    LEGACY = "legacy"
+    SHARED_COMPAT = "shared_compat"
+    SHADOW = "shadow"
+    SHARED_ONLY = "shared_only"
+
+
 class SleepBackendSettings(BaseModel):
     """One deployment-scoped backend configuration.
 
@@ -87,6 +99,15 @@ class SleepBackendSettings(BaseModel):
     # with an explicitly opted-in live Product model.
     provider_mode: ProviderMode = ProviderMode.DISABLED
     model_mode: ModelMode = ModelMode.DISABLED
+    # M0 remediation switches are contracts only. Production code does not
+    # consume their future states until the owning migration goal cuts over.
+    observation_semantics_version: ObservationSemanticsVersion = (
+        ObservationSemanticsVersion.V1
+    )
+    report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT
+    emit_legacy_report_compatibility: bool = Field(default=True, strict=True)
+    acquisition_scheduler_enabled: bool = Field(default=False, strict=True)
+    live_delivery_enabled: bool = Field(default=False, strict=True)
     service_credential_ref: str = Field(default="unconfigured", min_length=1)
     signing_key_ref: str = Field(min_length=1)
     encryption_key_ref: str = Field(min_length=1)
@@ -330,6 +351,27 @@ class SleepBackendSettings(BaseModel):
                     "disabled",
                 ).strip()
             ),
+            observation_semantics_version=ObservationSemanticsVersion(
+                env.get(
+                    f"{SETTINGS_PREFIX}OBSERVATION_SEMANTICS_VERSION",
+                    "v1",
+                ).strip()
+            ),
+            report_pipeline_mode=ReportPipelineMode(
+                env.get(
+                    f"{SETTINGS_PREFIX}REPORT_PIPELINE_MODE",
+                    "shared_compat",
+                ).strip()
+            ),
+            emit_legacy_report_compatibility=_boolean(
+                env, "EMIT_LEGACY_REPORT_COMPATIBILITY", True
+            ),
+            acquisition_scheduler_enabled=_boolean(
+                env, "ACQUISITION_SCHEDULER_ENABLED", False
+            ),
+            live_delivery_enabled=_boolean(
+                env, "LIVE_DELIVERY_ENABLED", False
+            ),
             service_credential_ref=required("SERVICE_CREDENTIAL_REF"),
             signing_key_ref=required("SIGNING_KEY_REF"),
             encryption_key_ref=required("ENCRYPTION_KEY_REF"),
@@ -456,6 +498,20 @@ def _floating(env: Mapping[str, str], name: str, default: float) -> float:
     return float(env.get(f"{SETTINGS_PREFIX}{name}", str(default)))
 
 
+def _boolean(env: Mapping[str, str], name: str, default: bool) -> bool:
+    value = env.get(
+        f"{SETTINGS_PREFIX}{name}",
+        "true" if default else "false",
+    ).strip()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(
+        f"{SETTINGS_PREFIX}{name} must be exactly 'true' or 'false'"
+    )
+
+
 def _looks_like_default_ref(value: str) -> bool:
     lowered = value.strip().lower()
     return lowered in {
@@ -473,8 +529,10 @@ __all__ = [
     "DataMode",
     "DeploymentMode",
     "ModelMode",
+    "ObservationSemanticsVersion",
     "ProcessRole",
     "ProviderMode",
+    "ReportPipelineMode",
     "SETTINGS_PREFIX",
     "SleepBackendSettings",
 ]

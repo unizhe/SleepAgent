@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -207,6 +208,91 @@ def test_run_no_wait_returns_acceptance_without_polling() -> None:
 
     assert outcome == report_cli.CliOutcome(payload=accepted(), exit_code=0)
     assert [name for name, _ in client.calls] == ["run"]
+
+
+def test_elder_run_continues_polling_until_narrative_is_terminal(
+    monkeypatch,
+) -> None:
+    client = FakeClient()
+    pending = ready_report(include_trace=True)
+    pending["narrative"] = {"state": "pending", "text": None}
+    final = ready_report(include_trace=True)
+    final["narrative"] = {
+        "state": "fallback",
+        "text": "确定性中文回退内容。",
+    }
+
+    def await_shared(**kwargs: Any) -> dict[str, Any]:
+        client.calls.append(("await", kwargs))
+        return pending
+
+    def get_terminal(**kwargs: Any) -> dict[str, Any]:
+        client.calls.append(("get", kwargs))
+        return final
+
+    client.await_report = await_shared  # type: ignore[method-assign]
+    client.get_report = get_terminal  # type: ignore[method-assign]
+    monkeypatch.setattr(report_cli.time, "sleep", lambda _: None)
+    args = build_parser().parse_args(
+        ["run", "--wake-date", "2026-08-26", "--timeout", "45"]
+    )
+
+    outcome = execute_command(args, client, config())
+
+    assert outcome.payload["narrative"] == final["narrative"]
+    assert [name for name, _ in client.calls] == ["run", "await", "get"]
+
+
+@pytest.mark.parametrize("role", ["family", "doctor"])
+def test_non_elder_run_does_not_wait_for_narrative(role: str) -> None:
+    client = FakeClient()
+    client.report["audience"] = role
+    projection = client.report["projection"]
+    assert isinstance(projection, dict)
+    projection["audience"] = role
+    client.report.pop("narrative", None)
+    args = build_parser().parse_args(
+        ["run", "--wake-date", "2026-08-26"]
+    )
+
+    execute_command(args, client, replace(config(), role=role))
+
+    assert [name for name, _ in client.calls] == ["run", "await"]
+
+
+def test_elder_pretty_mode_is_narrative_first_without_duplicate_projection() -> None:
+    report = ready_report()
+    report["quality_caveat"] = "部分时段的数据不完整。"
+    projection = report["projection"]
+    assert isinstance(projection, dict)
+    projection["summary_text"] = "不应与就绪叙述重复打印的确定性投影。"
+    projection["context_notice"] = "不应默认打印的内部范围说明。"
+    narrative = report["narrative"]
+    assert isinstance(narrative, dict)
+    narrative["text"] = (
+        "设备记录到约80分钟的睡眠分期数据。\n\n"
+        "本次部分时段的数据不完整，因此结果仅作为日常睡眠观察参考。\n\n"
+        "本报告由 AI 辅助整理，不构成诊断或医疗建议。"
+    )
+
+    rendered = report_cli._render_text(report, include_trace=False)
+
+    assert "不应与就绪叙述重复打印的确定性投影" not in rendered
+    assert "不应默认打印的内部范围说明" not in rendered
+    assert "quality_caveat:" not in rendered
+    assert rendered.count("数据不完整") == 1
+    assert rendered.count("不构成诊断或医疗建议") == 1
+    assert "narrative_state:" not in rendered
+
+
+def test_elder_pending_show_uses_projection_with_compact_generation_state() -> None:
+    report = ready_report()
+    report["narrative"] = {"state": "pending", "text": None}
+
+    rendered = report_cli._render_text(report, include_trace=False)
+
+    assert "You slept for about seven hours." in rendered
+    assert rendered.count("自然语言报告生成中。") == 1
 
 
 @pytest.mark.parametrize(

@@ -241,7 +241,10 @@ class Backend:
                 context_notice="Only authorized evidence is shown.",
             ),
             narrative=(
-                ProductReportNarrative(state=ProductNarrativeState.FALLBACK)
+                ProductReportNarrative(
+                    state=ProductNarrativeState.FALLBACK,
+                    text="确定性中文回退内容。",
+                )
                 if context.role == ProductRole.ELDER
                 else None
             ),

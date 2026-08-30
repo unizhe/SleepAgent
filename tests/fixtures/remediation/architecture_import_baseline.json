@@ -1,0 +1,57 @@
+{
+  "schema_version": "architecture_import_baseline.g1.v1",
+  "captured_head": "51947e6da69d9d8e0e0eeb36669e227865fc26ff",
+  "known_sccs": [
+    [
+      "sleepagent.app",
+      "sleepagent.domain.postgres_slice",
+      "sleepagent.integrations.perceptor.ingestion",
+      "sleepagent.integrations.perceptor.pull_ingestion",
+      "sleepagent.process",
+      "sleepagent.simulation.journey",
+      "sleepagent.simulation.replay_ingress",
+      "sleepagent.workers.commands",
+      "sleepagent.workers.demo",
+      "sleepagent.workers.effects",
+      "sleepagent.workers.ingestion",
+      "sleepagent.workers.product",
+      "sleepagent.workers.retention",
+      "sleepagent.workers.runtime"
+    ],
+    [
+      "sleepagent.domain.product_data",
+      "sleepagent.runtime.tools"
+    ],
+    [
+      "sleepagent.runtime.cold_start",
+      "sleepagent.runtime.contracts",
+      "sleepagent.runtime.governance",
+      "sleepagent.runtime.hitl",
+      "sleepagent.runtime.invocation",
+      "sleepagent.runtime.memory",
+      "sleepagent.runtime.registry",
+      "sleepagent.runtime.results"
+    ]
+  ],
+  "self_imports": [
+    "sleepagent.config -> sleepagent.config",
+    "sleepagent.runtime.agents -> sleepagent.runtime.agents",
+    "sleepagent.runtime.contracts -> sleepagent.runtime.contracts",
+    "sleepagent.runtime.knowledge -> sleepagent.runtime.knowledge",
+    "sleepagent.runtime.registry -> sleepagent.runtime.registry",
+    "sleepagent.workers.retention -> sleepagent.workers.retention"
+  ],
+  "forbidden_edges": [
+    "sleepagent.domain.postgres_slice -> sleepagent.workers.retention",
+    "sleepagent.domain.product_data -> sleepagent.runtime.cold_start",
+    "sleepagent.domain.product_data -> sleepagent.runtime.contracts",
+    "sleepagent.domain.product_data -> sleepagent.runtime.tools",
+    "sleepagent.process -> sleepagent.app",
+    "sleepagent.workers.runtime -> sleepagent.workers.commands",
+    "sleepagent.workers.runtime -> sleepagent.workers.demo",
+    "sleepagent.workers.runtime -> sleepagent.workers.effects",
+    "sleepagent.workers.runtime -> sleepagent.workers.ingestion",
+    "sleepagent.workers.runtime -> sleepagent.workers.product",
+    "sleepagent.workers.runtime -> sleepagent.workers.retention"
+  ]
+}

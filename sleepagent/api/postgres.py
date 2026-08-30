@@ -132,6 +132,7 @@ from sleepagent.runtime.provider import (
     openai_compatible_provider_config_from_env,
 )
 from sleepagent.runtime.reports import (
+    ElderMessageAtom,
     ElderNarrative as RuntimeElderNarrative,
     ElderNarrativeState as RuntimeElderNarrativeState,
     ReportRole,
@@ -143,7 +144,10 @@ from sleepagent.runtime.reports import (
     build_safe_model_pin,
     build_shared_analysis_runtime_manifest,
     build_shared_role_projections,
+    elder_presentation_authority_sha256,
     role_projection_identity_sha256,
+    validate_elder_communication_draft,
+    validate_elder_message_atoms,
 )
 from sleepagent.runtime.results import PRODUCT_EPISODE_RUNNER_VERSION
 
@@ -3985,16 +3989,20 @@ def _validated_role_projection(
         projection = RoleProjection.model_validate(row.view_json)
     except (ValidationError, ValueError, TypeError):
         return None
-    expected_projection = next(
-        (
-            item
-            for item in build_shared_role_projections(shared)
-            if item.role is projection.role
-        ),
-        None,
-    )
-    if expected_projection is None or projection != expected_projection:
-        return None
+    if projection.role is ReportRole.ELDER:
+        if projection.presentation_authority_sha256 is None:
+            return None
+    else:
+        expected_projection = next(
+            (
+                item
+                for item in build_shared_role_projections(shared)
+                if item.role is projection.role
+            ),
+            None,
+        )
+        if expected_projection is None or projection != expected_projection:
+            return None
     if (
         row.view_fact_snapshot_sha256 != shared.fact_snapshot_hash
         or not _is_sha256_string(row.view_projection_identity_sha256)
@@ -4124,7 +4132,20 @@ def _report_narrative(
     ):
         return ProductReportNarrative(state=ProductNarrativeState.STALE)
     operation = row.narrative_operation_json
+    message_atoms: tuple[ElderMessageAtom, ...] = ()
     if operation is not None:
+        atom_values = operation.get("elder_message_atoms")
+        try:
+            message_atoms = tuple(
+                ElderMessageAtom.model_validate(item)
+                for item in atom_values
+            ) if isinstance(atom_values, list) else ()
+            atom_authority_sha256 = elder_presentation_authority_sha256(
+                message_atoms
+            )
+            validate_elder_message_atoms(shared, message_atoms)
+        except (ValidationError, ValueError, TypeError):
+            return ProductReportNarrative(state=ProductNarrativeState.STALE)
         expected_render_identity = stable_hash(
             {
                 "schema_version": "elder_narrative_request.v1",
@@ -4148,6 +4169,8 @@ def _report_narrative(
             != row.view_projection_identity_sha256
             or operation.get("elder_projection_content_sha256")
             != projection.projection_sha256
+            or atom_authority_sha256
+            != projection.presentation_authority_sha256
             or operation.get("elder_projection")
             != projection.model_dump(mode="json")
             or operation.get("render_identity_sha256")
@@ -4174,13 +4197,30 @@ def _report_narrative(
                 != operation.get("render_identity_sha256")
             ):
                 return ProductReportNarrative(
-                    state=ProductNarrativeState.FAILED
+                    state=ProductNarrativeState.FALLBACK,
+                    text=projection.text.strip(),
                 )
             if validated.state is RuntimeElderNarrativeState.READY:
                 assert validated.text is not None
+                assert validated.communication is not None
+                try:
+                    validate_elder_communication_draft(
+                        validated.communication,
+                        message_atoms,
+                    )
+                except (ValueError, TypeError):
+                    return ProductReportNarrative(
+                        state=ProductNarrativeState.FALLBACK,
+                        text=projection.text.strip(),
+                    )
                 return ProductReportNarrative(
                     state=ProductNarrativeState.READY,
                     text=validated.text.strip(),
+                )
+            if validated.state is RuntimeElderNarrativeState.FALLBACK:
+                return ProductReportNarrative(
+                    state=ProductNarrativeState.FALLBACK,
+                    text=projection.text.strip(),
                 )
             if validated.state is RuntimeElderNarrativeState.STALE:
                 return ProductReportNarrative(
@@ -4188,10 +4228,14 @@ def _report_narrative(
                 )
             if validated.state is RuntimeElderNarrativeState.FAILED:
                 return ProductReportNarrative(
-                    state=ProductNarrativeState.FAILED
+                    state=ProductNarrativeState.FALLBACK,
+                    text=projection.text.strip(),
                 )
     # A missing/invalid/failed narrative never suppresses deterministic content.
-    return ProductReportNarrative(state=ProductNarrativeState.FALLBACK)
+    return ProductReportNarrative(
+        state=ProductNarrativeState.FALLBACK,
+        text=projection.text.strip(),
+    )
 
 
 def _report_failure_code(

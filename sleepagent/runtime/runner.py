@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
@@ -110,6 +111,7 @@ from sleepagent.runtime.reports import (
     ElderNarrativeState,
     SharedAnalysisRunRequest,
     SharedNightAnalysis,
+    validate_elder_communication_draft,
 )
 
 
@@ -146,7 +148,12 @@ class _DetachedNarrativeRuntime:
             )
         )
         self.invocation_records: list[AgentInvocationRecord] = []
-        self.accepted_work_products = shared.accepted_products()
+        # The provider receives only the Runtime-derived typed Elder atoms.
+        # Accepted shared products remain available to the local acceptance gate
+        # and are not duplicated as dense free-form prose in the render prompt.
+        self.accepted_work_products: dict[
+            WorkProductKind, AcceptedWorkProduct
+        ] = {}
         self.plan: EpisodePlan | None = None
 
     def record_agent_invocation(self, record: AgentInvocationRecord) -> None:
@@ -595,6 +602,10 @@ class ProductEpisodeRunner:
                 tool_receipts=[],
                 accepted_evidence=request.shared_analysis.evidence,
                 safety_target=None,
+                elder_message_atoms=tuple(
+                    item.model_dump(mode="json")
+                    for item in request.message_atoms
+                ),
             )
             invocation = runtime.invocation_records[0]
             envelope = turn.envelope
@@ -610,8 +621,28 @@ class ProductEpisodeRunner:
                 require_personal_grounding=runtime_request.personalized,
                 authenticated_user_text="",
                 expected_audience_role="elder",
+                elder_atom_numbers={
+                    atom.atom_id: {
+                        token
+                        for rendering in atom.renderings
+                        for token in re.findall(
+                            r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?",
+                            rendering.text,
+                        )
+                    }
+                    for atom in request.message_atoms
+                },
+                mandatory_elder_atom_refs={
+                    atom.atom_id
+                    for atom in request.message_atoms
+                    if atom.mandatory
+                },
             )
             draft = CommunicationDraft.model_validate(accepted.payload)
+            validate_elder_communication_draft(
+                draft,
+                request.message_atoms,
+            )
             if draft.memory_change_candidates:
                 raise AcceptanceError("elder narrative cannot propose Memory changes")
             return ElderNarrative(

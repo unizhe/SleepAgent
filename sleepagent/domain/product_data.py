@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 
@@ -160,6 +161,118 @@ class ProductLongitudinalRiskContext(SleepDomainContract):
         return self
 
 
+class ProductElderPresentationFacts(SleepDomainContract):
+    """Typed, locale-ready facts that never participate in shared analysis."""
+
+    schema_version: Literal["product_elder_presentation_facts.v1"] = (
+        "product_elder_presentation_facts.v1"
+    )
+    timezone_name: str = Field(..., min_length=1)
+    episode_observation_start_at: datetime | None = None
+    episode_observation_end_at: datetime | None = None
+    episode_observation_minutes: float | None = Field(default=None, ge=0)
+    episode_local_display: str | None = Field(default=None, min_length=1)
+    vendor_stage_span_start_at: datetime | None = None
+    vendor_stage_span_end_at: datetime | None = None
+    vendor_stage_span_minutes: float | None = Field(default=None, ge=0)
+    vendor_stage_local_display: str | None = Field(default=None, min_length=1)
+    presented_stage_start_at: datetime | None = None
+    presented_stage_end_at: datetime | None = None
+    presented_stage_local_display: str | None = Field(default=None, min_length=1)
+    stage_observation_minutes: float = Field(default=0, ge=0)
+    classified_stage_minutes: dict[str, float] = Field(default_factory=dict)
+    classified_totals_state: Literal["reliable", "overlap_ambiguous"]
+    unclassified_gap_minutes: float = Field(default=0, ge=0)
+    stage_boundary_state: Literal[
+        "within_episode",
+        "constrained_to_episode",
+        "episode_bounds_unavailable",
+    ]
+    out_of_episode_interval_count: int = Field(default=0, ge=0)
+    invalid_interval_count: int = Field(default=0, ge=0)
+    bed_exit_count: int = Field(default=0, ge=0)
+    bed_exit_local_times: tuple[str, ...] = ()
+    source_refs: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_presentation_semantics(self) -> "ProductElderPresentationFacts":
+        try:
+            ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("timezone_name must be a valid IANA timezone") from exc
+        for start, end, display, label in (
+            (
+                self.episode_observation_start_at,
+                self.episode_observation_end_at,
+                self.episode_local_display,
+                "Episode observation span",
+            ),
+            (
+                self.vendor_stage_span_start_at,
+                self.vendor_stage_span_end_at,
+                self.vendor_stage_local_display,
+                "vendor stage-observation span",
+            ),
+            (
+                self.presented_stage_start_at,
+                self.presented_stage_end_at,
+                self.presented_stage_local_display,
+                "presented stage-observation span",
+            ),
+        ):
+            if (start is None) != (end is None):
+                raise ValueError(f"{label} requires both endpoints")
+            if start is not None and end is not None:
+                _require_aware_datetime(start, f"{label} start")
+                _require_aware_datetime(end, f"{label} end")
+                if end <= start:
+                    raise ValueError(f"{label} must have positive duration")
+                if display is None:
+                    raise ValueError(f"{label} requires a localized display")
+            elif display is not None:
+                raise ValueError(f"{label} display requires canonical endpoints")
+        if (
+            self.episode_observation_start_at is None
+        ) != (self.episode_observation_minutes is None):
+            raise ValueError("Episode duration must match its typed span")
+        if (
+            self.vendor_stage_span_start_at is None
+        ) != (self.vendor_stage_span_minutes is None):
+            raise ValueError("vendor stage duration must match its typed span")
+        for start, end, minutes, label in (
+            (
+                self.episode_observation_start_at,
+                self.episode_observation_end_at,
+                self.episode_observation_minutes,
+                "Episode",
+            ),
+            (
+                self.vendor_stage_span_start_at,
+                self.vendor_stage_span_end_at,
+                self.vendor_stage_span_minutes,
+                "vendor stage",
+            ),
+        ):
+            if start is not None and end is not None and minutes is not None:
+                expected_minutes = round(
+                    (end - start).total_seconds() / 60,
+                    1,
+                )
+                if minutes != expected_minutes:
+                    raise ValueError(f"{label} duration is inconsistent")
+        if self.presented_stage_start_at is None and self.stage_observation_minutes:
+            raise ValueError("stage observation duration requires a presented span")
+        if any(value < 0 for value in self.classified_stage_minutes.values()):
+            raise ValueError("classified stage totals cannot be negative")
+        if len(self.source_refs) != len(set(self.source_refs)):
+            raise ValueError("Elder presentation source refs must be unique")
+        if self.classified_totals_state == "overlap_ambiguous" and not (
+            self.classified_stage_minutes
+        ):
+            raise ValueError("overlap state requires the observed raw stage totals")
+        return self
+
+
 def build_longitudinal_vital_risk_context(
     summaries: tuple[ProductNightVitalSummary, ...],
 ) -> ProductLongitudinalRiskContext | None:
@@ -221,6 +334,8 @@ class ProductRevisionFacts(SleepDomainContract):
     data_mode: DataMode
     timezone_name: str = Field(..., min_length=1)
     local_sleep_date: str = Field(..., min_length=1)
+    episode_bed_at: datetime | None = None
+    episode_wake_at: datetime | None = None
     data_sufficiency: str = Field(..., min_length=1)
     canonical_observations: tuple[dict[str, Any], ...]
     deterministic_quality: dict[str, Any]
@@ -232,6 +347,20 @@ class ProductRevisionFacts(SleepDomainContract):
 
     @model_validator(mode="after")
     def reject_private_or_mixed_mode_content(self) -> "ProductRevisionFacts":
+        if self.episode_bed_at is not None:
+            _require_aware_datetime(self.episode_bed_at, "episode_bed_at")
+        if self.episode_wake_at is not None:
+            _require_aware_datetime(self.episode_wake_at, "episode_wake_at")
+        if (
+            self.episode_bed_at is not None
+            and self.episode_wake_at is not None
+            and self.episode_wake_at <= self.episode_bed_at
+        ):
+            raise ValueError("episode_wake_at must follow episode_bed_at")
+        try:
+            ZoneInfo(self.timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("timezone_name must be a valid IANA timezone") from exc
         assert_agent_safe_payload(
             self.model_dump(mode="json"),
             expected_data_mode=self.data_mode,
@@ -600,6 +729,177 @@ class ProductRevisionFacts(SleepDomainContract):
             "bed_exit_events": exits,
         }
 
+    def elder_presentation_facts(self) -> ProductElderPresentationFacts:
+        """Reduce canonical facts for Elder display without changing analysis input.
+
+        Valid stage intervals are clipped only in this presentation view.  Raw
+        canonical timestamps and ``deterministic_night_summary`` remain unchanged.
+        Overlapping stage classifications are detected and marked ambiguous rather
+        than being silently double-counted in Elder prose.
+        """
+
+        zone = ZoneInfo(self.timezone_name)
+        episode_start = self.episode_bed_at
+        episode_end = self.episode_wake_at
+        has_episode_bounds = episode_start is not None and episode_end is not None
+
+        raw_intervals: list[tuple[datetime, datetime, str]] = []
+        invalid_interval_count = 0
+        bed_exits: list[datetime] = []
+        for observation in self.canonical_observations:
+            payload = observation.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            observation_type = str(payload.get("observation_type") or "")
+            if observation_type == "sleep_stage_interval":
+                start = _aware_wire_datetime(payload.get("start_at"))
+                end = _aware_wire_datetime(payload.get("end_at"))
+                stage = payload.get("stage")
+                if (
+                    start is None
+                    or end is None
+                    or end <= start
+                    or not isinstance(stage, str)
+                    or not stage
+                ):
+                    invalid_interval_count += 1
+                    continue
+                raw_intervals.append((start, end, stage))
+            elif (
+                observation_type == "bed_exit"
+                and payload.get("kind") == "bed_exit"
+            ):
+                event_at = _aware_wire_datetime(
+                    observation.get("event_occurred_at")
+                    or observation.get("measurement_at")
+                )
+                if event_at is not None:
+                    within_episode = True
+                    if has_episode_bounds:
+                        assert episode_start is not None and episode_end is not None
+                        within_episode = episode_start <= event_at <= episode_end
+                    if within_episode:
+                        bed_exits.append(event_at)
+
+        vendor_start = min((item[0] for item in raw_intervals), default=None)
+        vendor_end = max((item[1] for item in raw_intervals), default=None)
+        presented: list[tuple[datetime, datetime, str]] = []
+        out_of_episode_count = 0
+        for start, end, stage in raw_intervals:
+            presented_start = start
+            presented_end = end
+            if has_episode_bounds:
+                assert episode_start is not None and episode_end is not None
+                if start < episode_start or end > episode_end:
+                    out_of_episode_count += 1
+                presented_start = max(start, episode_start)
+                presented_end = min(end, episode_end)
+                if presented_end <= presented_start:
+                    continue
+            presented.append((presented_start, presented_end, stage))
+
+        ordered = sorted(presented, key=lambda item: (item[0], item[1], item[2]))
+        overlap_detected = False
+        union_minutes = 0.0
+        union_start: datetime | None = None
+        union_end: datetime | None = None
+        for start, end, _ in ordered:
+            if union_start is None:
+                union_start, union_end = start, end
+                continue
+            assert union_end is not None
+            if start < union_end:
+                overlap_detected = True
+            if start <= union_end:
+                union_end = max(union_end, end)
+                continue
+            union_minutes += (union_end - union_start).total_seconds() / 60
+            union_start, union_end = start, end
+        if union_start is not None and union_end is not None:
+            union_minutes += (union_end - union_start).total_seconds() / 60
+
+        stage_totals: dict[str, float] = {}
+        for start, end, stage in ordered:
+            stage_totals[stage] = stage_totals.get(stage, 0.0) + (
+                end - start
+            ).total_seconds() / 60
+        presented_start = min((item[0] for item in ordered), default=None)
+        presented_end = max((item[1] for item in ordered), default=None)
+        presented_envelope_minutes = (
+            0.0
+            if presented_start is None or presented_end is None
+            else (presented_end - presented_start).total_seconds() / 60
+        )
+        gap_minutes = max(0.0, presented_envelope_minutes - union_minutes)
+
+        if not has_episode_bounds:
+            boundary_state = "episode_bounds_unavailable"
+        elif out_of_episode_count:
+            boundary_state = "constrained_to_episode"
+        else:
+            boundary_state = "within_episode"
+
+        episode_minutes: float | None = None
+        if has_episode_bounds:
+            assert episode_start is not None and episode_end is not None
+            episode_minutes = round(
+                (episode_end - episode_start).total_seconds() / 60,
+                1,
+            )
+
+        return ProductElderPresentationFacts(
+            timezone_name=self.timezone_name,
+            episode_observation_start_at=(
+                episode_start if has_episode_bounds else None
+            ),
+            episode_observation_end_at=(
+                episode_end if has_episode_bounds else None
+            ),
+            episode_observation_minutes=episode_minutes,
+            episode_local_display=_local_span_display(
+                episode_start,
+                episode_end,
+                zone,
+            ),
+            vendor_stage_span_start_at=vendor_start,
+            vendor_stage_span_end_at=vendor_end,
+            vendor_stage_span_minutes=(
+                None
+                if vendor_start is None or vendor_end is None
+                else round((vendor_end - vendor_start).total_seconds() / 60, 1)
+            ),
+            vendor_stage_local_display=_local_span_display(
+                vendor_start,
+                vendor_end,
+                zone,
+            ),
+            presented_stage_start_at=presented_start,
+            presented_stage_end_at=presented_end,
+            presented_stage_local_display=_local_span_display(
+                presented_start,
+                presented_end,
+                zone,
+            ),
+            stage_observation_minutes=round(union_minutes, 1),
+            classified_stage_minutes={
+                key: round(value, 1)
+                for key, value in sorted(stage_totals.items())
+            },
+            classified_totals_state=(
+                "overlap_ambiguous" if overlap_detected else "reliable"
+            ),
+            unclassified_gap_minutes=round(gap_minutes, 1),
+            stage_boundary_state=boundary_state,
+            out_of_episode_interval_count=out_of_episode_count,
+            invalid_interval_count=invalid_interval_count,
+            bed_exit_count=len(bed_exits),
+            bed_exit_local_times=tuple(
+                item.astimezone(zone).strftime("%H:%M")
+                for item in sorted(bed_exits)
+            ),
+            source_refs=self.agent_source_refs(),
+        )
+
 
 class PersistentProductDataProvider:
     """Read committed canonical data without touching Raw Inbox payload bytes."""
@@ -773,6 +1073,8 @@ class PersistentProductDataProvider:
             data_mode=revision.data_mode,
             timezone_name=episode.timezone_name,
             local_sleep_date=episode.local_sleep_date.isoformat(),
+            episode_bed_at=getattr(episode, "bed_at", None),
+            episode_wake_at=getattr(episode, "wake_at", None),
             data_sufficiency=revision.data_sufficiency.value,
             canonical_observations=tuple(safe_observations),
             deterministic_quality=quality_payload,
@@ -1049,6 +1351,28 @@ def _aware_wire_datetime(value: object) -> datetime | None:
     return parsed
 
 
+def _require_aware_datetime(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone offset")
+
+
+def _local_span_display(
+    start: datetime | None,
+    end: datetime | None,
+    zone: ZoneInfo,
+) -> str | None:
+    if start is None or end is None:
+        return None
+    local_start = start.astimezone(zone)
+    local_end = end.astimezone(zone)
+    if local_start.date() == local_end.date():
+        return f"{local_start:%H:%M}–{local_end:%H:%M}"
+    return (
+        f"{local_start.month}月{local_start.day}日 {local_start:%H:%M}–"
+        f"{local_end.month}月{local_end.day}日 {local_end:%H:%M}"
+    )
+
+
 def _scope_matches_revision(
     revision_id: str,
     observation_ids: set[str],
@@ -1067,6 +1391,7 @@ __all__ = [
     "ROLE_VIEW_SCOPES",
     "PersistentProductDataProvider",
     "ProductDataAuthorization",
+    "ProductElderPresentationFacts",
     "ProductRevisionFacts",
     "RoleViewAuthorization",
     "assert_agent_safe_payload",

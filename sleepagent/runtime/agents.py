@@ -10,7 +10,13 @@ from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, cast
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from sleepagent.runtime.contracts import (
     AgentEnvelope,
@@ -211,6 +217,17 @@ class RuntimeRoleInvocation(FrozenContract):
     accepted_evidence_ref: str | None = Field(default=None, min_length=1)
     review_target: ReviewTargetBinding | None = None
     audience_role: AudienceRole | None = None
+    elder_message_atoms: tuple[dict[str, Any], ...] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_runtime_role_invocation(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        payload = dict(handler(self))
+        if not self.elder_message_atoms:
+            payload.pop("elder_message_atoms", None)
+        return payload
 
 
 class RoleInvocationInput(FrozenContract):
@@ -725,6 +742,7 @@ from sleepagent.runtime.registry import (
 from sleepagent.runtime.registry import (
     SkillRegistry,
 )
+from sleepagent.runtime.reports import ElderMessageAtom
 
 
 _SleepCareSourceType = Literal[
@@ -815,6 +833,21 @@ class _SleepCareContentPlan(StrictContract):
     )
 
 
+class _ElderNarrativeRenderingSelection(StrictContract):
+    atom_id: str = Field(..., pattern=r"^elder-atom:[0-9a-f]{32}$")
+    rendering_id: str = Field(..., min_length=1, max_length=100)
+
+
+class _ElderNarrativeRewritePlan(StrictContract):
+    """The provider may select/reorder renderings, but cannot author facts."""
+
+    status: WorkProductStatus
+    selections: list[_ElderNarrativeRenderingSelection] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+
+
 _SLEEPCARE_PRESENTATION_TEMPLATES: tuple[
     tuple[AudienceRole, _SleepCareSourceType, str], ...
 ] = (
@@ -839,6 +872,7 @@ _SLEEPCARE_CONTROLLED_SUMMARY = "已按受控内容计划生成沟通草稿。"
 _SLEEPCARE_SOURCE_MANIFEST_MARKER = (
     "SleepCareContentPlan allowed-source manifest"
 )
+_ELDER_REWRITE_MANIFEST_MARKER = "Bounded Elder message-atom manifest"
 
 
 def _number_free_template(value: str) -> str:
@@ -924,6 +958,219 @@ def _sleepcare_allowed_source_manifest_message(
             )
         ),
     }
+
+
+def _elder_message_atoms_from_invocation(
+    invocation: RuntimeRoleInvocation,
+) -> tuple[ElderMessageAtom, ...] | None:
+    if not invocation.elder_message_atoms:
+        return None
+    atoms = tuple(
+        ElderMessageAtom.model_validate(item)
+        for item in invocation.elder_message_atoms
+    )
+    if not atoms:
+        raise ValueError("Elder message atom catalog cannot be empty")
+    atom_ids = tuple(item.atom_id for item in atoms)
+    if len(atom_ids) != len(set(atom_ids)):
+        raise ValueError("Elder message atom catalog contains duplicates")
+    return atoms
+
+
+def _elder_rewrite_manifest_message(
+    *,
+    context_packet_id: str,
+    atoms: tuple[ElderMessageAtom, ...],
+) -> dict[str, str]:
+    manifest = {
+        "context_packet_id": context_packet_id,
+        "numeric_policy": "runtime_defined_display_only.v1",
+        "atoms": [
+            {
+                "atom_id": atom.atom_id,
+                "semantic_type": atom.semantic_type,
+                "priority": atom.priority,
+                "mandatory": atom.mandatory,
+                "numeric_bindings": [
+                    item.model_dump(mode="json")
+                    for item in atom.numeric_bindings
+                ],
+                "localized_display_values": atom.localized_display_values,
+                "quality_classification": atom.quality_classification,
+                "risk_state": atom.risk_state,
+                "care_state": atom.care_state,
+                "safety_classification": atom.safety_classification,
+                "allowed_elder_meaning": atom.allowed_elder_meaning,
+                "renderings": [
+                    item.model_dump(mode="json")
+                    for item in atom.renderings
+                ],
+                "fallback_rendering_id": atom.fallback_rendering_id,
+            }
+            for atom in atoms
+        ],
+    }
+    return {
+        "role": "system",
+        "content": (
+            f"{_ELDER_REWRITE_MANIFEST_MARKER}. Runtime owns every fact, "
+            "number, unit, localized time, quality, risk, care and safety "
+            "meaning below. Return only atom_id/rendering_id selections from "
+            "this manifest. Select every mandatory atom exactly once. Optional "
+            "atoms may be omitted. Do not write prose, numbers, facts, advice, "
+            "diagnoses, time conversions, tool requests or identifiers. Runtime "
+            "will validate and assemble the selected zh-CN renderings. Manifest JSON: "
+            + json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ),
+    }
+
+
+def _assemble_elder_rewrite_output(
+    *,
+    context_packet_id: str,
+    atoms: tuple[ElderMessageAtom, ...],
+    plan: _ElderNarrativeRewritePlan,
+) -> SleepCareModelOutput:
+    if plan.status is not WorkProductStatus.COMPLETED:
+        raise ValueError("Elder rewrite must complete without follow-up requests")
+    atoms_by_id = {item.atom_id: item for item in atoms}
+    selected_ids = tuple(item.atom_id for item in plan.selections)
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("Elder rewrite selected a message atom more than once")
+    if not set(selected_ids).issubset(atoms_by_id):
+        raise ValueError("Elder rewrite selected an unknown message atom")
+    mandatory_ids = {item.atom_id for item in atoms if item.mandatory}
+    if not mandatory_ids.issubset(selected_ids):
+        raise ValueError("Elder rewrite omitted mandatory meaning")
+
+    selected = sorted(
+        plan.selections,
+        key=lambda item: (
+            atoms_by_id[item.atom_id].priority,
+            selected_ids.index(item.atom_id),
+        ),
+    )
+    segments: list[str] = []
+    bindings: list[CommunicationSemanticBinding] = []
+    for selection in selected:
+        atom = atoms_by_id[selection.atom_id]
+        rendering = atom.rendering(selection.rendering_id)
+        segments.append(rendering.text)
+        bindings.append(
+            CommunicationSemanticBinding(
+                binding_id=(
+                    "communication-binding:"
+                    + stable_hash(
+                        (
+                            context_packet_id,
+                            atom.atom_id,
+                            rendering.rendering_id,
+                        )
+                    )[:24]
+                ),
+                source_kind="elder_atom",
+                source_ref=atom.atom_id,
+                rendered_text=rendering.text,
+            )
+        )
+    text = "\n\n".join(segments)
+    draft = CommunicationDraft(
+        draft_id=(
+            "communication:"
+            + stable_hash(
+                (
+                    context_packet_id,
+                    tuple(
+                        (item.atom_id, item.rendering_id)
+                        for item in selected
+                    ),
+                )
+            )[:24]
+        ),
+        audience_role="elder",
+        text=text,
+        semantic_bindings=bindings,
+        context_notice="内容来自当前夜间的受控观察，仅在授权范围内展示。",
+    )
+    output = SleepCareModelOutput(
+        status=WorkProductStatus.COMPLETED,
+        summary="已按受控 Elder 消息原子生成中文叙述。",
+        output_payload=draft,
+    )
+    return SleepCareModelOutput.model_validate(output.model_dump(mode="python"))
+
+
+class _ElderNarrativeAssemblyModel:
+    """Per-invocation adapter for finite, Runtime-owned Elder renderings."""
+
+    def __init__(
+        self,
+        *,
+        base_model: StructuredAgentModel,
+        atoms: tuple[ElderMessageAtom, ...],
+    ) -> None:
+        self._base_model = base_model
+        self._atoms = atoms
+        self.last_provider_request_id: str | None = None
+        self.last_provider_input_tokens: int | None = None
+
+    @property
+    def provider(self) -> str:
+        return self._base_model.provider
+
+    @property
+    def model_id(self) -> str:
+        return self._base_model.model_id
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(getattr(self._base_model, "is_configured", True))
+
+    def generate(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        schema: type[_AssemblySchemaT],
+        prompt_version: str,
+        context_packet_id: str,
+    ) -> _AssemblySchemaT:
+        if schema is not SleepCareModelOutput:
+            raise TypeError("Elder assembly requires SleepCareModelOutput")
+        raw_plan = self._base_model.generate(
+            messages=[
+                _elder_rewrite_manifest_message(
+                    context_packet_id=context_packet_id,
+                    atoms=self._atoms,
+                ),
+                *messages,
+            ],
+            schema=_ElderNarrativeRewritePlan,
+            prompt_version=prompt_version,
+            context_packet_id=context_packet_id,
+        )
+        self.last_provider_request_id = getattr(
+            self._base_model,
+            "last_provider_request_id",
+            None,
+        )
+        self.last_provider_input_tokens = getattr(
+            self._base_model,
+            "last_provider_input_tokens",
+            None,
+        )
+        if not isinstance(raw_plan, _ElderNarrativeRewritePlan):
+            raise TypeError("Elder provider returned a non-rewrite plan")
+        output = _assemble_elder_rewrite_output(
+            context_packet_id=context_packet_id,
+            atoms=self._atoms,
+            plan=raw_plan,
+        )
+        return cast(_AssemblySchemaT, output)
 
 
 def _build_sleepcare_source_catalog(
@@ -1234,6 +1481,8 @@ class SleepCareInvocationInput(RoleInvocationInput):
             raise ValueError("SleepCare requires one requested audience")
         if audience_items[0].value != invocation.audience_role:
             raise ValueError("SleepCare audience binding mismatch")
+        if invocation.elder_message_atoms and invocation.audience_role != "elder":
+            raise ValueError("Elder message atoms require the Elder audience")
         allowed = {
             "accepted:evidence_packet",
             "accepted:care_strategy",
@@ -1411,12 +1660,25 @@ class SleepCareAgent(
         if type(command) is not SleepCareInvocationInput:
             raise TypeError("SleepCareAgent requires SleepCareInvocationInput")
         if self._content_plan_assembly:
-            catalog = _build_sleepcare_source_catalog(command.invocation.context)
-            assembly_model = _SleepCareAssemblyModel(
-                base_model=self.model,
-                catalog=catalog,
-                doctor_material=command.invocation.doctor_material,
+            elder_atoms = _elder_message_atoms_from_invocation(
+                command.invocation
             )
+            if elder_atoms is not None:
+                if command.invocation.audience_role != "elder":
+                    raise ValueError("Elder message atoms crossed an audience boundary")
+                assembly_model: StructuredAgentModel = _ElderNarrativeAssemblyModel(
+                    base_model=self.model,
+                    atoms=elder_atoms,
+                )
+            else:
+                catalog = _build_sleepcare_source_catalog(
+                    command.invocation.context
+                )
+                assembly_model = _SleepCareAssemblyModel(
+                    base_model=self.model,
+                    catalog=catalog,
+                    doctor_material=command.invocation.doctor_material,
+                )
             envelope, record = self._invoke_model(
                 command,
                 model_override=assembly_model,

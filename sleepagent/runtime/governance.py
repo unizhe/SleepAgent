@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
 from threading import RLock
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, Literal, Mapping, Protocol
 
 from pydantic import Field, model_validator
 
@@ -695,6 +695,8 @@ def accept_communication(
     require_personal_grounding: bool = False,
     authenticated_user_text: str = "",
     expected_audience_role: str | None = None,
+    elder_atom_numbers: Mapping[str, set[str]] | None = None,
+    mandatory_elder_atom_refs: set[str] | None = None,
 ) -> AcceptedWorkProduct:
     _require_common(envelope, snapshot)
     if envelope.agent_id != AgentId.SLEEP_CARE:
@@ -733,7 +735,11 @@ def accept_communication(
         raise AcceptanceError("Communication Care action lacks semantic binding")
     if require_personal_grounding and accepted_evidence:
         has_personal_claims = bool(accepted_evidence.payload.get("claims"))
-        if has_personal_claims and not payload.claim_refs:
+        if (
+            has_personal_claims
+            and not payload.claim_refs
+            and not elder_atom_numbers
+        ):
             raise AcceptanceError(
                 "personalized Communication must cite accepted Evidence"
             )
@@ -747,7 +753,10 @@ def accept_communication(
         care_by_id[action["candidate_id"]] = action
     reviewed_knowledge_refs = reviewed_knowledge_refs or set()
     reviewed_knowledge_payloads = reviewed_knowledge_payloads or {}
+    elder_atom_numbers = elder_atom_numbers or {}
+    mandatory_elder_atom_refs = mandatory_elder_atom_refs or set()
     bound_numbers: set[str] = set()
+    bound_elder_atoms: set[str] = set()
     for binding in payload.semantic_bindings:
         if binding.source_kind == "evidence_claim":
             source = evidence_by_id.get(binding.source_ref)
@@ -757,6 +766,25 @@ def accept_communication(
             source = care_by_id.get(binding.source_ref)
             if source is None:
                 raise AcceptanceError("Communication binding cites unknown Care action")
+        elif binding.source_kind == "elder_atom":
+            if binding.source_ref not in elder_atom_numbers:
+                raise AcceptanceError(
+                    "Communication binding cites an unknown Elder atom"
+                )
+            rendered_numbers = _numeric_tokens(binding.rendered_text)
+            if set(binding.preserved_numbers) != rendered_numbers:
+                raise AcceptanceError(
+                    "Communication Elder binding must enumerate every number"
+                )
+            if not rendered_numbers.issubset(
+                elder_atom_numbers[binding.source_ref]
+            ):
+                raise AcceptanceError(
+                    "Communication changes or invents an Elder display number"
+                )
+            bound_numbers.update(rendered_numbers)
+            bound_elder_atoms.add(binding.source_ref)
+            continue
         else:
             if binding.source_ref not in reviewed_knowledge_refs:
                 raise AcceptanceError(
@@ -778,6 +806,10 @@ def accept_communication(
                 "Communication changes or invents an upstream number"
             )
         bound_numbers.update(rendered_numbers)
+    if not mandatory_elder_atom_refs.issubset(bound_elder_atoms):
+        raise AcceptanceError("Communication omitted mandatory Elder meaning")
+    if bound_elder_atoms and payload.audience_role != "elder":
+        raise AcceptanceError("Elder atom Communication crossed an audience boundary")
     if not _numeric_tokens(payload.text).issubset(bound_numbers):
         raise AcceptanceError("Communication contains an unbound number")
     explicit_memory_markers = (

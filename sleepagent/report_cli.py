@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sys
+import time
 import urllib.error
 from dataclasses import dataclass
 from datetime import date
@@ -341,6 +342,7 @@ def execute_command(
             if args.timeout is None
             else float(args.timeout)
         )
+        deadline = time.monotonic() + timeout
         report = _sanitize_payload(
             client.await_report(
                 wake_date=wake_date,
@@ -351,6 +353,15 @@ def execute_command(
             include_trace=include_trace,
         )
         _validate_payload(report)
+        if config.role == "elder":
+            report = _await_elder_narrative_terminal(
+                client=client,
+                report=report,
+                wake_date=wake_date,
+                deadline=deadline,
+                interval_seconds=config.poll_interval_seconds,
+                include_trace=include_trace,
+            )
         return CliOutcome(
             payload=report,
             exit_code=_report_exit_code(report),
@@ -727,12 +738,13 @@ def _validate_report(
         if narrative_state not in NARRATIVE_STATES:
             raise ReportCliError("report narrative contains an unsupported state")
         narrative_text = narrative.get("text")
-        if narrative_state == "ready" and (
+        publishes_text = narrative_state in {"ready", "fallback"}
+        if publishes_text and (
             not isinstance(narrative_text, str) or not narrative_text.strip()
         ):
-            raise ReportCliError("ready narrative omitted its text")
-        if narrative_state != "ready" and narrative_text is not None:
-            raise ReportCliError("non-ready narrative carried text")
+            raise ReportCliError("publishable narrative omitted its text")
+        if not publishes_text and narrative_text is not None:
+            raise ReportCliError("non-publishable narrative carried text")
     narrative_state = report.get("narrative_state")
     if narrative_state is not None and narrative_state not in NARRATIVE_STATES:
         raise ReportCliError("report summary contains an unsupported narrative state")
@@ -780,6 +792,8 @@ def _render_text(payload: Mapping[str, Any], *, include_trace: bool) -> str:
     schema_version = payload.get("schema_version")
     if schema_version == "product_sleep_report_list.v1":
         return _render_report_list(payload, include_trace=include_trace)
+    if payload.get("audience") == "elder" and payload.get("state") == "ready":
+        return _render_elder_report(payload, include_trace=include_trace)
     lines = [
         f"wake_date: {payload.get('wake_date')}",
         f"state: {payload.get('state')}",
@@ -811,6 +825,86 @@ def _render_text(payload: Mapping[str, Any], *, include_trace: bool) -> str:
             if field in trace:
                 lines.append(f"  {field}: {trace[field]}")
     return "\n".join(lines)
+
+
+def _render_elder_report(
+    payload: Mapping[str, Any],
+    *,
+    include_trace: bool,
+) -> str:
+    """Render one narrative-first Elder view without duplicating caveats."""
+
+    lines = [
+        f"wake_date: {payload.get('wake_date')}",
+        f"state: {payload.get('state')}",
+    ]
+    if payload.get("quality") is not None:
+        lines.append(f"quality: {payload.get('quality')}")
+    narrative = payload.get("narrative")
+    projection = payload.get("projection")
+    narrative_state = (
+        narrative.get("state") if isinstance(narrative, Mapping) else None
+    )
+    narrative_text = (
+        narrative.get("text") if isinstance(narrative, Mapping) else None
+    )
+    fallback_text = (
+        projection.get("summary_text")
+        if isinstance(projection, Mapping)
+        else None
+    )
+    if narrative_state in {"ready", "fallback"} and isinstance(
+        narrative_text, str
+    ):
+        lines.extend(("", narrative_text))
+    elif isinstance(fallback_text, str):
+        lines.extend(("", fallback_text))
+        if narrative_state == "pending":
+            lines.extend(("", "自然语言报告生成中。"))
+    if include_trace and isinstance(payload.get("trace"), Mapping):
+        lines.append("trace:")
+        trace = payload["trace"]
+        assert isinstance(trace, Mapping)
+        for field in sorted(TRACE_FIELDS):
+            if field in trace:
+                lines.append(f"  {field}: {trace[field]}")
+    return "\n".join(lines)
+
+
+def _await_elder_narrative_terminal(
+    *,
+    client: ReportClient,
+    report: dict[str, Any],
+    wake_date: date,
+    deadline: float,
+    interval_seconds: float,
+    include_trace: bool,
+) -> dict[str, Any]:
+    """Continue GET polling after shared readiness until Elder prose settles."""
+
+    current = report
+    while current.get("state") == "ready":
+        narrative = current.get("narrative")
+        narrative_state = (
+            narrative.get("state")
+            if isinstance(narrative, Mapping)
+            else None
+        )
+        if narrative_state in {"ready", "fallback", "failed"}:
+            return current
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Elder narrative did not reach a terminal state")
+        time.sleep(min(interval_seconds, remaining))
+        current = _sanitize_payload(
+            client.get_report(
+                wake_date=wake_date,
+                include_trace=include_trace,
+            ),
+            include_trace=include_trace,
+        )
+        _validate_payload(current)
+    return current
 
 
 def _render_report_list(

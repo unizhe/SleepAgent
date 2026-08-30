@@ -7,8 +7,15 @@ from __future__ import annotations
 """定义角色报告的稳定角色合同，不负责报告渲染。"""
 
 from enum import Enum
+import re
 
-from pydantic import Field, field_serializer, model_validator
+from pydantic import (
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
 
 from sleepagent.runtime.schemas import RadarAgentSchema, RoleReportArtifact
 
@@ -54,7 +61,7 @@ class RoleReportBundle(RadarAgentSchema):
 
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 from sleepagent.runtime.knowledge import grounded_citation_refs
 from sleepagent.runtime.schemas import (
@@ -577,7 +584,9 @@ def build_elder_narrative_runtime_manifest(
         "result_schema": ELDER_NARRATIVE_SCHEMA_VERSION,
         "prompt_compiler_version": prompt_compiler_version,
         "safety_policy_version": safety_policy_version,
-        "render_policy_version": "elder_narrative_render.v1",
+        "render_policy_version": "elder_narrative_render.v2",
+        "rewrite_policy_version": "bounded_atom_selection.v1",
+        "numeric_rendering_policy": "runtime_defined_display_only.v1",
         "profile": dict(profile),
         "skill": dict(skill),
         "model": dict(model),
@@ -870,8 +879,9 @@ def _projection_hash_material(
     caveats: tuple[str, ...],
     safety_notices: tuple[str, ...],
     failure_codes: tuple[str, ...],
+    presentation_authority_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    material = {
         "schema_version": ROLE_PROJECTION_SCHEMA_VERSION,
         "role": role.value,
         "state": state.value,
@@ -888,6 +898,557 @@ def _projection_hash_material(
         "safety_notices": list(safety_notices),
         "failure_codes": list(failure_codes),
     }
+    if presentation_authority_sha256 is not None:
+        material["presentation_authority_sha256"] = (
+            presentation_authority_sha256
+        )
+    return material
+
+
+_ELDER_NUMBER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?%?"
+)
+_ELDER_FORBIDDEN_PUBLIC_TERMS = (
+    "本次已验收信息：",
+    "HIPAA",
+    "FDA",
+    "pull-backfilled",
+    "reconstructed cadence",
+    "context_notice",
+)
+
+
+class ElderNumericBinding(StrictContract):
+    binding_key: str = Field(..., min_length=1, max_length=80)
+    value: int | float
+    unit: Literal["minutes", "count"]
+    display_value: str = Field(..., min_length=1, max_length=40)
+    approximation: Literal["exact", "about"] = "exact"
+
+    @model_validator(mode="after")
+    def validate_runtime_display(self) -> "ElderNumericBinding":
+        if self.value < 0:
+            raise ValueError("Elder numeric binding cannot be negative")
+        if self.unit == "count" and (
+            not isinstance(self.value, int)
+            or self.display_value != str(self.value)
+            or self.approximation != "exact"
+        ):
+            raise ValueError("Elder count display must preserve the exact integer")
+        if self.unit == "minutes" and self.display_value != _elder_display_number(
+            float(self.value)
+        ):
+            raise ValueError("Elder minute display must use Runtime rounding")
+        return self
+
+
+class ElderAtomRendering(StrictContract):
+    rendering_id: str = Field(..., min_length=1, max_length=100)
+    text: str = Field(..., min_length=1, max_length=1600)
+
+
+class ElderMessageAtom(StrictContract):
+    """Runtime-owned Elder meaning with a finite set of safe zh-CN renderings."""
+
+    atom_id: str = Field(..., pattern=r"^elder-atom:[0-9a-f]{32}$")
+    semantic_type: Literal[
+        "sleep_stage_summary",
+        "bed_exit_observation",
+        "quality_caveat",
+        "observation_boundary",
+    ]
+    priority: int = Field(..., ge=1, le=100)
+    mandatory: bool
+    numeric_bindings: tuple[ElderNumericBinding, ...] = ()
+    localized_display_values: dict[str, str] = Field(default_factory=dict)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    quality_classification: Literal["good", "partial", "not_applicable"]
+    risk_state: str = Field(..., min_length=1, max_length=100)
+    care_state: Literal["not_presented"] = "not_presented"
+    safety_classification: Literal[
+        "observational",
+        "non_diagnostic_boundary",
+    ]
+    allowed_elder_meaning: str = Field(..., min_length=1, max_length=800)
+    renderings: tuple[ElderAtomRendering, ...] = Field(min_length=1, max_length=4)
+    fallback_rendering_id: str = Field(..., min_length=1, max_length=100)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        semantic_type: Literal[
+            "sleep_stage_summary",
+            "bed_exit_observation",
+            "quality_caveat",
+            "observation_boundary",
+        ],
+        priority: int,
+        mandatory: bool,
+        numeric_bindings: tuple[ElderNumericBinding, ...] = (),
+        localized_display_values: dict[str, str] | None = None,
+        source_refs: tuple[str, ...],
+        quality_classification: Literal["good", "partial", "not_applicable"],
+        risk_state: str,
+        safety_classification: Literal[
+            "observational",
+            "non_diagnostic_boundary",
+        ],
+        renderings: tuple[ElderAtomRendering, ...],
+        fallback_rendering_id: str,
+        allowed_elder_meaning: str,
+    ) -> "ElderMessageAtom":
+        authority = {
+            "semantic_type": semantic_type,
+            "priority": priority,
+            "mandatory": mandatory,
+            "numeric_bindings": [
+                item.model_dump(mode="json") for item in numeric_bindings
+            ],
+            "localized_display_values": localized_display_values or {},
+            "source_refs": list(source_refs),
+            "quality_classification": quality_classification,
+            "risk_state": risk_state,
+            "care_state": "not_presented",
+            "safety_classification": safety_classification,
+            "allowed_elder_meaning": allowed_elder_meaning,
+            "renderings": [item.model_dump(mode="json") for item in renderings],
+            "fallback_rendering_id": fallback_rendering_id,
+        }
+        return cls(
+            atom_id="elder-atom:" + stable_hash(authority)[:32],
+            **authority,
+        )
+
+    @model_validator(mode="after")
+    def validate_bounded_renderings(self) -> "ElderMessageAtom":
+        expected_atom_id = "elder-atom:" + stable_hash(
+            self.model_dump(mode="json", exclude={"atom_id"})
+        )[:32]
+        if self.atom_id != expected_atom_id:
+            raise ValueError("Elder atom ID is inconsistent with its authority")
+        rendering_ids = tuple(item.rendering_id for item in self.renderings)
+        if len(rendering_ids) != len(set(rendering_ids)):
+            raise ValueError("Elder atom rendering IDs must be unique")
+        if self.fallback_rendering_id not in rendering_ids:
+            raise ValueError("Elder atom fallback rendering is unavailable")
+        binding_keys = tuple(item.binding_key for item in self.numeric_bindings)
+        if len(binding_keys) != len(set(binding_keys)):
+            raise ValueError("Elder numeric binding keys must be unique")
+        allowed_numbers = {
+            token
+            for value in (
+                *(
+                    item.display_value
+                    for item in self.numeric_bindings
+                ),
+                *self.localized_display_values.values(),
+            )
+            for token in _ELDER_NUMBER_PATTERN.findall(value)
+        }
+        for rendering in self.renderings:
+            if not re.search(r"[\u3400-\u9fff]", rendering.text):
+                raise ValueError("Elder atom rendering must be zh-CN-compatible")
+            if any(
+                forbidden.lower() in rendering.text.lower()
+                for forbidden in _ELDER_FORBIDDEN_PUBLIC_TERMS
+            ):
+                raise ValueError("Elder atom rendering exposes internal prose")
+            rendered_numbers = set(
+                _ELDER_NUMBER_PATTERN.findall(rendering.text)
+            )
+            if not rendered_numbers.issubset(allowed_numbers):
+                raise ValueError("Elder atom rendering has an unsupported number")
+            if any(
+                item.display_value not in rendering.text
+                for item in self.numeric_bindings
+            ):
+                raise ValueError(
+                    "Elder atom rendering omitted a Runtime numeric display"
+                )
+        if any(
+            "utc" in value.lower()
+            for value in self.localized_display_values.values()
+        ):
+            raise ValueError("Elder localized display cannot expose UTC")
+        return self
+
+    def rendering(self, rendering_id: str) -> ElderAtomRendering:
+        try:
+            return next(
+                item for item in self.renderings
+                if item.rendering_id == rendering_id
+            )
+        except StopIteration as exc:
+            raise ValueError("Elder atom rendering is not authorized") from exc
+
+
+def elder_presentation_authority_sha256(
+    atoms: tuple[ElderMessageAtom, ...],
+) -> str:
+    if not atoms:
+        raise ValueError("Elder presentation authority requires message atoms")
+    return stable_hash([item.model_dump(mode="json") for item in atoms])
+
+
+def deterministic_elder_fallback(
+    atoms: tuple[ElderMessageAtom, ...],
+) -> str:
+    mandatory = tuple(item for item in atoms if item.mandatory)
+    if not mandatory:
+        raise ValueError("deterministic Elder fallback requires mandatory atoms")
+    ordered = sorted(mandatory, key=lambda item: (item.priority, item.atom_id))
+    return "\n\n".join(
+        item.rendering(item.fallback_rendering_id).text
+        for item in ordered
+    )
+
+
+def _elder_display_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+class _ElderPresentationFactsPort(Protocol):
+    source_refs: tuple[str, ...]
+    stage_observation_minutes: float
+    presented_stage_local_display: str | None
+    stage_boundary_state: str
+    classified_stage_minutes: dict[str, float]
+    classified_totals_state: str
+    bed_exit_count: int
+    bed_exit_local_times: tuple[str, ...]
+    invalid_interval_count: int
+    out_of_episode_interval_count: int
+
+
+def build_elder_message_atoms(
+    shared: SharedNightAnalysis,
+    presentation: _ElderPresentationFactsPort,
+) -> tuple[ElderMessageAtom, ...]:
+    """Build the small, role-filtered Elder authority from accepted analysis."""
+
+    authority_refs = tuple(
+        dict.fromkeys(
+            (
+                f"shared_analysis:sha256:{shared.shared_analysis_sha256}",
+                shared.evidence.work_product_ref,
+                *presentation.source_refs,
+            )
+        )
+    )
+    risk_state = shared.source.risk_state
+    atoms: list[ElderMessageAtom] = []
+
+    summary_bindings: list[ElderNumericBinding] = []
+    localized_values: dict[str, str] = {}
+    if presentation.stage_observation_minutes > 0:
+        observed = _elder_display_number(
+            presentation.stage_observation_minutes
+        )
+        summary_bindings.append(
+            ElderNumericBinding(
+                binding_key="stage_observation_minutes",
+                value=presentation.stage_observation_minutes,
+                unit="minutes",
+                display_value=observed,
+                approximation="about",
+            )
+        )
+        local_span = presentation.presented_stage_local_display
+        if local_span is not None:
+            localized_values["stage_observation_local_span"] = local_span
+        constrained = (
+            presentation.stage_boundary_state == "constrained_to_episode"
+        )
+        span_phrase = (
+            ""
+            if local_span is None
+            else (
+                f"按夜间时段范围，设备在{local_span}"
+                if constrained
+                else f"设备在{local_span}"
+            )
+        )
+        if not span_phrase:
+            span_phrase = "设备"
+        stage_parts: list[str] = []
+        stage_names = {
+            "light": "浅睡",
+            "deep": "深睡",
+            "rem": "REM 睡眠",
+        }
+        if presentation.classified_totals_state == "reliable":
+            for stage in ("light", "deep", "rem"):
+                minutes = presentation.classified_stage_minutes.get(stage, 0.0)
+                if minutes <= 0:
+                    continue
+                displayed = _elder_display_number(minutes)
+                summary_bindings.append(
+                    ElderNumericBinding(
+                        binding_key=f"stage_minutes.{stage}",
+                        value=minutes,
+                        unit="minutes",
+                        display_value=displayed,
+                        approximation="about",
+                    )
+                )
+                stage_parts.append(f"{stage_names[stage]}约{displayed}分钟")
+        breakdown = ""
+        if stage_parts:
+            breakdown = "，其中" + "、".join(stage_parts)
+        overlap_notice = (
+            "。分期区间存在重叠，因此本次不展示各阶段分钟数。"
+            if presentation.classified_totals_state == "overlap_ambiguous"
+            else "。"
+        )
+        summary_text = (
+            f"您好。{span_phrase}记录到约{observed}分钟的睡眠分期数据"
+            f"{breakdown}{overlap_notice}"
+        )
+        alternate = (
+            f"您好。本次{span_phrase}记录到的睡眠分期数据约为{observed}分钟"
+            f"{breakdown}{overlap_notice}"
+        )
+    else:
+        summary_text = "您好。本次设备记录未形成可安全展示的睡眠分期摘要。"
+        alternate = "您好。本次暂时没有可安全展示的睡眠分期摘要。"
+    atoms.append(
+        ElderMessageAtom.create(
+            semantic_type="sleep_stage_summary",
+            priority=10,
+            mandatory=True,
+            numeric_bindings=tuple(summary_bindings),
+            localized_display_values=localized_values,
+            source_refs=authority_refs,
+            quality_classification=shared.source.quality_state,
+            risk_state=risk_state,
+            safety_classification="observational",
+            allowed_elder_meaning=(
+                "仅说明设备记录到的分期数据时长、主体本地记录时段和可安全理解的主要分期分钟数；"
+                "不把分期观测跨度表述为总睡眠时长。"
+            ),
+            renderings=(
+                ElderAtomRendering(
+                    rendering_id="sleep-stage-summary.default",
+                    text=summary_text,
+                ),
+                ElderAtomRendering(
+                    rendering_id="sleep-stage-summary.alternate",
+                    text=alternate,
+                ),
+            ),
+            fallback_rendering_id="sleep-stage-summary.default",
+        )
+    )
+
+    if presentation.bed_exit_count:
+        count = str(presentation.bed_exit_count)
+        bed_bindings = (
+            ElderNumericBinding(
+                binding_key="bed_exit_count",
+                value=presentation.bed_exit_count,
+                unit="count",
+                display_value=count,
+            ),
+        )
+        first_time = (
+            presentation.bed_exit_local_times[0]
+            if presentation.bed_exit_local_times
+            else None
+        )
+        bed_local_values = (
+            {} if first_time is None else {"first_bed_exit_local_time": first_time}
+        )
+        time_suffix = "" if first_time is None else f"，首次在{first_time}左右"
+        bed_text = f"设备在已记录时段内记录到{count}次离床{time_suffix}。"
+        bed_alternate = f"已记录时段内共有{count}次离床记录{time_suffix}。"
+    else:
+        bed_bindings = ()
+        bed_local_values = {}
+        bed_text = "在设备已记录的时段内，没有记录到离床。"
+        bed_alternate = "设备已记录的时段内未见离床记录。"
+    atoms.append(
+        ElderMessageAtom.create(
+            semantic_type="bed_exit_observation",
+            priority=20,
+            mandatory=True,
+            numeric_bindings=bed_bindings,
+            localized_display_values=bed_local_values,
+            source_refs=authority_refs,
+            quality_classification=shared.source.quality_state,
+            risk_state=risk_state,
+            safety_classification="observational",
+            allowed_elder_meaning="仅说明设备已记录时段内的离床观察，不外推未覆盖时段。",
+            renderings=(
+                ElderAtomRendering(
+                    rendering_id="bed-exit.default",
+                    text=bed_text,
+                ),
+                ElderAtomRendering(
+                    rendering_id="bed-exit.alternate",
+                    text=bed_alternate,
+                ),
+            ),
+            fallback_rendering_id="bed-exit.default",
+        )
+    )
+
+    presentation_limited = bool(
+        presentation.invalid_interval_count
+        or presentation.out_of_episode_interval_count
+        or presentation.classified_totals_state == "overlap_ambiguous"
+    )
+    if shared.source.partial_caveat is not None or presentation_limited:
+        quality_text = (
+            "本次部分时段的数据不完整，因此结果仅作为日常睡眠观察参考，"
+            "建议结合之后几晚的数据继续观察。"
+        )
+        quality_alternate = (
+            "本次有部分时段的数据不完整，结果仅供日常睡眠观察；"
+            "可以结合后续几晚的记录继续查看。"
+        )
+        atoms.append(
+            ElderMessageAtom.create(
+                semantic_type="quality_caveat",
+                priority=30,
+                mandatory=True,
+                source_refs=authority_refs,
+                quality_classification="partial",
+                risk_state=risk_state,
+                safety_classification="observational",
+                allowed_elder_meaning=(
+                    "保留一次 PARTIAL 或展示受限含义，并将结果限定为日常观察。"
+                ),
+                renderings=(
+                    ElderAtomRendering(
+                        rendering_id="quality-caveat.default",
+                        text=quality_text,
+                    ),
+                    ElderAtomRendering(
+                        rendering_id="quality-caveat.alternate",
+                        text=quality_alternate,
+                    ),
+                ),
+                fallback_rendering_id="quality-caveat.default",
+            )
+        )
+
+    atoms.append(
+        ElderMessageAtom.create(
+            semantic_type="observation_boundary",
+            priority=40,
+            mandatory=True,
+            source_refs=authority_refs,
+            quality_classification="not_applicable",
+            risk_state=risk_state,
+            safety_classification="non_diagnostic_boundary",
+            allowed_elder_meaning=(
+                "说明报告由 AI 辅助整理、仅用于睡眠观察，且不构成诊断或医疗建议。"
+            ),
+            renderings=(
+                ElderAtomRendering(
+                    rendering_id="boundary.default",
+                    text=(
+                        "本报告由 AI 辅助整理，仅用于睡眠观察，"
+                        "不构成诊断或医疗建议。"
+                    ),
+                ),
+                ElderAtomRendering(
+                    rendering_id="boundary.alternate",
+                    text=(
+                        "以上内容由 AI 辅助整理，仅供睡眠观察参考，"
+                        "不能替代诊断或医疗建议。"
+                    ),
+                ),
+            ),
+            fallback_rendering_id="boundary.default",
+        )
+    )
+    result = tuple(sorted(atoms, key=lambda item: (item.priority, item.atom_id)))
+    validate_elder_message_atoms(shared, result)
+    return result
+
+
+def validate_elder_message_atoms(
+    shared: SharedNightAnalysis,
+    atoms: tuple[ElderMessageAtom, ...],
+) -> None:
+    """Bind every Elder atom to one accepted SharedNightAnalysis authority."""
+
+    if not atoms:
+        raise ValueError("Elder message atom authority cannot be empty")
+    semantic_types = tuple(item.semantic_type for item in atoms)
+    if len(semantic_types) != len(set(semantic_types)):
+        raise ValueError("Elder message atom semantic types must be unique")
+    required_types = {
+        "sleep_stage_summary",
+        "bed_exit_observation",
+        "observation_boundary",
+    }
+    if not required_types.issubset(semantic_types):
+        raise ValueError("Elder message atom authority omitted default meaning")
+    quality_atoms = tuple(
+        item for item in atoms if item.semantic_type == "quality_caveat"
+    )
+    if shared.source.partial_caveat is not None and len(quality_atoms) != 1:
+        raise ValueError("PARTIAL shared analysis requires one Elder caveat atom")
+    required_refs = {
+        f"shared_analysis:sha256:{shared.shared_analysis_sha256}",
+        shared.evidence.work_product_ref,
+    }
+    for atom in atoms:
+        if not required_refs.issubset(atom.source_refs):
+            raise ValueError("Elder atom is not bound to accepted Shared Analysis")
+        if atom.risk_state != shared.source.risk_state:
+            raise ValueError("Elder atom changed shared risk meaning")
+    boundary = next(
+        item for item in atoms
+        if item.semantic_type == "observation_boundary"
+    )
+    if boundary.safety_classification != "non_diagnostic_boundary":
+        raise ValueError("Elder boundary changed safety meaning")
+
+
+def validate_elder_communication_draft(
+    draft: CommunicationDraft,
+    atoms: tuple[ElderMessageAtom, ...],
+) -> None:
+    """Validate the selected finite renderings without semantic guesswork."""
+
+    atoms_by_id = {item.atom_id: item for item in atoms}
+    bindings = tuple(draft.semantic_bindings)
+    binding_refs = tuple(item.source_ref for item in bindings)
+    if (
+        draft.audience_role != "elder"
+        or draft.claim_refs
+        or draft.care_candidate_refs
+        or draft.memory_change_candidates
+        or not bindings
+        or any(item.source_kind != "elder_atom" for item in bindings)
+        or len(binding_refs) != len(set(binding_refs))
+        or not set(binding_refs).issubset(atoms_by_id)
+    ):
+        raise ValueError("Elder Communication exceeds message-atom authority")
+    mandatory_refs = {
+        item.atom_id for item in atoms if item.mandatory
+    }
+    if not mandatory_refs.issubset(binding_refs):
+        raise ValueError("Elder Communication omitted mandatory atoms")
+    for binding in bindings:
+        allowed_text = {
+            item.text for item in atoms_by_id[binding.source_ref].renderings
+        }
+        if binding.rendered_text not in allowed_text:
+            raise ValueError("Elder Communication invented a rendering")
+    ordered = sorted(
+        bindings,
+        key=lambda item: (
+            atoms_by_id[item.source_ref].priority,
+            binding_refs.index(item.source_ref),
+        ),
+    )
+    if draft.text != "\n\n".join(item.rendered_text for item in ordered):
+        raise ValueError("Elder Communication text differs from bound renderings")
 
 
 class RoleProjection(StrictContract):
@@ -909,9 +1470,30 @@ class RoleProjection(StrictContract):
     caveats: tuple[str, ...] = ()
     safety_notices: tuple[str, ...] = ()
     failure_codes: tuple[str, ...] = ()
+    presentation_authority_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_serializer(mode="wrap")
+    def serialize_projection(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        payload = dict(handler(self))
+        if self.presentation_authority_sha256 is None:
+            payload.pop("presentation_authority_sha256", None)
+        return payload
 
     @model_validator(mode="after")
     def validate_projection(self) -> "RoleProjection":
+        if self.presentation_authority_sha256 is not None and (
+            self.role is not ReportRole.ELDER
+            or self.state is not RoleProjectionState.READY
+        ):
+            raise ValueError(
+                "presentation authority is limited to the ready Elder projection"
+            )
         if self.state is RoleProjectionState.READY:
             if self.text is None or self.failure_codes:
                 raise ValueError("ready projection requires text without failures")
@@ -935,6 +1517,9 @@ class RoleProjection(StrictContract):
                 caveats=self.caveats,
                 safety_notices=self.safety_notices,
                 failure_codes=self.failure_codes,
+                presentation_authority_sha256=(
+                    self.presentation_authority_sha256
+                ),
             )
         )
         if self.projection_sha256 != expected:
@@ -952,7 +1537,7 @@ _SHARED_REPORT_SAFETY_NOTICES = (
 
 def build_role_projection_runtime_manifest(
     *,
-    projection_policy_version: str = "shared_role_projection.v1",
+    projection_policy_version: str = "shared_role_projection.v2",
 ) -> dict[str, Any]:
     """Canonical deterministic projection pins, independent of analysis."""
 
@@ -960,7 +1545,13 @@ def build_role_projection_runtime_manifest(
         "schema_version": "role_projection_runtime_manifest.v1",
         "projection_schema": ROLE_PROJECTION_SCHEMA_VERSION,
         "projection_policy_version": projection_policy_version,
-        "projector_version": "build_shared_role_projections.v1",
+        "projector_version": "build_shared_role_projections.v2",
+        "elder_presentation_policy_version": (
+            "bounded_semantic_elder_atoms.v1"
+        ),
+        "elder_numeric_rendering_policy": (
+            "runtime_defined_display_only.v1"
+        ),
         "safety_notices_sha256": stable_hash(_SHARED_REPORT_SAFETY_NOTICES),
     }
 
@@ -987,8 +1578,13 @@ def role_projection_identity_sha256(
 
 def build_shared_role_projections(
     shared: SharedNightAnalysis,
+    *,
+    elder_message_atoms: tuple[ElderMessageAtom, ...] = (),
 ) -> tuple[RoleProjection, RoleProjection, RoleProjection]:
     """Build all three deterministic views without invoking a model."""
+
+    if elder_message_atoms:
+        validate_elder_message_atoms(shared, elder_message_atoms)
 
     evidence = ProductEvidencePacket.model_validate(shared.evidence.payload)
     care = (
@@ -1040,25 +1636,33 @@ def build_shared_role_projections(
         else:
             state = RoleProjectionState.READY
             failure_codes = ()
-            heading = {
-                ReportRole.ELDER: (
-                    "我们根据昨夜设备记录，为您整理了这些观察："
-                ),
-                ReportRole.FAMILY: "以下内容用于家属连续观察与照护协同：",
-                ReportRole.DOCTOR: "以下为已验收睡眠观察摘要：",
-            }[role]
-            lines = [heading, *[f"- {line}" for line in shared.summary_lines]]
-            if shared.source.partial_caveat:
-                lines.extend(("数据说明：", f"- {shared.source.partial_caveat}"))
-            lines.extend(
-                (
-                    "观察边界：",
-                    *[f"- {item}" for item in role_caveats],
-                    "安全说明：",
-                    *[f"- {item}" for item in _SHARED_REPORT_SAFETY_NOTICES],
+            if role is ReportRole.ELDER and elder_message_atoms:
+                text = deterministic_elder_fallback(elder_message_atoms)
+            else:
+                heading = {
+                    ReportRole.ELDER: (
+                        "我们根据昨夜设备记录，为您整理了这些观察："
+                    ),
+                    ReportRole.FAMILY: "以下内容用于家属连续观察与照护协同：",
+                    ReportRole.DOCTOR: "以下为已验收睡眠观察摘要：",
+                }[role]
+                lines = [heading, *[f"- {line}" for line in shared.summary_lines]]
+                if shared.source.partial_caveat:
+                    lines.extend(("数据说明：", f"- {shared.source.partial_caveat}"))
+                lines.extend(
+                    (
+                        "观察边界：",
+                        *[f"- {item}" for item in role_caveats],
+                        "安全说明：",
+                        *[f"- {item}" for item in _SHARED_REPORT_SAFETY_NOTICES],
+                    )
                 )
-            )
-            text = "\n".join(lines)
+                text = "\n".join(lines)
+        presentation_authority_sha256 = (
+            elder_presentation_authority_sha256(elder_message_atoms)
+            if role is ReportRole.ELDER and elder_message_atoms
+            else None
+        )
         material = _projection_hash_material(
             role=role,
             state=state,
@@ -1074,6 +1678,9 @@ def build_shared_role_projections(
             caveats=role_caveats,
             safety_notices=_SHARED_REPORT_SAFETY_NOTICES,
             failure_codes=failure_codes,
+            presentation_authority_sha256=(
+                presentation_authority_sha256
+            ),
         )
         projections.append(
             RoleProjection(
@@ -1092,6 +1699,9 @@ def build_shared_role_projections(
                 caveats=role_caveats,
                 safety_notices=_SHARED_REPORT_SAFETY_NOTICES,
                 failure_codes=failure_codes,
+                presentation_authority_sha256=(
+                    presentation_authority_sha256
+                ),
             )
         )
     return tuple(projections)  # type: ignore[return-value]
@@ -1104,6 +1714,7 @@ class ElderNarrativeRequest(StrictContract):
     runtime_request: ProductEpisodeRunRequest
     shared_analysis: SharedNightAnalysis
     elder_projection: RoleProjection
+    message_atoms: tuple[ElderMessageAtom, ...] = Field(min_length=1)
     source_projection_identity_sha256: str = Field(
         ...,
         pattern=r"^[0-9a-f]{64}$",
@@ -1122,6 +1733,7 @@ class ElderNarrativeRequest(StrictContract):
         runtime_request: ProductEpisodeRunRequest,
         shared_analysis: SharedNightAnalysis,
         elder_projection: RoleProjection,
+        message_atoms: tuple[ElderMessageAtom, ...],
         render_manifest_sha256: str,
         source_projection_identity_sha256: str | None = None,
     ) -> "ElderNarrativeRequest":
@@ -1142,6 +1754,7 @@ class ElderNarrativeRequest(StrictContract):
             runtime_request=runtime_request,
             shared_analysis=shared_analysis,
             elder_projection=elder_projection,
+            message_atoms=message_atoms,
             source_projection_identity_sha256=projection_identity,
             render_manifest_sha256=render_manifest_sha256,
             render_identity_sha256=identity,
@@ -1166,6 +1779,15 @@ class ElderNarrativeRequest(StrictContract):
             != self.shared_analysis.shared_analysis_sha256
         ):
             raise ValueError("elder narrative requires the ready shared elder projection")
+        if (
+            projection.presentation_authority_sha256 is None
+            or elder_presentation_authority_sha256(self.message_atoms)
+            != projection.presentation_authority_sha256
+        ):
+            raise ValueError(
+                "elder narrative atoms differ from projection authority"
+            )
+        validate_elder_message_atoms(self.shared_analysis, self.message_atoms)
         expected = stable_hash(
             {
                 "schema_version": ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION,
@@ -1234,6 +1856,9 @@ __all__ = [
     "ElderNarrative",
     "ElderNarrativeRequest",
     "ElderNarrativeState",
+    "ElderAtomRendering",
+    "ElderMessageAtom",
+    "ElderNumericBinding",
     "ReportRole",
     "RoleProjection",
     "RoleProjectionState",
@@ -1243,10 +1868,15 @@ __all__ = [
     "SharedAnalysisSourceV1",
     "SharedNightAnalysis",
     "build_elder_narrative_runtime_manifest",
+    "build_elder_message_atoms",
     "build_role_projection_runtime_manifest",
     "build_role_report_templates",
     "build_safe_model_pin",
     "build_shared_analysis_runtime_manifest",
     "build_shared_role_projections",
+    "deterministic_elder_fallback",
+    "elder_presentation_authority_sha256",
+    "validate_elder_communication_draft",
+    "validate_elder_message_atoms",
     "role_projection_identity_sha256",
 ]

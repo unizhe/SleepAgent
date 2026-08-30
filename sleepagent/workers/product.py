@@ -58,6 +58,7 @@ from sleepagent.runtime.results import (
 )
 from sleepagent.runtime.registry import product_agent_manifest
 from sleepagent.runtime.reports import (
+    ElderMessageAtom,
     ElderNarrative,
     ElderNarrativeRequest,
     ReportRole,
@@ -67,6 +68,7 @@ from sleepagent.runtime.reports import (
     SharedAnalysisSourceV1,
     SharedNightAnalysis,
     build_elder_narrative_runtime_manifest,
+    build_elder_message_atoms,
     build_role_projection_runtime_manifest,
     build_safe_model_pin,
     build_shared_analysis_runtime_manifest,
@@ -1561,7 +1563,14 @@ class ProductAgentProcessor:
                 runtime_request=runtime_request,
             )
         )
-        projections = build_shared_role_projections(shared_analysis)
+        elder_message_atoms = build_elder_message_atoms(
+            shared_analysis,
+            source.facts.elder_presentation_facts(),
+        )
+        projections = build_shared_role_projections(
+            shared_analysis,
+            elder_message_atoms=elder_message_atoms,
+        )
         projection_manifest = build_role_projection_runtime_manifest()
         projection_manifest_sha256 = stable_hash(projection_manifest)
         projection_identities = {
@@ -1791,10 +1800,19 @@ class ProductAgentProcessor:
             personalization=None,
             personalization_projection_version="selected_stable.v1",
         )
+        atom_values = source.operation_json.get("elder_message_atoms")
+        if not isinstance(atom_values, list) or not atom_values:
+            raise ProductAgentInvariantError(
+                "elder narrative operation has no typed message atoms"
+            )
+        message_atoms = tuple(
+            ElderMessageAtom.model_validate(item) for item in atom_values
+        )
         narrative_request = ElderNarrativeRequest.create(
             runtime_request=runtime_request,
             shared_analysis=committed_shared.shared_analysis,
             elder_projection=elder_projection,
+            message_atoms=message_atoms,
             render_manifest_sha256=narrative_manifest_sha256,
             source_projection_identity_sha256=(
                 projection_identity_sha256
@@ -3444,6 +3462,7 @@ class PostgresProductAgentRepository:
                     ),
                     narrative_manifest=narrative_manifest,
                     narrative_manifest_sha256=narrative_manifest_sha256,
+                    source=source,
                 )
                 ready_result = existing_operation_json.get("result")
                 if not isinstance(ready_result, Mapping):
@@ -3539,11 +3558,20 @@ class PostgresProductAgentRepository:
         projection_manifest_sha256: str,
         narrative_manifest: Mapping[str, Any],
         narrative_manifest_sha256: str,
+        source: LoadedProductAgentSource,
     ) -> tuple[str, bool]:
         committed_shared = self._load_committed_v3_shared_attempt(
             cursor,
             operation_id=shared_operation_id,
             operation_json=shared_operation_json,
+        )
+        if committed_shared.shared_analysis is None:
+            raise ProductAgentInvariantError(
+                "succeeded shared operation has no shared analysis"
+            )
+        elder_message_atoms = build_elder_message_atoms(
+            committed_shared.shared_analysis,
+            source.facts.elder_presentation_facts(),
         )
         refreshed_projections, projection_identities = (
             self._refresh_role_projections_for_succeeded_shared(
@@ -3552,6 +3580,7 @@ class PostgresProductAgentRepository:
                 projection_manifest=projection_manifest,
                 projection_manifest_sha256=projection_manifest_sha256,
                 refreshed_at=reserved_at,
+                elder_message_atoms=elder_message_atoms,
             )
         )
         elder_projection = next(
@@ -3572,6 +3601,7 @@ class PostgresProductAgentRepository:
             projection_manifest_sha256=projection_manifest_sha256,
             narrative_manifest=narrative_manifest,
             narrative_manifest_sha256=narrative_manifest_sha256,
+            elder_message_atoms=elder_message_atoms,
         )
 
     def _load_committed_v3_shared_attempt(
@@ -3649,6 +3679,7 @@ class PostgresProductAgentRepository:
         projection_manifest: Mapping[str, Any],
         projection_manifest_sha256: str,
         refreshed_at: datetime,
+        elder_message_atoms: tuple[ElderMessageAtom, ...],
     ) -> tuple[
         tuple[RoleProjection, RoleProjection, RoleProjection],
         dict[str, str],
@@ -3665,7 +3696,10 @@ class PostgresProductAgentRepository:
             raise ProductAgentInvariantError(
                 "projection refresh has no valid committed shared source"
             )
-        projections = build_shared_role_projections(artifact.shared_analysis)
+        projections = build_shared_role_projections(
+            artifact.shared_analysis,
+            elder_message_atoms=elder_message_atoms,
+        )
         projection_identities = {
             projection.role.value: role_projection_identity_sha256(
                 desired_analysis_sha256=artifact.desired_analysis_sha256,
@@ -3795,6 +3829,7 @@ class PostgresProductAgentRepository:
         projection_manifest_sha256: str | None = None,
         narrative_manifest: Mapping[str, Any] | None = None,
         narrative_manifest_sha256: str | None = None,
+        elder_message_atoms: tuple[ElderMessageAtom, ...] = (),
     ) -> tuple[str, bool]:
         """Reserve/reuse narrative work inside the shared commit transaction."""
 
@@ -3847,6 +3882,17 @@ class PostgresProductAgentRepository:
         ):
             raise ProductAgentInvariantError(
                 "v3 shared commit has no elder projection"
+            )
+        atom_authority_sha256 = stable_hash(
+            [item.model_dump(mode="json") for item in elder_message_atoms]
+        )
+        if (
+            not elder_message_atoms
+            or resolved_elder_projection.presentation_authority_sha256
+            != atom_authority_sha256
+        ):
+            raise ProductAgentInvariantError(
+                "elder message atoms differ from projection authority"
             )
         if stable_hash(resolved_manifest) != resolved_manifest_sha256:
             raise ProductAgentInvariantError(
@@ -4021,6 +4067,10 @@ class PostgresProductAgentRepository:
             "elder_projection": resolved_elder_projection.model_dump(
                 mode="json"
             ),
+            "elder_message_atoms": [
+                item.model_dump(mode="json")
+                for item in elder_message_atoms
+            ],
             "projection_manifest_sha256": (
                 resolved_projection_manifest_sha256
             ),
@@ -5043,6 +5093,8 @@ class PostgresProductAgentRepository:
                     "prepared Product attempt commit CAS failed"
                 )
             if artifact.schema_version == "product_agent_prepared_attempt.v3":
+                assert source is not None
+                assert artifact.shared_analysis is not None
                 (
                     elder_narrative_operation_id,
                     elder_narrative_operation_created,
@@ -5052,6 +5104,10 @@ class PostgresProductAgentRepository:
                     source_operation_json=operation_json,
                     wake_date=episode_row[1],
                     reserved_at=committed_at,
+                    elder_message_atoms=build_elder_message_atoms(
+                        artifact.shared_analysis,
+                        source.facts.elder_presentation_facts(),
+                    ),
                 )
             induction_operation_id = self.id_generator(committed_at)
             induction_manifest_id = self.id_generator(committed_at)
@@ -7381,6 +7437,8 @@ def _build_facts(
         data_mode=episode.data_mode,
         timezone_name=episode.timezone_name,
         local_sleep_date=episode.episode_local_date.isoformat(),
+        episode_bed_at=episode.bed_at,
+        episode_wake_at=episode.wake_at,
         data_sufficiency=quality.data_sufficiency.value,
         canonical_observations=tuple(safe_observations),
         deterministic_quality=quality_payload,

@@ -105,8 +105,14 @@ class ProductReportNarrative(PublicModel):
 
     @model_validator(mode="after")
     def text_matches_state(self) -> "ProductReportNarrative":
-        if (self.state == ProductNarrativeState.READY) != (self.text is not None):
-            raise ValueError("only a ready elder narrative may carry text")
+        publishes_text = self.state in {
+            ProductNarrativeState.READY,
+            ProductNarrativeState.FALLBACK,
+        }
+        if publishes_text != (self.text is not None):
+            raise ValueError(
+                "ready/fallback Elder narrative text must match its state"
+            )
         return self
 
 

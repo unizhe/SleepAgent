@@ -54,6 +54,9 @@ from sleepagent.runtime.invocation import (
     SleepCareModelOutput,
 )
 from sleepagent.runtime.agents import (
+    _ELDER_REWRITE_MANIFEST_MARKER,
+    _ElderNarrativeRenderingSelection,
+    _ElderNarrativeRewritePlan,
     _SleepCareContentPlan,
     _SleepCareSegmentSelection,
     _assemble_sleepcare_output,
@@ -151,6 +154,9 @@ class DeterministicReplayStructuredAgentModel:
         elif schema is _SleepCareContentPlan:
             _require_agent(packet, AgentId.SLEEP_CARE)
             output = self._communication_plan(packet)
+        elif schema is _ElderNarrativeRewritePlan:
+            _require_agent(packet, AgentId.SLEEP_CARE)
+            output = self._elder_narrative_rewrite_plan(messages)
         else:
             raise ValueError(
                 f"unsupported deterministic structured schema: {schema.__name__}"
@@ -209,6 +215,46 @@ class DeterministicReplayStructuredAgentModel:
                 len(required) + 3,
             ),
             expected_tool_calls=len(definition.required_tools),
+        )
+
+    @staticmethod
+    def _elder_narrative_rewrite_plan(
+        messages: list[dict[str, str]],
+    ) -> _ElderNarrativeRewritePlan:
+        manifest_messages = [
+            item.get("content", "")
+            for item in messages
+            if _ELDER_REWRITE_MANIFEST_MARKER in item.get("content", "")
+        ]
+        if len(manifest_messages) != 1 or "Manifest JSON: " not in (
+            manifest_messages[0]
+        ):
+            raise ValueError("deterministic Elder atom manifest is invalid")
+        manifest = json.loads(
+            manifest_messages[0].split("Manifest JSON: ", 1)[1]
+        )
+        atoms = manifest.get("atoms") if isinstance(manifest, dict) else None
+        if not isinstance(atoms, list):
+            raise ValueError("deterministic Elder atom manifest has no atoms")
+        selections: list[_ElderNarrativeRenderingSelection] = []
+        for atom in atoms:
+            if not isinstance(atom, dict) or not bool(atom.get("mandatory")):
+                continue
+            atom_id = atom.get("atom_id")
+            rendering_id = atom.get("fallback_rendering_id")
+            if not isinstance(atom_id, str) or not isinstance(rendering_id, str):
+                raise ValueError("deterministic Elder atom is incomplete")
+            selections.append(
+                _ElderNarrativeRenderingSelection(
+                    atom_id=atom_id,
+                    rendering_id=rendering_id,
+                )
+            )
+        if not selections:
+            raise ValueError("deterministic Elder rewrite has no mandatory atoms")
+        return _ElderNarrativeRewritePlan(
+            status=WorkProductStatus.COMPLETED,
+            selections=selections,
         )
 
     @staticmethod

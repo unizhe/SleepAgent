@@ -137,6 +137,11 @@ def test_narrative_model_change_does_not_change_shared_analysis_manifest() -> No
     assert "explain_for_elder" not in str(first_shared)
     assert first_narrative != second_narrative
     assert first_narrative["skill"]["skill_id"] == "explain_for_elder"
+    projection_manifest = build_role_projection_runtime_manifest()
+    assert projection_manifest["elder_presentation_policy_version"] == (
+        "bounded_semantic_elder_atoms.v1"
+    )
+    assert "elder_presentation_policy_version" not in str(first_shared)
 
     shared_sha256 = stable_hash("committed-shared")
     projection_sha256 = stable_hash("elder-projection")
@@ -187,7 +192,10 @@ class _ReadyReuseRepository(PostgresProductAgentRepository):
         del cursor, operation_json
         assert operation_id == "shared-operation"
         self.loaded = True
-        return cast(PreparedProductAgentArtifact, object())
+        return cast(
+            PreparedProductAgentArtifact,
+            SimpleNamespace(shared_analysis=object()),
+        )
 
     def _reserve_elder_narrative(self, cursor: Any, **kwargs: Any):
         del cursor
@@ -212,13 +220,28 @@ class _ReadyReuseRepository(PostgresProductAgentRepository):
         }
 
 
-def test_ready_shared_reuse_reserves_current_prompt_only_narrative_identity() -> None:
+def test_ready_shared_reuse_reserves_current_prompt_only_narrative_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     repository = _ReadyReuseRepository()
     current_manifest = {"schema_version": "elder_narrative_runtime_manifest.v1", "prompt": "v2"}
     current_manifest_sha256 = stable_hash(current_manifest)
     projection_manifest = {
         "schema_version": "role_projection_runtime_manifest.v1"
     }
+    monkeypatch.setattr(
+        product_module,
+        "build_elder_message_atoms",
+        lambda *_: (),
+    )
+    source = cast(
+        LoadedProductAgentSource,
+        SimpleNamespace(
+            facts=SimpleNamespace(
+                elder_presentation_facts=lambda: object(),
+            )
+        ),
+    )
 
     result = repository._reserve_narrative_for_succeeded_shared(
         cast(Any, object()),
@@ -234,6 +257,7 @@ def test_ready_shared_reuse_reserves_current_prompt_only_narrative_identity() ->
         projection_manifest_sha256=stable_hash(projection_manifest),
         narrative_manifest=current_manifest,
         narrative_manifest_sha256=current_manifest_sha256,
+        source=source,
     )
 
     assert result == ("narrative-operation", True)

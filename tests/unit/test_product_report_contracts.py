@@ -57,12 +57,15 @@ from sleepagent.runtime.memory import (
     select_memory_slice,
 )
 from sleepagent.runtime.reports import (
+    ElderMessageAtom,
     RoleProjection,
     SharedNightAnalysis,
+    build_elder_message_atoms,
     build_role_projection_runtime_manifest,
     build_shared_role_projections,
     role_projection_identity_sha256,
 )
+from sleepagent.domain.product_data import ProductElderPresentationFacts
 from sleepagent.runtime.results import PinnedPersonalizationContext
 from sleepagent.workers.product import (
     _consumed_context_sha256,
@@ -334,6 +337,7 @@ def _valid_shared_artifacts() -> tuple[
     dict[str, str],
     dict[str, Any],
     str,
+    tuple[ElderMessageAtom, ...],
 ]:
     from tests.unit.test_product_agent_runner import _shared_analysis_request
 
@@ -341,7 +345,19 @@ def _valid_shared_artifacts() -> tuple[
         model=DeterministicReplayStructuredAgentModel()
     )
     shared = bundle.runner.analyze_shared(_shared_analysis_request())
-    projections = build_shared_role_projections(shared)
+    atoms = build_elder_message_atoms(
+        shared,
+        ProductElderPresentationFacts(
+            timezone_name="Asia/Shanghai",
+            classified_totals_state="reliable",
+            stage_boundary_state="episode_bounds_unavailable",
+            source_refs=("governed_evidence_set:test",),
+        ),
+    )
+    projections = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )
     elder = projections[0]
     manifest = build_role_projection_runtime_manifest()
     manifest_sha256 = stable_hash(manifest)
@@ -356,11 +372,18 @@ def _valid_shared_artifacts() -> tuple[
         )
         for projection in projections
     }
-    return shared, elder, identities, manifest, manifest_sha256
+    return shared, elder, identities, manifest, manifest_sha256, atoms
 
 
 def _compatible_ready_row() -> _ReportReadRow:
-    shared, elder, identities, projection_manifest, projection_manifest_sha256 = (
+    (
+        shared,
+        elder,
+        identities,
+        projection_manifest,
+        projection_manifest_sha256,
+        _,
+    ) = (
         _valid_shared_artifacts()
     )
     desired = shared.source.desired_analysis_sha256
@@ -406,6 +429,18 @@ def _compatible_ready_row() -> _ReportReadRow:
         view_fact_snapshot_sha256=shared.fact_snapshot_hash,
         view_projection_identity_sha256=identities["elder"],
     )
+
+
+def test_legacy_projection_without_presentation_authority_round_trips_exactly() -> None:
+    shared = _valid_shared_artifacts()[0]
+    legacy = build_shared_role_projections(shared)[0]
+
+    payload = legacy.model_dump(mode="json")
+    round_tripped = RoleProjection.model_validate(payload)
+
+    assert "presentation_authority_sha256" not in payload
+    assert round_tripped.model_dump(mode="json") == payload
+    assert round_tripped.projection_sha256 == legacy.projection_sha256
 
 
 def test_report_request_accepts_only_canonical_date_and_public_fields() -> None:
@@ -650,9 +685,10 @@ def test_report_contract_requires_partial_caveat_and_role_binding() -> None:
                 summary_text="Bound report",
                 context_notice="Authorized context only.",
             ),
-            narrative=ProductReportNarrative(
-                state=ProductNarrativeState.FALLBACK,
-            ),
+                narrative=ProductReportNarrative(
+                    state=ProductNarrativeState.FALLBACK,
+                    text="确定性回退内容。",
+                ),
         )
 
 
@@ -1025,6 +1061,7 @@ def test_projection_only_refresh_uses_current_role_identity_not_old_provenance(
 
 def test_narrative_render_identity_uses_validated_projection_identity() -> None:
     ready = _compatible_ready_row()
+    atoms = _valid_shared_artifacts()[5]
     assert ready.analysis_json is not None
     shared = SharedNightAnalysis.model_validate(
         ready.analysis_json["shared_analysis"]
@@ -1060,6 +1097,9 @@ def test_narrative_render_identity_uses_validated_projection_identity() -> None:
                 RoleProjection.model_validate(ready.view_json).projection_sha256
             ),
             "elder_projection": ready.view_json,
+            "elder_message_atoms": [
+                item.model_dump(mode="json") for item in atoms
+            ],
             "render_identity_sha256": expected_render_identity,
         },
     )
@@ -1100,7 +1140,7 @@ def test_trace_aggregates_shared_and_narrative_usage_without_ids() -> None:
     assert report.trace.provider_request_ids_present is True
     assert report.narrative is not None
     assert report.narrative.state == ProductNarrativeState.FALLBACK
-    assert report.narrative.text is None
+    assert report.narrative.text == report.projection.summary_text
 
 
 def test_trace_attributes_legacy_narrative_to_shared_creator_without_ids() -> None:

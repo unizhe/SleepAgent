@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sleepagent.runtime.contracts import (
     AgentId,
@@ -730,3 +730,145 @@ def _product_facts(
         provenance_references=("night_episode_revision:live:1",),
         canonical_data_version="a" * 64,
     )
+
+
+def _stage_observation(
+    stage: str,
+    start: datetime | str,
+    end: datetime | str,
+) -> dict[str, object]:
+    return {
+        "payload": {
+            "observation_type": "sleep_stage_interval",
+            "stage": stage,
+            "start_at": start.isoformat() if isinstance(start, datetime) else start,
+            "end_at": end.isoformat() if isinstance(end, datetime) else end,
+        }
+    }
+
+
+def test_elder_presentation_separates_episode_stage_span_and_classified_totals() -> None:
+    bed_at = datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc)
+    wake_at = datetime(2026, 8, 24, 21, 0, tzinfo=timezone.utc)
+    observations = (
+        _stage_observation("light", bed_at + timedelta(minutes=35), bed_at + timedelta(minutes=65)),
+        _stage_observation("awake", bed_at + timedelta(minutes=75), bed_at + timedelta(minutes=85)),
+        _stage_observation("unknown", bed_at + timedelta(minutes=85), bed_at + timedelta(minutes=95)),
+        _stage_observation("deep", bed_at + timedelta(minutes=95), bed_at + timedelta(minutes=115)),
+    )
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": bed_at,
+            "episode_wake_at": wake_at,
+            "canonical_observations": observations,
+        }
+    )
+
+    legacy = facts.deterministic_night_summary()
+    presentation = facts.elder_presentation_facts()
+
+    assert legacy["sleep_window_minutes"] == 80.0
+    assert legacy["stage_minutes"] == {
+        "awake": 10.0,
+        "deep": 20.0,
+        "light": 30.0,
+        "unknown": 10.0,
+    }
+    assert presentation.episode_observation_minutes == 240.0
+    assert presentation.vendor_stage_span_minutes == 80.0
+    assert presentation.stage_observation_minutes == 70.0
+    assert presentation.unclassified_gap_minutes == 10.0
+    assert presentation.classified_stage_minutes == legacy["stage_minutes"]
+    assert presentation.classified_totals_state == "reliable"
+    assert presentation.presented_stage_local_display == "01:35–02:55"
+    assert "UTC" not in presentation.presented_stage_local_display
+    assert facts.episode_bed_at == bed_at
+    assert facts.canonical_observations == observations
+
+
+def test_elder_presentation_constrains_stage_intervals_to_episode_bounds() -> None:
+    bed_at = datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc)
+    wake_at = bed_at + timedelta(hours=4)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": bed_at,
+            "episode_wake_at": wake_at,
+            "canonical_observations": (
+                _stage_observation("light", bed_at - timedelta(minutes=10), bed_at + timedelta(minutes=10)),
+                _stage_observation("deep", wake_at - timedelta(minutes=10), wake_at + timedelta(minutes=10)),
+                _stage_observation("rem", wake_at + timedelta(hours=1), wake_at + timedelta(hours=2)),
+            ),
+        }
+    )
+
+    presentation = facts.elder_presentation_facts()
+
+    assert presentation.stage_boundary_state == "constrained_to_episode"
+    assert presentation.out_of_episode_interval_count == 3
+    assert presentation.stage_observation_minutes == 20.0
+    assert presentation.classified_stage_minutes == {
+        "deep": 10.0,
+        "light": 10.0,
+    }
+    assert presentation.presented_stage_local_display == "01:00–05:00"
+    assert presentation.vendor_stage_local_display == "00:50–07:00"
+
+
+def test_elder_presentation_flags_overlap_and_rejects_naive_invalid_intervals() -> None:
+    bed_at = datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": bed_at,
+            "episode_wake_at": bed_at + timedelta(hours=4),
+            "canonical_observations": (
+                _stage_observation("light", bed_at, bed_at + timedelta(hours=1)),
+                _stage_observation("deep", bed_at + timedelta(minutes=30), bed_at + timedelta(minutes=90)),
+                _stage_observation("rem", "2026-08-24T19:00:00", "2026-08-24T19:30:00"),
+            ),
+        }
+    )
+
+    presentation = facts.elder_presentation_facts()
+
+    assert presentation.classified_totals_state == "overlap_ambiguous"
+    assert presentation.stage_observation_minutes == 90.0
+    assert presentation.classified_stage_minutes == {
+        "deep": 60.0,
+        "light": 60.0,
+    }
+    assert presentation.invalid_interval_count == 1
+
+
+def test_episode_presentation_fields_do_not_change_shared_agent_inputs() -> None:
+    facts = _product_facts()
+    with_episode_bounds = facts.model_copy(
+        update={
+            "episode_bed_at": datetime(2026, 8, 24, 17, tzinfo=timezone.utc),
+            "episode_wake_at": datetime(2026, 8, 25, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    assert with_episode_bounds.tool_inputs() == facts.tool_inputs()
+    assert with_episode_bounds.canonical_data_version == facts.canonical_data_version
+
+
+def test_incomplete_episode_bounds_do_not_become_presentation_truth() -> None:
+    bed_at = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": bed_at,
+            "canonical_observations": (
+                _stage_observation(
+                    "light",
+                    bed_at + timedelta(minutes=10),
+                    bed_at + timedelta(minutes=40),
+                ),
+            ),
+        }
+    )
+
+    presentation = facts.elder_presentation_facts()
+
+    assert presentation.stage_boundary_state == "episode_bounds_unavailable"
+    assert presentation.episode_observation_start_at is None
+    assert presentation.episode_observation_end_at is None

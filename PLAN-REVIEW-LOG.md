@@ -419,3 +419,167 @@ the atomic commit.
 No external provider, radar/device service, production database, migration,
 dependency, Git remote, commit, or tag was contacted or changed. No commit was
 created.
+
+## Act 7 — Build: Product Report UX Closure
+
+### Round 1 — Codex build
+
+Implemented the narrow Elder presentation closure without changing Product
+Runtime topology or shared-analysis inputs. `ProductRevisionFacts` now retains
+the authoritative Episode bed/wake span for presentation and derives a separate
+typed Elder view that preserves canonical timestamps, localizes with
+`ZoneInfo`, distinguishes Episode span, vendor stage envelope, observed stage
+coverage, and classified stage totals, clips only the presentation view to
+Episode bounds, and flags overlap/invalid/boundary conditions instead of
+silently choosing a classification policy. The existing
+`deterministic_night_summary()` and provider-facing shared inputs remain
+unchanged.
+
+The Elder projection now derives a deliberately small set of source-bound
+message atoms for the stage summary, bed-exit observation, one quality caveat,
+and one AI-assisted/non-diagnostic boundary. Each atom owns its numeric values,
+units, Runtime-selected display values, subject-local times, quality/risk/safety
+classification, source references, priority, mandatory state, and finite safe
+zh-CN renderings. The independent Elder model call may select and order only
+those renderings; its schema has no prose or numeric field. Runtime validates
+mandatory selection, source/risk/safety authority, exact rendering membership,
+numeric bindings, locale compatibility, and the final Communication binding.
+Invalid/provider-failed output publishes the same deterministic Chinese atom
+fallback while Shared Analysis stays ready.
+
+The public fallback now carries deterministic text. Elder CLI pretty mode is
+narrative-first, omits the duplicate full projection/context/legal boilerplate,
+and renders the PARTIAL caveat and compact boundary once. Elder `run` continues
+GET polling after shared readiness until narrative `ready`, `fallback`, or
+`failed`; `--no-wait`, Family, Doctor, `show`, `list`, `--trace`, and `--json`
+retain their prior authority and side-effect behavior.
+
+### Round 2 — adversarial fix pass
+
+The diff audit found that an initial atom transport through a new SleepCare
+Context key would have broadened the concrete-Agent manifest. The atoms were
+moved onto the existing Runtime invocation binding, omitted when empty for
+legacy serialization/hash compatibility, and included only in the Elder target
+hash. The provider receives the bounded atom manifest without the dense
+free-form Evidence statements. Additional checks now bind atom IDs to their
+complete authority, verify Shared Analysis/risk/safety references, reject
+inconsistent localized spans and Runtime number displays, validate persisted
+ready narratives again at the API boundary, and always use projection text for
+fallback publication.
+
+No shared-analysis manifest bump is required: the repair changes only the
+projection/narrative presentation manifests. A direct baseline comparison at
+commit `51947e6` proved the concrete-Agent manifest hash, desired-analysis hash,
+and resulting deterministic Shared Analysis hash are byte-identical before and
+after this closure; the role-projection manifest hash changes as intended.
+
+### Codex verification
+
+- Focused Product data/report/runner/worker/API/CLI regression: 372 passed,
+  1 opt-in process E2E skipped.
+- Full unit suite: 948 passed.
+- Complete repository suite with localhost loopback permission: 1,031 passed,
+  35 skipped.
+- Focused PostgreSQL Product collection: 1 passed, 18 skipped because the host
+  environment lacks `psycopg`; no test database is configured.
+- Python 3.11 compilation, host-Python compilation, real-shaped Elder rendering,
+  baseline/current shared-identity parity, and `git diff --check` passed.
+- Static `mypy` verification was unavailable because `mypy` is not installed.
+
+The 35 complete-suite skips are environment-only PostgreSQL/process/opt-in E2E
+gates. No DeepSeek, YunYun, radar/device, production database, migration,
+dependency, Git remote, commit, or tag was contacted or changed. No commit was
+created. One bounded adversarial fix pass was used.
+
+## Act 3 — Build: G1 M0 remediation safeguards
+
+### Round 1 — Codex build
+
+Recorded the exact dirty-worktree baseline before production edits, then added
+seven remediation ADRs, a classified report-consumer inventory, typed
+default-preserving switches in the existing settings authority, a reproducible
+characterization fixture/suite, an AST import no-growth guard, and an explicit
+OpenAPI drift classification. No observation, report, scheduling, delivery,
+database, or external-effect migration was activated.
+
+The characterization evidence freezes the current mixed movement aggregation,
+Push/Pull/Replay validator asymmetry, UTC-as-local report defect, and English
+claim leakage under Chinese headings. The architecture fixture freezes six
+existing SCCs and exact forbidden edges while allowing later debt reduction.
+
+### Round 2 — Codex fix pass
+
+The dependency snapshot review found that `from package import submodule` in a
+package `__init__` was initially being counted as a false package self-import.
+The resolver now records a known imported submodule when it exists, restoring
+the G0 six-SCC baseline while retaining exact real self-imports. Spec review
+also added the separate Night Finalization ADR so the attached G1 work order
+and master M0 ADR set are both covered. Final evidence review corrected the
+OpenAPI schema-group count to 12 personalization plus 11 report schemas.
+
+### Codex verification
+
+- Focused G1 settings, characterization, and architecture: 18 passed.
+- Full architecture suite: 5 passed, including synthetic new-debt rejection.
+- Unit-marked suite with localhost permission: 1,047 passed, 35 deselected.
+- Full non-PostgreSQL/non-E2E/non-ASGI-lifespan suite with localhost permission:
+  1,044 passed, 38 deselected.
+- Python 3.13 and supported Python 3.11.15 compilation passed; Python 3.11.15
+  import smoke passed; `git diff --check` passed.
+- OpenAPI check still fails for both snapshots and is classified
+  `STALE_SNAPSHOT`; no snapshot was overwritten.
+- PostgreSQL verification and mypy are `ENV_BLOCKED`.
+
+Diff review found no G1 edits to the 18 pre-existing dirty report/runtime/test
+files. `sleepagent/config.py` is the only G1 production edit and future switch
+states have no production consumer. No external provider or real effect was
+invoked. The build used one bounded fix pass. A safe isolated commit is blocked
+because the new characterization evidence depends on the authoritative
+uncommitted report baseline; no staging, commit, or push occurred.
+
+### Supplemental G1 verification
+
+Reverified the completed G1 safeguards on the supported Python 3.11.15
+interpreter using an isolated environment installed from the repository's
+hash-locked development requirements. Compile/import checks, 46 focused tests,
+5 architecture tests, 1,047 unit-marked tests, and 1,044 non-PostgreSQL tests
+passed. The two broad selections initially hit eight sandbox-only localhost
+bind denials and passed with approved `127.0.0.1` permission.
+
+The now-available declared mypy 2.3.0 reports a known baseline of 86 errors in
+20 files; an archived clean HEAD independently reports 63 errors in 20 files,
+and no error is in the sole G1 production file, `sleepagent/config.py`.
+PostgreSQL remains environment-blocked because there is no database URL or
+native server/client and the installed Docker socket is inaccessible. OpenAPI
+remains the classified stale-snapshot failure and both snapshot files were
+left at their original hashes. The frozen 18-file user patch still hashes to
+`f306cc80aa4e25df543501ccbdd23e9917c57ecf9dfc9a152abb436381f78806`.
+No staging, commit, push, provider call, or real effect occurred.
+
+## Act 4 — Build: G1.5 pre-G2 baseline consolidation
+
+### Round 1 — Codex build
+
+Reconfirmed the frozen pre-G1 report/runtime/test patch at SHA-256
+`f306cc80aa4e25df543501ccbdd23e9917c57ecf9dfc9a152abb436381f78806`,
+then re-ran the structural OpenAPI comparison. It reproduced only the
+classified 10/23 backend and 1/1 Demo additions, with no changed or removed
+existing path/schema. The existing generator reconciled both snapshots and the
+canonical check now passes.
+
+Established Python 3.11.15 as authoritative using an isolated environment
+installed from the hash-locked development requirements. Compile/import,
+focused safeguards, architecture, unit-marked, and non-PostgreSQL selections
+pass. Declared mypy 2.3.0 ran and is recorded as an existing failure baseline,
+not repaired broadly.
+
+Validated the repository's isolated PostgreSQL 16 Compose configuration and
+all 13 immutable migration hashes. Actual PostgreSQL execution remains
+environment-blocked because the Docker socket is inaccessible and no native
+server/client exists. This yields separate M1/M2 readiness from M3 readiness.
+
+The exact 40-path checkpoint candidate is classified in
+`docs/remediation/G1_5_CHECKPOINT_COMPOSITION.md`. Ignored environments,
+caches, secrets, key material, attachments, and unrelated files are excluded.
+The checkpoint commit and its documentation-only hash attestation are pending
+the final staged-diff audit.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
-from typing import ClassVar, Literal, Mapping, Protocol, TypeVar, cast
+from typing import Any, ClassVar, Literal, Mapping, Protocol, TypeVar, cast
 from weakref import WeakValueDictionary
 
 from sleepagent.runtime.agents import (
@@ -492,8 +492,11 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
         revision_reason: str | None = None,
         collaboration_request: CrossAgentRequest | None = None,
         tool_session_id: str | None = None,
+        elder_message_atoms: tuple[dict[str, Any], ...] = (),
     ) -> AgentInvocationTurn:
         agent_id = agent.agent_id
+        if elder_message_atoms and agent_id is not AgentId.SLEEP_CARE:
+            raise ValueError("Elder message atoms are limited to SleepCare")
         kind = agent.boundary.work_product_kind
         skill_id = agent.select_skill(
             request.episode_type,
@@ -812,6 +815,10 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
             "inputs": [item.source_refs for item in context.items],
             "safety_target": safety_target.target_hash if safety_target else None,
         }
+        if elder_message_atoms:
+            target_material["elder_message_atoms_sha256"] = stable_hash(
+                elder_message_atoms
+            )
         bundle, skill_lock = self.skill_resolver.resolve(
             episode_id=request.episode_id,
             episode_type=request.episode_type,
@@ -881,6 +888,7 @@ class AgentInvocationCoordinator(SleepCareControlInvocationPort):
                     if agent.boundary.context.audience_visible
                     else None
                 ),
+                elder_message_atoms=elder_message_atoms,
             )
         )
         provider_input_tokens = canonical_token_count(
