@@ -80,7 +80,7 @@ def _api_settings(dsn: str) -> SleepBackendSettings:
         database_dsn="postgresql://sleepagent_p4d_api@localhost/postgres",
         database_identity="postgres",
         database_role="sleepagent_p4d_api",
-        service_principal_id="sleepagent-p4d-api",
+        service_principal_id=_dsn("SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"),
         database_scope=DataMode.LIVE,
         namespace_prefixes=(NAMESPACE,),
         enabled_surfaces=frozenset({ApiSurface.PERCEPTOR_PUSH}),
@@ -105,7 +105,7 @@ def _worker_settings(dsn: str) -> SleepBackendSettings:
         database_dsn="postgresql://sleepagent_p4d_worker@localhost/postgres",
         database_identity="postgres",
         database_role="sleepagent_p4d_worker",
-        service_principal_id="sleepagent-p4d-worker",
+        service_principal_id=_dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"),
         database_scope=DataMode.LIVE,
         namespace_prefixes=(NAMESPACE,),
         enabled_surfaces=frozenset(),
@@ -221,13 +221,13 @@ def _seed(admin_dsn: str) -> None:
             for grant_id, principal, purpose, handlers in (
                 (
                     "grant-p4d-api",
-                    "sleepagent-p4d-api",
+                    _dsn("SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"),
                     "perceptor_ingress",
                     [],
                 ),
                 (
                     "grant-p4d-worker",
-                    "sleepagent-p4d-worker",
+                    _dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"),
                     "worker",
                     ["normalization"],
                 ),

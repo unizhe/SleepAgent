@@ -1225,3 +1225,111 @@ for one local commit with subject
 `remediation(g2a): add canonical observation semantics v2`. The commit hash is
 reported in the G2A handoff because a commit cannot contain its own hash. No
 push is authorized or performed.
+
+## G2B-Preflight — PostgreSQL 16 verification readiness
+
+`G2B_PREFLIGHT_STATUS = PASS`
+
+### Entry and blocker diagnosis
+
+- Entry HEAD was the required
+  `29700bd2c15544f7a04541b9c8793436bca8887f`; the worktree was clean and the
+  branch was 16 commits ahead of upstream.
+- Docker 29.3.0 and Compose 5.1.1 are installed and the default context points
+  to `unix:///var/run/docker.sock`. The socket is mode `0660`, owned by
+  `nobody:nogroup` (uid/gid 65534), while the process is uid/gid 1018.
+  `docker info` therefore fails with permission denied. Classification:
+  `DOCKER_SOCKET_PERMISSION`; no host permission, group, daemon, service, or
+  firewall mutation was attempted.
+- The earlier binary diagnosis was incomplete because PostgreSQL was absent
+  from `PATH`. A user-owned PostgreSQL 16 distribution exists at
+  `/mnt/data4/wz/.sleepagent/pg16/bin`, so Docker is not required for this
+  preflight.
+
+### Runtime and isolation
+
+- Actual server: PostgreSQL 16.14, 64-bit, user-owned native distribution.
+- Verification cluster: unique `/tmp/sleepagent-g2b-preflight.*` data and
+  socket directories, owned by uid 1018; the unrelated pre-existing demo
+  cluster on port 55448 was not touched.
+- Network: exact `listen_addresses=127.0.0.1`, port 15432, private Unix socket
+  directory with mode 0700, then loopback TCP authentication upgraded to
+  SCRAM-SHA-256.
+- Database: `sleepagent_replay_test`. Redacted admin DSN:
+  `postgresql://sleepagent_test_migration:***@127.0.0.1:15432/sleepagent_replay_test`.
+- Roles: migration owner plus distinct API, Demo, and Worker login roles. The
+  three runtime roles have no superuser, createdb, createrole, replication, or
+  bypass-RLS capability. All four public test credentials authenticated over
+  SCRAM.
+- The Compose example now binds PostgreSQL explicitly to loopback. Static
+  `docker compose --env-file .env.test.example config --quiet` passes.
+
+### Fresh migration proof
+
+The dedicated database was dropped/recreated, then the unchanged repository
+migration runner applied 001 through 013 from zero. `apply`, `status`, and
+`check` each reported schema version 013. The ledger contains exactly 13
+contiguous applied rows (min 1, max 13) and 13 distinct SQL checksums. The
+manifest SHA-256 remains
+`c027b2a2e7828713422770d14e171a795c94b32e716b5eb077e33bd610880a06`.
+No historical migration changed and no manual repair or migration 014 was
+created.
+
+Post-application catalogs contain 101 forced-RLS tables, 102 policies, and 49
+non-internal triggers. The command, delivery, scenario-clock, Perceptor Push,
+Perceptor Pull, and Pull history-planner functions are present. A final
+post-test migration check remains clean at 013.
+
+### Existing PostgreSQL baseline
+
+The first full run found two `TEST_CONFIGURATION_ERROR` failures: the two
+Perceptor PostgreSQL fixtures inserted grants for hard-coded principals absent
+from the canonical test bootstrap. The minimal test-only repair makes both
+fixtures use `SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL` and
+`SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL`, matching the rest of the suite.
+The focused rerun passed 2/2.
+
+The authoritative run used a fresh database, migrations 001-013, canonical
+test bootstrap, loopback-only networking, and SCRAM credentials:
+
+- PostgreSQL marker: 32 passed, 1 skipped, 1,073 deselected in 23.90s.
+- The one skip is the existing completed-process evidence reader, which
+  requires `SLEEPAGENT_FIRST_SLICE_ROOT_OPERATION_ID`; it is not runnable on
+  an otherwise fresh database and is not an environment failure.
+- A deliberate second run without reset reproduced durable-state collisions.
+  The contract therefore requires a database reset before the full marker.
+
+`POSTGRES_TEST_BASELINE = PASS`
+
+### G2A and architecture re-verification
+
+- Observation Semantics V2 plus G1 characterization: 29 passed.
+- Architecture suite: 5 passed; the G1 no-growth baseline remains unchanged.
+- V1 remains the default; no V2 persistence, migration, upcast, aggregation,
+  trend, risk, CareStrategy, report, scheduler, DeviceBinding, or delivery
+  work was performed.
+- `git diff --check` passes and all migrations 001-013 retain their recorded
+  hashes.
+
+### Reproducibility, cleanup, and readiness
+
+The authoritative Compose and verified native start/readiness/reset/migrate/
+bootstrap/test/stop procedures are recorded in
+`docs/remediation/POSTGRESQL_VERIFICATION_BASELINE.md`. Docker remains
+permission-blocked for this uid, but the native path requires no privileged
+host change and supplies actual PostgreSQL 16 evidence.
+
+The temporary verification server is stopped during final cleanup; the
+one-command native restart and the canonical Compose procedure are both in the
+contract. No environment-generated data, credentials, or key material is
+committed.
+
+`POSTGRES16_RUNTIME_READY = YES`
+
+`MIGRATION_BASELINE_READY = YES`
+
+`POSTGRES_TEST_BASELINE_READY = YES`
+
+`G2B_M3_SAFE_TO_BEGIN = YES`
+
+G2B-Preflight stops here. M3 is not started.

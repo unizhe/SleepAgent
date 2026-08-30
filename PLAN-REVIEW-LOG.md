@@ -635,3 +635,39 @@ Diff review confirms V1 default behavior and the G1 `20.9` characterization
 remain unchanged, V2 uses one semantic authority, all persistence/analytics
 work is deferred, and no OpenAPI snapshot or migration changed. One bounded
 fix pass was used.
+
+## Act 6 — Build: G2B-Preflight PostgreSQL 16 readiness
+
+### Round 1 — Environment proof
+
+Reconfirmed the exact clean G2A entry commit and diagnosed Docker as
+`DOCKER_SOCKET_PERMISSION`: the default socket is owned by uid/gid 65534 and
+is not accessible to uid/gid 1018. No privileged host mutation was attempted.
+Discovered the user-owned PostgreSQL 16.14 distribution outside `PATH`, then
+created a unique loopback-only temporary cluster and dedicated
+`sleepagent_replay_test` database without touching the unrelated demo cluster.
+
+Applied immutable migrations 001-013 from zero, bootstrapped the canonical
+test roles, and verified the clean ledger, hashes, forced RLS, policies,
+triggers, and critical functions. The initial PostgreSQL marker produced 30
+passes, one expected process-proof skip, and two fixture foreign-key failures.
+
+### Round 2 — Codex fix pass
+
+The two Perceptor fixtures used hard-coded service principals that canonical
+`test-bootstrap` never creates. Changed only those tests to consume the
+existing API and Worker principal environment variables. The focused tests
+then passed 2/2. No production or migration file changed.
+
+Reset the dedicated database, reapplied 001-013, enabled loopback TCP
+SCRAM-SHA-256, verified all four test credentials, and ran the authoritative
+fresh-database marker: 32 passed, one intentional completed-process evidence
+reader skipped, and 1,073 deselected. A deliberate no-reset repeat confirmed
+that durable-state collisions make reset-before-full-marker part of the
+contract; a final fresh SCRAM run passed.
+
+G2A/characterization re-verification passed 29 tests, architecture passed 5,
+the final migration check remained at 013, and `git diff --check` passed. The
+Compose example is loopback-only and the new remediation document records
+canonical Compose plus verified native start/reset/test/stop commands. M3 was
+not started.
