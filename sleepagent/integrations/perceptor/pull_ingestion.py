@@ -969,7 +969,12 @@ class PerceptorPullNormalizationProcessor:
             raise SleepSliceInvariantError(
                 "persisted Pull response_has_data contradicts normalization"
             )
-        if result is not None and not result.candidates:
+        if (
+            result is not None
+            and not result.candidates
+            and not result.intentionally_unsupported_fields
+            and not result.intentionally_ignored_fields
+        ):
             raise PullContractError(
                 "non-empty Pull response produced no canonical candidates"
             )
@@ -1014,6 +1019,12 @@ class PerceptorPullNormalizationProcessor:
             "canonical_semantics": canonical_semantics,
             "no_data": no_data,
             "unknown_fields": () if result is None else result.unknown_fields,
+            "intentionally_unsupported_fields": (
+                () if result is None else result.intentionally_unsupported_fields
+            ),
+            "intentionally_ignored_fields": (
+                () if result is None else result.intentionally_ignored_fields
+            ),
             "history_window_classification": (
                 None
                 if history_classification is None

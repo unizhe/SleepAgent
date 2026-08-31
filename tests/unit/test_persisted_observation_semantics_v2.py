@@ -110,12 +110,19 @@ def test_legacy_upcast_uses_vendor_evidence_and_never_numeric_heuristics() -> No
         binding_timezone_name="UTC",
         **_context(),
     ).candidates[0]
-    ambiguous_candidate = normalize_sleep_report(
-        {"body_shake_data": [{"time_long": int(AT.timestamp()), "value": 21}]},
-        report_date=date(2026, 8, 23),
-        binding_timezone_name="UTC",
-        **_context(),
-    ).candidates[0]
+    ambiguous_candidate = hourly_candidate.model_copy(
+        update={
+            "payload": MovementPayload(value=21),
+            "measurement_at": AT,
+            "source_timestamp_text": str(int(AT.timestamp())),
+            "quality": hourly_candidate.quality.model_copy(
+                update={
+                    "quality_flags": ("vendor_report_series",),
+                    "limitations": (),
+                }
+            ),
+        }
+    )
 
     index = classify_legacy_movement(
         _observation(index_candidate, "index"), index_candidate

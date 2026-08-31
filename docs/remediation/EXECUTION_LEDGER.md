@@ -2336,3 +2336,147 @@ G7_1_LIVE_ACCEPTANCE_READY              = YES
 
 Checkpoint commit: this goal's single local commit, subject
 `remediation(g7.1-r1): fix live acquisition handoff blockers`; no push.
+
+## G7.1-R2 — Complete SleepReport Observation V2 semantics
+
+`G7_1_R2_STATUS = ACCEPTED`
+
+### Entry, evidence, and semantic boundary
+
+- Entry HEAD is exactly
+  `f4e8236c7895104f0934fdd721511051af9487b1`, subject
+  `remediation(g7.1-r1): fix live acquisition handoff blockers`; the entry
+  worktree was clean.
+- The authoritative vendor evidence is
+  `云云对接API通用版（V2.5.2）.docx`, SHA-256
+  `2e12cde7fb92b301adc6a94841fd08dd22ef9ad6fc7eae0c360d6d17c434a498`.
+  Numeric plausibility was not used to establish metric identity, unit,
+  source, or aggregation semantics.
+- `PERCEPTOR_SLEEP_REPORT_SEMANTICS.md` is the complete field-level authority
+  for documented, adapter-recognized, retained-real, intentionally ignored,
+  unsupported, and unknown-extension behavior.
+- The recorded-real structural derivative
+  `sanitized_recorded_real_pull_get_sleep_report_full.json` retains the full
+  relevant top-level/profile/series structure, nullable vendor `type` and
+  display fields, and synthetic values only. It contains no real identifier,
+  credential, or raw health payload.
+
+### Mapping and consumer decisions
+
+- Sleep-period heart-rate and respiratory samples remain trusted
+  `device_measured` facts. Their documented whole-sleep means are distinct
+  `heart_rate_mean` / `respiratory_rate_mean` facts with the same canonical
+  physical units, `vendor_derived` provenance, and the authoritative
+  sleep-stage envelope as the required aggregation window.
+- Documented body-movement totals map to `movement_event_total/count`;
+  deep-sleep rate and sleep efficiency map to explicit percent metrics. Each
+  is vendor-derived and requires the same report envelope. Hourly movement
+  counts retain their exact binding-local one-hour windows.
+- The seven profile strings whose timestamp/date, duration encoding, or
+  interval grammar is not established remain raw-only. Documented apnea chart
+  data and legacy adapter-recognized apnea optionals also remain explicit
+  raw-only unsupported evidence. Unknown structural fields fail the report
+  atomically.
+- Product continues to compute displayed vital centers from canonical point
+  samples. Vendor report means, movement total, deep-sleep ratio, and sleep
+  efficiency are supporting evidence only; no prompt, care rule, risk rule,
+  medical threshold, or role projection was expanded.
+- Missing facts arise when Perceptor emits an invalid sentinel or other
+  out-of-contract value at a concrete sensor timestamp. SleepAgent does not
+  synthesize cadence gaps in this path. The target, missing state, reason, and
+  deterministic adapter processing remain explicit. With no system-derived
+  source category, the originating device-measurement authority remains
+  `device_measured`.
+
+### Deterministic and PostgreSQL evidence
+
+- The complete sanitized report canonicalizes through the actual adapter and
+  `CanonicalObservationFactoryV2` into 18 trusted facts: 3 stages, 3 heart
+  samples, 3 respiratory samples, 2 movement buckets, 2 bed exits, and one
+  each of heart mean, respiratory mean, movement total, deep-sleep ratio, and
+  sleep efficiency. Seven ambiguous profile fields are explicitly unsupported;
+  vendor display/type fields are explicitly ignored; unexpected fields and
+  semantic rejects are zero.
+- Reprocessing the retained encrypted complete real response, without printing
+  payload values, yields 885 candidates and 885 accepted V2 facts: 410 heart
+  samples, 419 respiratory samples, 23 explicit invalid/missing facts, 16
+  stages, 8 movement buckets, 4 bed exits, and 5 supported vendor summaries.
+  Seven profile fields remain documented raw-only; unexpected semantic rejects
+  are zero.
+- A fresh isolated PostgreSQL 16.14 database at schema 018 persisted the full
+  sanitized path with `created=18`, `deduplicated=0`, `conflicts=0`, and every
+  V2 row carrying a non-null canonical unit and trusted semantic sidecar. The
+  authoritative retained evidence database was not reset or mutated.
+- No migration was required. Migrations 001–018 and their manifest hashes are
+  unchanged. Fresh apply and migration check both report schema version 018.
+
+### Fresh bounded live closure
+
+- The isolated non-login acceptance process explicitly sourced the authorized
+  owner-only external reference bootstrap. The bootstrap was a regular,
+  non-symlink owner-only file; all three expected reference variables were
+  visible, and the referenced client-ID and client-secret files passed the
+  production `BackendKeyProvider` resolver plus absolute-path, non-symlink,
+  owner, mode, readability, and non-empty checks. No credential value or
+  credential file entered command output, repository state, or this ledger.
+- Provider access remained limited to authentication and read-only
+  `/vitalSigns/getSleepReport`. A preliminary retained date returned the
+  documented no-report shape and created no candidates or persistence. Local
+  isolated-harness seeding and grant preflights were then corrected without a
+  repository change or provider-side write before the final known-nonempty
+  report was accepted. No Alarm, AlarmStop, device configuration, delivery,
+  email, SMS, or other provider write-side action ran.
+- The final fresh full response contained 9 relevant top-level fields, 9
+  profile fields, and 880 series records. The current adapter created 885
+  candidates and `CanonicalObservationFactoryV2` accepted all 885: 410 heart
+  samples, 419 respiratory samples, 23 explicit invalid/missing facts, 16
+  stages, 8 hourly movement buckets, 4 bed exits, and 5 supported vendor
+  summaries. Seven profile fields remained intentionally raw-only and three
+  display/type fields remained intentionally ignored.
+- Every encountered field classified as `KNOWN_SUPPORTED` or
+  `KNOWN_RAW_ONLY`; `UNKNOWN_EXTENSION` and `CONTRACT_DRIFT` were empty.
+  `heart_rate_avg` produced `heart_rate_mean/beats_per_minute/vendor_derived`
+  with the bounded report envelope and did not reproduce `invalid_unit`.
+  Heart-rate and respiratory samples plus their explicit invalid/missing facts
+  retained `device_measured` authority. All five supported summaries retained
+  `vendor_derived` authority and their documented units and windows.
+- Durable ingress and Worker reconciliation persisted all 885 trusted V2
+  facts with `created=885`, `deduplicated=0`, `conflicts=0`, no quarantine,
+  and zero unexpected semantic rejection categories. Legacy report execution,
+  external effects, and write-side provider effects remained zero.
+
+### Verification to date
+
+| Verification | Result |
+|---|---|
+| Focused semantic/adapter/Observation V2/Product selection | 316 passed |
+| Unit marker | 1,117 passed; 40 deselected |
+| Broad non-E2E/non-PostgreSQL regression | 1,117 passed; 40 deselected |
+| Focused Perceptor/Observation V2 PostgreSQL + exact G7.1-R1 handoff | 3 passed |
+| Full PostgreSQL marker | 37 passed; 1 expected process-proof skip; 1,119 deselected |
+| Architecture gate | 6 passed |
+| OpenAPI, migration 001–018 discovery/check, Python 3.11 compile/import, diff check | PASS |
+
+### Final acceptance decision
+
+The current full real SleepReport passes the Observation Semantics V2 contract
+through the normal current client, adapter, canonical factory, encrypted raw
+ingress, persistence, and reconciliation path. The live response adds no
+unknown extension or supported-field contract drift, and no additional G7.1
+lifecycle replay is required. The Perceptor semantic integration phase is
+closed at G7.1-R2; later Process/E2E, monitoring, HITL, delivery, CareOutcome,
+and other phases remain outside this goal.
+
+```text
+FULL_SLEEP_REPORT_SEMANTIC_MATRIX_COMPLETE = YES
+HEART_RATE_AVG_SEMANTICS_RESOLVED           = YES
+ALL_SUPPORTED_SUMMARY_UNITS_RESOLVED        = YES
+ALL_SUPPORTED_SUMMARY_PROVENANCE_RESOLVED   = YES
+MISSING_INTERVAL_PROVENANCE_RESOLVED        = YES
+SANITIZED_FULL_REPORT_REGRESSION             = PASS
+FULL_REAL_SLEEP_REPORT_V2                    = PASS
+UNEXPECTED_SEMANTIC_REJECTIONS               = 0
+LEGACY_REPORT_EXECUTION                      = ZERO
+EXTERNAL_EFFECTS                             = ZERO
+G7_PERCEPTOR_SEMANTIC_INTEGRATION_COMPLETE   = YES
+```

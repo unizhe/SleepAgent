@@ -17,7 +17,9 @@ from sleepagent.domain.contracts import (
     ObservationProvenance,
     ObservationType,
     SleepDomainContract,
+    SleepStageIntervalPayload,
     SourceKind,
+    VendorSleepProfileMetricPayload,
 )
 from sleepagent.domain.observation_semantics import (
     OBSERVATION_SEMANTICS_VERSION,
@@ -26,7 +28,11 @@ from sleepagent.domain.observation_semantics import (
     SemanticRejectionCategory,
     validate_movement_semantics_v2,
 )
-from sleepagent.domain.ontology import METRICS, ONTOLOGY_VERSION, validate_observation_ontology
+from sleepagent.domain.ontology import (
+    ONTOLOGY_VERSION,
+    MetricDefinition,
+    validate_observation_ontology,
+)
 
 
 UTC = timezone.utc
@@ -111,8 +117,9 @@ class CanonicalObservationFactoryV2:
             ontology_version = OBSERVATION_SEMANTICS_VERSION
             payload: CanonicalPayloadV2 = semantic_payload
         else:
-            self._validate_existing_semantics(typed_candidate)
-            existing_definition = METRICS.get(typed_candidate.observation_type)
+            existing_definition = self._validate_existing_semantics(
+                typed_candidate
+            )
             metric_id = (
                 existing_definition.metric_name
                 if existing_definition is not None
@@ -123,9 +130,27 @@ class CanonicalObservationFactoryV2:
                 if existing_definition is not None
                 else None
             )
-            aggregation_start = None
-            aggregation_end = None
-            vendor_semantic_code = None
+            if isinstance(typed_candidate.payload, VendorSleepProfileMetricPayload):
+                aggregation_start = typed_candidate.payload.aggregation_start_at
+                aggregation_end = typed_candidate.payload.aggregation_end_at
+                vendor_semantic_code = typed_candidate.payload.vendor_semantic_code
+            elif isinstance(typed_candidate.payload, SleepStageIntervalPayload):
+                aggregation_start = typed_candidate.payload.start_at
+                aggregation_end = typed_candidate.payload.end_at
+                vendor_semantic_code = None
+            elif isinstance(typed_candidate.payload, MissingIntervalPayload):
+                aggregation_start = typed_candidate.payload.interval_start_at
+                aggregation_end = typed_candidate.payload.interval_end_at
+                if (aggregation_start is None) != (aggregation_end is None):
+                    aggregation_start = None
+                    aggregation_end = None
+                vendor_semantic_code = None
+            else:
+                aggregation_start = None
+                aggregation_end = None
+                vendor_semantic_code = None
+            aggregation_start = _utc_or_none(aggregation_start)
+            aggregation_end = _utc_or_none(aggregation_end)
             trusted = True
             ontology_version = ONTOLOGY_VERSION
             payload = typed_candidate.payload
@@ -216,20 +241,27 @@ class CanonicalObservationFactoryV2:
             ) from exc
 
     @staticmethod
-    def _validate_existing_semantics(candidate: AdapterObservationCandidate) -> None:
+    def _validate_existing_semantics(
+        candidate: AdapterObservationCandidate,
+    ) -> MetricDefinition | None:
         try:
-            validate_observation_ontology(
+            return validate_observation_ontology(
                 observation_type=candidate.observation_type,
                 payload=candidate.payload,
                 source_kind=candidate.source_kind,
             )
         except ValueError as exc:
             detail = str(exc)
-            category = (
-                SemanticRejectionCategory.INVALID_SOURCE_PROVENANCE
-                if "source" in detail
-                else SemanticRejectionCategory.INVALID_UNIT
-            )
+            if "source" in detail:
+                category = SemanticRejectionCategory.INVALID_SOURCE_PROVENANCE
+            elif "aggregation window" in detail:
+                category = SemanticRejectionCategory.MISSING_AGGREGATION_WINDOW
+            elif "value" in detail:
+                category = SemanticRejectionCategory.INVALID_VALUE
+            elif "unsupported vendor sleep profile metric" in detail:
+                category = SemanticRejectionCategory.UNSUPPORTED_METRIC
+            else:
+                category = SemanticRejectionCategory.INVALID_UNIT
             raise CanonicalObservationRejected(category, detail) from exc
 
 

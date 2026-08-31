@@ -1036,3 +1036,55 @@ Diff review confirms the live credential separation is intact, scheduled Pull
 authority is exact and handler-bounded, migrations 015–017 remain immutable,
 retry semantics are preserved, no payload/credential/runtime artifact entered
 the repository, and the two bounded fix rounds stayed within the frozen goal.
+
+## Act 15 — Build: G7.1-R2 full SleepReport V2 semantic closure
+
+### Round 1 — Evidence matrix and complete adapter contract
+
+Reconstructed the complete retained-real SleepReport shape against the pinned
+Perceptor V2.5.2 document and wrote one field-level semantic authority. Added
+distinct vendor-derived whole-report metric identities, canonical units,
+numeric constraints, and required stage-envelope aggregation windows for heart
+mean, respiratory mean, movement total, deep-sleep ratio, and sleep efficiency.
+Raw physiological samples retain device-measured authority. Ambiguous profile
+time/duration strings and apnea values remain encrypted raw-only evidence.
+
+Added the complete sanitized structural fixture and routed it through the real
+adapter, canonical factory, reconciliation, and PostgreSQL V2 sidecar path.
+Unknown mapped/documented structure fails atomically; explicitly known
+unsupported fields remain visible to normalization without becoming trusted.
+Missing/invalid facts were traced to provider-emitted sensor sentinels at
+explicit timestamps rather than SleepAgent cadence-gap synthesis.
+
+### Round 2 — PostgreSQL compatibility and fail-closed review
+
+The strict new-write adapter correctly stopped producing legacy ambiguous
+movement candidates, exposing an upgrade-test fixture that still attempted to
+create historical ambiguity through the live adapter. The fixture now creates
+that historical row directly, preserving read/upcast compatibility without
+weakening new writes. Its isolated fresh/upgrade PostgreSQL proof passes.
+
+Self-review also found that documented raw-only `apnea_images` content was not
+validating nested keys. The adapter now validates the exact documented chart
+shape while continuing to emit no clinical or trusted fact. Legacy raw-only
+apnea optionals with no published schema remain opaque type-checked lists, and
+the extension policy documents that distinction.
+
+### Final Codex verification
+
+- Focused semantic/adapter/Observation V2/Product selection: 316 passed.
+- Unit marker: 1,117 passed, 40 deselected.
+- Broad non-E2E/non-PostgreSQL: 1,117 passed, 40 deselected.
+- Focused Perceptor/Observation V2 PostgreSQL plus exact G7.1-R1 convergent
+  shared-handoff regression: 3 passed.
+- Full PostgreSQL marker: 37 passed; 1 expected process-proof skip.
+- Architecture: 6 passed; OpenAPI, schema-018 apply/check, compilation, and
+  `git diff --check`: PASS.
+
+The explicitly sourced owner-only credential references passed production
+resolver checks. A fresh bounded provider response for the retained known-full
+date crossed the current client, adapter, canonical factory, durable ingress,
+and Worker reconciliation path as 885 accepted and persisted V2 facts with
+zero semantic rejects, conflicts, unknown extensions, contract drift, legacy
+execution, or external effects. The live field inventory matches the complete
+semantic matrix; the G7.1-R2 ledger is accepted.

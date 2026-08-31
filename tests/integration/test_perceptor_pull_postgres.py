@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1005,19 +1006,100 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             ).fetchone()
         assert counts_after_noop == counts_before_noop
 
-        before_no_data = _count(admin_dsn, "sleep_domain_canonical_observations")
-        no_data_ingress = ingress.accept(
+        full_report_fixture = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "fixtures"
+                / "perceptor_v2_5_2"
+                / "sanitized_recorded_real_pull_get_sleep_report_full.json"
+            ).read_text(encoding="utf-8")
+        )
+        full_report_ingress = ingress.accept(
             _read(
                 SLEEP_REPORT_ENDPOINT,
-                _sleep_no_data(),
-                requested_at=NOW + timedelta(minutes=7),
-                received_at=NOW + timedelta(minutes=7, seconds=1),
-                envelope_nonce="sleep-no-data-1",
+                full_report_fixture["data"],
+                requested_at=NOW + timedelta(minutes=6),
+                received_at=NOW + timedelta(minutes=6, seconds=1),
+                envelope_nonce="sleep-full-v2-1",
             ),
             binding=binding,
             coordinates=PullRequestCoordinates(
                 endpoint=SLEEP_REPORT_ENDPOINT,
                 report_date=date(2026, 8, 22),
+            ),
+        )
+        assert full_report_ingress.disposition == "accepted"
+        full_report_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-full-sleep-report-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert full_report_result.quarantined is False
+        assert full_report_result.canonical_created_count == 18
+        assert full_report_result.duplicate_count == 0
+        assert full_report_result.conflict_created_count == 0
+        assert full_report_result.checkpoint_advanced is True
+        with psycopg.connect(admin_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT metric_id, canonical_unit, source_kind, count(*) "
+                    "FROM sleep_domain_observation_semantics_v2 "
+                    "WHERE namespace_id = %s AND observation_id = ANY(%s) "
+                    "GROUP BY metric_id, canonical_unit, source_kind "
+                    "ORDER BY metric_id",
+                    (
+                        NAMESPACE,
+                        list(full_report_result.canonical_observation_ids),
+                    ),
+                )
+                assert cursor.fetchall() == [
+                    ("bed_exit_event", "event", "vendor_derived", 2),
+                    ("deep_sleep_ratio", "percent", "vendor_derived", 1),
+                    ("heart_rate", "beats_per_minute", "device_measured", 3),
+                    ("heart_rate_mean", "beats_per_minute", "vendor_derived", 1),
+                    ("movement_event_count", "count", "vendor_derived", 2),
+                    ("movement_event_total", "count", "vendor_derived", 1),
+                    (
+                        "respiratory_rate",
+                        "breaths_per_minute",
+                        "device_measured",
+                        3,
+                    ),
+                    (
+                        "respiratory_rate_mean",
+                        "breaths_per_minute",
+                        "vendor_derived",
+                        1,
+                    ),
+                    ("sleep_efficiency", "percent", "vendor_derived", 1),
+                    ("sleep_stage", "stage_interval", "vendor_derived", 3),
+                ]
+                cursor.execute(
+                    "SELECT count(*) FROM sleep_domain_observation_semantics_v2 "
+                    "WHERE namespace_id = %s AND observation_id = ANY(%s) "
+                    "AND (canonical_unit IS NULL OR NOT trusted_for_analytics)",
+                    (
+                        NAMESPACE,
+                        list(full_report_result.canonical_observation_ids),
+                    ),
+                )
+                assert cursor.fetchone() == (0,)
+
+        before_no_data = _count(admin_dsn, "sleep_domain_canonical_observations")
+        no_data_ingress = ingress.accept(
+            _read(
+                SLEEP_REPORT_ENDPOINT,
+                _sleep_no_data(),
+                requested_at=NOW + timedelta(days=1, minutes=7),
+                received_at=NOW + timedelta(days=1, minutes=7, seconds=1),
+                envelope_nonce="sleep-no-data-1",
+            ),
+            binding=binding,
+            coordinates=PullRequestCoordinates(
+                endpoint=SLEEP_REPORT_ENDPOINT,
+                report_date=date(2026, 8, 23),
             ),
         )
         assert no_data_ingress.disposition == "accepted"
@@ -1036,7 +1118,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     "sleep_domain_source_reports WHERE namespace_id = %s",
                     (NAMESPACE,),
                 )
-                assert cursor.fetchone() == (1, True)
+                assert cursor.fetchone() == (2, False)
                 cursor.execute(
                     "SELECT count(*) FROM sleep_domain_processing_receipts "
                     "WHERE namespace_id = %s AND stage = 'normalization' "
@@ -1191,14 +1273,14 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             _read(
                 SLEEP_REPORT_ENDPOINT,
                 _sleep_no_data(),
-                requested_at=NOW + timedelta(minutes=7),
-                received_at=NOW + timedelta(minutes=7, seconds=1),
+                requested_at=NOW + timedelta(days=1, minutes=7),
+                received_at=NOW + timedelta(days=1, minutes=7, seconds=1),
                 envelope_nonce="sleep-no-data-1",
             ),
             binding=binding,
             coordinates=PullRequestCoordinates(
                 endpoint=SLEEP_REPORT_ENDPOINT,
-                report_date=date(2026, 8, 22),
+                report_date=date(2026, 8, 23),
             ),
         )
         assert generation_two_no_data.disposition == "accepted"
@@ -1267,7 +1349,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     "FROM sleep_domain_source_reports WHERE namespace_id = %s",
                     (NAMESPACE,),
                 )
-                assert cursor.fetchone() == (2, 2, 2)
+                assert cursor.fetchone() == (3, 2, 3)
 
                 cursor.execute(
                     "SELECT count(*) FROM sleep_domain_raw_inbox "

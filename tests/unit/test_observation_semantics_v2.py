@@ -574,12 +574,11 @@ def test_unproved_pull_vendor_series_semantics_fail_closed() -> None:
         report_date=date(2026, 8, 23),
         binding_timezone_name="UTC",
     )
-    with pytest.raises(CanonicalObservationRejected) as rejected:
-        canonicalize_pull_result_v2(result)
-    assert (
-        rejected.value.category
-        is SemanticRejectionCategory.UNSUPPORTED_VENDOR_SEMANTICS
+    assert result.candidates == ()
+    assert result.intentionally_unsupported_fields == (
+        "body_shake_data[].time_long/value",
     )
+    assert canonicalize_pull_result_v2(result) == ()
 
 
 def test_feature_default_is_v2_and_explicit_v1_preserves_legacy_payload() -> None:

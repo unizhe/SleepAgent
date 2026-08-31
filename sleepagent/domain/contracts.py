@@ -370,6 +370,9 @@ class VendorSleepProfileMetricPayload(SleepDomainContract):
     value: str | int | float | bool | None = None
     source_text: str | None = None
     unit: str | None = None
+    aggregation_start_at: datetime | None = None
+    aggregation_end_at: datetime | None = None
+    vendor_semantic_code: str | None = None
 
     @model_validator(mode="after")
     def value_matches_state(self) -> "VendorSleepProfileMetricPayload":
@@ -377,6 +380,16 @@ class VendorSleepProfileMetricPayload(SleepDomainContract):
             raise ValueError("known vendor metric requires value")
         if self.value_state != AvailabilityState.KNOWN and self.value is not None:
             raise ValueError("unknown/not_provided vendor metric cannot carry value")
+        if (self.aggregation_start_at is None) != (
+            self.aggregation_end_at is None
+        ):
+            raise ValueError("vendor metric aggregation requires both boundaries")
+        if (
+            self.aggregation_start_at is not None
+            and self.aggregation_end_at is not None
+            and self.aggregation_end_at <= self.aggregation_start_at
+        ):
+            raise ValueError("vendor metric aggregation window must be positive")
         return self
 
 

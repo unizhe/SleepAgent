@@ -18,6 +18,7 @@ from sleepagent.domain.contracts import (
     DataMode,
     DeviceBinding,
     DeviceBindingStatus,
+    ObservationType,
     ProviderDeviceIdentity,
 )
 from sleepagent.infrastructure.postgres_sleep_slice import (
@@ -839,10 +840,16 @@ def test_sleep_report_no_data_is_durable_but_has_no_normalized_candidates() -> N
     assert normalized["observations"] == ()
 
 
-def test_sleep_report_worker_anchors_summary_and_profile_to_requested_local_day() -> None:
+def test_sleep_report_worker_binds_summary_to_authoritative_report_window() -> None:
     data = {
-        "sleep_profile": {"sleep_score": 82},
-        "sleep_stage_list": [],
+        "sleep_profile": {"sleep_time": "22-06"},
+        "sleep_stage_list": [
+            {
+                "start_time": 1787385600,
+                "end_time": 1787414400,
+                "type": 2,
+            }
+        ],
         "heart_rate_avg": 64,
     }
     raw = _envelope(data)
@@ -890,14 +897,16 @@ def test_sleep_report_worker_anchors_summary_and_profile_to_requested_local_day(
     )
 
     assert len(normalized["observations"]) == 2
-    assert all(
-        observation.measurement_at
-        == datetime(2026, 8, 21, 16, 0, tzinfo=UTC)
+    summary = next(
+        observation
         for observation in normalized["observations"]
+        if observation.observation_type
+        is ObservationType.VENDOR_SLEEP_PROFILE_METRIC
     )
-    assert all(
-        observation.source_timestamp_text == "2026-08-22"
-        for observation in normalized["observations"]
+    assert summary.measurement_at == datetime.fromtimestamp(1787414400, tz=UTC)
+    assert summary.source_timestamp_text == "2026-08-22"
+    assert normalized["intentionally_unsupported_fields"] == (
+        "sleep_profile.sleep_time",
     )
 
 

@@ -8,9 +8,10 @@ provider-neutral candidates cross this boundary.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -74,6 +75,7 @@ SLEEP_REPORT_SERIES_FIELDS = (
     "breathe_data",
     "body_shake_data",
     "getups",
+    "apnea_images",
     "apnea_data",
     "breath_pause_data",
 )
@@ -82,6 +84,25 @@ SLEEP_REPORT_SUMMARY_FIELDS = (
     "breathe_avg",
     "sum_body_shake_times",
     "apnea_count",
+)
+SLEEP_REPORT_PROFILE_FIELDS = frozenset(
+    {
+        "deep_sleep_rate",
+        "in_bed_time",
+        "in_sleep_time",
+        "leave_bed_time",
+        "sleep_duration",
+        "sleep_efficiency",
+        "sleep_time",
+        "wake_ups",
+        "wakeup_time",
+    }
+)
+SLEEP_REPORT_TRUSTED_PROFILE_FIELDS = frozenset(
+    {"deep_sleep_rate", "sleep_efficiency"}
+)
+SLEEP_REPORT_UNSUPPORTED_TOP_LEVEL_FIELDS = frozenset(
+    {"apnea_images", "apnea_data", "breath_pause_data", "apnea_count"}
 )
 SLEEP_REPORT_NO_DATA_REQUIRED_FIELDS = frozenset(
     {
@@ -109,6 +130,8 @@ class PullContractError(ValueError):
 class PullNormalizationResult:
     candidates: tuple[AdapterObservationCandidate, ...]
     unknown_fields: tuple[str, ...] = ()
+    intentionally_unsupported_fields: tuple[str, ...] = ()
+    intentionally_ignored_fields: tuple[str, ...] = ()
     parser_notes: tuple[str, ...] = ()
     history_window_classification: HistoryWindowClassification | None = None
 
@@ -202,6 +225,8 @@ def with_durable_raw_reference(
     return PullNormalizationResult(
         candidates=candidates,
         unknown_fields=result.unknown_fields,
+        intentionally_unsupported_fields=result.intentionally_unsupported_fields,
+        intentionally_ignored_fields=result.intentionally_ignored_fields,
         parser_notes=result.parser_notes,
         history_window_classification=result.history_window_classification,
     )
@@ -517,6 +542,12 @@ def sleep_report_is_no_data(data: Mapping[str, Any]) -> bool:
 
     if not isinstance(data, Mapping):
         raise PullContractError("sleep report data must be an object")
+    unknown = set(data) - SLEEP_REPORT_KNOWN_FIELDS
+    if unknown:
+        raise PullContractError(
+            "sleep report contains unknown top-level fields: "
+            + ", ".join(sorted(unknown))
+        )
 
     for field in SLEEP_REPORT_SERIES_FIELDS:
         if field not in data:
@@ -528,6 +559,13 @@ def sleep_report_is_no_data(data: Mapping[str, Any]) -> bool:
     profile = data.get("sleep_profile")
     if "sleep_profile" in data and profile is not None and not isinstance(profile, Mapping):
         raise PullContractError("sleep_profile must be null or an object")
+    if isinstance(profile, Mapping):
+        profile_unknown = set(profile) - SLEEP_REPORT_PROFILE_FIELDS
+        if profile_unknown:
+            raise PullContractError(
+                "sleep_profile contains unknown fields: "
+                + ", ".join(sorted(profile_unknown))
+            )
 
     for field in SLEEP_REPORT_SUMMARY_FIELDS:
         if field not in data or data[field] is None:
@@ -561,9 +599,6 @@ def sleep_report_is_no_data(data: Mapping[str, Any]) -> bool:
         "heart_rate_avg", "breathe_avg", "sum_body_shake_times"
     )):
         raise PullContractError("sleep report no-data summaries must be zero")
-    unknown = set(data) - SLEEP_REPORT_KNOWN_FIELDS
-    if unknown:
-        raise PullContractError("sleep report no-data shape contains unknown fields")
     return True
 
 
@@ -579,12 +614,12 @@ def normalize_sleep_report(
     binding_timezone_name: str,
 ) -> PullNormalizationResult:
     _validate_context(raw_sha256, requested_at, received_at)
-    report_anchor = datetime.combine(
-        report_date,
-        time.min,
-        tzinfo=ZoneInfo(binding_timezone_name),
-    ).astimezone(UTC)
-    known = set(SLEEP_REPORT_KNOWN_FIELDS)
+    unknown = set(data) - SLEEP_REPORT_KNOWN_FIELDS
+    if unknown:
+        raise PullContractError(
+            "sleep report contains unknown top-level fields: "
+            + ", ".join(sorted(unknown))
+        )
     if sleep_report_is_no_data(data):
         return PullNormalizationResult(
             candidates=(),
@@ -594,12 +629,57 @@ def normalize_sleep_report(
             ),
         )
     candidates: list[AdapterObservationCandidate] = []
-    nested_unknown: set[str] = set()
-    for index, item in enumerate(_optional_mapping_list(data.get("sleep_stage_list"), "sleep_stage_list")):
-        nested_unknown.update(
-            f"sleep_stage_list[].{key}"
-            for key in set(item) - {"start_time", "end_time", "type"}
-        )
+    unsupported: set[str] = {
+        field for field in SLEEP_REPORT_UNSUPPORTED_TOP_LEVEL_FIELDS if field in data
+    }
+    ignored: set[str] = set()
+    for item in _optional_mapping_list(
+        data.get("apnea_images"), "apnea_images"
+    ):
+        expected_apnea_fields = {
+            "apnea_images",
+            "begin_time",
+            "end_time",
+        }
+        if set(item) != expected_apnea_fields:
+            raise PullContractError(
+                "apnea_images entries must contain exactly the documented fields"
+            )
+        chart = item["apnea_images"]
+        if not isinstance(chart, list):
+            raise PullContractError("apnea_images.apnea_images must be an array")
+        for chart_value in chart:
+            _number(chart_value, "apnea_images.apnea_images[]")
+        for time_field in ("begin_time", "end_time"):
+            if not isinstance(item[time_field], str) or not item[time_field].strip():
+                raise PullContractError(
+                    f"apnea_images.{time_field} must be non-empty text"
+                )
+    stage_items = _optional_mapping_list(
+        data.get("sleep_stage_list"), "sleep_stage_list"
+    )
+    report_window_start: datetime | None = None
+    report_window_end: datetime | None = None
+    for index, item in enumerate(stage_items):
+        extra = set(item) - {
+            "start_time", "end_time", "type", "start_time_str", "end_time_str"
+        }
+        if extra:
+            raise PullContractError(
+                "sleep_stage_list contains unknown fields: "
+                + ", ".join(sorted(extra))
+            )
+        for display_field in ("start_time_str", "end_time_str"):
+            if (
+                display_field in item
+                and item[display_field] is not None
+                and not isinstance(item[display_field], str)
+            ):
+                raise PullContractError(
+                    f"sleep_stage_list.{display_field} must be text"
+                )
+            if display_field in item:
+                ignored.add(f"sleep_stage_list[].{display_field}")
         start = _epoch_time(
             item.get("start_time"), "sleep_stage_list.start_time", unit="seconds"
         )
@@ -607,7 +687,23 @@ def normalize_sleep_report(
             item.get("end_time"), "sleep_stage_list.end_time", unit="seconds"
         )
         stage_code = _integer(item.get("type"), "sleep_stage_list.type")
-        stage = {1: SleepStageState.DEEP, 2: SleepStageState.LIGHT, 3: SleepStageState.REM, 4: SleepStageState.AWAKE}.get(stage_code, SleepStageState.UNKNOWN)
+        try:
+            stage = {
+                1: SleepStageState.DEEP,
+                2: SleepStageState.LIGHT,
+                3: SleepStageState.REM,
+                4: SleepStageState.AWAKE,
+            }[stage_code]
+        except KeyError as exc:
+            raise PullContractError(
+                "sleep_stage_list.type must be one of the documented codes 1-4"
+            ) from exc
+        report_window_start = (
+            start if report_window_start is None else min(report_window_start, start)
+        )
+        report_window_end = (
+            end if report_window_end is None else max(report_window_end, end)
+        )
         candidates.append(
             _candidate(
                 endpoint="getSleepReport", suffix=f"stage-{index}",
@@ -628,9 +724,16 @@ def normalize_sleep_report(
         ("breathe_data", ObservationType.RESPIRATORY_RATE, RespiratoryRatePayload, 150.0, "breath-rate"),
     ):
         for index, item in enumerate(_optional_mapping_list(data.get(field), field)):
-            nested_unknown.update(
-                f"{field}[].{key}" for key in set(item) - {"time_long", "value"}
-            )
+            extra = set(item) - {"time_long", "value", "type"}
+            if extra:
+                raise PullContractError(
+                    f"{field} contains unknown fields: "
+                    + ", ".join(sorted(extra))
+                )
+            if "type" in item and item["type"] is not None:
+                _integer(item["type"], f"{field}.type")
+            if "type" in item:
+                ignored.add(f"{field}[].type")
             measured_at = _epoch_time(
                 item.get("time_long"), f"{field}.time_long", unit="seconds"
             )
@@ -700,65 +803,57 @@ def normalize_sleep_report(
                     )
                 )
         elif series_shape:
-            for index, item in enumerate(body_shake_items):
-                nested_unknown.update(
-                    f"body_shake_data[].{key}"
-                    for key in set(item) - {"time_long", "value"}
-                )
-                measured_at = _epoch_time(
-                    item.get("time_long"),
-                    "body_shake_data.time_long",
+            for item in body_shake_items:
+                extra = set(item) - {"time_long", "value"}
+                if extra:
+                    raise PullContractError(
+                        "body_shake_data contains unknown fields: "
+                        + ", ".join(sorted(extra))
+                    )
+                _epoch_time(
+                    item.get("time_long"), "body_shake_data.time_long",
                     unit="seconds",
                 )
-                candidates.append(
-                    _measurement_candidate(
-                        value=item.get("value"),
-                        field="body_shake_data.value",
-                        observation_type=ObservationType.MOVEMENT,
-                        payload_type=MovementPayload,
-                        upper=None,
-                        endpoint="getSleepReport",
-                        suffix=f"movement-{index}",
-                        provider_account_id=provider_account_id,
-                        provider_device=provider_device,
-                        raw_sha256=raw_sha256,
-                        requested_at=requested_at,
-                        received_at=received_at,
-                        measurement_at=measured_at,
-                        source_timestamp_text=str(item.get("time_long")),
-                        timezone_status=TimezoneStatus.KNOWN,
-                        time_flags=("vendor_report_series",),
-                        source_kind=SourceKind.VENDOR_DERIVED,
-                        allow_zero=True,
-                    )
-                )
+                _number(item.get("value"), "body_shake_data.value")
+            unsupported.add("body_shake_data[].time_long/value")
         else:
             raise PullContractError(
                 "body_shake_data must use one supported deterministic shape"
             )
-    for metric_name in (
-        "heart_rate_avg", "breathe_avg", "sum_body_shake_times", "apnea_count"
-    ):
-        if metric_name not in data:
+    summary_contract = {
+        "heart_rate_avg": ("heart_rate_mean", "beats_per_minute", 1.0, 300.0),
+        "breathe_avg": (
+            "respiratory_rate_mean", "breaths_per_minute", 1.0, 150.0
+        ),
+        "sum_body_shake_times": ("movement_event_total", "count", 0.0, None),
+    }
+    for vendor_field, (metric_name, unit, lower, upper) in summary_contract.items():
+        if vendor_field not in data or data[vendor_field] in (None, "", -1):
             continue
-        value = data[metric_name]
-        known_value = value not in (None, "", -1)
+        value = _integer(data[vendor_field], vendor_field)
+        if value < lower or (upper is not None and value > upper):
+            raise PullContractError(f"{vendor_field} is outside its documented metric contract")
+        window_start, window_end = _sleep_report_window(
+            report_window_start, report_window_end, vendor_field
+        )
         payload = VendorSleepProfileMetricPayload(
             metric_name=metric_name,
-            value_state=(
-                AvailabilityState.KNOWN if known_value else AvailabilityState.UNKNOWN
-            ),
-            value=value if known_value else None,
-            source_text=str(value) if known_value else None,
+            value_state=AvailabilityState.KNOWN,
+            value=value,
+            source_text=str(data[vendor_field]),
+            unit=unit,
+            aggregation_start_at=window_start,
+            aggregation_end_at=window_end,
+            vendor_semantic_code=f"perceptor.sleep_report.{vendor_field}",
         )
         candidates.append(
             _candidate(
-                endpoint="getSleepReport", suffix=f"summary-{metric_name}",
+                endpoint="getSleepReport", suffix=f"summary-{vendor_field}",
                 payload=payload, source_kind=SourceKind.VENDOR_DERIVED,
                 provider_account_id=provider_account_id,
                 provider_device=provider_device, raw_sha256=raw_sha256,
                 requested_at=requested_at, received_at=received_at,
-                measurement_at=report_anchor,
+                measurement_at=window_end,
                 source_timestamp_text=report_date.isoformat(),
                 timezone_status=TimezoneStatus.NORMALIZED_FROM_BINDING,
                 quality_flags=(
@@ -795,25 +890,48 @@ def normalize_sleep_report(
     if profile is not None:
         if not isinstance(profile, Mapping):
             raise PullContractError("sleep_profile must be an object")
-        for metric_name in sorted(profile):
-            value = profile[metric_name]
-            if isinstance(value, (str, int, float, bool)) and value != "":
-                payload = VendorSleepProfileMetricPayload(
-                    metric_name=str(metric_name), value_state=AvailabilityState.KNOWN,
-                    value=value, source_text=str(value),
-                )
-            else:
-                payload = VendorSleepProfileMetricPayload(
-                    metric_name=str(metric_name), value_state=AvailabilityState.UNKNOWN,
-                    source_text=None,
-                )
+        profile_unknown = set(profile) - SLEEP_REPORT_PROFILE_FIELDS
+        if profile_unknown:
+            raise PullContractError(
+                "sleep_profile contains unknown fields: "
+                + ", ".join(sorted(profile_unknown))
+            )
+        for vendor_field in sorted(profile):
+            value = profile[vendor_field]
+            if value in (None, ""):
+                continue
+            if vendor_field not in SLEEP_REPORT_TRUSTED_PROFILE_FIELDS:
+                unsupported.add(f"sleep_profile.{vendor_field}")
+                continue
+            number = _percent(value, f"sleep_profile.{vendor_field}")
+            metric_name = {
+                "deep_sleep_rate": "deep_sleep_ratio",
+                "sleep_efficiency": "sleep_efficiency",
+            }[vendor_field]
+            window_start, window_end = _sleep_report_window(
+                report_window_start,
+                report_window_end,
+                f"sleep_profile.{vendor_field}",
+            )
+            payload = VendorSleepProfileMetricPayload(
+                metric_name=metric_name,
+                value_state=AvailabilityState.KNOWN,
+                value=number,
+                source_text=str(value),
+                unit="percent",
+                aggregation_start_at=window_start,
+                aggregation_end_at=window_end,
+                vendor_semantic_code=(
+                    f"perceptor.sleep_report.sleep_profile.{vendor_field}"
+                ),
+            )
             candidates.append(
                 _candidate(
                     endpoint="getSleepReport", suffix=f"profile-{metric_name}", payload=payload,
                     source_kind=SourceKind.VENDOR_DERIVED,
                     provider_account_id=provider_account_id, provider_device=provider_device,
                     raw_sha256=raw_sha256, requested_at=requested_at, received_at=received_at,
-                    measurement_at=report_anchor,
+                    measurement_at=window_end,
                     source_timestamp_text=report_date.isoformat(),
                     timezone_status=TimezoneStatus.NORMALIZED_FROM_BINDING,
                     quality_flags=(
@@ -828,9 +946,37 @@ def normalize_sleep_report(
             )
     return PullNormalizationResult(
         candidates=tuple(candidates),
-        unknown_fields=tuple(sorted((set(data) - known) | nested_unknown)),
-        parser_notes=(f"binding_timezone:{binding_timezone_name}", "vendor_sleep_stages_remain_vendor_derived"),
+        intentionally_unsupported_fields=tuple(sorted(unsupported)),
+        intentionally_ignored_fields=tuple(sorted(ignored)),
+        parser_notes=(
+            f"binding_timezone:{binding_timezone_name}",
+            "vendor_sleep_stages_remain_vendor_derived",
+            "sleep_report_unknown_fields_fail_closed",
+        ),
     )
+
+
+def _sleep_report_window(
+    start: datetime | None,
+    end: datetime | None,
+    field: str,
+) -> tuple[datetime, datetime]:
+    if start is None or end is None:
+        raise PullContractError(
+            f"{field} requires the authoritative sleep-stage report window"
+        )
+    return start, end
+
+
+def _percent(value: object, field: str) -> float:
+    if not isinstance(value, str) or re.fullmatch(
+        r"(?:0|[1-9][0-9]?|100)(?:\.[0-9]+)?%", value
+    ) is None:
+        raise PullContractError(f"{field} must be a documented percentage string")
+    number = float(value[:-1])
+    if not 0 <= number <= 100:
+        raise PullContractError(f"{field} percentage is outside 0-100")
+    return number
 
 
 def _measurement_candidate(

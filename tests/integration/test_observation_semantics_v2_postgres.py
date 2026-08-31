@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import pytest
 
 from sleepagent.domain.contracts import (
+    MovementPayload,
     ObservationType,
     ProviderDeviceIdentity,
     SleepObservation,
@@ -160,12 +161,22 @@ def _legacy_rows() -> list[tuple[object, SleepObservation]]:
         binding_timezone_name="UTC",
         **_context(),
     ).candidates[0]
-    ambiguous = normalize_sleep_report(
-        {"body_shake_data": [{"time_long": int(AT.timestamp()), "value": 21}]},
-        report_date=date(2026, 8, 23),
-        binding_timezone_name="UTC",
-        **_context(),
-    ).candidates[0]
+    ambiguous = count.model_copy(
+        update={
+            "candidate_id": "g2b-m3-legacy-ambiguous-candidate",
+            "payload": MovementPayload(value=21),
+            "measurement_at": AT,
+            "source_timestamp_text": str(int(AT.timestamp())),
+            "source_key": "g2b-m3-legacy-ambiguous-source",
+            "idempotency_key": "g2b-m3-legacy-ambiguous-idempotency",
+            "quality": count.quality.model_copy(
+                update={
+                    "quality_flags": ("vendor_report_series",),
+                    "limitations": (),
+                }
+            ),
+        }
+    )
     duplicate = index.model_copy(
         update={
             "candidate_id": "g2b-m3-duplicate-candidate",

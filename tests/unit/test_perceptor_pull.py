@@ -288,11 +288,14 @@ def test_history_device_mismatch_fails_closed() -> None:
 def test_sleep_report_keeps_stages_vendor_derived_and_normalizes_series() -> None:
     result = normalize_sleep_report(
         {
-            "sleep_profile": {"sleep_score": 82, "sleep_time": "22-06"},
+            "sleep_profile": {
+                "deep_sleep_rate": "25%",
+                "sleep_time": "22-06",
+            },
             "sleep_stage_list": [{"start_time": 1787472000, "end_time": 1787472600, "type": 2}],
             "heart_rate_data": [{"time_long": 1787472000, "value": 64}],
             "breathe_data": [{"time_long": 1787472000, "value": -1}],
-            "body_shake_data": [{"time_long": 1787472000, "value": 2}],
+            "body_shake_data": [{"hour": "16", "count": 2}],
             "heart_rate_avg": 64,
         },
         report_date=date(2026, 8, 23),
@@ -319,14 +322,17 @@ def test_sleep_report_keeps_stages_vendor_derived_and_normalizes_series() -> Non
         for item in physiological_series
     )
     assert any(isinstance(item.payload, MissingIntervalPayload) for item in result.candidates)
-    assert sum(isinstance(item.payload, VendorSleepProfileMetricPayload) for item in result.candidates) == 3
+    assert sum(isinstance(item.payload, VendorSleepProfileMetricPayload) for item in result.candidates) == 2
+    assert result.intentionally_unsupported_fields == (
+        "sleep_profile.sleep_time",
+    )
     report_metrics = tuple(
         item
         for item in result.candidates
         if isinstance(item.payload, VendorSleepProfileMetricPayload)
     )
     assert all(
-        item.measurement_at == datetime(2026, 8, 22, 16, 0, tzinfo=UTC)
+        item.measurement_at == datetime.fromtimestamp(1787472600, tz=UTC)
         for item in report_metrics
     )
     assert all(item.source_timestamp_text == "2026-08-23" for item in report_metrics)
@@ -354,7 +360,8 @@ def test_sanitized_real_sleep_report_series_has_explicit_v2_provenance() -> None
         **CONTEXT,
     )
 
-    assert result.unknown_fields == (
+    assert result.unknown_fields == ()
+    assert result.intentionally_ignored_fields == (
         "breathe_data[].type",
         "heart_rate_data[].type",
     )
@@ -370,6 +377,163 @@ def test_sanitized_real_sleep_report_series_has_explicit_v2_provenance() -> None
     }
     assert all(
         item.source_kind is SourceKind.DEVICE_MEASURED for item in canonical
+    )
+
+
+def test_full_sanitized_real_sleep_report_has_complete_v2_semantic_inventory() -> None:
+    fixture = json.loads(
+        (
+            FIXTURES
+            / "sanitized_recorded_real_pull_get_sleep_report_full.json"
+        ).read_text(encoding="utf-8")
+    )
+    result = normalize_sleep_report(
+        fixture["data"],
+        report_date=date(2026, 8, 22),
+        binding_timezone_name="Asia/Shanghai",
+        **CONTEXT,
+    )
+
+    assert result.unknown_fields == ()
+    assert result.intentionally_ignored_fields == (
+        "heart_rate_data[].type",
+        "sleep_stage_list[].end_time_str",
+        "sleep_stage_list[].start_time_str",
+    )
+    assert result.intentionally_unsupported_fields == (
+        "sleep_profile.in_bed_time",
+        "sleep_profile.in_sleep_time",
+        "sleep_profile.leave_bed_time",
+        "sleep_profile.sleep_duration",
+        "sleep_profile.sleep_time",
+        "sleep_profile.wake_ups",
+        "sleep_profile.wakeup_time",
+    )
+    canonical = canonicalize_pull_result_v2(result)
+    inventory: dict[tuple[str, str, str], int] = {}
+    for item in canonical:
+        key = (
+            item.metric_id,
+            str(item.canonical_unit),
+            item.source_kind.value,
+        )
+        inventory[key] = inventory.get(key, 0) + 1
+
+    assert len(canonical) == 18
+    assert inventory == {
+        ("bed_exit_event", "event", "vendor_derived"): 2,
+        ("deep_sleep_ratio", "percent", "vendor_derived"): 1,
+        ("heart_rate", "beats_per_minute", "device_measured"): 3,
+        ("heart_rate_mean", "beats_per_minute", "vendor_derived"): 1,
+        ("movement_event_count", "count", "vendor_derived"): 2,
+        ("movement_event_total", "count", "vendor_derived"): 1,
+        ("respiratory_rate", "breaths_per_minute", "device_measured"): 3,
+        ("respiratory_rate_mean", "breaths_per_minute", "vendor_derived"): 1,
+        ("sleep_efficiency", "percent", "vendor_derived"): 1,
+        ("sleep_stage", "stage_interval", "vendor_derived"): 3,
+    }
+    report_summaries = tuple(
+        item
+        for item in canonical
+        if item.metric_id
+        in {
+            "deep_sleep_ratio",
+            "heart_rate_mean",
+            "movement_event_total",
+            "respiratory_rate_mean",
+            "sleep_efficiency",
+        }
+    )
+    assert report_summaries
+    assert all(item.aggregation_start_at is not None for item in report_summaries)
+    assert all(item.aggregation_end_at is not None for item in report_summaries)
+    assert all(item.trusted_for_analytics for item in canonical)
+
+
+def test_sleep_report_summary_requires_documented_report_window() -> None:
+    with pytest.raises(PullContractError, match="authoritative sleep-stage report window"):
+        normalize_sleep_report(
+            {"heart_rate_avg": 64},
+            report_date=date(2025, 6, 30),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+
+
+def test_sleep_report_unknown_fields_fail_closed_but_documented_apnea_is_raw_only() -> None:
+    with pytest.raises(PullContractError, match="unknown top-level fields"):
+        normalize_sleep_report(
+            {"future_vendor_field": 1},
+            report_date=date(2025, 6, 30),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+    with pytest.raises(PullContractError, match="sleep_profile contains unknown"):
+        normalize_sleep_report(
+            {"sleep_profile": {"sleep_score": 82}},
+            report_date=date(2025, 6, 30),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+
+    raw_only = normalize_sleep_report(
+        {
+            "apnea_images": [
+                {
+                    "apnea_images": [12, 10, 8],
+                    "begin_time": "01:15",
+                    "end_time": "01:16",
+                }
+            ]
+        },
+        report_date=date(2025, 6, 30),
+        binding_timezone_name="Asia/Shanghai",
+        **CONTEXT,
+    )
+    assert raw_only.candidates == ()
+    assert raw_only.intentionally_unsupported_fields == ("apnea_images",)
+
+    with pytest.raises(PullContractError, match="documented fields"):
+        normalize_sleep_report(
+            {
+                "apnea_images": [
+                    {
+                        "apnea_images": [12, 10, 8],
+                        "begin_time": "01:15",
+                        "end_time": "01:16",
+                        "future_nested_field": 1,
+                    }
+                ]
+            },
+            report_date=date(2025, 6, 30),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+
+
+def test_sleep_report_explicit_invalid_sentinels_retain_device_measurement_authority() -> None:
+    result = normalize_sleep_report(
+        {
+            "heart_rate_data": [{"time_long": 1751205960, "value": -1}],
+            "breathe_data": [{"time_long": 1751205960, "value": 0}],
+        },
+        report_date=date(2025, 6, 30),
+        binding_timezone_name="Asia/Shanghai",
+        **CONTEXT,
+    )
+    assert len(result.candidates) == 2
+    assert all(
+        isinstance(item.payload, MissingIntervalPayload)
+        and item.source_kind is SourceKind.DEVICE_MEASURED
+        and "vendor_invalid_measurement" in item.quality.quality_flags
+        for item in result.candidates
+    )
+    canonical = canonicalize_pull_result_v2(result)
+    assert all(
+        item.metric_id == "missing_interval"
+        and item.canonical_unit == "interval"
+        and item.source_kind is SourceKind.DEVICE_MEASURED
+        for item in canonical
     )
 
 
