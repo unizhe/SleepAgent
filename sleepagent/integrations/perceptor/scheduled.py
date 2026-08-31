@@ -110,6 +110,7 @@ class PerceptorAcquisitionExecutor:
         self._client = PerceptorPlatformClient(
             client_id=self._client_id(),
             client_secret=secret,
+            base_url=self.settings.perceptor_base_url,
         )
         return self._client
 

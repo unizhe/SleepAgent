@@ -114,6 +114,7 @@ class SleepBackendSettings(BaseModel):
     encryption_key_ref: str = Field(min_length=1)
     perceptor_client_id_ref: str | None = None
     perceptor_client_secret_ref: str | None = None
+    perceptor_base_url: str = "https://openapi.perceptor.cn/v2"
     perceptor_provider_account_id: str | None = Field(default=None, min_length=1)
     perceptor_namespace_id: str | None = Field(default=None, min_length=1)
     perceptor_namespace_generation: int = Field(default=1, ge=1)
@@ -275,6 +276,18 @@ class SleepBackendSettings(BaseModel):
             raise ValueError(
                 "scheduled Perceptor Pull requires live provider configuration"
             )
+        perceptor_base = urlsplit(self.perceptor_base_url)
+        if (
+            perceptor_base.scheme != "https"
+            or not perceptor_base.hostname
+            or perceptor_base.username is not None
+            or perceptor_base.password is not None
+            or perceptor_base.query
+            or perceptor_base.fragment
+        ):
+            raise ValueError(
+                "Perceptor base URL must be an HTTPS origin without credentials"
+            )
         if ApiSurface.DEMO in self.enabled_surfaces:
             if self.deployment_mode == DeploymentMode.PRODUCTION:
                 raise ValueError("production cannot expose the demo surface")
@@ -424,6 +437,10 @@ class SleepBackendSettings(BaseModel):
             perceptor_client_secret_ref=(
                 env.get(f"{SETTINGS_PREFIX}PERCEPTOR_CLIENT_SECRET_REF") or None
             ),
+            perceptor_base_url=env.get(
+                f"{SETTINGS_PREFIX}PERCEPTOR_BASE_URL",
+                "https://openapi.perceptor.cn/v2",
+            ).strip(),
             perceptor_provider_account_id=(
                 env.get(f"{SETTINGS_PREFIX}PERCEPTOR_PROVIDER_ACCOUNT_ID") or None
             ),

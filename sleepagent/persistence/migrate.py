@@ -1271,7 +1271,10 @@ def _bootstrap_replay_seed_allowlist(connection: ConnectionLike) -> None:
     generator = CanonicalReplayGenerator()
     for seed in registry.seeds:
         scenario = verify_packaged_seed(seed)
-        adapter = replay_external_fact_adapter(seed.adapter_version)
+        adapter = replay_external_fact_adapter(
+            seed.adapter_version,
+            observation_semantics_version="v2",
+        )
         adapted = adapter.adapt(scenario, generator.generate(scenario))
         manifest = adapted.manifest
         manifest_bytes = json.dumps(

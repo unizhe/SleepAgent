@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from importlib import resources
 
 import pytest
@@ -15,6 +17,7 @@ from sleepagent.simulation.replay_ingress import AdaptedReplayIngress
 from sleepagent.simulation.replay_ingress import (
     AdaptedReplayIngressV2,
     ReplayExternalFactAdapterV2,
+    replay_external_fact_adapter,
 )
 from sleepagent.simulation.seed_registry import (
     load_replay_seed_registry,
@@ -183,3 +186,27 @@ def test_every_packaged_seed_scenario_is_traversable() -> None:
     verified = tuple(verify_packaged_seed(seed).scenario_id for seed in registry.seeds)
 
     assert verified == tuple(seed.scenario_id for seed in registry.seeds)
+
+
+def test_every_packaged_seed_pins_the_authoritative_v2_ingress_manifest() -> None:
+    registry = load_replay_seed_registry()
+    generator = CanonicalReplayGenerator()
+
+    for seed in registry.seeds:
+        scenario = verify_packaged_seed(seed)
+        adapted = replay_external_fact_adapter(
+            seed.adapter_version,
+            observation_semantics_version="v2",
+        ).adapt(scenario, generator.generate(scenario))
+        manifest = adapted.manifest
+        encoded = json.dumps(
+            manifest.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+        assert manifest.component_pins_sha256 == seed.component_pins_sha256
+        assert manifest.canonical_sequence_sha256 == seed.canonical_sequence_sha256
+        assert hashlib.sha256(encoded).hexdigest() == seed.manifest_sha256
+        assert len(adapted.items) == seed.observation_count

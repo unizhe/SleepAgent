@@ -790,7 +790,7 @@ class PostgresReplayJourneyRepository:
             cursor = uow.connection.cursor()
             try:
                 cursor.execute(
-                    "SELECT status, operation_json FROM "
+                    "SELECT status, operation_json, operation_type FROM "
                     "public.sleep_domain_operations WHERE operation_id = %s "
                     "AND namespace_id = %s AND data_mode = %s "
                     "AND namespace_generation = %s AND subject_id = %s "
@@ -833,15 +833,13 @@ class PostgresReplayJourneyRepository:
                         "public.sleep_domain_operations WHERE operation_id = %s "
                         "AND namespace_id = %s AND data_mode = %s "
                         "AND namespace_generation = %s AND subject_id = %s "
-                        "AND operation_type = 'product.shared_analysis.v1' "
-                        "AND target_resource_key = %s",
+                        "AND operation_type = 'product.shared_analysis.v1'",
                         (
                             shared_operation_id,
                             scope.namespace_id,
                             scope.data_mode,
                             scope.namespace_generation,
                             scope.subject_id,
-                            episode.night_episode_revision_id,
                         ),
                     )
                     shared_row = cursor.fetchone()

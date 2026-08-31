@@ -11,6 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from sleepagent.application.product_data import public_product_subject_ref
 from sleepagent.simulation.cli import (
     ActorAssertionSigner,
     DemoCliError,
@@ -369,7 +370,7 @@ class ProductDemoProduct:
                 "data_mode": "replay",
                 "synthetic_non_release": True,
                 "state": "no_data",
-                "subject_ref": subject_id,
+                "subject_ref": public_product_subject_ref(subject_id),
                 "role": role,
                 "content": None,
             }
@@ -385,7 +386,7 @@ class ProductDemoProduct:
             "data_mode": "replay",
             "synthetic_non_release": True,
             "state": "ready",
-            "subject_ref": subject_id,
+            "subject_ref": public_product_subject_ref(subject_id),
             "role": role,
             "episode_id": "episode-1",
             "analysis_revision_id": "analysis-1",
@@ -466,7 +467,7 @@ class ProductDemoProduct:
             }[kind],
             "data_mode": "replay",
             "synthetic_non_release": True,
-            "subject_ref": subject_id,
+            "subject_ref": public_product_subject_ref(subject_id),
             "role": role,
             "items": items,
             "next_cursor": None,
@@ -557,7 +558,7 @@ class ProductClient:
             "data_mode": "replay",
             "synthetic_non_release": True,
             "state": "ready",
-            "subject_ref": subject_id,
+            "subject_ref": public_product_subject_ref(subject_id),
             "role": role,
             "episode_id": "episode-1",
             "episode_revision_id": "episode-revision-1",
@@ -1133,7 +1134,7 @@ def test_command_verifier_drives_real_public_command_contracts() -> None:
                 "schema_version": "product_sleep_care.v1",
                 "data_mode": "replay",
                 "synthetic_non_release": True,
-                "subject_ref": subject_id,
+                "subject_ref": public_product_subject_ref(subject_id),
                 "role": role,
                 "items": items,
                 "next_cursor": None,
@@ -1282,7 +1283,7 @@ def test_effect_verifier_observes_public_delivery_effect() -> None:
                 "schema_version": "product_sleep_care.v1",
                 "data_mode": "replay",
                 "synthetic_non_release": True,
-                "subject_ref": kwargs["subject_id"],
+                "subject_ref": public_product_subject_ref(kwargs["subject_id"]),
                 "role": kwargs["role"],
                 "items": [
                     {
@@ -1381,7 +1382,7 @@ def test_read_model_verifier_proves_advance_dedup_and_dedicated_cursors() -> Non
                 "schema_version": schemas[kind],
                 "data_mode": "replay",
                 "synthetic_non_release": True,
-                "subject_ref": subject_id,
+                "subject_ref": public_product_subject_ref(subject_id),
                 "role": role,
                 "items": items,
                 "next_cursor": next_cursor,
@@ -1439,7 +1440,7 @@ def test_abnormal_verifier_proves_urgent_zero_product_route() -> None:
                 "data_mode": "replay",
                 "synthetic_non_release": True,
                 "state": "no_data",
-                "subject_ref": kwargs["subject_id"],
+                "subject_ref": public_product_subject_ref(kwargs["subject_id"]),
                 "role": kwargs["role"],
             }
 

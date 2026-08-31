@@ -203,7 +203,8 @@ def test_demo_technical_trace_accepts_postgres_json_array_shapes() -> None:
 class InternalStatus:
     def operational_metrics(self):
         return {
-            "schema_version": "sleepagent_durable_operational_metrics.v1",
+            "schema_version": "sleepagent_durable_operational_metrics.v2",
+            "status": "healthy",
             "queues": [],
             "product_attempts": [],
             "safety": [],

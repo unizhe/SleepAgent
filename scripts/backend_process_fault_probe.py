@@ -17,6 +17,7 @@ from typing import Any
 
 ADMIN_DSN_ENV = "SLEEPAGENT_FAULT_PROBE_POSTGRES_DSN"
 WORKER_DSN_ENV = "SLEEPAGENT_FAULT_PROBE_WORKER_DSN"
+WORKER_PRINCIPAL_ENV = "SLEEPAGENT_FAULT_PROBE_WORKER_PRINCIPAL"
 DELIVERY_DESTINATION = "replay_care_notification"
 TERMINAL_PHASES = {"succeeded", "blocked", "reconciliation_required", "failed"}
 
@@ -88,8 +89,9 @@ def _product_candidate(connection: Any) -> dict[str, Any] | None:
         "'privacy_epoch', 'retrieval_policy_epoch', "
         "workload_authorization_snapshot_json -> 'retrieval_policy_epoch')) "
         "FROM public.sleep_domain_operations WHERE operation_type = "
-        "'product_agent' AND queue_name = 'product_agent' "
-        "AND status IN ('pending', 'retry') ORDER BY created_at LIMIT 1"
+        "'product.shared_analysis.v1' AND queue_name = 'product_agent' "
+        "AND status IN ('pending', 'retry', 'running') "
+        "ORDER BY created_at LIMIT 1"
     ).fetchone()
     return None if row is None else dict(row[0])
 
@@ -129,26 +131,31 @@ def hold_product_commit(
 ) -> None:
     import psycopg
 
-    with psycopg.connect(_dsn(), autocommit=True) as setup:
-        candidate = _wait_until(
-            lambda: _product_candidate(setup), timeout_seconds=timeout_seconds,
-            description="a pending Product operation",
-        )
-        changed = setup.execute(
-            "UPDATE public.sleep_domain_operations SET max_attempts = 1 "
-            "WHERE operation_id = %s AND status IN ('pending', 'retry') "
-            "AND attempt_count = 0 RETURNING operation_id",
-            (candidate["operation_id"],),
-        ).fetchone()
-        if changed is None:
-            raise TerminalProbeError("Product operation was claimed before max_attempts=1")
-
     with psycopg.connect(_dsn()) as lock_connection:
-        # SHARE 锁允许 source SELECT，却阻塞最终发布的首个 INSERT，从而稳定制造
-        # “prepared 已持久化、publish 尚未发生”的 SIGKILL 窗口。
+        # Take the publish lock before the report queue can create its current
+        # shared-analysis child.  Report and shared analysis intentionally use
+        # the same durable queue, so waiting for a pending child before taking
+        # this lock would race the Worker.
         lock_connection.execute(
             "LOCK TABLE public.sleep_domain_analysis_revisions IN SHARE MODE"
         )
+        candidate = _wait_until(
+            lambda: _product_candidate(lock_connection),
+            timeout_seconds=timeout_seconds,
+            description="a current shared-analysis operation",
+        )
+        with psycopg.connect(_dsn(), autocommit=True) as setup:
+            changed = setup.execute(
+                "UPDATE public.sleep_domain_operations SET max_attempts = 1 "
+                "WHERE operation_id = %s "
+                "AND status IN ('pending', 'retry', 'running') "
+                "AND attempt_count <= 1 RETURNING operation_id",
+                (candidate["operation_id"],),
+            ).fetchone()
+            if changed is None:
+                raise TerminalProbeError(
+                    "shared analysis passed the bounded reclaim window"
+                )
         _write(ready_file, candidate)
 
         prepared = _wait_until(
@@ -212,11 +219,29 @@ def assert_stale_product_fence(state_file: Path) -> None:
 
     # SIGKILL 后旧进程可能恢复执行；显式证明旧 fence 失效，才能排除双重发布。
     state = _read(state_file)
+    with psycopg.connect(_dsn(), autocommit=True) as admin:
+        current = admin.execute(
+            "SELECT lease_generation, fencing_token, worker_instance "
+            "FROM public.sleep_domain_operations WHERE operation_id = %s "
+            "AND status = 'running' AND lease_expires_at > clock_timestamp()",
+            (state["operation_id"],),
+        ).fetchone()
+    if current is None or int(current[0]) <= int(
+        state["old_owner"]["lease_generation"]
+    ):
+        raise AssertionError("no newer live Product owner is available")
+    current_owner = {
+        "lease_generation": int(current[0]),
+        "fencing_token": str(current[1]),
+        "worker_instance": str(current[2]),
+    }
     scope = state["scope"]
     with psycopg.connect(_dsn(WORKER_DSN_ENV), autocommit=True) as connection:
         settings = {
             "sleepagent.process_role": "worker",
-            "sleepagent.service_principal_id": "sleepagent-worker-test",
+            "sleepagent.service_principal_id": os.environ.get(
+                WORKER_PRINCIPAL_ENV, "sleepagent-worker-test"
+            ).strip(),
             "sleepagent.purpose": "worker",
             **{f"sleepagent.{key}": value for key, value in scope.items()},
         }
@@ -233,9 +258,28 @@ def assert_stale_product_fence(state_file: Path) -> None:
                 (state["operation_id"], owner["lease_generation"], owner["fencing_token"]),
             ).fetchone()[0])
 
-        if allows(state["old_owner"]) or not allows(state["new_owner"]):
+        stale_allows = allows(state["old_owner"])
+        current_allows = allows(current_owner)
+        if stale_allows or not current_allows:
+            print(json.dumps({
+                "current_fence": current_allows,
+                "stale_fence": stale_allows,
+            }, sort_keys=True))
             raise AssertionError("stale/current Product fence proof failed")
     print(json.dumps({"current_fence": True, "stale_fence": False}, sort_keys=True))
+
+
+def assert_stale_product_fence_and_release(
+    *, state_file: Path, release_file: Path, timeout_seconds: float
+) -> None:
+    _wait_until(
+        lambda: True if state_file.exists() and state_file.stat().st_size else None,
+        timeout_seconds=timeout_seconds,
+        description="prepared Product ownership takeover",
+    )
+    assert_stale_product_fence(state_file)
+    _write(release_file, {"release": True})
+    print(json.dumps({"publish_lock_released": True}, sort_keys=True))
 
 
 def assert_product_recovery(
@@ -269,7 +313,7 @@ def assert_product_recovery(
         ).fetchone()
         if final is None or (
             int(final[0]) != 1
-            or int(final[1]) != state["old_owner"]["lease_generation"] + 1
+            or int(final[1]) <= state["old_owner"]["lease_generation"]
             or str(final[2]) == state["old_owner"]["fencing_token"]
             or (str(final[3]), bool(final[4])) != ("committed", True)
             or final[5] != state["immutable_artifact"]
@@ -312,8 +356,14 @@ def assert_product_recovery(
             raise AssertionError("Product terminal publish was not exactly once")
         root_id = root_file.read_text(encoding="utf-8").strip()
         linked = connection.execute(
-            "SELECT operation_json #>> '{result,product_operation_id}' "
-            "FROM public.sleep_domain_operations WHERE operation_id = %s",
+            "SELECT shared.operation_id FROM public.sleep_domain_operations AS root "
+            "JOIN public.sleep_domain_operations AS report ON report.operation_id = "
+            "root.operation_json #>> '{result,product_operation_id}' "
+            "JOIN public.sleep_domain_operations AS shared ON shared.operation_id = "
+            "report.operation_json #>> '{report_result,shared_operation_id}' "
+            "WHERE root.operation_id = %s "
+            "AND report.operation_type = 'product.report.run.v1' "
+            "AND shared.operation_type = 'product.shared_analysis.v1'",
             (root_id,),
         ).fetchone()
         if linked != (state["operation_id"],):
@@ -542,6 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
         "wait-delivery-send-started": ("state",),
         "assert-delivery-recovery": ("state",),
         "assert-stale-product-fence": ("state",),
+        "assert-stale-product-fence-and-release": ("state", "release"),
         "assert-product-recovery": ("state", "root"),
         "wait-root-active": ("root", "state"),
         "assert-root-recovery": ("root", "state"),
@@ -562,6 +613,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     handlers = {
         "hold-product-commit": hold_product_commit,
         "assert-stale-product-fence": assert_stale_product_fence,
+        "assert-stale-product-fence-and-release": (
+            assert_stale_product_fence_and_release
+        ),
         "assert-product-recovery": assert_product_recovery,
         "hold-delivery-effect-lock": hold_delivery_effect_lock,
         "wait-delivery-send-started": wait_delivery_send_started,

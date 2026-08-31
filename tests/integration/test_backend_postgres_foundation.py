@@ -1101,6 +1101,61 @@ def test_stage6_migration_closes_rls_epoch_and_namespace_fairness_gaps() -> None
         assert f"public.{claim}" in body
 
 
+def test_runtime_operational_snapshot_is_aggregate_complete_and_protected() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/019_runtime_operational_snapshot.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "sleepagent_durable_operational_metrics.v2" in body
+    for signal in (
+        "due_lag_seconds",
+        "last_fire_at",
+        "last_success_at",
+        "failure_count",
+        "last_history_pull_success_at",
+        "last_sleep_report_pull_success_at",
+        "records_received",
+        "records_persisted",
+        "deduplicated_count",
+        "oldest_ready_age_seconds",
+        "active_lease_count",
+        "lease_reclaim_count",
+        "retry_count",
+        "dead_letter_count",
+        "outcome_unknown_count",
+        "oldest_open_age_seconds",
+        "oldest_soft_finalized_age_seconds",
+        "reconciliation_required_count",
+        "late_finalization_revision_count",
+        "latest_shared_analysis_completion_at",
+    ):
+        assert signal in body
+    assert "SECURITY DEFINER" in body
+    assert "sleepagent_principal_context_allows" in body
+    assert re.search(
+        r"REVOKE ALL ON FUNCTION public\.sleepagent_internal_operational_metrics\(\)\s+FROM PUBLIC",
+        body,
+    )
+    terminal_fence = body.split(
+        "CREATE OR REPLACE FUNCTION sleepagent_succeed_demo_journey", 1
+    )[1]
+    assert "product.report.run.v1" in terminal_fence
+    assert "product.shared_analysis.v1" in terminal_fence
+    assert "{report_result,shared_operation_id}" in terminal_fence
+    assert "{result,night_episode_revision_id}" in terminal_fence
+    assert "{result,role_view_ids}" in terminal_fence
+    assert "operation.operation_type = 'product_agent'" in terminal_fence
+    returned = body.split("SELECT jsonb_build_object(", 1)[1]
+    for forbidden_label in (
+        "'namespace_id'",
+        "'subject_id'",
+        "'device_id'",
+        "'provider_request_id'",
+        "'error_code'",
+    ):
+        assert forbidden_label not in returned
+
+
 @pytest.mark.parametrize(
     ("version", "function_name"),
     [

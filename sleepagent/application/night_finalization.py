@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from sleepagent.domain.episodes import UUID7Generator
+from sleepagent.observability import log_event
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 
 
@@ -164,6 +165,25 @@ class NightFinalizationService:
                 ) from exc
             finally:
                 cursor.close()
+        log_event(
+            "night_finalization_transition",
+            night_episode_id=result.night_episode_id,
+            finalization_revision_id=result.night_finalization_revision_id,
+            revision_number=result.finalization_revision_number,
+            state=result.state.value,
+            revision_cause=result.revision_cause,
+        )
+        if result.reanalysis_operation_id is not None:
+            log_event(
+                "night_finalization_report_handoff",
+                finalization_revision_id=result.night_finalization_revision_id,
+                operation_id=result.reanalysis_operation_id,
+                handoff_kind=(
+                    "initial_report"
+                    if result.parent_finalization_revision_id is None
+                    else "late_reanalysis"
+                ),
+            )
         return result
 
     def _load_evidence(

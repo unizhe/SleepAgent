@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sleepagent.application.device_bindings import ManagedDeviceBinding
+from sleepagent.observability import log_event
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope, WorkerClaimScope
 
 
@@ -393,7 +394,7 @@ class PostgresAcquisitionScheduler:
                 uow.commit()
             finally:
                 cursor.close()
-        return tuple(
+        fires = tuple(
             AcquisitionScheduleFire(
                 fire_id=str(row[0]),
                 schedule_id=str(row[1]),
@@ -403,6 +404,15 @@ class PostgresAcquisitionScheduler:
             )
             for row in rows
         )
+        for fire in fires:
+            log_event(
+                "acquisition_schedule_fire_created",
+                schedule_id=fire.schedule_id,
+                operation_id=fire.operation_id,
+                job_type=fire.job_type.value,
+                scheduled_for=fire.scheduled_for,
+            )
+        return fires
 
 
 def _schedule_select() -> str:

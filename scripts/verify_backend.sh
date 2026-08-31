@@ -185,7 +185,7 @@ cat "${CLEAN_OUTPUT}"
 assert_first_slice "$(root_from_output "${CLEAN_OUTPUT}")"
 cleanup_process_case
 
-start_case product-reclaim "ingestion,fast_path,sleep_command,product_interaction,demo_advance,replay_journey,reconciliation"
+start_case product-reclaim "${FULL_QUEUES}"
 PRODUCT_READY="${E2E_TMP}/product-ready.json"
 PRODUCT_PREPARED="${E2E_TMP}/product-prepared.json"
 PRODUCT_TAKEOVER="${E2E_TMP}/product-takeover.json"
@@ -198,8 +198,6 @@ HELPER_PID=$!
 run_cli_verifier "${PRODUCT_OUTPUT}" &
 VERIFIER_PID=$!
 wait_for_file "${PRODUCT_READY}" "${HELPER_PID}" "Product commit lock"
-append_worker_queues "${FULL_QUEUES}"
-docker compose "${COMPOSE_ARGS[@]}" up -d --force-recreate --wait worker
 wait_for_file "${PRODUCT_PREPARED}" "${HELPER_PID}" "prepared Product artifact"
 docker compose "${COMPOSE_ARGS[@]}" kill -s SIGKILL worker
 docker compose "${COMPOSE_ARGS[@]}" up -d --wait worker

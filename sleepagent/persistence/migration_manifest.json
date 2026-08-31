@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 18,
+  "target_version": 19,
   "migrations": [
     {
       "version": 1,
@@ -125,6 +125,13 @@
       "version": 18,
       "filename": "018_scheduled_perceptor_pull_authority.sql",
       "sha256": "a799b10d7f9ea773e1ca457cc66c1a68beb6799d86df2f045983658dbe656875",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 19,
+      "filename": "019_runtime_operational_snapshot.sql",
+      "sha256": "42049164386ba6d7933dc1f1b7a577814361465fbefd9ea708849904e528565d",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

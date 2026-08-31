@@ -149,18 +149,42 @@ def test_committed_first_slice_has_one_exact_causal_product_chain() -> None:
             )
             assert cursor.fetchone() == (3, ["doctor", "elder", "family"])
             cursor.execute(
-                "SELECT count(*) FROM public.sleep_domain_operations WHERE "
-                "namespace_id = %s AND data_mode = 'replay' "
-                "AND namespace_generation = %s AND run_id = %s AND arm_id = %s "
-                "AND subject_id = %s AND operation_type = 'product_agent' "
-                "AND target_resource_key = %s AND operation_id = %s "
-                "AND status = 'succeeded' "
-                "AND operation_json #>> '{result,analysis_revision_id}' = %s",
+                "SELECT count(*) FROM public.sleep_domain_operations AS report "
+                "JOIN public.sleep_domain_operations AS shared ON "
+                "shared.operation_id = report.operation_json #>> "
+                "'{report_result,shared_operation_id}' "
+                "AND shared.namespace_id = report.namespace_id "
+                "AND shared.data_mode = report.data_mode "
+                "AND shared.namespace_generation = report.namespace_generation "
+                "AND shared.run_id = report.run_id AND shared.arm_id = report.arm_id "
+                "AND shared.subject_id = report.subject_id "
+                "WHERE report.namespace_id = %s AND report.data_mode = 'replay' "
+                "AND report.namespace_generation = %s AND report.run_id = %s "
+                "AND report.arm_id = %s AND report.subject_id = %s "
+                "AND report.operation_type = 'product.report.run.v1' "
+                "AND report.target_resource_key = %s "
+                "AND report.operation_id = %s AND report.status = 'succeeded' "
+                "AND shared.operation_type = 'product.shared_analysis.v1' "
+                "AND shared.status = 'succeeded' "
+                "AND shared.operation_json #>> '{result,analysis_revision_id}' = %s "
+                "AND shared.operation_json #>> "
+                "'{result,night_episode_revision_id}' = %s "
+                "AND jsonb_array_length(shared.operation_json #> "
+                "'{result,role_view_ids}') = 3",
                 (
                     *scope,
                     result["night_episode_revision_id"],
                     result["product_operation_id"],
                     result["analysis_revision_id"],
+                    result["night_episode_revision_id"],
                 ),
             )
             assert cursor.fetchone() == (1,)
+            cursor.execute(
+                "SELECT count(*) FROM public.sleep_domain_operations WHERE "
+                "namespace_id = %s AND data_mode = 'replay' "
+                "AND namespace_generation = %s AND run_id = %s AND arm_id = %s "
+                "AND subject_id = %s AND operation_type = 'product_agent'",
+                scope,
+            )
+            assert cursor.fetchone() == (0,)

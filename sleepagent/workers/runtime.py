@@ -1865,6 +1865,14 @@ class DurableWorkerRuntime:
                 lease_seconds=self.lease_seconds,
             )
             if claim is not None:
+                log_event(
+                    "backend_worker_claimed",
+                    queue=claim.queue,
+                    work_id=claim.work_id,
+                    attempt=claim.attempt,
+                    lease_generation=claim.lease_generation,
+                    reclaimed=claim.lease_generation > 1,
+                )
                 self._execute(claim, self.handlers[queue])
                 return True
         return False
@@ -2279,6 +2287,11 @@ def run_worker_command(
 
         def request_stop(signum: int, frame: object) -> None:
             del signum, frame
+            log_event(
+                "backend_worker_shutdown_requested",
+                worker_instance=worker.worker_instance,
+                in_flight=worker.in_flight,
+            )
             worker.stop_claiming()
 
         prior_handlers: dict[signal.Signals, Any] = {}
@@ -2289,7 +2302,14 @@ def run_worker_command(
             if not store.healthcheck(worker_instance=worker.worker_instance):
                 return 1
             worker.run_forever()
-            return 0 if worker.drain(drain_seconds) else 4
+            drained = worker.drain(drain_seconds)
+            log_event(
+                "backend_worker_drain_completed",
+                worker_instance=worker.worker_instance,
+                drained=drained,
+                in_flight=worker.in_flight,
+            )
+            return 0 if drained else 4
         finally:
             for signum, previous in prior_handlers.items():
                 signal.signal(signum, previous)

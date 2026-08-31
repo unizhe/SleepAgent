@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
 )
 
+from sleepagent.application.product_data import public_product_subject_ref
 from sleepagent.simulation.seed_registry import (
     ReplaySeedDefinition,
     ReplaySeedRegistryError,
@@ -989,7 +990,7 @@ def _verify_product_demo_today(
     if (
         value.get("schema_version") != "product_sleep_today.v1"
         or value.get("role") != role
-        or value.get("subject_ref") != subject_id
+        or value.get("subject_ref") != public_product_subject_ref(subject_id)
         or value.get("state") not in {"ready", "degraded", "blocked", "no_data"}
     ):
         raise DemoCliError(f"{role} /today violated its public contract")
@@ -3600,7 +3601,7 @@ def _verify_read_model_page(
     if (
         value.get("schema_version") != expected_schema
         or value.get("role") != role
-        or value.get("subject_ref") != subject_id
+        or value.get("subject_ref") != public_product_subject_ref(subject_id)
         or not isinstance(value.get("items"), list)
         or (
             value.get("next_cursor") is not None
@@ -3671,7 +3672,7 @@ def _verify_today_projection(
         value.get("schema_version") != "product_sleep_today.v1"
         or value.get("state") != "ready"
         or value.get("role") != role
-        or value.get("subject_ref") != subject_id
+        or value.get("subject_ref") != public_product_subject_ref(subject_id)
         or value.get("analysis_revision_id") != analysis_revision_id
         or not value.get("projection_id")
     ):

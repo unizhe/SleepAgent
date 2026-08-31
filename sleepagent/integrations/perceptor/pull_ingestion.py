@@ -80,6 +80,39 @@ PULL_ENDPOINTS = frozenset(
     }
 )
 
+_SAFE_PULL_INGRESS_ERRORS = {
+    "invalid or untrusted Perceptor Pull ingress context": "ingress_context_rejected",
+    "Perceptor Pull safe metadata contract mismatch": "metadata_contract_mismatch",
+    "Perceptor Pull safe metadata time contract mismatch": "metadata_time_mismatch",
+    "Perceptor Pull safe metadata coordinates mismatch": "metadata_coordinates_mismatch",
+    "Perceptor Pull endpoint is outside the durable read allowlist": "endpoint_rejected",
+    "scheduled Perceptor Pull worker authority mismatch": "worker_authority_mismatch",
+    "invalid bounded Perceptor history window": "history_window_rejected",
+    "invalid Perceptor sleep-report request scope": "sleep_report_scope_rejected",
+    "current Perceptor Pull surface has no history window": "current_window_rejected",
+    "Perceptor Pull namespace generation is not active": "namespace_generation_inactive",
+    "Perceptor Pull safe metadata value mismatch": "metadata_value_mismatch",
+    "Perceptor Pull safe checkpoint time mismatch": "checkpoint_time_mismatch",
+    "Perceptor Pull safe checkpoint contract mismatch": "checkpoint_contract_mismatch",
+    "Perceptor provider account binding mismatch": "provider_account_mismatch",
+    "Perceptor Pull safe device key mismatch": "device_key_mismatch",
+    "bound Perceptor subject has no governance epochs": "governance_epochs_missing",
+    "Perceptor normalization requires one exact worker grant": "normalization_grant_mismatch",
+}
+
+
+def _safe_pull_error_code(exc: Exception) -> str:
+    """Classify known invariant failures without emitting exception content."""
+
+    current: BaseException | None = exc
+    while current is not None:
+        diagnostic = getattr(current, "diag", None)
+        primary = getattr(diagnostic, "message_primary", None)
+        if isinstance(primary, str) and primary in _SAFE_PULL_INGRESS_ERRORS:
+            return _SAFE_PULL_INGRESS_ERRORS[primary]
+        current = current.__cause__
+    return "unclassified"
+
 
 class PerceptorPullIngressError(RuntimeError):
     """A response could not safely enter the durable Pull boundary."""
@@ -699,7 +732,12 @@ class PerceptorPullBackfillRunner:
             )
         except Exception as exc:
             record_backend_signal(category="pull", outcome="failed")
-            log_event("pull_failed", endpoint=coordinates.endpoint, error_type=type(exc).__name__)
+            log_event(
+                "pull_failed",
+                endpoint=coordinates.endpoint,
+                error_type=type(exc).__name__,
+                error_code=_safe_pull_error_code(exc),
+            )
             raise
         record_backend_signal(category="pull", outcome="succeeded")
         log_event("pull_succeeded", endpoint=coordinates.endpoint, disposition=result.disposition)

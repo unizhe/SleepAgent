@@ -19,6 +19,7 @@ from sleepagent.config import (
     ProviderMode,
     SleepBackendSettings,
 )
+from sleepagent.observability import log_event
 from sleepagent.persistence.uow import UnitOfWorkFactory
 from sleepagent.workers.kernel import (
     RetryableWorkError,
@@ -91,6 +92,20 @@ class ScheduledAcquisitionWorkHandler:
                 succeeded=True,
             )
         except NightFinalizationPending as exc:
+            pending_reason = {
+                "binding has no finalizable night": "binding_has_no_finalizable_night",
+                "night has not reached a deterministic finalization gate": (
+                    "deterministic_gate_not_reached"
+                ),
+                "night episode has no committed date/revision authority": (
+                    "episode_authority_incomplete"
+                ),
+            }.get(str(exc), "unclassified")
+            log_event(
+                "night_finalization_pending",
+                reason=pending_reason,
+                queue=job_type.value,
+            )
             self.schedules.record_result(
                 scope,
                 fire_id=fire_id,

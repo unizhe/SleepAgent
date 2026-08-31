@@ -185,6 +185,14 @@ def _internal_app(runtime: SleepBackendRuntime) -> FastAPI:
     ) -> dict[str, object]:
         authorize(x_internal_token)
         result = backend_metrics_snapshot()
+        result["runtime_policy"] = {
+            "data_mode": runtime.settings.data_mode.value,
+            "report_pipeline_mode": runtime.settings.report_pipeline_mode.value,
+            "legacy_report_compatibility_enabled": (
+                runtime.settings.emit_legacy_report_compatibility
+            ),
+            "live_delivery_enabled": runtime.settings.live_delivery_enabled,
+        }
         reader = getattr(runtime.services.internal_status, "operational_metrics", None)
         if reader is not None:
             result["durable"] = reader()

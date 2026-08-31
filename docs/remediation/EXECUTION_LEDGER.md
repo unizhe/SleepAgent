@@ -2480,3 +2480,132 @@ LEGACY_REPORT_EXECUTION                      = ZERO
 EXTERNAL_EFFECTS                             = ZERO
 G7_PERCEPTOR_SEMANTIC_INTEGRATION_COMPLETE   = YES
 ```
+
+## G7.2 — Process boundary, fault recovery, and operational acceptance
+
+`G7_2_STATUS = ACCEPTED`
+
+### Frozen entry and process topology
+
+- Entry HEAD was exactly
+  `48c0d03708401ef8d92ce59858e9d916b2a89cdf`; the entry worktree was clean.
+- PostgreSQL 16.14 ran in a user-owned isolated cluster. Migration/bootstrap,
+  API, demo API, internal API, Scheduler, and Worker used distinct current
+  entry points and the existing migration/API/demo/worker database roles.
+- The authoritative entries remain `sleepagent.app:app`,
+  `sleepagent.workers.runtime run|healthcheck`,
+  `sleepagent.bootstrap.scheduler once|run`, and
+  `sleepagent.persistence.migrate apply|check`. No second runtime framework or
+  privileged Docker repair was introduced.
+- Scheduler and Worker profiles explicitly pinned live/replay mode, namespace,
+  service principal, queue capability, schema 019, shared-only reporting, and
+  disabled external delivery. The controlled Perceptor endpoint was TLS-only;
+  its client values and the controlled model key were public isolated test
+  fixtures. Real G7.1 credentials were not loaded or needed.
+
+### Independent-process and process-proof evidence
+
+- Independent public, demo, and internal ASGI processes, Scheduler processes,
+  and multiple Worker processes authenticated to the isolated database. API
+  liveness and authenticated readiness passed; the Worker healthcheck attested
+  schema 019 and exact database role/handler composition.
+- The unchanged replay process verifier crossed the public API into a durable
+  root and independent Worker. It persisted 497 canonical observations, 494
+  immutable episode revisions/membership sets, one exact report-to-shared
+  chain, one `SharedNightAnalysis`, and exactly three zh-CN role projections.
+  The strengthened terminal SQL fence revalidated that current shared-only
+  chain atomically. Legacy `product_agent` execution and external effects were
+  zero.
+- With the process-produced root exported, the previously skipped
+  `test_backend_first_slice_postgres.py` ran unchanged at its precondition and
+  passed. It now asserts the current report/shared chain and rejects a legacy
+  report execution.
+- An independent live Scheduler created due history, SleepReport, and
+  finalization operations. The live Worker crossed a TLS loopback Perceptor
+  read into encrypted raw ingress, V2 normalization, canonical persistence,
+  and checkpoint advancement. Full controlled SleepReport produced 18 trusted
+  canonical observations. A correctly aligned history slot produced 18 more.
+  One deliberately misaligned recorded-history window was quarantined rather
+  than trusted.
+- A bounded validated episode fixture allowed the actual Worker finalizer to
+  create one hard-finalization revision and report handoff. A repeated scan
+  returned the same material revision/handoff without churn. Validated material
+  late revisions created superseding immutable finalization revisions and
+  bounded reanalysis operations. The policy-correct revision completed its
+  actual fast path; stale recorded evidence correctly prevented an additional
+  live Product/model export. The replay process proof remains the authoritative
+  complete shared-analysis/three-projection result.
+
+### Fault and shutdown evidence
+
+- Scheduler: an actual long-running Scheduler committed one due slot, was sent
+  SIGKILL by exact PID, then restarted. The next scan created zero fires. The
+  PostgreSQL concurrency test additionally proves two evaluations of the same
+  slot converge under the schedule lock and `(schedule_id, scheduled_for)`
+  uniqueness.
+- Worker: Worker A was sent SIGKILL after a durable shared-analysis artifact
+  was prepared. Worker B reclaimed the operation. The killed owner's fence was
+  rejected while the live fence succeeded; business attempt count, invocation,
+  artifact, analysis, projections, and handoff cardinalities remained one.
+- Provider timeout: the controlled TLS endpoint timed out twice. Both attempts
+  were retryable and left the checkpoint and canonical count unchanged. The
+  recovered provider read was accepted; its semantically duplicate recorded
+  payload was quarantined instead of mutating trusted facts.
+- NO_DATA: a separate controlled history slot emitted explicit `pull_no_data`,
+  completed normalization successfully, advanced its checkpoint, and invented
+  no observation.
+- Commit uncertainty and duplicate-finalizer/materiality semantics are also
+  covered by the PostgreSQL fault suites. Idempotent raw/batch/semantic keys
+  converge to one trusted set; no checkpoint reset or manual work-state repair
+  was used.
+- SIGTERM/SIGINT caused Workers to stop claiming, emit shutdown requested, drain
+  with `in_flight=0`, and exit successfully. Restart required no database
+  repair. The abrupt Worker and Scheduler cases separately proved durable
+  discovery after process loss.
+
+### Operational surface and policy
+
+- Additive migration 019 exposes the protected aggregate-only
+  `sleepagent_internal_operational_metrics()` snapshot through the existing
+  authenticated internal API. It reports all 18 required scheduler,
+  acquisition, queue/lease, finalization, and report signals, plus controlled
+  product/safety outcome dimensions. It returns no subject, device, namespace,
+  raw request, prompt, payload, or free-form error value.
+- The function is `SECURITY DEFINER` with a fixed search path, explicit
+  internal-status principal context, and no PUBLIC grant. Fresh 001→019 and
+  additive 018→019 paths, manifest hash integrity, and privilege discovery are
+  acceptance gates.
+- Scheduler lag thresholds derive from configured cadence (one cadence
+  degraded, two unhealthy); configured `max_attempts` exhaustion and any
+  dead-letter/outcome-unknown/reconciliation-required work are unhealthy. The
+  conservative one-day OPEN/SOFT age is operational, not medical.
+- Structured sanitized events cover schedule fire, claim/reclaim, Pull result,
+  checkpoint advance, finalization/handoff, and Worker shutdown/drain. The
+  platform-independent start/readiness/activation/shutdown/restart contract is
+  documented in `docs/operations/runtime-operations.md`.
+
+### Closure
+
+Final regression evidence:
+
+- targeted G7.2 and affected suites: 260 passed, then 79 passed;
+- architecture suite: 6 passed; OpenAPI and migration discovery/check: passed;
+- Python 3.11 compile/import and `git diff --check`: passed;
+- unit-marked suite: 1120 passed, 40 deselected;
+- broad non-E2E/non-PostgreSQL suite: 1120 passed, 40 deselected;
+- definitive PostgreSQL-marker suite: 38 collected, 37 passed, 1 skipped,
+  0 failed, 0 errors. The sole skip is the environment-gated independent
+  process verifier; that exact test passed separately against the process-
+  produced root and isolated database.
+
+```text
+PROCESS_PROOF_SKIP_RESOLVED          = YES
+STALE_WORKER_FENCE_REJECTED          = PASS
+PROCESS_BOUNDARY_E2E                 = PASS
+FAULT_RECOVERY                       = PASS
+SAFE_RESTART                         = PASS
+OPERATIONAL_ACCEPTANCE               = PASS
+LEGACY_REPORT_EXECUTION              = ZERO
+EXTERNAL_EFFECTS                     = ZERO
+G7_RUNTIME_AND_OPERATIONS_COMPLETE   = YES
+```

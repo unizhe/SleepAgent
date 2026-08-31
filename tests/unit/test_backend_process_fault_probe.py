@@ -75,3 +75,9 @@ def test_fault_process_orchestration_is_single_canonical_entrypoint() -> None:
     assert "restart postgres" in script
     assert "wait-delivery-send-started" in script
     assert not list(Path("scripts").glob("verify_backend_stage*.sh"))
+
+    probe = Path("scripts/backend_process_fault_probe.py").read_text(
+        encoding="utf-8"
+    )
+    assert "product.shared_analysis.v1" in probe
+    assert "{report_result,shared_operation_id}" in probe
