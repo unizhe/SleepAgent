@@ -23,6 +23,7 @@ from sleepagent.domain.contracts import (
 from sleepagent.integrations.perceptor.pull import (
     PullContractError,
     assert_requested_device_matches_binding,
+    canonicalize_pull_result_v2,
     normalize_current,
     normalize_history,
     normalize_realtime,
@@ -302,6 +303,21 @@ def test_sleep_report_keeps_stages_vendor_derived_and_normalizes_series() -> Non
     assert isinstance(stage.payload, SleepStageIntervalPayload)
     assert stage.source_kind == SourceKind.VENDOR_DERIVED
     assert "not_sleepagent_independent_stage_classification" in stage.quality.limitations
+    physiological_series = tuple(
+        item
+        for item in result.candidates
+        if isinstance(item.payload, (HeartRatePayload, RespiratoryRatePayload))
+        or (
+            isinstance(item.payload, MissingIntervalPayload)
+            and item.payload.target_observation_type
+            in {ObservationType.HEART_RATE, ObservationType.RESPIRATORY_RATE}
+        )
+    )
+    assert physiological_series
+    assert all(
+        item.source_kind is SourceKind.DEVICE_MEASURED
+        for item in physiological_series
+    )
     assert any(isinstance(item.payload, MissingIntervalPayload) for item in result.candidates)
     assert sum(isinstance(item.payload, VendorSleepProfileMetricPayload) for item in result.candidates) == 3
     report_metrics = tuple(
@@ -321,6 +337,39 @@ def test_sleep_report_keeps_stages_vendor_derived_and_normalizes_series() -> Non
     assert all(
         "sleep_report_local_day_anchor" in item.quality.quality_flags
         for item in report_metrics
+    )
+
+
+def test_sanitized_real_sleep_report_series_has_explicit_v2_provenance() -> None:
+    fixture = json.loads(
+        (
+            FIXTURES
+            / "sanitized_recorded_real_pull_get_sleep_report_provenance.json"
+        ).read_text(encoding="utf-8")
+    )
+    result = normalize_sleep_report(
+        fixture["data"],
+        report_date=date(2026, 8, 25),
+        binding_timezone_name="Asia/Shanghai",
+        **CONTEXT,
+    )
+
+    assert result.unknown_fields == (
+        "breathe_data[].type",
+        "heart_rate_data[].type",
+    )
+    assert len(result.candidates) == 2
+    assert all(
+        item.source_kind is SourceKind.DEVICE_MEASURED
+        for item in result.candidates
+    )
+    canonical = canonicalize_pull_result_v2(result)
+    assert {item.metric_id for item in canonical} == {
+        "heart_rate",
+        "respiratory_rate",
+    }
+    assert all(
+        item.source_kind is SourceKind.DEVICE_MEASURED for item in canonical
     )
 
 

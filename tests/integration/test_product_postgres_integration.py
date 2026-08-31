@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, NoReturn
@@ -66,6 +66,16 @@ from sleepagent.runtime.memory import (
 )
 from sleepagent.domain.habit import HabitFact, HabitOperation
 from sleepagent.application.product_data import public_product_subject_ref
+from sleepagent.application.night_finalization import (
+    NightFinalizationPolicy,
+    NightFinalizationService,
+    NightFinalizationState,
+)
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    FastPathHandler,
+    FastPathLease,
+    default_sleep_slice_policy,
+)
 from sleepagent.workers.product import (
     PRODUCT_ELDER_NARRATIVE_OPERATION,
     PRODUCT_REPORT_RUN_OPERATION,
@@ -812,6 +822,7 @@ def _worker_runtime(
     worker_principal: str,
     namespace_id: str,
     pool_max_size: int = 2,
+    worker_queues: tuple[str, ...] = ("product_agent",),
 ) -> tuple[PsycopgPoolProvider, UnitOfWorkFactory[object], PostgresDurableWorkStore]:
     settings = SleepBackendSettings(
         profile="product-postgres-integration",
@@ -824,7 +835,7 @@ def _worker_runtime(
         service_principal_id=worker_principal,
         database_scope=BackendDataMode.REPLAY,
         namespace_prefixes=(namespace_id,),
-        worker_queues=("product_agent",),
+        worker_queues=worker_queues,
         model_mode=ModelMode.DETERMINISTIC,
         service_credential_ref="test:worker-service",
         signing_key_ref="test:worker-signing",
@@ -1413,6 +1424,337 @@ def test_shared_only_commit_creates_one_shared_result_without_legacy_bridge() ->
         admin_dsn=admin_dsn,
         namespace_id=case.seed.namespace_id,
     )
+
+
+def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis() -> None:
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    seed = _seed_product_scope(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_principal=worker_principal,
+    )
+    default_policy = default_sleep_slice_policy()
+    fast_path_policy = replace(
+        default_policy,
+        quality=default_policy.quality.model_copy(
+            update={"coverage_cadence_seconds": 86_400}
+        ),
+    )
+    normalization_workload = {
+        "schema_version": "workload_authorization_snapshot.v1",
+        "workload_principal_id": worker_principal,
+        "namespace_id": seed.namespace_id,
+        "namespace_generation": 1,
+        "data_mode": "replay",
+        "run_id": seed.run_id,
+        "arm_id": seed.arm_id,
+        "subject_id": seed.subject_id,
+        "purpose": "worker",
+        "allowed_handler": "fast_path",
+        "authorization_epoch": 1,
+        "privacy_epoch": 1,
+        "retrieval_policy_epoch": 1,
+    }
+    normalization_operation = {
+        "schema_version": "backend_operation.v2",
+        "trigger": "normalization",
+        "night_episode_id": seed.night_episode_id,
+        "night_episode_revision_id": seed.night_episode_revision_id,
+        "authorization_snapshot": normalization_workload,
+    }
+    normalization_semantic = hashlib.sha256(
+        (
+            "normalization-fast-path:"
+            f"{seed.namespace_id}:{seed.night_episode_revision_id}"
+        ).encode()
+    ).hexdigest()
+    with psycopg.connect(admin_dsn) as admin:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_operations
+                SET operation_type = 'fast_path',
+                  idempotency_key = %s, request_sha256 = %s,
+                  operation_json = %s::jsonb, semantic_key = %s,
+                  queue_name = 'fast_path', priority = 0,
+                  workload_authorization_snapshot_json = %s::jsonb,
+                  policy_sha256 = %s
+                WHERE operation_id = %s AND status = 'pending'
+                """,
+                (
+                    normalization_semantic,
+                    normalization_semantic,
+                    json.dumps(normalization_operation),
+                    normalization_semantic,
+                    json.dumps(normalization_workload),
+                    fast_path_policy.policy_sha256,
+                    seed.operation_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                """
+                UPDATE public.backend_principal_grants
+                SET allowed_handlers_json = '["fast_path","product_agent"]'::jsonb
+                WHERE namespace_id = %s AND principal_id = %s
+                  AND purpose = 'worker'
+                """,
+                (seed.namespace_id, worker_principal),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_night_episode_revisions
+                SET revision_json = jsonb_set(
+                  revision_json,
+                  '{policy_versions}',
+                  %s::jsonb
+                )
+                WHERE night_episode_revision_id = %s
+                """,
+                (
+                    json.dumps(fast_path_policy.policy_versions),
+                    seed.night_episode_revision_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                """
+                SELECT deterministic_close_deadline_at
+                FROM public.sleep_domain_night_episodes
+                WHERE night_episode_id = %s
+                """,
+                (seed.night_episode_id,),
+            )
+            close_deadline = cursor.fetchone()[0]
+
+    provider, factory, store = _worker_runtime(
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        namespace_id=seed.namespace_id,
+        worker_queues=("fast_path", "product_agent"),
+    )
+    try:
+        finalization_scope = UowScope(
+            namespace_id=seed.namespace_id,
+            data_mode="replay",
+            process_role="worker",
+            purpose="worker",
+            service_principal_id=worker_principal,
+            namespace_generation=1,
+            run_id=seed.run_id,
+            arm_id=seed.arm_id,
+            subject_id=seed.subject_id,
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+            worker_instance="first-finalization-test",
+        )
+        finalizer = NightFinalizationService(
+            factory,
+            policy=NightFinalizationPolicy(minimum_observation_count=0),
+        )
+        soft_at = close_deadline + timedelta(hours=3)
+        first = finalizer.finalize(
+            finalization_scope,
+            night_episode_id=seed.night_episode_id,
+            evaluated_at=soft_at,
+        )
+        hard_at = close_deadline + timedelta(hours=25)
+        hard = finalizer.finalize(
+            finalization_scope,
+            night_episode_id=seed.night_episode_id,
+            evaluated_at=hard_at,
+        )
+        replayed = finalizer.finalize(
+            finalization_scope,
+            night_episode_id=seed.night_episode_id,
+            evaluated_at=hard_at,
+        )
+        assert replayed == hard
+        assert first.finalization_revision_number == 1
+        assert first.parent_finalization_revision_id is None
+        assert first.reanalysis_operation_id is not None
+        assert first.state is NightFinalizationState.SOFT_FINALIZED
+        assert hard.finalization_revision_number == 2
+        assert (
+            hard.parent_finalization_revision_id
+            == first.night_finalization_revision_id
+        )
+        assert hard.source_night_episode_revision_id == (
+            first.source_night_episode_revision_id
+        )
+        assert hard.reanalysis_operation_id is not None
+        assert hard.state is NightFinalizationState.HARD_FINALIZED
+        # The synthetic seed's deterministic close deadline is in the future;
+        # make all three independently committed handoffs due in a fixed order.
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET available_at = clock_timestamp(),
+                      priority = CASE operation_id
+                        WHEN %s THEN 300
+                        WHEN %s THEN 200
+                        WHEN %s THEN 100
+                      END
+                    WHERE operation_id IN (%s, %s, %s)
+                      AND status = 'pending'
+                    """,
+                    (
+                        seed.operation_id,
+                        first.reanalysis_operation_id,
+                        hard.reanalysis_operation_id,
+                        seed.operation_id,
+                        first.reanalysis_operation_id,
+                        hard.reanalysis_operation_id,
+                    ),
+                )
+                assert cursor.rowcount == 3
+
+        report_operation_ids: list[str] = []
+        for index, expected_operation_id in enumerate(
+            (
+                seed.operation_id,
+                first.reanalysis_operation_id,
+                hard.reanalysis_operation_id,
+            )
+        ):
+            fast_claim = store.claim(
+                queue="fast_path",
+                worker_instance=f"convergent-fast-path-{index}",
+                lease_seconds=300,
+            )
+            assert fast_claim is not None
+            assert fast_claim.work_id == expected_operation_id
+            fast_result = FastPathHandler(
+                factory,
+                policy=fast_path_policy,
+                emit_legacy_report_compatibility=False,
+            ).process(
+                store.uow_scope_for_claim(fast_claim),
+                FastPathLease(
+                    operation_id=fast_claim.work_id,
+                    lease_generation=fast_claim.lease_generation,
+                    fencing_token=fast_claim.fencing_token,
+                    worker_instance=fast_claim.worker_instance,
+                ),
+            )
+            assert fast_result.report_operation_id is not None
+            assert fast_result.product_agent_operation_id is None
+            report_operation_ids.append(fast_result.report_operation_id)
+        assert len(set(report_operation_ids)) == 1
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE public.sleep_domain_operations SET priority = 10000 "
+                    "WHERE operation_id = %s",
+                    (report_operation_ids[0],),
+                )
+                assert cursor.rowcount == 1
+
+        processor = ProductAgentProcessor(
+            factory,
+            runtime_bundle=_deterministic_runtime_bundle(),
+            report_pipeline_mode=ReportPipelineMode.SHARED_ONLY,
+        )
+        report_claim = _claim_product_work(
+            store,
+            worker_instance="first-finalization-report",
+            operation_type=PRODUCT_REPORT_RUN_OPERATION,
+        )
+        routed = processor.route_report_request(
+            store.uow_scope_for_claim(report_claim),
+            _lease_for_claim(report_claim),
+        )
+        assert routed.shared_operation_created is True
+        assert routed.shared_operation_id is not None
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE public.sleep_domain_operations SET priority = 20000 "
+                    "WHERE operation_id = %s",
+                    (routed.shared_operation_id,),
+                )
+                assert cursor.rowcount == 1
+
+        shared_claim = _claim_product_work(
+            store,
+            worker_instance="first-finalization-shared",
+            operation_type=PRODUCT_SHARED_ANALYSIS_OPERATION,
+        )
+        shared_scope = store.uow_scope_for_claim(shared_claim)
+        shared_lease = _lease_for_claim(shared_claim)
+        source = processor.load_source(shared_scope, shared_lease)
+        artifact = processor.prepare_shared(
+            scope=shared_scope,
+            source=source,
+            lease=shared_lease,
+            prepared_at=datetime.now(tz=UTC),
+        )
+        processor.persist_and_commit(
+            shared_scope,
+            shared_lease,
+            artifact,
+            source=source,
+        )
+
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                      count(*) FILTER (
+                        WHERE operation_type = 'fast_path'
+                      ),
+                      count(*) FILTER (
+                        WHERE operation_type = 'product.report.run.v1'
+                      ),
+                      count(*) FILTER (
+                        WHERE operation_type = 'product.shared_analysis.v1'
+                      ),
+                      count(*) FILTER (
+                        WHERE operation_type = 'product_agent'
+                           OR queue_name = 'product_agent_compatibility'
+                      )
+                    FROM public.sleep_domain_operations
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                assert cursor.fetchone() == (3, 1, 1, 0)
+                cursor.execute(
+                    """
+                    SELECT count(*)
+                    FROM public.sleep_domain_analysis_revisions
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                assert cursor.fetchone() == (1,)
+                cursor.execute(
+                    """
+                    SELECT count(*), count(DISTINCT view_json #>> '{role}')
+                    FROM public.sleep_domain_analysis_role_views
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                assert cursor.fetchone() == (3, 3)
+    finally:
+        _cancel_pending_product_work(
+            psycopg,
+            admin_dsn=admin_dsn,
+            namespace_id=seed.namespace_id,
+        )
+        provider.close()
 
 
 def _lease_for_claim(claim: LeaseClaim) -> ProductAgentLease:

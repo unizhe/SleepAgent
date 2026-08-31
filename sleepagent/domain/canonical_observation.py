@@ -12,6 +12,7 @@ from pydantic import Field, ValidationError
 
 from sleepagent.domain.contracts import (
     AdapterObservationCandidate,
+    MissingIntervalPayload,
     ObservationPayload,
     ObservationProvenance,
     ObservationType,
@@ -261,6 +262,7 @@ def _semantic_identity(
     aggregation_start_at: datetime | None,
     aggregation_end_at: datetime | None,
     vendor_semantic_code: str | None,
+    include_missing_interval_discriminant: bool = True,
 ) -> str:
     material = {
         "provider_id": candidate.provider_id,
@@ -280,6 +282,15 @@ def _semantic_identity(
         "source_kind": candidate.source_kind.value,
         "vendor_semantic_code": vendor_semantic_code,
     }
+    if (
+        include_missing_interval_discriminant
+        and isinstance(payload, MissingIntervalPayload)
+    ):
+        material["missing_interval"] = {
+            "target_observation_type": payload.target_observation_type.value,
+            "missing_state": payload.missing_state.value,
+            "reason_code": payload.reason_code,
+        }
     encoded = json.dumps(
         material,
         sort_keys=True,
@@ -289,8 +300,29 @@ def _semantic_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def legacy_missing_interval_semantic_identity_v2(
+    canonical: CanonicalObservationV2,
+) -> str | None:
+    """Return the pre-fix hash only for immutable-row retry compatibility."""
+
+    if not isinstance(canonical.payload, MissingIntervalPayload):
+        return None
+    return _semantic_identity(
+        candidate=canonical.compatibility_candidate,
+        metric_id=canonical.metric_id,
+        canonical_unit=canonical.canonical_unit,
+        payload=canonical.payload,
+        occurred_at=canonical.occurred_at,
+        aggregation_start_at=canonical.aggregation_start_at,
+        aggregation_end_at=canonical.aggregation_end_at,
+        vendor_semantic_code=canonical.vendor_semantic_code,
+        include_missing_interval_discriminant=False,
+    )
+
+
 __all__ = [
     "CANONICAL_FACTORY_VERSION",
     "CanonicalObservationFactoryV2",
     "CanonicalObservationV2",
+    "legacy_missing_interval_semantic_identity_v2",
 ]

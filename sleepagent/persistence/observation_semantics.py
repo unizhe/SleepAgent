@@ -6,7 +6,10 @@ import json
 from datetime import datetime
 from typing import Any, Mapping, Protocol
 
-from sleepagent.domain.canonical_observation import CanonicalObservationV2
+from sleepagent.domain.canonical_observation import (
+    CanonicalObservationV2,
+    legacy_missing_interval_semantic_identity_v2,
+)
 from sleepagent.domain.observation_semantics import PersistedObservationSemanticsV2
 
 
@@ -108,8 +111,24 @@ def persist_observation_semantics_v2(
         (observation_id, scope.namespace_id, scope.data_mode, subject_id),
     )
     row = cursor.fetchone()
-    if row is None or _semantic_core(_database_values(row)) != _semantic_core(
-        _comparable_values(record)
+    if row is None:
+        raise ObservationSemanticsPersistenceError(
+            "observation semantic identity or content collision"
+        )
+    persisted_values = _database_values(row)
+    candidate_values = _comparable_values(record)
+    if _semantic_core(persisted_values) == _semantic_core(candidate_values):
+        return False
+    legacy_identity = (
+        legacy_missing_interval_semantic_identity_v2(semantics)
+        if isinstance(semantics, CanonicalObservationV2)
+        else None
+    )
+    if (
+        legacy_identity is None
+        or persisted_values[14] != legacy_identity
+        or _semantic_content_core(persisted_values)
+        != _semantic_content_core(candidate_values)
     ):
         raise ObservationSemanticsPersistenceError(
             "observation semantic identity or content collision"
@@ -184,6 +203,16 @@ def _semantic_core(values: tuple[Any, ...]) -> tuple[Any, ...]:
         value
         for index, value in enumerate(values)
         if index not in {9, 13, 15, 17, 18}
+    )
+
+
+def _semantic_content_core(values: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Compare immutable meaning while accepting the one proved legacy hash."""
+
+    return tuple(
+        value
+        for index, value in enumerate(values)
+        if index not in {9, 13, 14, 15, 17, 18}
     )
 
 

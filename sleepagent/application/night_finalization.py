@@ -325,16 +325,17 @@ class NightFinalizationService:
         revision_cause = decision["revision_cause"]
         if parent_id is not None and decision["state"] != "reconciliation_required":
             revision_cause = "late_material_evidence"
-        reanalysis_id = None
-        if parent_id is not None and decision["state"] in {
+        analysis_handoff_id = None
+        if decision["state"] in {
             "soft_finalized",
             "hard_finalized",
         }:
-            reanalysis_id = self._insert_reanalysis(
+            analysis_handoff_id = self._insert_analysis_handoff(
                 cursor,
                 scope,
                 evidence=evidence,
                 finalization_revision_id=revision_id,
+                initial_finalization=parent_id is None,
                 now=now,
             )
         payload = NightFinalizationRevision(
@@ -351,7 +352,9 @@ class NightFinalizationService:
             coverage_caveat=decision["coverage_caveat"],
             revision_cause=revision_cause,
             material_sha256=material_sha,
-            reanalysis_operation_id=reanalysis_id,
+            # Migration 017 named this linkage for the late-data case. It is
+            # also the existing durable FK for the initial analysis handoff.
+            reanalysis_operation_id=analysis_handoff_id,
             created_at=now,
         )
         cursor.execute(
@@ -391,7 +394,7 @@ class NightFinalizationService:
                 revision_cause,
                 material_sha,
                 payload.model_dump_json(),
-                reanalysis_id,
+                analysis_handoff_id,
                 now,
             ),
         )
@@ -416,13 +419,14 @@ class NightFinalizationService:
             raise NightFinalizationConflict("finalization CAS conflict")
         return payload
 
-    def _insert_reanalysis(
+    def _insert_analysis_handoff(
         self,
         cursor: Any,
         scope: UowScope,
         *,
         evidence: dict[str, Any],
         finalization_revision_id: str,
+        initial_finalization: bool,
         now: datetime,
     ) -> str:
         operation_id = str(self.id_generator())
@@ -443,13 +447,17 @@ class NightFinalizationService:
         }
         operation = {
             "schema_version": "backend_operation.v2",
+            "trigger": "night_finalization",
+            "finalization_handoff_kind": (
+                "initial_report" if initial_finalization else "late_reanalysis"
+            ),
             "night_episode_id": evidence["night_episode_id"],
             "night_episode_revision_id": evidence["episode_revision_id"],
             "night_finalization_revision_id": finalization_revision_id,
             "authorization_snapshot": workload,
         }
         semantic = _identifier(
-            "finalization-reanalysis-semantic", finalization_revision_id
+            "finalization-analysis-handoff-semantic", finalization_revision_id
         )
         cursor.execute(
             """

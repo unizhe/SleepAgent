@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from sleepagent.config import ObservationSemanticsVersion, SleepBackendSettings
-from sleepagent.domain.canonical_observation import CanonicalObservationFactoryV2
+from sleepagent.domain.canonical_observation import (
+    CanonicalObservationFactoryV2,
+    legacy_missing_interval_semantic_identity_v2,
+)
 from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AvailabilityState,
@@ -48,6 +52,10 @@ from sleepagent.integrations.perceptor.push import (
     normalize_push_envelope,
     parse_push_envelope,
 )
+from sleepagent.persistence.observation_semantics import (
+    ObservationSemanticsPersistenceError,
+    persist_observation_semantics_v2,
+)
 from sleepagent.simulation import CanonicalReplayGenerator, load_packaged_scenario
 from sleepagent.simulation.replay_ingress import ReplayExternalFactAdapter
 
@@ -63,6 +71,29 @@ FIXTURE = (
     / "perceptor_v2_5_2"
     / "vital_signs_data_event.json"
 )
+
+
+class _LegacySemanticRetryCursor:
+    def __init__(
+        self,
+        *,
+        legacy_identity: str,
+        stored_row: tuple[object, ...] | None = None,
+    ) -> None:
+        self.legacy_identity = legacy_identity
+        self.stored_row = stored_row
+        self.rowcount = 0
+
+    def execute(self, sql: str, params: tuple[object, ...]) -> None:
+        self.rowcount = 0
+        if "INSERT INTO public.sleep_domain_observation_semantics_v2" in sql:
+            if self.stored_row is None:
+                row = list(params[4:-1])
+                row[14] = self.legacy_identity
+                self.stored_row = tuple(row)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.stored_row
 
 
 def _quality() -> ObservationQuality:
@@ -305,6 +336,109 @@ def test_factory_normalizes_authoritative_time_and_separates_receipt_identity() 
     assert canonical.occurred_at == AT
     assert canonical.transport_receipt_identity == candidate.idempotency_key
     assert canonical.semantic_identity != candidate.idempotency_key
+
+
+def test_missing_interval_identity_includes_target_observation_type() -> None:
+    result = normalize_history(
+        [
+            {
+                "device_id": "semantic-device",
+                "heart_rate": "-1",
+                "breath_rate": "-1",
+                "body_shake": "-1",
+                "send_time": "2026-08-23T16:00:00",
+            }
+        ],
+        provider_account_id="semantic-account",
+        provider_device=DEVICE,
+        raw_sha256="e" * 64,
+        requested_at=AT,
+        received_at=RECEIVED,
+        binding_timezone_name="Asia/Shanghai",
+    )
+
+    missing = tuple(
+        item
+        for item in canonicalize_pull_result_v2(result)
+        if item.observation_type is ObservationType.MISSING_INTERVAL
+    )
+
+    assert {
+        item.payload.target_observation_type for item in missing
+    } == {
+        ObservationType.HEART_RATE,
+        ObservationType.RESPIRATORY_RATE,
+        ObservationType.MOVEMENT,
+    }
+    assert len({item.semantic_identity for item in missing}) == len(missing)
+
+
+def test_missing_interval_retry_accepts_only_matching_legacy_identity_content() -> None:
+    result = normalize_history(
+        [
+            {
+                "device_id": "semantic-device",
+                "heart_rate": "-1",
+                "breath_rate": "-1",
+                "body_shake": "-1",
+                "send_time": "2026-08-23T16:00:00",
+            }
+        ],
+        provider_account_id="semantic-account",
+        provider_device=DEVICE,
+        raw_sha256="f" * 64,
+        requested_at=AT,
+        received_at=RECEIVED,
+        binding_timezone_name="Asia/Shanghai",
+    )
+    missing = tuple(
+        item
+        for item in canonicalize_pull_result_v2(result)
+        if item.observation_type is ObservationType.MISSING_INTERVAL
+    )
+    original = next(
+        item
+        for item in missing
+        if item.payload.target_observation_type is ObservationType.HEART_RATE
+    )
+    changed = next(
+        item
+        for item in missing
+        if item.payload.target_observation_type is ObservationType.RESPIRATORY_RATE
+    )
+    legacy_identity = legacy_missing_interval_semantic_identity_v2(original)
+    assert legacy_identity is not None
+    assert legacy_identity == legacy_missing_interval_semantic_identity_v2(changed)
+    assert legacy_identity != original.semantic_identity
+    scope = SimpleNamespace(namespace_id="replay:semantic", data_mode="replay")
+    cursor = _LegacySemanticRetryCursor(legacy_identity=legacy_identity)
+
+    assert persist_observation_semantics_v2(
+        cursor,
+        scope,
+        observation_id="observation:legacy-missing",
+        subject_id="subject:semantic",
+        semantics=original,
+        created_at=RECEIVED,
+    ) is False
+    assert cursor.stored_row is not None
+
+    changed_cursor = _LegacySemanticRetryCursor(
+        legacy_identity=legacy_identity,
+        stored_row=cursor.stored_row,
+    )
+    with pytest.raises(
+        ObservationSemanticsPersistenceError,
+        match="semantic identity or content collision",
+    ):
+        persist_observation_semantics_v2(
+            changed_cursor,
+            scope,
+            observation_id="observation:legacy-missing",
+            subject_id="subject:semantic",
+            semantics=changed,
+            created_at=RECEIVED,
+        )
 
 
 def test_factory_rejects_invalid_schema_provenance_timestamp_and_semantics() -> None:

@@ -643,8 +643,11 @@ def normalize_sleep_report(
                     requested_at=requested_at, received_at=received_at,
                     measurement_at=measured_at, source_timestamp_text=str(item.get("time_long")),
                     timezone_status=TimezoneStatus.KNOWN, time_flags=("vendor_report_series",),
-                    source_kind=SourceKind.VENDOR_DERIVED,
+                    source_kind=SourceKind.DEVICE_MEASURED,
                     allow_zero=observation_type == ObservationType.MOVEMENT,
+                    limitations=(
+                        "provider_documented_sleep_period_sensor_measurement",
+                    ),
                 )
             )
     body_shake_items = _optional_mapping_list(

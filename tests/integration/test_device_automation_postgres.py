@@ -789,6 +789,19 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
         assert soft.state is NightFinalizationState.SOFT_FINALIZED
         assert soft.provisional is True
         assert soft.coverage_caveat is not None
+        assert soft.reanalysis_operation_id is not None
+        initial_claim = store.claim(
+            queue="fast_path",
+            worker_instance="g7-initial-report-worker",
+            lease_seconds=30,
+        )
+        assert initial_claim is not None
+        assert initial_claim.work_id == soft.reanalysis_operation_id
+        assert initial_claim.payload["finalization_handoff_kind"] == "initial_report"
+        assert store.finalize(
+            initial_claim,
+            WorkResult(disposition=WorkDisposition.SUCCEEDED),
+        ) is True
         late_episode_revision = _revise_episode(
             psycopg,
             admin_dsn,
@@ -818,6 +831,9 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
         )
         assert reanalysis_claim is not None
         assert reanalysis_claim.work_id == hard.reanalysis_operation_id
+        assert reanalysis_claim.payload["finalization_handoff_kind"] == (
+            "late_reanalysis"
+        )
         assert exact_worker_scope(
             WorkContext(reanalysis_claim, store, threading.Event()),
             allowed_handler="fast_path",
@@ -837,6 +853,19 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
         )
         assert direct_hard.state is NightFinalizationState.HARD_FINALIZED
         assert direct_hard.parent_finalization_revision_id is None
+        assert direct_hard.reanalysis_operation_id is not None
+        direct_replay = finalizer.finalize(
+            final_scope,
+            night_episode_id=direct_episode,
+            evaluated_at=direct_deadline + timedelta(hours=25),
+        )
+        assert direct_replay == direct_hard
+        with psycopg.connect(admin_dsn) as admin:
+            assert admin.execute(
+                "SELECT count(*) FROM public.sleep_domain_operations "
+                "WHERE operation_id = %s AND operation_type = 'fast_path'",
+                (direct_hard.reanalysis_operation_id,),
+            ).fetchone() == (1,)
 
         conflict_episode, _, conflict_deadline = _seed_episode(
             psycopg,

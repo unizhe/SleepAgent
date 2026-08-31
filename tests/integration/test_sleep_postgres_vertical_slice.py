@@ -767,8 +767,14 @@ class _FastRepository:
         self.risk = risk
         return True
 
-    def persist_fast_path_handoff(self, **kwargs: Any) -> None:
+    def persist_fast_path_handoff(
+        self, **kwargs: Any
+    ) -> tuple[str | None, str | None]:
         self.persisted = kwargs
+        return (
+            kwargs["product_agent_operation_id"],
+            kwargs["report_operation_id"],
+        )
 
 
 def _fast_observation(

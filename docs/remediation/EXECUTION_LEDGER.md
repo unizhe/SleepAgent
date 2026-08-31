@@ -2181,3 +2181,158 @@ Blocking acceptance findings are real SleepReport V2 provenance incompatibility,
 absence of persisted new live V2 observations for the scheduled History slot,
 and absence of the required first-finalization shared report handoff. No
 external-effect work was started.
+
+## G7.1-R1 — Live acquisition handoff blocker remediation
+
+`G7_1_R1_STATUS = ACCEPTED`
+
+### Entry, scope, and root causes
+
+- Entry HEAD was exactly
+  `34e4a55a2c1281c1291e0964238df5691ee132e4`, subject
+  `remediation(g7.1): validate live acquisition lifecycle`. The R1 worktree
+  started clean. The previously authorized binding remained unchanged:
+  binding ref `396ac1640613`, version `2`, subject ref `98b24d1d005e`.
+- Provenance root cause classification:
+  `ADAPTER_PROVENANCE_MAPPING_WRONG`. The repository's Perceptor V2.5.2
+  contract identifies SleepReport `heart_rate_data` and `breathe_data` as
+  sleep-period sensor measurement series, but the Pull adapter blanket-labeled
+  every SleepReport field-series `vendor_derived`. The shared V2 ontology
+  correctly requires physiological heart/respiratory measurements to be
+  `device_measured`, so the first real heart-rate candidate failed closed as
+  `invalid_source_provenance` before persistence.
+- Handoff root cause classification:
+  `FINALIZATION_DID_NOT_ENQUEUE_REPORT`. `NightFinalizationService._persist`
+  created fast-path report/reanalysis work only when a parent finalization
+  revision existed. The initial revision has no parent, so the first
+  soft/hard finalization committed without any downstream operation. There was
+  no queue, handler, lease, revision-pin, or transaction-visibility failure;
+  the graph diverged before enqueue.
+
+### Fixes and durable regressions
+
+- SleepReport physiological series now carry explicit `device_measured`
+  provenance plus the documented sensor-measurement limitation. Sleep stages,
+  summary/profile metrics, bed-exit series, and movement-count series remain
+  explicitly `vendor_derived`; no live/provider bypass, V1 fallback, or
+  unknown-to-trusted coercion was added.
+- The sanitized real-shape fixture
+  `sanitized_recorded_real_pull_get_sleep_report_provenance.json` retains the
+  vendor's extra physiological `type` field while removing credentials and
+  real subject/device identifiers. It proves heart-rate and respiratory-rate
+  candidates cross the one CanonicalObservationFactoryV2 boundary as trusted
+  device measurements. Replaying the full sanitized real response now crosses
+  the original provenance failure and reaches a separate existing summary
+  metric rejection (`heart_rate_avg`, missing canonical unit).
+- Batch behavior remains the existing atomic/fail-closed contract. R1 did not
+  silently drop invalid records or introduce partial acceptance. The selected
+  heterogeneous History response is entirely supported and therefore needed
+  no rejected-record side channel.
+- Every first SOFT/HARD finalization now inserts an `initial_report` fast-path
+  handoff in the same transaction as its immutable revision. Later material
+  revisions use the same durable linkage with `late_reanalysis`. The existing
+  migration-017 `reanalysis_operation_id` FK is reused; no fake prior revision
+  is created.
+- Independent normalization, soft-finalization, and hard-finalization
+  fast-path operations for the same Episode revision now converge under an
+  advisory semantic lock on one report operation. An existing eligible report
+  is validated and reused; if still pending/retry, its pinned deterministic
+  gate is atomically refreshed before claim. The PostgreSQL regression proves
+  three handoffs create one report, one shared analysis, and three role views.
+- Simultaneous History gaps exposed a pre-existing V2 identity defect:
+  missing-interval heart, respiration, and movement candidates at one instant
+  hashed the same generic null value. Their semantic identity now includes
+  target observation type, missing state, and reason code. Exact immutable
+  retries against the proved legacy hash remain accepted only when all
+  semantic content matches; changed target/content still fails closed. The
+  normalizer version remains unchanged because this is an in-place identity
+  bug correction, not a new ontology contract.
+
+### Migration audit
+
+- Migration 018 was required because migrations 012/013 SECURITY DEFINER
+  planner/ingress functions hard-coded API plus `perceptor_ingress` authority.
+  It replaces only those two functions, adds exact Worker-handler grant checks
+  and test-role execution grants, and preserves the API retry no-op. It stores
+  no acceptance evidence.
+- Migrations 001–017 are byte/hash unchanged from entry; migration 018 is also
+  unchanged with SHA-256
+  `a799b10d7f9ea773e1ca457cc66c1a68beb6799d86df2f045983658dbe656875`.
+  Migration discovery remains exactly 18. No migration 019 was required.
+- Fresh PostgreSQL 16.14 databases applied and checked 001→018. The accepted
+  G7.1 001→017→018 upgrade evidence remains authoritative because none of the
+  migration files or manifest entries changed in R1.
+
+### Focused controlled live proof
+
+- The original evidence database remained under
+  `default_transaction_read_only=on`; all R1 mutations were confined to a
+  disposable local clone. The real provider call was the read-only History
+  endpoint `/vitalSigns/getHistoryData`. No additional SleepReport provider
+  call was needed.
+- A due schedule for the authorized known-nonempty window ending
+  `2026-08-25T00:45:56Z` created one immutable fire and one acquisition
+  operation. The real response contained 3 records and normalized to 900
+  accepted candidates: 188 heart-rate, 188 respiratory-rate, 188 movement
+  index, and 336 explicit missing intervals. Intentionally rejected was 0,
+  conflicts were 0, and the operation reached `succeeded` with checkpoint
+  advancement.
+- All 900 candidates have native V2 sidecars and trusted
+  `device_measured` provenance. The scheduled acquisition resolved as 900
+  semantic duplicates of already committed canonical identities (created 0,
+  deduplicated 900), proving durable idempotent persistence rather than a
+  second copy.
+- The automatic scheduled finalization created revision 1 with no parent,
+  then an `initial_report` fast-path operation, one
+  `product.report.run.v1`, one `product.shared_analysis.v1`, one ready shared
+  analysis revision, and exactly three distinct role projections. The retained
+  identifiers are sanitized refs: root `055702c6ca48`, finalization
+  `e33e1f426ab1`, handoff `32ff1ea3388f`, report `ceb930f036d4`, and shared
+  `296173250764`.
+- The large retained Episode exceeded the temporary harness's first 15-second
+  SQL UOW timeout while loading the report. Its exact durable lease was expired
+  and reclaimed under the intended 300-second acceptance timeout; the same
+  report operation then succeeded. No duplicate authority was created.
+- Replaying the identical finalization schedule slot returned the same fire
+  and root operation. Authoritative counts remained exactly: finalization 1,
+  fast-path 1, report 1, shared operation 1, analysis revision 1, role views 3.
+- Legacy `product_agent`/compatibility execution count was 0.
+  `report_pipeline_mode=shared_only`, `emit_legacy_report_compatibility=false`,
+  and `live_delivery_enabled=false` throughout. Two optional, unexecuted
+  induction/narrative operations were cancelled during clone shutdown.
+- Every audited external-effect delta was 0: delivery intents/journal,
+  delivery reconciliation/replay effects, care actions/followups/transitions,
+  command receipts/commands, and delivery operations. No email, SMS, care
+  notification, Alarm, AlarmStop, or device-control call occurred.
+- Shared analysis used ModelMode.LIVE through a controlled OpenAI-compatible
+  loopback endpoint (3 successful requests, no errors). No health context was
+  sent to an external model provider. All schedules were paused, the temporary
+  schedule grant was removed, and the clone Worker grant was restored from the
+  read-only source.
+
+### Verification and verdict
+
+| Verification | Result |
+|---|---|
+| Provenance/Observation/automation focused selection | 150 passed |
+| Device automation + Observation V2 + Pull PostgreSQL | 3 passed |
+| Shared-only Product PostgreSQL focus | 3 passed |
+| Full PostgreSQL marker on clean 001→018 database | 37 passed; 1 expected process-proof skip |
+| Broad non-E2E/non-PostgreSQL regression | 1,113 passed; 40 deselected |
+| Architecture gate | 6 passed |
+| OpenAPI snapshot, compileall, migration discovery/check, diff check | PASS |
+
+```text
+PROVENANCE_BLOCKER_RESOLVED             = YES
+FIRST_FINALIZATION_HANDOFF_RESOLVED     = YES
+LIVE_HISTORY_NONEMPTY_SCHEDULED_PULL    = PASS
+LIVE_OBSERVATION_V2                     = PASS
+SHARED_FIRST_FINALIZATION_HANDOFF       = PASS
+SHARED_HANDOFF_IDEMPOTENCY              = PASS
+LEGACY_REPORT_EXECUTION                 = ZERO
+EXTERNAL_EFFECTS                        = ZERO
+G7_1_LIVE_ACCEPTANCE_READY              = YES
+```
+
+Checkpoint commit: this goal's single local commit, subject
+`remediation(g7.1-r1): fix live acquisition handoff blockers`; no push.

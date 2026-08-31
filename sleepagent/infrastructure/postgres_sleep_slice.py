@@ -1180,7 +1180,10 @@ class FastPathHandler:
                 and self.emit_legacy_report_compatibility
                 else None
             )
-            repository.persist_fast_path_handoff(
+            (
+                product_operation_id,
+                report_operation_id,
+            ) = repository.persist_fast_path_handoff(
                 lease=lease,
                 operation=operation,
                 result=result,
@@ -2668,7 +2671,7 @@ class PostgresSleepSliceRepository:
         report_operation_id: str | None,
         policy: SleepSlicePolicy,
         committed_at: datetime,
-    ) -> None:
+    ) -> tuple[str | None, str | None]:
         if (
             not decision.enqueue_product_agent
             and (
@@ -2698,6 +2701,63 @@ class PostgresSleepSliceRepository:
                     }
                 )
                 workload = _workload_snapshot(self.scope, "product_agent")
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (report_semantic_key,),
+                )
+                cursor.execute(
+                    """
+                    SELECT operation_id, subject_id, target_resource_id,
+                      target_resource_key, idempotency_key, request_sha256,
+                      operation_json, queue_name, policy_sha256, status
+                    FROM public.sleep_domain_operations
+                    WHERE namespace_id = %s AND data_mode = %s
+                      AND namespace_generation = %s
+                      AND COALESCE(run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(arm_id, '') = COALESCE(%s, '')
+                      AND operation_type = 'product.report.run.v1'
+                      AND semantic_key = %s
+                    """,
+                    (
+                        self.scope.namespace_id,
+                        self.scope.data_mode,
+                        self.scope.namespace_generation,
+                        self.scope.run_id,
+                        self.scope.arm_id,
+                        report_semantic_key,
+                    ),
+                )
+                existing_report = cursor.fetchone()
+                if existing_report is not None:
+                    existing_json = _json_value(existing_report[6])
+                    expected_revision_id = (
+                        result.current_risk.source_scope.night_episode_revision_id
+                    )
+                    expected_target_key = (
+                        expected_revision_id or operation.night_episode_id
+                    )
+                    if (
+                        str(existing_report[1]) != operation.subject_id
+                        or str(existing_report[2]) != operation.night_episode_id
+                        or str(existing_report[3]) != expected_target_key
+                        or str(existing_report[4]) != report_semantic_key
+                        or str(existing_report[5]) != report_semantic_key
+                        or str(existing_report[7]) != "product_agent"
+                        or str(existing_report[8]) != policy.policy_sha256
+                        or str(existing_report[9])
+                        not in {"pending", "retry", "running", "succeeded"}
+                        or existing_json.get("command_type")
+                        != "product.report.run.v1"
+                        or existing_json.get("trigger") != "fast_path_nonurgent"
+                        or existing_json.get("night_episode_id")
+                        != operation.night_episode_id
+                        or existing_json.get("night_episode_revision_id")
+                        != expected_revision_id
+                    ):
+                        raise SleepSliceInvariantError(
+                            "existing report operation semantic collision"
+                        )
+                    report_operation_id = str(existing_report[0])
                 if product_agent_operation_id is not None:
                     compatibility_semantic_key = _digest(
                         {
@@ -2742,6 +2802,7 @@ class PostgresSleepSliceRepository:
                           %s, 'product_agent_compatibility', 0, %s, 1,
                           %s::jsonb, %s
                         )
+                        ON CONFLICT DO NOTHING
                         """,
                         (
                             product_agent_operation_id,
@@ -2768,6 +2829,32 @@ class PostgresSleepSliceRepository:
                             policy.policy_sha256,
                         ),
                     )
+                    cursor.execute(
+                        """
+                        SELECT operation_id
+                        FROM public.sleep_domain_operations
+                        WHERE namespace_id = %s AND data_mode = %s
+                          AND namespace_generation = %s
+                          AND COALESCE(run_id, '') = COALESCE(%s, '')
+                          AND COALESCE(arm_id, '') = COALESCE(%s, '')
+                          AND operation_type = 'product_agent'
+                          AND semantic_key = %s
+                        """,
+                        (
+                            self.scope.namespace_id,
+                            self.scope.data_mode,
+                            self.scope.namespace_generation,
+                            self.scope.run_id,
+                            self.scope.arm_id,
+                            compatibility_semantic_key,
+                        ),
+                    )
+                    compatibility_row = cursor.fetchone()
+                    if compatibility_row is None:
+                        raise SleepSliceInvariantError(
+                            "compatibility operation insert was not durable"
+                        )
+                    product_agent_operation_id = str(compatibility_row[0])
                 report_json = {
                     "schema_version": "backend_operation.v2",
                     "command_type": "product.report.run.v1",
@@ -2789,8 +2876,9 @@ class PostgresSleepSliceRepository:
                     ),
                     "authorization_snapshot": workload,
                 }
-                cursor.execute(
-                    """
+                if existing_report is None:
+                    cursor.execute(
+                        """
                     INSERT INTO public.sleep_domain_operations (
                       operation_id, namespace_id, data_mode, operation_type,
                       subject_id, service_principal_id, actor_id,
@@ -2807,32 +2895,55 @@ class PostgresSleepSliceRepository:
                       %s, %s, 2, %s, %s, %s, 'uuidv7', 'system',
                       %s, 'product_agent', 0, %s, 5, %s::jsonb, %s
                     )
-                    """,
-                    (
-                        report_operation_id,
-                        self.scope.namespace_id,
-                        self.scope.data_mode,
-                        operation.subject_id,
-                        self.scope.service_principal_id,
-                        operation.night_episode_id,
+                        """,
                         (
-                            result.current_risk.source_scope.night_episode_revision_id
-                            or operation.night_episode_id
+                            report_operation_id,
+                            self.scope.namespace_id,
+                            self.scope.data_mode,
+                            operation.subject_id,
+                            self.scope.service_principal_id,
+                            operation.night_episode_id,
+                            (
+                                result.current_risk.source_scope.night_episode_revision_id
+                                or operation.night_episode_id
+                            ),
+                            report_semantic_key,
+                            report_semantic_key,
+                            _json(report_json),
+                            committed_at,
+                            committed_at,
+                            self.scope.namespace_generation,
+                            self.scope.run_id,
+                            self.scope.arm_id,
+                            report_semantic_key,
+                            committed_at,
+                            _json(workload),
+                            policy.policy_sha256,
                         ),
-                        report_semantic_key,
-                        report_semantic_key,
-                        _json(report_json),
-                        committed_at,
-                        committed_at,
-                        self.scope.namespace_generation,
-                        self.scope.run_id,
-                        self.scope.arm_id,
-                        report_semantic_key,
-                        committed_at,
-                        _json(workload),
-                        policy.policy_sha256,
-                    ),
-                )
+                    )
+                elif str(existing_report[9]) in {"pending", "retry"}:
+                    cursor.execute(
+                        """
+                        UPDATE public.sleep_domain_operations
+                        SET operation_json = %s::jsonb, updated_at = %s,
+                          cas_version = cas_version + 1
+                        WHERE operation_id = %s AND namespace_id = %s
+                          AND data_mode = %s AND namespace_generation = %s
+                          AND status IN ('pending', 'retry')
+                        """,
+                        (
+                            _json(report_json),
+                            committed_at,
+                            report_operation_id,
+                            self.scope.namespace_id,
+                            self.scope.data_mode,
+                            self.scope.namespace_generation,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise SleepSliceInvariantError(
+                            "existing report operation changed during refresh"
+                        )
             operation_json = {
                 **operation.operation_json,
                 "result": {
@@ -2915,6 +3026,7 @@ class PostgresSleepSliceRepository:
                 },
                 created_at=committed_at,
             )
+            return product_agent_operation_id, report_operation_id
         finally:
             cursor.close()
 
