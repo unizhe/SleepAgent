@@ -513,6 +513,9 @@ class DeviceBindingStatus(str, Enum):
 class DeviceBindingAuditAction(str, Enum):
     CREATED = "created"
     REBOUND = "rebound"
+    ENDED = "ended"
+    REVOKED = "revoked"
+    VALIDATED = "validated"
 
 
 class DeviceBinding(SleepDomainContract):
@@ -580,11 +583,11 @@ class DeviceBindingAuditEvent(SleepDomainContract):
             None,
         ):
             raise ValueError("created binding audit cannot reference a previous binding")
-        if self.action == DeviceBindingAuditAction.REBOUND and (
+        if self.action != DeviceBindingAuditAction.CREATED and (
             self.previous_device_binding_id is None
             or self.previous_binding_version is None
         ):
-            raise ValueError("rebound binding audit requires the previous binding")
+            raise ValueError("binding transition audit requires the previous binding")
         return self
 
 

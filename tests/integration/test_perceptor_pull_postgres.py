@@ -21,7 +21,7 @@ from sleepagent.config import (
     ProviderMode,
     SleepBackendSettings,
 )
-from sleepagent.domain.contracts import DeviceBinding
+from sleepagent.domain.contracts import DeviceBinding, DeviceBindingStatus
 from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
     RawPayloadCipher,
@@ -274,6 +274,83 @@ def _seed(admin_dsn: str) -> DeviceBinding:
             )
         connection.commit()
     return DeviceBinding.model_validate(binding_json)
+
+
+def _reassign_binding(
+    admin_dsn: str,
+    binding: DeviceBinding,
+    *,
+    effective_at: datetime,
+) -> DeviceBinding:
+    """Create a real temporal version instead of mutating historical identity."""
+
+    psycopg = pytest.importorskip("psycopg")
+    ended = binding.model_copy(
+        update={
+            "effective_until": effective_at,
+            "status": DeviceBindingStatus.ENDED,
+            "changed_by_actor_id": "p4d2-b2-temporal-proof",
+            "change_reason": "synthetic reassignment boundary",
+        }
+    )
+    reassigned = binding.model_copy(
+        update={
+            "device_binding_id": f"{binding.device_binding_id}-v2",
+            "binding_version": binding.binding_version + 1,
+            "effective_from": effective_at,
+            "effective_until": None,
+            "status": DeviceBindingStatus.ACTIVE,
+            "changed_by_actor_id": "p4d2-b2-temporal-proof",
+            "change_reason": "synthetic reassignment version",
+            "recorded_at": effective_at,
+        }
+    )
+    with psycopg.connect(admin_dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE public.sleep_domain_device_bindings AS binding_row
+                SET status = 'ended', effective_until = %s, ended_at = %s,
+                    binding_json = %s::jsonb,
+                    cas_version = binding_row.cas_version + 1
+                WHERE device_binding_id = %s AND cas_version = 0
+                """,
+                (
+                    effective_at,
+                    effective_at,
+                    ended.model_dump_json(),
+                    binding.device_binding_id,
+                ),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_device_bindings (
+                  device_binding_id, namespace_id, data_mode, binding_version,
+                  device_id, provider_id, provider_account_id, subject_id,
+                  timezone_name, effective_from, status, binding_json,
+                  recorded_at, cas_version, supersedes_device_binding_id
+                ) VALUES (
+                  %s, %s, 'live', %s, %s, %s, %s, %s, %s, %s, 'active',
+                  %s::jsonb, %s, 0, %s
+                )
+                """,
+                (
+                    reassigned.device_binding_id,
+                    NAMESPACE,
+                    reassigned.binding_version,
+                    reassigned.device_id,
+                    reassigned.provider_id,
+                    reassigned.provider_account_id,
+                    reassigned.subject_id,
+                    reassigned.timezone_name,
+                    reassigned.effective_from,
+                    reassigned.model_dump_json(),
+                    reassigned.recorded_at,
+                    binding.device_binding_id,
+                ),
+            )
+    return reassigned
 
 
 def _push_raw(*, message_id: str, heart_rate: int = 70) -> bytes:
@@ -1026,89 +1103,6 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             == before_out_of_window
         )
 
-        with psycopg.connect(admin_dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT count(*) FROM sleep_domain_raw_inbox "
-                    "WHERE namespace_id = %s",
-                    (NAMESPACE,),
-                )
-                raw_before_binding_period_rejections = int(cursor.fetchone()[0])
-                cursor.execute(
-                    "UPDATE sleep_domain_device_bindings SET effective_from = %s, "
-                    "effective_until = NULL WHERE namespace_id = %s "
-                    "AND device_binding_id = %s",
-                    (NOW + timedelta(minutes=20), NAMESPACE, BINDING_ID),
-                )
-            connection.commit()
-
-        pre_binding_coordinates = PullRequestCoordinates(
-            endpoint=HISTORY_ENDPOINT,
-            window_start_at=NOW + timedelta(minutes=9),
-            window_end_at=NOW + timedelta(minutes=11),
-        )
-        with pytest.raises(
-            psycopg.errors.RaiseException,
-            match="outside DeviceBinding effective interval",
-        ):
-            ingress.accept(
-                _read(
-                    HISTORY_ENDPOINT,
-                    _history_data(local_send_time="2026-08-23T11:10:00"),
-                    requested_at=NOW + timedelta(minutes=30),
-                    received_at=NOW + timedelta(minutes=30, seconds=1),
-                    envelope_nonce="pre-binding-period",
-                ),
-                binding=binding,
-                coordinates=pre_binding_coordinates,
-            )
-
-        with psycopg.connect(admin_dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT count(*) FROM sleep_domain_raw_inbox "
-                    "WHERE namespace_id = %s",
-                    (NAMESPACE,),
-                )
-                assert cursor.fetchone() == (raw_before_binding_period_rejections,)
-                cursor.execute(
-                    "UPDATE sleep_domain_device_bindings SET effective_from = %s, "
-                    "effective_until = %s WHERE namespace_id = %s "
-                    "AND device_binding_id = %s",
-                    (
-                        NOW - timedelta(days=2),
-                        NOW + timedelta(minutes=10, seconds=30),
-                        NAMESPACE,
-                        BINDING_ID,
-                    ),
-                )
-            connection.commit()
-
-        with pytest.raises(
-            psycopg.errors.RaiseException,
-            match="outside DeviceBinding effective interval",
-        ):
-            ingress.accept(
-                _read(
-                    HISTORY_ENDPOINT,
-                    _history_data(local_send_time="2026-08-23T11:10:00"),
-                    requested_at=NOW + timedelta(minutes=10),
-                    received_at=NOW + timedelta(minutes=10, seconds=1),
-                    envelope_nonce="reassignment-crossing-period",
-                ),
-                binding=binding,
-                coordinates=pre_binding_coordinates,
-            )
-
-        with psycopg.connect(admin_dsn) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT count(*) FROM sleep_domain_raw_inbox "
-                    "WHERE namespace_id = %s",
-                    (NAMESPACE,),
-                )
-                assert cursor.fetchone() == (raw_before_binding_period_rejections,)
-
         # A namespace reset permits byte-identical Push and Pull evidence to
         # normalize again without colliding with generation-one rows hidden by
         # Worker RLS. Same-generation Push/Pull overlap remains intact.
@@ -1274,6 +1268,64 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     (NAMESPACE,),
                 )
                 assert cursor.fetchone() == (2, 2, 2)
+
+                cursor.execute(
+                    "SELECT count(*) FROM sleep_domain_raw_inbox "
+                    "WHERE namespace_id = %s",
+                    (NAMESPACE,),
+                )
+                raw_before_binding_period_rejections = int(cursor.fetchone()[0])
+
+        reassigned_binding = _reassign_binding(
+            admin_dsn,
+            binding,
+            effective_at=NOW + timedelta(minutes=10, seconds=30),
+        )
+        pre_binding_coordinates = PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=NOW + timedelta(minutes=9),
+            window_end_at=NOW + timedelta(minutes=11),
+        )
+        with pytest.raises(
+            ValueError,
+            match="precedes DeviceBinding effective interval",
+        ):
+            generation_two_ingress.accept(
+                _read(
+                    HISTORY_ENDPOINT,
+                    _history_data(local_send_time="2026-08-23T11:10:00"),
+                    requested_at=NOW + timedelta(minutes=30),
+                    received_at=NOW + timedelta(minutes=30, seconds=1),
+                    envelope_nonce="pre-binding-period",
+                ),
+                binding=reassigned_binding,
+                coordinates=pre_binding_coordinates,
+            )
+
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="outside DeviceBinding effective interval",
+        ):
+            generation_two_ingress.accept(
+                _read(
+                    HISTORY_ENDPOINT,
+                    _history_data(local_send_time="2026-08-23T11:10:00"),
+                    requested_at=NOW + timedelta(minutes=10),
+                    received_at=NOW + timedelta(minutes=10, seconds=1),
+                    envelope_nonce="reassignment-crossing-period",
+                ),
+                binding=binding,
+                coordinates=pre_binding_coordinates,
+            )
+
+        with psycopg.connect(admin_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM sleep_domain_raw_inbox "
+                    "WHERE namespace_id = %s",
+                    (NAMESPACE,),
+                )
+                assert cursor.fetchone() == (raw_before_binding_period_rejections,)
     finally:
         worker_pool.close()
         api_pool.close()

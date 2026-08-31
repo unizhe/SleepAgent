@@ -131,3 +131,61 @@ def test_direct_boolean_switch_values_are_strictly_typed() -> None:
                 "live_delivery_enabled": "false",
             }
         )
+
+
+def test_scheduler_opt_in_requires_worker_and_scheduled_queue() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "night.finalization_scan",
+            "SLEEPAGENT_BACKEND_PROVIDER_MODE": "disabled",
+            "SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED": "true",
+        }
+    )
+
+    settings = SleepBackendSettings.from_environment(environment)
+
+    assert settings.acquisition_scheduler_enabled is True
+    assert settings.worker_queues == ("night.finalization_scan",)
+
+
+def test_scheduled_queue_without_feature_gate_fails_closed() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "night.finalization_scan",
+        }
+    )
+
+    with pytest.raises((ValueError, ValidationError), match="opt-in"):
+        SleepBackendSettings.from_environment(environment)
+
+
+def test_scheduled_perceptor_pull_requires_dedicated_client_id_reference() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_DATA_MODE": "live",
+            "SLEEPAGENT_BACKEND_DATABASE_SCOPE": "live",
+            "SLEEPAGENT_BACKEND_NAMESPACE_PREFIXES": "live:g7",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "perceptor.history_overlap_pull",
+            "SLEEPAGENT_BACKEND_PROVIDER_MODE": "live",
+            "SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED": "true",
+            "SLEEPAGENT_BACKEND_PERCEPTOR_CLIENT_SECRET_REF": "test:vendor-secret",
+            "SLEEPAGENT_BACKEND_PERCEPTOR_PROVIDER_ACCOUNT_ID": "vendor-account",
+            "SLEEPAGENT_BACKEND_PERCEPTOR_NAMESPACE_ID": "live:g7",
+        }
+    )
+    with pytest.raises((ValueError, ValidationError), match="live provider"):
+        SleepBackendSettings.from_environment(environment)
+
+    environment["SLEEPAGENT_BACKEND_PERCEPTOR_CLIENT_ID_REF"] = "test:vendor-id"
+    settings = SleepBackendSettings.from_environment(environment)
+
+    assert settings.perceptor_client_id_ref == "test:vendor-id"

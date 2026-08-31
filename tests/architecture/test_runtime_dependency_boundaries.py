@@ -43,6 +43,7 @@ def test_perceptor_imports_stay_in_the_narrow_ingress_boundary() -> None:
         Path("sleepagent/workers/ingestion.py"),
         Path("sleepagent/integrations/perceptor/ingestion.py"),
         Path("sleepagent/integrations/perceptor/pull_ingestion.py"),
+        Path("sleepagent/integrations/perceptor/scheduled.py"),
         Path("sleepagent/integrations/perceptor/client.py"),
         Path("sleepagent/integrations/perceptor/push.py"),
     }

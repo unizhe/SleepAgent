@@ -61,6 +61,9 @@ from sleepagent.workers.kernel import (
 
 UTC = timezone.utc
 DEFAULT_QUEUE_ORDER = (
+    "perceptor.history_overlap_pull",
+    "perceptor.sleep_report_pull",
+    "night.finalization_scan",
     "ingestion",
     "fast_path",
     "product_agent",

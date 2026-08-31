@@ -1,8 +1,8 @@
 # ADR-007: Night finalization is separate from date ownership
 
-- Status: Accepted for remediation
+- Status: Implemented
 - Date: 2026-08-30
-- Scope: Future M12-M14 device/finalization migration; no G1 state machine
+- Scope: M12-M14 device automation; additive to the G1 date state machine
 
 ## Context
 
@@ -34,3 +34,17 @@ late accepted evidence -> new immutable revision -> reanalysis
 
 `acquisition_scheduler_enabled` defaults to false. G1 adds no scheduler,
 finalization state, database migration, or automatic report trigger.
+
+## Implementation
+
+Migrations 015–017 implement the accepted boundary without changing
+`NightEpisodeV2.date_state`. Device binding lifecycle, acquisition schedules,
+and night-data finalization are separate RLS-scoped authorities. The scheduler
+only creates UUIDv7 durable operations; existing workers perform Perceptor Pull
+or deterministic finalization under exact workload snapshots.
+
+The runtime feature gate still defaults to false. Native PostgreSQL 16.14 tests
+cover temporal conflicts/transfers, multi-instance `SKIP LOCKED` firing,
+expired-lease recovery, duplicate-fire idempotency, SOFT/HARD/reconciliation
+transitions, immutable late revisions, and UTC/local-date crossing. No live
+device acceptance was performed (`LIVE_ACCEPTANCE_DEFERRED`).

@@ -939,3 +939,46 @@ has no concrete handler dependency, domain authorities no longer import
 runtime/workers/infrastructure, and the reduced baseline absorbed no new debt.
 The remaining runtime-contract SCC is explicit and bounded. Two fix rounds
 were used.
+
+## Act 13 — Build: G7 device automation lifecycle
+
+### Round 1 — Codex build
+
+Added one governed DeviceBinding service and CLI for discovery, temporal bind,
+read, rebind/transfer, end/unbind, revoke, and validation. Migration 015 adds
+CAS, immutable temporal chaining, overlap prevention, IANA timezone checks,
+append-only transfer audit, forced RLS, and a narrow SECURITY DEFINER command
+authority.
+
+Added PostgreSQL acquisition schedules and a feature-gated scheduler
+composition root. Due scans use `FOR UPDATE SKIP LOCKED`, deterministic UUIDv7
+operation identity, semantic idempotency, bounded jitter, pause/resume, failure
+backoff, and the existing lease/fence worker protocol. Concrete Perceptor work
+remains behind the integration boundary and reuses the existing Pull ingress,
+checkpoint, and client authorities.
+
+Implemented a separate immutable night-data finalization aggregate with
+OPEN/SOFT/HARD/reconciliation states. Late material evidence creates a new
+revision and bounded UUIDv7 reanalysis work without mutating prior authority.
+
+### Round 2 — Native PostgreSQL correction and self-review
+
+PostgreSQL execution found and corrected output-column ambiguity in binding
+lifecycle updates and scheduler conflict targets. Durable-operation checks then
+required deterministic UUIDv7 identity and the matching `id_scheme`; both were
+aligned with the existing v2 contract rather than weakening it. Self-review
+separated scheduler enqueue purpose from the production worker purpose and
+persisted the full exact workload snapshot required by `exact_worker_scope`.
+The final diff audit also preserved each ended predecessor's own immutable JSON
+identity during rebind and separated the vendor client-ID reference from the
+generic SleepAgent service credential.
+
+### Codex verification
+
+- Focused unit/settings/architecture selection: 28 passed.
+- Clean native PostgreSQL 16.14 G7 authority matrix: 1 passed.
+- Full PostgreSQL marker: 36 passed, one process-proof fixture skipped.
+- Full unit and non-E2E/non-PostgreSQL gates: 1,105 passed each.
+- Schema apply/check: 001–017, manifest-pinned.
+- Device and scheduler CLI help, compilation, and `git diff --check`: PASS.
+- No Perceptor cloud/device call; live acceptance deferred.

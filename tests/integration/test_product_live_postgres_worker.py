@@ -13,6 +13,7 @@ from sleepagent.config import (
     DeploymentMode,
     ModelMode,
     ProcessRole,
+    ReportPipelineMode,
     SleepBackendSettings,
 )
 from sleepagent.runtime.agents import (
@@ -107,6 +108,8 @@ def _live_worker_settings(
         namespace_prefixes=(namespace_id,),
         worker_queues=("product_agent",),
         model_mode=ModelMode.LIVE,
+        report_pipeline_mode=ReportPipelineMode.SHARED_COMPAT,
+        emit_legacy_report_compatibility=True,
         service_credential_ref="test:worker-service",
         signing_key_ref="test:worker-signing",
         encryption_key_ref="test:worker-encryption",

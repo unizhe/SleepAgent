@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 14,
+  "target_version": 17,
   "migrations": [
     {
       "version": 1,
@@ -97,6 +97,27 @@
       "version": 14,
       "filename": "014_observation_semantics_v2.sql",
       "sha256": "96756b31a3515b82756ef2ab0c30b432a6b259a185000993002bfacbc661a368",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 15,
+      "filename": "015_device_binding_authority.sql",
+      "sha256": "0fe864b19425b79abc38a61161891d555efe7c2c38d04b0fd7b4a65716fa725f",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 16,
+      "filename": "016_acquisition_scheduler.sql",
+      "sha256": "3ab3af991e644cca3d89153081e48dad3f59bfd18defdbfd31a93753535bffcd",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 17,
+      "filename": "017_night_finalization.sql",
+      "sha256": "669f46e71972c146b793afa5b4ececfd106a0b24fea53e2d2f36f00b59712d37",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

@@ -112,6 +112,7 @@ class SleepBackendSettings(BaseModel):
     service_credential_ref: str = Field(default="unconfigured", min_length=1)
     signing_key_ref: str = Field(min_length=1)
     encryption_key_ref: str = Field(min_length=1)
+    perceptor_client_id_ref: str | None = None
     perceptor_client_secret_ref: str | None = None
     perceptor_provider_account_id: str | None = Field(default=None, min_length=1)
     perceptor_namespace_id: str | None = Field(default=None, min_length=1)
@@ -162,6 +163,11 @@ class SleepBackendSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_deployment_contract(self) -> Self:
+        acquisition_queues = {
+            "perceptor.history_overlap_pull",
+            "perceptor.sleep_report_pull",
+            "night.finalization_scan",
+        }
         shared_only = self.report_pipeline_mode is ReportPipelineMode.SHARED_ONLY
         if shared_only == self.emit_legacy_report_compatibility:
             raise ValueError(
@@ -239,6 +245,36 @@ class SleepBackendSettings(BaseModel):
                 raise ValueError("worker process cannot expose API surfaces")
             if not self.worker_queues:
                 raise ValueError("worker process requires at least one queue")
+        configured_acquisition = set(self.worker_queues).intersection(
+            acquisition_queues
+        )
+        if self.acquisition_scheduler_enabled and (
+            self.process_role is not ProcessRole.WORKER
+            or not configured_acquisition
+        ):
+            raise ValueError(
+                "acquisition scheduler requires a worker profile with scheduled queues"
+            )
+        if configured_acquisition and not self.acquisition_scheduler_enabled:
+            raise ValueError(
+                "scheduled acquisition queues require acquisition scheduler opt-in"
+            )
+        if configured_acquisition.intersection(
+            {
+                "perceptor.history_overlap_pull",
+                "perceptor.sleep_report_pull",
+            }
+        ) and (
+            self.data_mode is not DataMode.LIVE
+            or self.provider_mode is not ProviderMode.LIVE
+            or self.perceptor_client_id_ref is None
+            or self.perceptor_client_secret_ref is None
+            or self.perceptor_provider_account_id is None
+            or self.perceptor_namespace_id is None
+        ):
+            raise ValueError(
+                "scheduled Perceptor Pull requires live provider configuration"
+            )
         if ApiSurface.DEMO in self.enabled_surfaces:
             if self.deployment_mode == DeploymentMode.PRODUCTION:
                 raise ValueError("production cannot expose the demo surface")
@@ -382,6 +418,9 @@ class SleepBackendSettings(BaseModel):
             service_credential_ref=required("SERVICE_CREDENTIAL_REF"),
             signing_key_ref=required("SIGNING_KEY_REF"),
             encryption_key_ref=required("ENCRYPTION_KEY_REF"),
+            perceptor_client_id_ref=(
+                env.get(f"{SETTINGS_PREFIX}PERCEPTOR_CLIENT_ID_REF") or None
+            ),
             perceptor_client_secret_ref=(
                 env.get(f"{SETTINGS_PREFIX}PERCEPTOR_CLIENT_SECRET_REF") or None
             ),

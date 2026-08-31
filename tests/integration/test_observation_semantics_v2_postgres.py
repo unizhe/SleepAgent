@@ -17,6 +17,7 @@ from sleepagent.integrations.perceptor.pull import (
     normalize_sleep_report,
 )
 from sleepagent.persistence.migrate import (
+    LATEST_SCHEMA_VERSION,
     PostgresMigrationRunner,
     discover_migrations,
 )
@@ -297,7 +298,7 @@ def test_migration_014_fresh_upgrade_upcast_rls_and_privileges() -> None:
             runner = PostgresMigrationRunner(
                 connection, applied_by="g2b-m3-fresh-test"
             )
-            assert runner.apply() == 14
+            assert runner.apply() == LATEST_SCHEMA_VERSION
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
@@ -327,7 +328,7 @@ def test_migration_014_fresh_upgrade_upcast_rls_and_privileges() -> None:
             runner = PostgresMigrationRunner(
                 connection, applied_by="g2b-m3-upgrade-test"
             )
-            assert runner.apply() == 14
+            assert runner.apply() == LATEST_SCHEMA_VERSION
             dry_run = run_upcast(
                 connection, batch_size=2, max_rows=20, dry_run=True
             )

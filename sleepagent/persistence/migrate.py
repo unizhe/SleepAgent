@@ -734,6 +734,13 @@ def bootstrap_test_database_roles(
             "backend_actor_subject_bindings",
             "backend_principal_grants",
             "backend_subject_epochs",
+            "sleep_domain_device_identities",
+            "sleep_domain_device_bindings",
+            "sleep_domain_device_binding_audit",
+            "backend_acquisition_schedules",
+            "backend_acquisition_schedule_fires",
+            "sleep_domain_night_finalizations",
+            "sleep_domain_night_finalization_revisions",
             "backend_command_receipts",
             "backend_monitoring_snapshots_v2",
             "sleep_domain_raw_inbox",
@@ -770,6 +777,7 @@ def bootstrap_test_database_roles(
             "backend_authorization_audit",
             "backend_command_receipts",
             "sleep_domain_operations",
+            "backend_acquisition_schedules",
             "sleep_domain_raw_inbox",
             "sleep_domain_normalization_work",
             "sleep_domain_domain_outbox",
@@ -795,6 +803,12 @@ def bootstrap_test_database_roles(
             "sleep_domain_normalization_work",
             "sleep_domain_provider_accounts",
             "sleep_domain_device_bindings",
+            "sleep_domain_device_identities",
+            "sleep_domain_device_binding_audit",
+            "backend_acquisition_schedules",
+            "backend_acquisition_schedule_fires",
+            "sleep_domain_night_finalizations",
+            "sleep_domain_night_finalization_revisions",
             "sleep_domain_processing_receipts",
             "sleep_domain_quarantine",
             "sleep_domain_adapter_candidates",
@@ -875,6 +889,13 @@ def bootstrap_test_database_roles(
         )
         _grant_tables(connection, sql, "SELECT", api_read_tables, api_role)
         _grant_tables(connection, sql, "INSERT", api_insert_tables, api_role)
+        _grant_tables(
+            connection,
+            sql,
+            "UPDATE",
+            ("backend_acquisition_schedules",),
+            api_role,
+        )
         # Product report reservation locks the exact marked-current episode
         # before deriving its durable semantic key. PostgreSQL row-locking
         # SELECTs require UPDATE on at least one column, so expose only the
@@ -951,6 +972,9 @@ def bootstrap_test_database_roles(
         )
         worker_insert_tables = (
             "backend_authorization_audit",
+            "backend_acquisition_schedule_fires",
+            "sleep_domain_night_finalizations",
+            "sleep_domain_night_finalization_revisions",
             "sleep_domain_raw_inbox",
             "sleep_domain_normalization_work",
             "sleep_domain_processing_receipts",
@@ -1023,6 +1047,9 @@ def bootstrap_test_database_roles(
         )
         worker_update_tables = (
             "sleep_domain_normalization_work",
+            "backend_acquisition_schedules",
+            "backend_acquisition_schedule_fires",
+            "sleep_domain_night_finalizations",
             "backend_monitoring_snapshots_v2",
             "backend_episode_date_reconciliation",
             "sleep_domain_night_episodes",
@@ -1141,6 +1168,7 @@ def bootstrap_test_database_roles(
             "sleepagent_ingest_perceptor_push(text,bigint,text,text,text,text,text,text,timestamptz,timestamptz,text,text,bytea,text,text,integer,timestamptz,text,boolean,boolean,text,text,text,text,text,jsonb)",
             "sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,text,text,text,timestamptz,timestamptz,date,timestamptz,timestamptz,text,text,text,bytea,text,text,integer,timestamptz,boolean,boolean,text,text,text,text,text,jsonb)",
             "sleepagent_plan_perceptor_history(text,bigint,text,text,integer,text,timestamptz,timestamptz)",
+            "sleepagent_manage_device_binding(text,text,text,bigint,text,text,text,text,text,jsonb,text,text,timestamptz,text,text,text,jsonb,jsonb)",
         )
         worker_functions = (
             "sleepagent_bootstrap_demo_journey(text,text)",
@@ -1153,6 +1181,7 @@ def bootstrap_test_database_roles(
             "sleepagent_heartbeat_normalization_work(text,bigint,text,integer)",
             "sleepagent_finalize_normalization_work(text,bigint,text,text,timestamptz,text)",
             "sleepagent_claim_operation(text,text,integer)",
+            "sleepagent_fire_due_acquisition_schedules(text,integer,boolean)",
             "sleepagent_heartbeat_operation(text,bigint,text,integer)",
             "sleepagent_finalize_operation(text,bigint,bigint,text,text,text,timestamptz)",
             "sleepagent_operation_fence_allows(text,bigint,text)",

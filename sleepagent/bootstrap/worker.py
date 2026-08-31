@@ -6,6 +6,7 @@ import sys
 from collections.abc import Sequence
 
 from sleepagent.config import SleepBackendSettings
+from sleepagent.workers.acquisition import build_acquisition_worker_handlers
 from sleepagent.workers.commands import build_command_worker_handlers
 from sleepagent.workers.demo import build_demo_worker_handlers
 from sleepagent.workers.effects import build_effect_worker_handlers
@@ -24,6 +25,7 @@ def build_worker_handlers(
     settings: SleepBackendSettings,
 ) -> dict[str, WorkHandler]:
     registries = (
+        build_acquisition_worker_handlers(settings),
         build_b3_worker_handlers(settings),
         build_product_agent_worker_handlers(settings),
         build_command_worker_handlers(settings),

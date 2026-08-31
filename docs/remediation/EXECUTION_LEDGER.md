@@ -1925,3 +1925,84 @@ architecture fixture may only shrink in later work.
 Checkpoint subject: `remediation(g6): restore architecture boundaries`.
 
 `G7_SAFE_TO_BEGIN = YES`
+
+## G7 — DeviceBinding, durable acquisition, and night finalization
+
+`G7_STATUS = PASS_WITH_LIMITATIONS`
+
+### DeviceBinding authority
+
+- Entry checkpoint: `12d1a22` (`remediation(g6): restore architecture
+  boundaries`); the phase began from a clean worktree.
+- `DeviceBindingService` is the single application authority for
+  discover/list, bind, show, rebind/transfer, end/unbind, revoke, and validate.
+  `sleepagent.device_cli` supplies the MVP operational surface and issues no
+  arbitrary SQL.
+- Migration 015 adds valid-IANA checks, one-device non-overlap, immutable
+  temporal versions, CAS lifecycle transitions, append-only audit, audited
+  cross-subject transfer, and forced-RLS policies. API commands require exact
+  actor/subject `device_binding_management` authority.
+
+### Durable scheduler and worker handoff
+
+- Migration 016 persists enabled state, due/success timestamps, failure
+  metadata, policy hash/version, binding version, cadence, jitter, attempts,
+  and CAS. Concurrent due scans use `FOR UPDATE SKIP LOCKED`.
+- Each `(schedule, scheduled_for)` creates at most one deterministic UUIDv7
+  operation and one fire row. The scheduler holds only
+  `acquisition_schedule` enqueue authority; the operation snapshot carries the
+  exact namespace/generation/subject epochs, production `worker` purpose, and
+  one allowed handler.
+- Existing workers perform `perceptor.history_overlap_pull`,
+  `perceptor.sleep_report_pull`, or `night.finalization_scan`. History retains
+  a 15-minute overlap; SleepReport local date uses the binding IANA timezone;
+  Perceptor ingestion/checkpoint code remains authoritative. Scheduled Pull
+  requires a dedicated vendor client-ID reference and never reuses the
+  SleepAgent service credential.
+- Pause/resume is CAS-guarded. Failed fires apply bounded exponential backoff;
+  expired leases are reclaimed with a new fence but no duplicate business
+  attempt. The feature gate defaults to false and disabled mode performs no
+  database work.
+
+### Distinct finalization authority
+
+- Migration 017 and `NightFinalizationService` keep data completeness separate
+  from episode date ownership. The additive states are OPEN,
+  SOFT_FINALIZED, HARD_FINALIZED, and RECONCILIATION_REQUIRED.
+- SOFT requires the configured local wake/deadline grace and carries explicit
+  provisional/partial coverage plus a caveat. HARD requires a non-empty vendor
+  report or the explicit maximum-wait policy. Date conflict routes directly to
+  reconciliation.
+- Material late evidence creates an immutable superseding finalization
+  revision. Prior revisions remain auditable and a bounded UUIDv7 fast-path
+  reanalysis operation is created when policy requires it.
+
+### Native PostgreSQL evidence
+
+The final clean PostgreSQL 16.14 run applied manifest-pinned migrations
+001–017, bootstrapped distinct non-owner API/Worker roles, and passed the full
+PostgreSQL-marked suite. Its G7 end-to-end matrix covers binding
+replay/conflict/rebind/transfer/CAS/RLS, two-instance scheduler claim, schedule
+idempotency, expired-lease recovery, failure backoff, duplicate fire,
+OPEN→SOFT, SOFT→HARD, direct OPEN→HARD, late revision/reanalysis,
+reconciliation, and UTC/local-date crossing. The one suite skip requires a
+separately completed process-proof database and is not a G7 behavior omission.
+
+| Verification | Result |
+|---|---|
+| Focused unit/settings/architecture selection | 28 passed |
+| Native PostgreSQL 16.14 G7 matrix | 1 passed |
+| Full PostgreSQL-marked regression | 36 passed; 1 process-proof fixture skipped; 0 failed |
+| Full unit-marked regression | 1,105 passed; 39 deselected |
+| Non-E2E/non-PostgreSQL regression | 1,105 passed; 39 deselected |
+| Architecture suite | 6 passed; exact reduced baseline |
+| OpenAPI snapshots and default legacy-writer audit | PASS; unchanged / zero writers |
+| Schema migration apply/check | PASS; schema 017 |
+| Python 3.11 compileall, three CLI helps, and `git diff --check` | PASS |
+| Feature-gate default / disabled no-op | `false` / PASS |
+
+No production credential, provider cloud, device, delivery, email, or SMS was
+contacted. Real automatic Perceptor acceptance remains
+`LIVE_ACCEPTANCE_DEFERRED`; deterministic/PostgreSQL scope is complete.
+
+Checkpoint subject: `remediation(g7): automate device acquisition lifecycle`.
