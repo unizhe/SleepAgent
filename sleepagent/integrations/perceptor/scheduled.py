@@ -67,6 +67,7 @@ class PerceptorAcquisitionExecutor:
             client_id_sha256=hashlib.sha256(
                 self._client_id().encode("utf-8")
             ).hexdigest(),
+            operation_scope=scope,
         )
         runner = PerceptorPullBackfillRunner(client, ingress, binding.binding)
         if job_type is AcquisitionJobType.HISTORY_OVERLAP_PULL:

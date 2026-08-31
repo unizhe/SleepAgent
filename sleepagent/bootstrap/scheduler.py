@@ -65,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     pool, scheduler = build_scheduler(
         settings, worker_instance=arguments.worker_instance
     )
-    pool.open(wait=True, timeout=settings.pool_timeout_seconds)
+    pool.open()
     try:
         if arguments.action == "once":
             fires = scheduler.fire_due(limit=arguments.limit)

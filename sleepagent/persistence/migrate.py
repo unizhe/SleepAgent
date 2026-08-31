@@ -1171,6 +1171,8 @@ def bootstrap_test_database_roles(
             "sleepagent_manage_device_binding(text,text,text,bigint,text,text,text,text,text,jsonb,text,text,timestamptz,text,text,text,jsonb,jsonb)",
         )
         worker_functions = (
+            "sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,text,text,text,timestamptz,timestamptz,date,timestamptz,timestamptz,text,text,text,bytea,text,text,integer,timestamptz,boolean,boolean,text,text,text,text,text,jsonb)",
+            "sleepagent_plan_perceptor_history(text,bigint,text,text,integer,text,timestamptz,timestamptz)",
             "sleepagent_bootstrap_demo_journey(text,text)",
             "sleepagent_claim_demo_journey(text,integer)",
             "sleepagent_heartbeat_demo_journey(text,bigint,text,integer)",

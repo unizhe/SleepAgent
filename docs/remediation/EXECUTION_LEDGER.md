@@ -2006,3 +2006,178 @@ contacted. Real automatic Perceptor acceptance remains
 `LIVE_ACCEPTANCE_DEFERRED`; deterministic/PostgreSQL scope is complete.
 
 Checkpoint subject: `remediation(g7): automate device acquisition lifecycle`.
+
+## G7.1 — Controlled live Perceptor acquisition acceptance
+
+`G7_1_STATUS = NOT_ACCEPTED`
+
+### Entry and authorized scope
+
+- Entry HEAD was exactly
+  `719e186d2d3918f2225d30054656b6a843f14c52`; the worktree was clean.
+- The acceptance reused the single previously authorized live Perceptor
+  binding. Sanitized authority: binding ref `396ac1640613`, version `2`,
+  subject ref `98b24d1d005e`, device ref `2178099316ee`, timezone
+  `Asia/Shanghai`, status active, CAS `0`. Exactly one active binding and zero
+  temporal overlaps were found; no provider/device configuration was changed.
+- The owner-only credential file remained outside the repository and supplied
+  only the vendor secret. The separate client ID was recovered in memory from
+  an authenticated, encrypted, checksum-matched prior Push receipt. Neither
+  value was printed or persisted in acceptance evidence.
+- The acceptance profile was limited to one namespace/binding, three schedules,
+  the existing API/Worker principals, `report_pipeline_mode=shared_only`, and
+  `live_delivery_enabled=false`. No Alarm, AlarmStop, control, configuration,
+  email, SMS, care notification, or other external effect was invoked.
+
+### Provider and live semantic evidence
+
+- Authentication, product/device discovery, binding match, device detail,
+  History, Current, and SleepReport all returned valid provider responses over
+  the project's normal Perceptor adapter. All provider operations were
+  read-only.
+- A known non-empty History window (`2026-08-25 08:30:55+08:00` through
+  `08:45:55+08:00`) returned four provider records and 903 V2 candidates:
+  189 heart-rate, 189 respiratory-rate, 189 movement-index, and 336
+  missing-interval facts. Timestamps were authoritative UTC, provenance was
+  `device_measured`, ontology was V2, and transport identities were present.
+  Semantic identities were not all unique within the response, an overlap/
+  missing-interval finding retained for operational follow-up.
+- Current returned V2 bed-presence and connectivity facts. Observed Pull
+  `smbdFlag`/`probStatus` mapped to `vendor_derived`; the authenticated Push
+  `OnBed` contract remains `device_measured`. This confirms the G2C mapping.
+- SleepReport for `2026-08-25` was non-empty: 892 candidates including heart
+  rate, respiratory rate, movement, missing intervals, sleep stages, bed exits,
+  and vendor profile facts. V2 correctly rejected the payload with
+  `invalid_source_provenance`: vendor-derived heart-rate conflicts with the
+  ontology requirement that heart-rate be device-measured. Validation was not
+  weakened and the response was not reinterpreted.
+
+### Controlled scheduler/worker evidence
+
+- Exactly three schedules were created through `sleepagent.device_cli`:
+  History ref `4f8cbc9c4f44`, SleepReport ref `833359d8f0cb`, and finalization
+  ref `bf8c21f64b11`; all used binding version 2, policy
+  `acquisition-default.v1`, zero jitter, and the expected per-job policy hash.
+- Pausing History followed by an actual scheduler scan emitted no History fire.
+  Resuming the exact eligible slot emitted fire ref `f11ddbd8a832` and operation
+  ref `ef43ae707936`. Re-evaluating the identical slot returned the same refs;
+  PostgreSQL retained one fire and one operation.
+- The checkpoint-safe scheduled History slot was a valid provider no-data
+  outcome. After bounded retries it committed one encrypted raw receipt,
+  completed one normalization work item, advanced the cursor from
+  `10:00:00+08:00` to `10:59:57+08:00`, retained the three-second overlap, and
+  reached `succeeded`. It created no observation because the provider returned
+  no data for that slot.
+- Worker attempts reused the same fire/operation through lease generations
+  1–5 and reached one terminal success after the missing scheduled-Pull
+  authority was corrected. The G7 PostgreSQL matrix independently proved an
+  expired claim is reclaimed under a new fence and cannot create a second
+  authoritative operation.
+- The scheduled SleepReport fire ref `3aa1d7c172db` and operation ref
+  `a5669db59bc4` reached `succeeded`. The live response committed a raw receipt
+  and resolved as a semantic duplicate of the existing durable report work;
+  the independent V2 preflight finding above remains a hard semantic failure.
+
+### Minimal acceptance fixes and migration
+
+- Fix round 1 corrected the two concrete entrypoints to use the actual
+  `PsycopgPoolProvider.open()` lifecycle contract and allowed the DeviceBinding
+  CLI and scheduler processes to start.
+- Fix round 2 preserved the claimed Worker scope through scheduled Pull
+  planning/ingress, extended the SQL functions with exact Worker/handler grant
+  checks while retaining the existing API authority and migration-013 retry
+  no-op, and granted the two functions to bootstrapped Worker roles.
+- Application-only correction was insufficient because migrations 012/013
+  hard-coded `api` plus `perceptor_ingress` in SECURITY DEFINER authority.
+  Immutable migration 018 therefore replaces only the two affected functions;
+  migrations 015–017 were not modified. Fresh 001→018, exact entry-HEAD
+  001→017 followed by 017→018, restored 013→018, manifest check, API retry
+  no-op, and Worker planner authority all passed on PostgreSQL 16.14.
+
+### Finalization, late data, and handoff
+
+- The selected real night created one `hard_finalized` revision directly from
+  OPEN under `night-finalization.v1` (policy hash
+  `4d2d84e4dbff693870389181aedfc78da64a7b99731e631d6e00679c4bae6f1d`).
+  The cause was `maximum_wait_elapsed`; coverage was partial and non-
+  provisional. No provider report version was linked to that episode.
+- Current frozen policy: OPEN remains open until a gate is met; OPEN→SOFT
+  requires the deterministic wake/close deadline plus 7,200 seconds and at
+  least one observation while a non-empty report is absent; SOFT→HARD occurs
+  when a non-empty vendor report arrives or the maximum wait elapses;
+  OPEN→HARD may skip SOFT when a non-empty report is already linked or the
+  86,400-second maximum wait has elapsed. A date conflict routes to
+  RECONCILIATION_REQUIRED before either final state.
+- Material identity is the tuple of episode revision ID, source report version
+  ID, target state, coverage status, and policy hash. A changed material hash
+  creates immutable revision N+1; an unchanged hash reuses the existing
+  revision. The focused PostgreSQL matrix passed SOFT→HARD late material
+  revision, prior-revision readability, bounded fast-path reanalysis,
+  unchanged-material non-churn, and reconciliation visibility/no repeated
+  enqueue using controlled local evidence shaped from the accepted night.
+- The actual selected night's first finalization emitted no report/reanalysis
+  operation, no SharedNightAnalysis, and no zh-CN RoleProjection. The local
+  late-revision path can enqueue fast-path reanalysis, but that does not satisfy
+  the required first-finalization shared handoff. `SHARED_REPORT_HANDOFF=FAIL`.
+
+### Operational metric inventory
+
+| Metric | Classification | Evidence |
+|---|---|---|
+| Scheduler due lag | DERIVABLE | `next_run_at`, enabled state, and database time |
+| Last fire time | AVAILABLE_NOW | schedule `last_fire_at` and immutable fire rows |
+| Last successful acquisition | AVAILABLE_NOW | schedule `last_success_at` and terminal operation/fire state |
+| History success/failure | AVAILABLE_NOW | job-typed fires, operations, attempts, and error code |
+| SleepReport success/failure | AVAILABLE_NOW | job-typed fires, operations, raw receipts, and work state |
+| Records received/persisted/deduplicated | DERIVABLE | raw/work/semantic/acquisition identities; no single aggregate |
+| Oldest acquisition operation age | DERIVABLE | non-terminal operation `created_at`/`available_at` |
+| Night OPEN age | DERIVABLE | finalization/episode state and timestamps |
+| Night SOFT age | DERIVABLE | current state plus revision `created_at` |
+| RECONCILIATION_REQUIRED count | AVAILABLE_NOW | finalization and episode reconciliation state |
+| Late revision count | DERIVABLE | revision number/parent and `late_material_evidence` cause |
+
+### Verification and safe shutdown
+
+| Verification | Result |
+|---|---|
+| Actual CLI/scheduler/Worker processes | PASS |
+| Focused G7 PostgreSQL matrix | 1 passed |
+| Observation V2 focused unit/PostgreSQL suite | 117 passed |
+| Product/report/finalization focused suite | 90 passed |
+| Full PostgreSQL marker regression | 36 passed; 1 expected process-proof skip |
+| Broader non-E2E/non-PostgreSQL regression | 1,110 passed; 39 deselected |
+| Architecture gate | 6 passed |
+| OpenAPI snapshot gate | PASS; unchanged |
+| Migration discovery/hash and schema checks | PASS; schema 018 |
+
+All three schedules were paused through the audited CLI. A final enabled
+scheduler scan returned zero fires. Scheduler and Worker processes exited,
+the source feature default remained false, external delivery remained disabled,
+and the DeviceBinding was retained. Re-enable only in the controlled profile by
+resuming the desired schedule with its current CAS and bounded `next_run_at`,
+then starting a scoped scheduler/Worker with the corresponding exact handlers.
+
+### Verdict
+
+| Dimension | Verdict |
+|---|---|
+| LIVE_DEVICE_AUTHENTICATION | PASS |
+| LIVE_HISTORY_PULL | NO_DATA (scheduled slot; non-empty endpoint preflight passed) |
+| LIVE_SLEEP_REPORT_PULL | PASS |
+| LIVE_OBSERVATION_V2 | FAIL |
+| LIVE_BED_PRESENCE_MAPPING | PASS |
+| SCHEDULER_FIRE_AUTHORITY | PASS |
+| SCHEDULER_IDEMPOTENCY | PASS |
+| PAUSE_RESUME | PASS |
+| WORKER_RECOVERY | PASS |
+| NIGHT_FINALIZATION | PASS |
+| LATE_DATA_REVISION | PASS (controlled local evidence) |
+| SHARED_REPORT_HANDOFF | FAIL |
+| SAFE_SHUTDOWN | PASS |
+
+`G7_1_LIVE_ACCEPTANCE_READY = NO`
+
+Blocking acceptance findings are real SleepReport V2 provenance incompatibility,
+absence of persisted new live V2 observations for the scheduled History slot,
+and absence of the required first-finalization shared report handoff. No
+external-effect work was started.

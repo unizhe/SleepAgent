@@ -140,6 +140,17 @@ def _settings() -> SleepBackendSettings:
     )
 
 
+def _worker_settings() -> SleepBackendSettings:
+    return _settings().model_copy(
+        update={
+            "process_role": ProcessRole.WORKER,
+            "enabled_surfaces": frozenset(),
+            "worker_queues": ("perceptor.history_overlap_pull",),
+            "service_principal_id": "sleepagent-perceptor-worker-test",
+        }
+    )
+
+
 def _binding(
     *,
     provider_id: str = "perceptor",
@@ -400,6 +411,71 @@ def test_history_planner_consumes_exact_scoped_checkpoint_watermark(
             authorization_epoch=8,
         )
     ]
+
+
+def test_scheduled_history_reuses_exact_claimed_worker_scope() -> None:
+    factory = UowFactory((WINDOW_START, WINDOW_END, None, None, False))
+    scope = UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="sleepagent-perceptor-worker-test",
+        namespace_generation=4,
+        subject_id="subject-1",
+        authorization_epoch=8,
+        privacy_epoch=9,
+        retrieval_policy_epoch=10,
+        worker_instance="scheduled-worker-1",
+    )
+    service = DurablePerceptorPullIngress(
+        _worker_settings(),
+        factory,  # type: ignore[arg-type]
+        client_id_sha256=CLIENT_ID_SHA256,
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+        operation_scope=scope,
+    )
+
+    service.plan_history_window(
+        binding=_binding(),
+        requested_start_at=WINDOW_START,
+        requested_end_at=WINDOW_END,
+    )
+
+    assert factory.scopes == [scope]
+
+
+def test_scheduled_pull_rejects_scope_outside_bound_subject() -> None:
+    factory = UowFactory((WINDOW_START, WINDOW_END, None, None, False))
+    scope = UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="sleepagent-perceptor-worker-test",
+        namespace_generation=4,
+        subject_id="other-subject",
+        authorization_epoch=8,
+        privacy_epoch=9,
+        retrieval_policy_epoch=10,
+        worker_instance="scheduled-worker-1",
+    )
+    service = DurablePerceptorPullIngress(
+        _worker_settings(),
+        factory,  # type: ignore[arg-type]
+        client_id_sha256=CLIENT_ID_SHA256,
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+        operation_scope=scope,
+    )
+
+    with pytest.raises(PerceptorPullIngressError, match="binding authority"):
+        service.plan_history_window(
+            binding=_binding(),
+            requested_start_at=WINDOW_START,
+            requested_end_at=WINDOW_END,
+        )
+
+    assert factory.scopes == []
 
 
 def test_history_planner_fails_closed_on_non_exact_checkpoint_watermark() -> None:

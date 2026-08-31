@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from sleepagent.config import (
     BackendKeyProvider,
     ObservationSemanticsVersion,
+    ProcessRole,
     SleepBackendSettings,
 )
 from sleepagent.domain.contracts import DataMode, DeviceBinding, bind_adapter_candidate
@@ -204,6 +205,7 @@ class DurablePerceptorPullIngress:
         *,
         client_id_sha256: str,
         cipher: RawPayloadCipher | None = None,
+        operation_scope: UowScope | None = None,
     ) -> None:
         if settings.perceptor_namespace_id is None:
             raise ValueError("Perceptor namespace is not configured")
@@ -220,6 +222,36 @@ class DurablePerceptorPullIngress:
         self.uow_factory = uow_factory
         self.client_id_sha256 = client_id_sha256
         self.cipher = cipher
+        self.operation_scope = operation_scope
+
+    def _ingress_scope(
+        self, binding: DeviceBinding
+    ) -> ExternalIngressScope | UowScope:
+        if self.operation_scope is None:
+            return ExternalIngressScope(
+                namespace_id=cast(str, self.settings.perceptor_namespace_id),
+                namespace_generation=self.settings.perceptor_namespace_generation,
+                service_principal_id=self.settings.service_principal_id,
+                authorization_epoch=self.settings.perceptor_authorization_epoch,
+            )
+        scope = self.operation_scope
+        if (
+            self.settings.process_role is not ProcessRole.WORKER
+            or scope.process_role != "worker"
+            or scope.purpose != "worker"
+            or scope.data_mode != "live"
+            or scope.namespace_id != self.settings.perceptor_namespace_id
+            or scope.namespace_generation
+            != self.settings.perceptor_namespace_generation
+            or scope.subject_id != binding.subject_id
+            or scope.authorization_epoch
+            != self.settings.perceptor_authorization_epoch
+            or scope.service_principal_id != self.settings.service_principal_id
+        ):
+            raise PerceptorPullIngressError(
+                "scheduled Pull scope does not match binding authority"
+            )
+        return scope
 
     def plan_history_window(
         self,
@@ -250,12 +282,7 @@ class DurablePerceptorPullIngress:
             raise ValueError("binding and configured provider account disagree")
         namespace = cast(str, self.settings.perceptor_namespace_id)
         account = cast(str, self.settings.perceptor_provider_account_id)
-        scope = ExternalIngressScope(
-            namespace_id=namespace,
-            namespace_generation=self.settings.perceptor_namespace_generation,
-            service_principal_id=self.settings.service_principal_id,
-            authorization_epoch=self.settings.perceptor_authorization_epoch,
-        )
+        scope = self._ingress_scope(binding)
         with self.uow_factory.begin(scope) as uow:
             cursor = uow.connection.cursor()
             try:
@@ -449,12 +476,7 @@ class DurablePerceptorPullIngress:
             name: f"perceptor:pull:{name}:{_stable_digest(raw_identity, name)}"
             for name in ("intake", "quarantine-receipt", "quarantine")
         }
-        scope = ExternalIngressScope(
-            namespace_id=namespace,
-            namespace_generation=self.settings.perceptor_namespace_generation,
-            service_principal_id=self.settings.service_principal_id,
-            authorization_epoch=self.settings.perceptor_authorization_epoch,
-        )
+        scope = self._ingress_scope(binding)
         with self.uow_factory.begin(scope) as uow:
             cursor = uow.connection.cursor()
             try:

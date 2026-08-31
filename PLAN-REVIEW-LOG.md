@@ -982,3 +982,57 @@ generic SleepAgent service credential.
 - Schema apply/check: 001–017, manifest-pinned.
 - Device and scheduler CLI help, compilation, and `git diff --check`: PASS.
 - No Perceptor cloud/device call; live acceptance deferred.
+
+## Act 14 — Build: G7.1 controlled live acquisition acceptance
+
+### Round 1 — Concrete process entrypoints and claimed scope
+
+The clean authoritative entry checkpoint was verified before live work. The
+single existing DeviceBinding and owner-only credential mechanism were reused;
+no binding, device, vendor setting, or physical configuration was changed.
+Read-only authentication/discovery, Current, known non-empty History, and
+SleepReport preflights were completed with sanitized evidence only.
+
+Actual CLI and scheduler startup exposed that both entrypoints called the pool
+provider with unsupported keyword arguments. They now use the provider's
+concrete `open()` lifecycle contract, with focused process-entry regressions.
+The first scheduled worker attempt then proved that the existing Pull ingress
+discarded the exact claimed Worker scope and constructed API ingress authority.
+Scheduled execution now passes and strictly validates the claimed Worker scope;
+the existing API path is unchanged.
+
+### Round 2 — Immutable SQL authority and role grants
+
+Application-only correction could not succeed because the migration-012/013
+SECURITY DEFINER functions hard-coded API/perceptor-ingress authority. Added
+migration 018 to admit only Worker/worker calls carrying the exact active
+History or SleepReport handler grant, while preserving API authority and the
+migration-013 covered-window retry no-op. The test-role bootstrap now grants
+the planner and ingress functions to its bounded Worker role.
+
+The live operation was reclaimed through lease generation 5 and reached one
+terminal success after the privilege correction. Duplicate due evaluation
+reused the same deterministic fire and operation. No third fix round was used;
+the fail-closed SleepReport V2 provenance mismatch and missing initial shared
+report handoff remain explicit acceptance failures.
+
+### Codex verification
+
+- Actual DeviceBinding CLI, scheduler, and Worker process boundaries: PASS.
+- Focused G7 PostgreSQL matrix: 1 passed.
+- Observation V2 unit/PostgreSQL selection: 117 passed.
+- Product/report/finalization selection: 90 passed.
+- Full PostgreSQL marker: 36 passed, 1 expected process-proof skip.
+- Broader non-E2E/non-PostgreSQL gate: 1,110 passed, 39 deselected. The first
+  sandboxed run could not open loopback test sockets; the approved loopback run
+  passed without code changes.
+- Architecture: 6 passed. OpenAPI snapshot check: PASS and unchanged.
+- Migration proofs: fresh 001→018, exact entry-HEAD 001→017 then 017→018,
+  restored 013→018, manifest/schema check, API no-op, and Worker planner: PASS.
+- Controlled schedules paused; final enabled scheduler scan emitted zero fires;
+  external delivery remained disabled.
+
+Diff review confirms the live credential separation is intact, scheduled Pull
+authority is exact and handler-bounded, migrations 015–017 remain immutable,
+retry semantics are preserved, no payload/credential/runtime artifact entered
+the repository, and the two bounded fix rounds stayed within the frozen goal.

@@ -139,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         statement_timeout_ms=settings.statement_timeout_ms,
         idle_in_transaction_timeout_ms=settings.idle_transaction_timeout_ms,
     )
-    pool.open(wait=True, timeout=settings.pool_timeout_seconds)
+    pool.open()
     try:
         result = _execute(
             arguments,
