@@ -16,7 +16,7 @@ from sleepagent.workers.retention import (
     PostgresRetentionKeyCoordinator,
 )
 from sleepagent.domain.episodes import UUID7Generator
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     IngressResult,
     RawPayloadCipher,
     ReplayIngressHandler,
@@ -24,11 +24,13 @@ from sleepagent.domain.postgres_slice import (
     ReplayRawBatch,
 )
 from sleepagent.simulation.replay_ingress import ReplayIngressItem
-from sleepagent.workers.runtime import (
+from sleepagent.workers.kernel import (
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
     worker_uow_factory,
 )
 

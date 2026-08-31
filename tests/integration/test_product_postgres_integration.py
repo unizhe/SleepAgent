@@ -65,7 +65,7 @@ from sleepagent.runtime.memory import (
     SensitivityClass,
 )
 from sleepagent.domain.habit import HabitFact, HabitOperation
-from sleepagent.domain.product_data import public_product_subject_ref
+from sleepagent.application.product_data import public_product_subject_ref
 from sleepagent.workers.product import (
     PRODUCT_ELDER_NARRATIVE_OPERATION,
     PRODUCT_REPORT_RUN_OPERATION,

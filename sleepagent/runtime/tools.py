@@ -46,7 +46,7 @@ class CanonicalRadarEvidenceTool:
         if not set(requested_refs).issubset(snapshot_refs):
             raise ValueError("radar evidence refs exceed FactSnapshot scope")
         if data.get("schema_version") == "product_revision_facts.v1":
-            from sleepagent.domain.product_data import ProductRevisionFacts
+            from sleepagent.application.product_data import ProductRevisionFacts
 
             facts = ProductRevisionFacts.model_validate(data)
             binding = context.fact_snapshot.binding
@@ -216,12 +216,12 @@ from sleepagent.runtime.policies import (
     RiskQualityStatus,
     StructuredQualityStatus,
     StructuredRiskFacts,
-    TrendSignalLevel,
     classify_deterministic_risk,
     classify_multifactor_risk,
     classify_structured_risk,
     match_urgent_boundary,
 )
+from sleepagent.application.reporting import TrendRiskSignal
 
 
 RISK_CLASSIFICATION_TOOL_VERSION: Final = "sleepagent-risk-classification-tool.v1"
@@ -237,14 +237,6 @@ class RiskObservation(StrictContract):
     vital_fluctuation_count: int = Field(default=0, ge=0)
     out_of_bed_count: int = Field(default=0, ge=0)
     movement_count: int = Field(default=0, ge=0)
-    source_refs: tuple[str, ...] = ()
-
-
-class TrendRiskSignal(StrictContract):
-    """Accepted, source-bound trend classification without an Agent payload."""
-
-    risk_level: TrendSignalLevel
-    confidence: float = Field(default=0, ge=0, le=1)
     source_refs: tuple[str, ...] = ()
 
 

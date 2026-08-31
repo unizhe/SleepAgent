@@ -133,7 +133,9 @@ def _forbidden_edges(graph: dict[str, set[str]]) -> tuple[str, ...]:
             if source in {
                 "sleepagent.workers.kernel",
                 "sleepagent.workers.runtime",
-            } and target.startswith("sleepagent.workers."):
+            } and target.startswith("sleepagent.workers.") and target != (
+                "sleepagent.workers.kernel"
+            ):
                 violations.add(f"{source} -> {target}")
             if source == "sleepagent.process" and target == "sleepagent.app":
                 violations.add(f"{source} -> {target}")
@@ -182,7 +184,7 @@ def _new_debt(
 
 def _baseline() -> dict[str, object]:
     value = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-    assert value["schema_version"] == "architecture_import_baseline.g1.v1"
+    assert value["schema_version"] == "architecture_import_baseline.g6.v1"
     return value
 
 
@@ -191,6 +193,17 @@ def test_import_architecture_does_not_grow_beyond_g1_baseline() -> None:
 
     assert debt == {
         "known_sccs": [],
+        "self_imports": [],
+        "forbidden_edges": [],
+    }
+
+
+def test_g6_reduced_baseline_has_zero_self_imports_and_forbidden_edges() -> None:
+    current = _snapshot()
+    baseline = _baseline()
+
+    assert current == {
+        "known_sccs": baseline["known_sccs"],
         "self_imports": [],
         "forbidden_edges": [],
     }

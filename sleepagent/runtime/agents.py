@@ -695,28 +695,6 @@ __all__ = [
 # 合并自 agents/sleepcare.py。
 from pydantic import model_validator
 
-from sleepagent.runtime.agents import (
-    AgentControlPortBoundary,
-    EpisodePlanProposal,
-    EvaluationDecision,
-    PurposeScopedReceipt,
-    RoleContextBoundary,
-    RoleInvocationInput,
-    RoleInvocationOutput,
-    RuntimeRoleInvocation,
-    SLEEPCARE_CONTROL_CONTEXT_BOUNDARY,
-    SleepCareControlInvocationPort,
-    SleepCareEvaluation,
-    SleepCareEvaluationContext,
-    SleepCareEvaluationInput,
-    SleepCareEvaluationOutput,
-    SleepCarePlanContext,
-    SleepCarePlanInput,
-    SleepCarePlanOutput,
-    _ModelBackedRole,
-    build_implementation_boundary,
-    validate_role_output,
-)
 from sleepagent.runtime.contracts import (
     AgentId,
     CareActionCandidate,
@@ -1745,15 +1723,6 @@ __all__ = [
 # 合并自 agents/evidence_reasoning.py。
 from pydantic import model_validator
 
-from sleepagent.runtime.agents import (
-    RoleContextBoundary,
-    RoleInvocationInput,
-    RoleInvocationOutput,
-    RuntimeRoleInvocation,
-    _ModelBackedRole,
-    build_implementation_boundary,
-    validate_role_output,
-)
 from sleepagent.runtime.contracts import (
     AgentId,
     EpisodeType,
@@ -1915,15 +1884,6 @@ __all__ = [
 # 合并自 agents/care_strategy.py。
 from pydantic import model_validator
 
-from sleepagent.runtime.agents import (
-    RoleContextBoundary,
-    RoleInvocationInput,
-    RoleInvocationOutput,
-    RuntimeRoleInvocation,
-    _ModelBackedRole,
-    build_implementation_boundary,
-    validate_role_output,
-)
 from sleepagent.runtime.contracts import (
     AgentId,
     CareStrategy,
@@ -2707,15 +2667,6 @@ __all__ = [
 # 合并自 agents/safety_review.py。
 from pydantic import model_validator
 
-from sleepagent.runtime.agents import (
-    RoleContextBoundary,
-    RoleInvocationInput,
-    RoleInvocationOutput,
-    RuntimeRoleInvocation,
-    _ModelBackedRole,
-    build_implementation_boundary,
-    validate_role_output,
-)
 from sleepagent.runtime.contracts import (
     AgentId,
     EpisodeType,
@@ -2873,24 +2824,6 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from sleepagent.runtime.agents import (
-    CareStrategyAgent,
-)
-from sleepagent.runtime.agents import (
-    EvidenceReasoningAgent,
-)
-from sleepagent.runtime.agents import (
-    AgentControlPortBoundary,
-    AgentImplementationBoundary,
-    PurposeScopedReceipt,
-    RoleContextBoundary,
-)
-from sleepagent.runtime.agents import (
-    SafetyReviewAgent,
-)
-from sleepagent.runtime.agents import (
-    SleepCareAgent,
-)
 from sleepagent.runtime.contracts import (
     AgentId,
     PRODUCT_AGENT_ROSTER,

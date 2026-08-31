@@ -1848,3 +1848,80 @@ Checkpoint subject:
 `remediation(g5): retire legacy report write path`.
 
 `G6_SAFE_TO_BEGIN = YES`
+
+## G6 — Architecture boundary cleanup
+
+`G6_STATUS = PASS`
+
+### Entry and debt reduction
+
+- Entry checkpoint: `b8c382d` (`remediation(g5): retire legacy report write
+  path`); worktree clean at phase entry.
+- The executable G1 fixture contained three concrete strongly connected
+  components spanning the six ledger categories, six self-imports, and eleven
+  forbidden-direction edges. The G6 fixture contains one bounded
+  runtime-contract SCC, zero self-imports, and zero forbidden edges.
+- All six self-imports were redundant in-module imports and were removed before
+  structural moves. Import compilation remained green after the cleanup.
+
+### Composition, kernel, and dependency direction
+
+- `sleepagent.bootstrap.worker` is the concrete worker composition root. It
+  assembles queue registries, rejects overlaps and missing handlers, and owns
+  the CLI entry point. `workers.runtime` no longer imports concrete handlers;
+  its historical `main` delegates dynamically to the bootstrap root.
+- `sleepagent.workers.kernel` now owns only lease/fence claims, handler/context
+  contracts, result/disposition contracts, invocation primitives, and shared
+  worker errors. Concrete handlers import these contracts from the kernel;
+  the runtime retains source-compatible re-exports.
+- `build_backend_runtime` receives API services through an injected factory.
+  The API composition path supplies that factory, removing the
+  `process -> app` reverse edge while preserving one shared UoW factory.
+- The Product data provider moved to `sleepagent.application.product_data` and
+  its neutral reporting signal moved to `sleepagent.application.reporting`.
+  The old domain module is a compatibility re-export only.
+- The PostgreSQL sleep slice moved to
+  `sleepagent.infrastructure.postgres_sleep_slice`. The old domain path is a
+  dynamic compatibility facade; all production and test consumers now use the
+  infrastructure authority.
+
+### Architecture gate and verification
+
+| Gate | G1 executable fixture | G6 fixture |
+|---|---:|---:|
+| Strongly connected components | 3 (six categorized debts) | 1 runtime-internal |
+| Self-import edges | 6 | 0 |
+| Forbidden-direction edges | 11 | 0 |
+
+The remaining SCC is limited to the existing runtime contract/governance
+cluster (`cold_start`, `contracts`, `governance`, `hitl`, `invocation`,
+`memory`, `registry`, and `results`). Splitting that cohesive contract cluster
+would be a broad runtime redesign with no remaining forbidden edge, so it is
+retained as the exact no-growth ceiling rather than hidden or expanded.
+
+| Verification | Result |
+|---|---|
+| Focused moved-module/runtime regression | 233 passed |
+| Extracted-kernel regression | 111 passed |
+| Unit-marked regression with loopback provider profile | 1,096 passed; 38 deselected |
+| Architecture suite | 6 passed; exact reduced baseline |
+| Worker bootstrap and compatibility CLI help | PASS |
+| Compile and `git diff --check` | PASS |
+
+The first full unit run was sandboxed: 1,087 tests passed, eight existing
+loopback HTTP tests could not bind sockets, and the source audit found one
+stale pre-move path. The audit was pointed at the new infrastructure authority;
+the approved loopback rerun then passed all 1,096 unit-marked tests. No schema,
+OpenAPI contract, production device, external provider, delivery, email, or SMS
+was touched.
+
+### Compatibility and checkpoint
+
+The two moved authorities retain narrow historical import shims, and the
+runtime retains the worker-kernel public names. These are rollback/read
+compatibility surfaces, not authoritative dependency directions. The reduced
+architecture fixture may only shrink in later work.
+
+Checkpoint subject: `remediation(g6): restore architecture boundaries`.
+
+`G7_SAFE_TO_BEGIN = YES`

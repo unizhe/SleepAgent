@@ -896,3 +896,46 @@ Diff review confirms the default path cannot create or execute legacy report
 work, simulation has a shared-native child identity, rollback is explicit and
 tested, and historical reads were not destructively removed. One bounded fix
 pass was used.
+
+## Act 12 — Build: G6 architecture boundary cleanup
+
+### Round 1 — Codex build
+
+Removed all six characterized self-imports, then replaced the large worker
+runtime's concrete handler imports with a bootstrap-owned registry assembly.
+Injected API service construction into `build_backend_runtime` to eliminate the
+process/app inversion. Moved the Product data provider into application scope
+and the concrete PostgreSQL slice into infrastructure scope, retaining narrow
+compatibility facades while migrating every known production and test caller.
+
+Extracted the durable worker contracts, lease/fence primitives, handler
+protocol, result types, invocation records, and shared errors into a minimal
+`workers.kernel`. Concrete handlers now depend on the kernel; runtime preserves
+the historical public names without importing any concrete handler.
+
+### Round 2 — Codex fix pass
+
+The initial exact-baseline assertion incorrectly compared snapshot-only fields
+with fixture metadata and was corrected to compare only graph debt. The full
+unit run then found that the executable report-consumer audit still scanned the
+pre-move domain path; it now scans the authoritative infrastructure adapter.
+The architecture rule was narrowed to permit the intended
+`workers.runtime -> workers.kernel` contract edge while still rejecting every
+kernel/runtime dependency on concrete worker modules.
+
+### Codex verification
+
+- Focused moved-module and runtime regression: 233 passed.
+- Extracted-kernel regression: 111 passed.
+- Unit-marked regression: 1,096 passed, 38 deselected under the required
+  loopback provider-test profile.
+- Architecture: 6 passed; executable SCCs 3 to 1, self-imports 6 to 0, and
+  forbidden edges 11 to 0.
+- Worker bootstrap/compatibility CLI help, compilation, source audit, and
+  `git diff --check`: PASS.
+
+Diff review confirms concrete assembly is bootstrap-owned, the worker kernel
+has no concrete handler dependency, domain authorities no longer import
+runtime/workers/infrastructure, and the reduced baseline absorbed no new debt.
+The remaining runtime-contract SCC is explicit and bounded. Two fix rounds
+were used.

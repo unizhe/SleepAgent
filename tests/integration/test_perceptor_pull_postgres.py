@@ -22,7 +22,10 @@ from sleepagent.config import (
     SleepBackendSettings,
 )
 from sleepagent.domain.contracts import DeviceBinding
-from sleepagent.domain.postgres_slice import NormalizationLease, RawPayloadCipher
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    NormalizationLease,
+    RawPayloadCipher,
+)
 from sleepagent.integrations.perceptor.client import (
     HISTORY_ENDPOINT,
     REALTIME_READ_ENDPOINT,

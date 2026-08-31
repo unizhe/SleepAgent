@@ -19,7 +19,7 @@ from sleepagent.config import (
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.domain.postgres_slice import RawPayloadCipher
+from sleepagent.infrastructure.postgres_sleep_slice import RawPayloadCipher
 from sleepagent.integrations.perceptor import ingestion as ingestion_module
 from sleepagent.integrations.perceptor.ingestion import (
     WEBHOOK_PATH,

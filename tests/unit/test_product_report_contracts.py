@@ -65,7 +65,7 @@ from sleepagent.runtime.reports import (
     build_shared_role_projections,
     role_projection_identity_sha256,
 )
-from sleepagent.domain.product_data import ProductElderPresentationFacts
+from sleepagent.application.product_data import ProductElderPresentationFacts
 from sleepagent.runtime.results import PinnedPersonalizationContext
 from sleepagent.workers.product import (
     _consumed_context_sha256,

@@ -17,8 +17,8 @@ from sleepagent.domain.contracts import (
     TimezoneStatus,
 )
 from sleepagent.domain.ontology import validate_observation_ontology
-from sleepagent.domain.postgres_slice import ReplayObservationInput
-from sleepagent.domain.product_data import ProductRevisionFacts
+from sleepagent.infrastructure.postgres_sleep_slice import ReplayObservationInput
+from sleepagent.application.product_data import ProductRevisionFacts
 from sleepagent.integrations.perceptor.pull import (
     normalize_history,
     normalize_sleep_report,
@@ -194,7 +194,7 @@ def test_push_pull_replay_valid_movement_path_characterization() -> None:
     assert live_validator.call_count == 0
 
     with patch(
-        "sleepagent.domain.postgres_slice.validate_observation_ontology",
+        "sleepagent.infrastructure.postgres_sleep_slice.validate_observation_ontology",
         wraps=validate_observation_ontology,
     ) as replay_validator:
         replay = ReplayObservationInput(

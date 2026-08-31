@@ -36,7 +36,7 @@ from sleepagent.api.product_contracts import (
     ProductSleepTodayResponse,
     ProductTrendsResponse,
 )
-from sleepagent.domain.product_data import public_product_subject_ref
+from sleepagent.application.product_data import public_product_subject_ref
 
 
 READ_SCOPES = {

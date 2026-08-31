@@ -18,8 +18,7 @@ from sleepagent.persistence.uow import UowScope
 from sleepagent.persistence.migrations import DELIVERY_AUTHORITY_FUNCTION
 from sleepagent.domain.episodes import UUID7Generator
 from sleepagent.workers.demo import EpisodeDateReconciliationHandler
-from sleepagent.workers.runtime import (
-    B3ClaimInvariantError,
+from sleepagent.workers.kernel import (
     InvocationKind,
     LeaseLostError,
     OutcomeUnknownError,
@@ -30,6 +29,9 @@ from sleepagent.workers.runtime import (
     WorkFinalizationMode,
     WorkHandler,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
+    B3ClaimInvariantError,
     exact_worker_scope,
     worker_uow_factory,
 )

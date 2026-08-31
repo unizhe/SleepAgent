@@ -92,7 +92,7 @@ from sleepagent.domain.habit import (
     propose_habit_change,
     select_habit_questions,
 )
-from sleepagent.domain.product_data import public_product_subject_ref
+from sleepagent.application.product_data import public_product_subject_ref
 from sleepagent.runtime.contracts import (
     AgentId,
     MemoryChangeCandidate,

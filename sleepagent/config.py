@@ -567,9 +567,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from sleepagent.config import DeploymentMode
-
-
 class BackendKeyError(RuntimeError):
     pass
 

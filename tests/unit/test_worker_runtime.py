@@ -16,7 +16,7 @@ from sleepagent.config import (
     ProviderMode,
     SleepBackendSettings,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
     NormalizationResult,
     SleepSliceConflict,

@@ -22,7 +22,7 @@ from sleepagent.config import (
     SleepBackendSettings,
 )
 from sleepagent.domain.contracts import DataMode, DeviceBinding, bind_adapter_candidate
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
     RawPayloadCipher,
     SleepSliceInvariantError,

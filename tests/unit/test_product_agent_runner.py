@@ -124,7 +124,7 @@ from sleepagent.runtime.reports import (
     build_elder_message_atoms,
     build_shared_role_projections,
 )
-from sleepagent.domain.product_data import ProductElderPresentationFacts
+from sleepagent.application.product_data import ProductElderPresentationFacts
 from sleepagent.runtime.agents import (
     _ElderNarrativeRenderingSelection,
     _ElderNarrativeRewritePlan,

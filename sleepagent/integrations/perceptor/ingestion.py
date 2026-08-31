@@ -24,7 +24,7 @@ from sleepagent.domain.contracts import (
     bind_adapter_candidate,
 )
 from sleepagent.domain.episodes import UUID7Generator
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
     RawPayloadCipher,
     SleepSliceInvariantError,

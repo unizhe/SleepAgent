@@ -879,7 +879,13 @@ if os.getenv("SLEEPAGENT_BACKEND_PROFILE"):
     settings = SleepBackendSettings.from_environment()
     if settings.process_role != ProcessRole.API:
         raise RuntimeError("sleepagent.app requires PROCESS_ROLE=api")
-    runtime = build_backend_runtime(settings)
+    runtime = build_backend_runtime(
+        settings,
+        services_factory=lambda uow_factory: build_api_runtime_services(
+            settings,
+            uow_factory=uow_factory,
+        ),
+    )
     app = create_sleep_backend_app(runtime)
 else:
     # 工厂的单元测试不应在 import 时伪造部署配置；真实入口必须提供 profile。

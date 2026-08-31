@@ -318,12 +318,6 @@ from typing import Any, Literal, Protocol, cast
 from pydantic import Field, model_validator
 
 from sleepagent.runtime.contracts import StrictContract
-from sleepagent.runtime.knowledge import (
-    SeedKnowledgeStore,
-    default_seed_knowledge_store,
-)
-
-
 REVIEWED_KNOWLEDGE_SERVICE_VERSION = "sleepagent-reviewed-knowledge.v1"
 
 KnowledgeRole = Literal["elder", "family", "doctor", "system"]

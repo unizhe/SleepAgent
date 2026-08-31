@@ -19,7 +19,7 @@ from sleepagent.workers.retention import (
     LocalTestRetentionKeyEnvelope,
     PostgresRetentionKeyCoordinator,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     FastPathCommitResult,
     FastPathHandler,
     FastPathLease,
@@ -32,16 +32,18 @@ from sleepagent.domain.postgres_slice import (
     SleepSliceLeaseLost,
     SleepSliceStaleRevision,
 )
-from sleepagent.workers.runtime import (
-    B3ClaimInvariantError,
-    B3WorkerCompositionError,
-    DurableWorkStoreError,
+from sleepagent.workers.kernel import (
     LeaseClaim,
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,
     WorkHandler,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
+    B3ClaimInvariantError,
+    B3WorkerCompositionError,
+    DurableWorkStoreError,
     exact_worker_scope,
     worker_uow_factory,
 )

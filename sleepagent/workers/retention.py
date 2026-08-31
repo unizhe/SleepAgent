@@ -489,24 +489,18 @@ from sleepagent.config import (
     SleepBackendSettings,
 )
 from sleepagent.persistence.uow import UowScope
-from sleepagent.workers.retention import (
-    LocalTestRetentionKeyEnvelope,
-    RAW_RETENTION_CLASS,
-    RAW_RETENTION_DOMAIN,
-    RetentionKeyEnvelopePort,
-)
 from sleepagent.domain.episodes import UUID7Generator
-from sleepagent.workers.runtime import (
-    B3ClaimInvariantError,
-    exact_worker_scope,
-    worker_uow_factory,
-)
-from sleepagent.workers.runtime import (
+from sleepagent.workers.kernel import (
     WorkContext,
     WorkDisposition,
     WorkFinalizationMode,
     WorkHandler,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
+    B3ClaimInvariantError,
+    exact_worker_scope,
+    worker_uow_factory,
 )
 
 

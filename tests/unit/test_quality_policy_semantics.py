@@ -10,7 +10,7 @@ from sleepagent.domain.contracts import (
     QualityState,
 )
 from sleepagent.domain.fast_path import _quality_outcome
-from sleepagent.domain.postgres_slice import decide_fast_path_followup
+from sleepagent.infrastructure.postgres_sleep_slice import decide_fast_path_followup
 
 
 pytestmark = pytest.mark.unit

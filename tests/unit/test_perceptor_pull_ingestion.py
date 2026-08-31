@@ -20,7 +20,7 @@ from sleepagent.domain.contracts import (
     DeviceBindingStatus,
     ProviderDeviceIdentity,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
     RawPayloadCipher,
     SleepSliceInvariantError,

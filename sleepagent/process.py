@@ -284,8 +284,11 @@ def build_backend_runtime(
     settings: SleepBackendSettings,
     *,
     services: RuntimeServices | None = None,
+    services_factory: Callable[[Any], RuntimeServices] | None = None,
     worker_handlers: Mapping[str, object] | None = None,
 ) -> SleepBackendRuntime:
+    if services is not None and services_factory is not None:
+        raise ValueError("provide services or services_factory, not both")
     try:
         from sleepagent.persistence.uow import (
             PoolConfiguration,
@@ -310,9 +313,11 @@ def build_backend_runtime(
         idle_in_transaction_timeout_ms=settings.idle_transaction_timeout_ms,
     )
     if settings.process_role == ProcessRole.API and services is None:
-        from sleepagent.app import build_api_runtime_services
-
-        services = build_api_runtime_services(settings, uow_factory=uow_factory)
+        if services_factory is None:
+            raise RuntimeError(
+                "API runtime requires services from the API composition root"
+            )
+        services = services_factory(uow_factory)
     expected_actor_key_sha256: str | None = None
     if (
         settings.process_role == ProcessRole.API

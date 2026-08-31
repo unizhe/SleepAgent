@@ -721,11 +721,6 @@ from sleepagent.runtime.contracts import (
     provider_context_projection,
     stable_hash,
 )
-from sleepagent.runtime.registry import (
-    TOOL_INVOCATION_ALLOWLIST,
-)
-
-
 SKILL_FOUNDATION_VERSION = "sleepagent-product-skill-foundation.v6"
 
 

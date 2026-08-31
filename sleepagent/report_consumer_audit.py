@@ -59,7 +59,7 @@ def build_report_consumer_audit(repository_root: Path) -> dict[str, Any]:
     product_worker = root / "sleepagent/workers/product.py"
     configuration = root / "sleepagent/config.py"
     ingestion_worker = root / "sleepagent/workers/ingestion.py"
-    fast_path = root / "sleepagent/domain/postgres_slice.py"
+    fast_path = root / "sleepagent/infrastructure/postgres_sleep_slice.py"
     product_api = root / "sleepagent/api/postgres.py"
     report_cli = root / "sleepagent/report_cli.py"
     demo_cli = root / "sleepagent/simulation/cli.py"

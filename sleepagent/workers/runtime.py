@@ -6,24 +6,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import importlib
 import json
 import signal
-import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Callable, Literal, Mapping, Protocol, Self, Sequence, cast
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from uuid import uuid4
-
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
 
 from sleepagent.process import SleepBackendRuntime, build_backend_runtime
 from sleepagent.config import (
@@ -47,6 +38,25 @@ from sleepagent.persistence.migrations import (
     SCENARIO_CLOCK_AUTHORITY_FUNCTION_SIGNATURE,
 )
 from sleepagent.domain.episodes import UUID7Generator
+from sleepagent.workers.kernel import (
+    DispatchKnownNotSent,
+    DurableWorkStore,
+    InvocationKind,
+    InvocationRecord,
+    InvocationState,
+    LeaseClaim,
+    LeaseLostError,
+    OutcomeUnknownError,
+    RetryableWorkError,
+    TerminalWorkError,
+    WorkContext,
+    WorkDisposition,
+    WorkFinalizationMode,
+    WorkHandler,
+    WorkKind,
+    WorkResult,
+    _install_invocation_dispatcher_factory,
+)
 
 
 UTC = timezone.utc
@@ -66,262 +76,6 @@ DEFAULT_QUEUE_ORDER = (
     "demo_reset",
     "reconciliation",
 )
-
-
-class WorkDisposition(str, Enum):
-    SUCCEEDED = "succeeded"
-    RETRYABLE = "retryable"
-    TERMINAL = "terminal"
-    OUTCOME_UNKNOWN = "outcome_unknown"
-
-
-class WorkFinalizationMode(str, Enum):
-    """Identify which trusted component atomically finalized the claim row."""
-
-    WORKER_OWNED = "worker_owned"
-    HANDLER_OWNED = "handler_owned"
-
-
-class InvocationState(str, Enum):
-    RESERVED = "reserved"
-    SEND_STARTED = "send_started"
-    OUTCOME_POSSIBLE = "outcome_possible"
-    RESPONSE_RECEIVED = "response_received"
-    KNOWN_FAILED = "known_failed"
-    OUTCOME_UNKNOWN = "outcome_unknown"
-    RECONCILED = "reconciled"
-
-
-class InvocationKind(str, Enum):
-    MODEL = "model"
-    PROVIDER = "provider"
-    EXTERNAL_SINK = "external_sink"
-
-
-class WorkKind(str, Enum):
-    JOURNEY = "journey"
-    NORMALIZATION = "normalization"
-    OPERATION = "operation"
-    DELIVERY = "delivery"
-    RETENTION = "retention"
-
-
-class LeaseClaim(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    work_id: str = Field(min_length=1)
-    operation_id: str | None = None
-    queue: str = Field(min_length=1)
-    namespace_id: str = Field(min_length=1)
-    data_mode: str = Field(pattern="^(live|replay)$")
-    namespace_generation: int = Field(ge=1)
-    run_id: str | None = None
-    arm_id: str | None = None
-    subject_id: str | None = None
-    operation_version: int = Field(ge=0)
-    lease_generation: int = Field(ge=1)
-    fencing_token: str = Field(min_length=32)
-    worker_instance: str = Field(min_length=1)
-    attempt: int = Field(ge=1)
-    max_attempts: int = Field(ge=1)
-    lease_deadline: datetime
-    payload: dict[str, Any]
-    authorization_snapshot: dict[str, Any]
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("lease_deadline")
-    @classmethod
-    def deadline_is_aware(cls, value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("lease_deadline must include a timezone offset")
-        return value
-
-    @model_validator(mode="after")
-    def scope_is_exact(self) -> Self:
-        if self.data_mode == "live" and (self.run_id or self.arm_id):
-            raise ValueError("live work cannot carry replay run/arm identifiers")
-        if self.data_mode == "replay" and not (self.run_id and self.arm_id):
-            raise ValueError("replay work requires run_id and arm_id")
-        return self
-
-
-class WorkResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    disposition: WorkDisposition
-    result: dict[str, Any] = Field(default_factory=dict)
-    error_code: str | None = None
-    retry_after_seconds: float | None = Field(default=None, ge=0, le=86_400)
-    finalization_mode: WorkFinalizationMode = WorkFinalizationMode.WORKER_OWNED
-
-    @model_validator(mode="after")
-    def handler_owned_result_is_committed_success(self) -> Self:
-        if (
-            self.finalization_mode == WorkFinalizationMode.HANDLER_OWNED
-            and self.disposition
-            not in {WorkDisposition.SUCCEEDED, WorkDisposition.RETRYABLE}
-        ):
-            raise ValueError(
-                "handler-owned finalization requires a committed successful "
-                "result or committed retry wait"
-            )
-        return self
-
-
-class InvocationRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    invocation_id: str
-    invocation_key: str
-    invocation_kind: InvocationKind
-    work_id: str
-    lease_generation: int
-    request_sha256: str
-    state: InvocationState
-    provider_request_id: str | None = None
-    response: dict[str, Any] | None = None
-    error_code: str | None = None
-
-
-class DurableWorkStore(Protocol):
-    """Every method is one bounded database transaction."""
-
-    def claim(
-        self,
-        *,
-        queue: str,
-        worker_instance: str,
-        lease_seconds: int,
-    ) -> LeaseClaim | None: ...
-
-    def heartbeat(
-        self,
-        claim: LeaseClaim,
-        *,
-        lease_seconds: int,
-    ) -> bool: ...
-
-    def checkpoint(
-        self,
-        claim: LeaseClaim,
-        *,
-        checkpoint_type: str,
-        payload: Mapping[str, Any],
-    ) -> bool: ...
-
-    def finalize(
-        self,
-        claim: LeaseClaim,
-        result: WorkResult,
-    ) -> bool: ...
-
-    def uow_scope_for_claim(self, claim: LeaseClaim) -> UowScope: ...
-
-    def reserve_invocation(
-        self,
-        claim: LeaseClaim,
-        *,
-        invocation_kind: InvocationKind,
-        invocation_key: str,
-        request_sha256: str,
-    ) -> InvocationRecord: ...
-
-    def mark_invocation_send_started(
-        self,
-        claim: LeaseClaim,
-        record: InvocationRecord,
-    ) -> bool: ...
-
-    def finalize_invocation(
-        self,
-        claim: LeaseClaim,
-        record: InvocationRecord,
-        *,
-        state: InvocationState,
-        provider_request_id: str | None,
-        response: Mapping[str, Any] | None,
-        error_code: str | None,
-    ) -> bool: ...
-
-
-class WorkHandler(Protocol):
-    def __call__(self, context: "WorkContext") -> WorkResult: ...
-
-
-@dataclass
-class WorkContext:
-    claim: LeaseClaim
-    store: DurableWorkStore
-    _lease_lost: threading.Event
-
-    @property
-    def lease_is_valid(self) -> bool:
-        return not self._lease_lost.is_set()
-
-    def checkpoint(
-        self,
-        checkpoint_type: str,
-        payload: Mapping[str, Any],
-    ) -> None:
-        if self._lease_lost.is_set() or not self.store.checkpoint(
-            self.claim,
-            checkpoint_type=checkpoint_type,
-            payload=payload,
-        ):
-            self._lease_lost.set()
-            raise LeaseLostError("lease fence rejected checkpoint")
-
-    def mark_lease_lost(self) -> None:
-        """Prevent any outer finalize after a handler observes a rejected fence."""
-
-        self._lease_lost.set()
-
-    def invocation_dispatcher(self) -> "InvocationDispatcher":
-        return InvocationDispatcher(
-            store=self.store,
-            claim=self.claim,
-            lease_lost=self._lease_lost,
-        )
-
-
-class WorkerError(RuntimeError):
-    pass
-
-
-class RetryableWorkError(WorkerError):
-    def __init__(
-        self,
-        code: str,
-        *,
-        retry_after_seconds: float | None = None,
-    ) -> None:
-        super().__init__(code)
-        self.code = code
-        self.retry_after_seconds = retry_after_seconds
-
-
-class TerminalWorkError(WorkerError):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-class OutcomeUnknownError(WorkerError):
-    def __init__(self, code: str = "outcome_unknown") -> None:
-        super().__init__(code)
-        self.code = code
-
-
-class LeaseLostError(OutcomeUnknownError):
-    pass
-
-
-class DispatchKnownNotSent(WorkerError):
-    """A connector proved no external effect could have occurred."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 class InvocationDispatcher:
@@ -427,6 +181,9 @@ class InvocationDispatcher:
         ):
             self.lease_lost.set()
             raise LeaseLostError("invocation outcome lost its lease fence")
+
+
+_install_invocation_dispatcher_factory(InvocationDispatcher)
 
 
 class DurableWorkStoreError(RuntimeError):
@@ -2471,55 +2228,6 @@ def build_worker_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cli_handlers(settings: SleepBackendSettings) -> dict[str, WorkHandler]:
-    # Import lazily: the adapters implement WorkHandler and therefore depend on
-    # this module's public runtime contracts.
-    from sleepagent.workers.product import (
-        build_product_agent_worker_handlers,
-    )
-    from sleepagent.workers.ingestion import build_b3_worker_handlers
-    from sleepagent.workers.commands import build_command_worker_handlers
-    from sleepagent.workers.demo import build_demo_worker_handlers
-    from sleepagent.workers.effects import build_effect_worker_handlers
-    from sleepagent.workers.retention import build_retention_worker_handlers
-
-    handlers = build_b3_worker_handlers(settings)
-    product_handlers = build_product_agent_worker_handlers(settings)
-    command_handlers = build_command_worker_handlers(settings)
-    demo_handlers = build_demo_worker_handlers(settings)
-    effect_handlers = build_effect_worker_handlers(settings)
-    retention_handlers = build_retention_worker_handlers(settings)
-    registries = (
-        handlers,
-        product_handlers,
-        command_handlers,
-        demo_handlers,
-        effect_handlers,
-        retention_handlers,
-    )
-    overlap: set[str] = set()
-    for index, registry in enumerate(registries):
-        for other in registries[index + 1 :]:
-            overlap.update(set(registry).intersection(other))
-    if overlap:
-        raise DurableWorkStoreError(
-            "worker queue has more than one explicit handler: "
-            + ", ".join(sorted(overlap))
-        )
-    handlers.update(product_handlers)
-    handlers.update(command_handlers)
-    handlers.update(demo_handlers)
-    handlers.update(effect_handlers)
-    handlers.update(retention_handlers)
-    unsupported = set(settings.worker_queues) - set(handlers)
-    if unsupported:
-        raise DurableWorkStoreError(
-            "worker handlers must be explicitly composed: "
-            + ", ".join(sorted(unsupported))
-        )
-    return {queue: handlers[queue] for queue in settings.worker_queues}
-
-
 def run_worker_command(
     action: str,
     *,
@@ -2532,17 +2240,17 @@ def run_worker_command(
 ) -> int:
     if settings.process_role != ProcessRole.WORKER:
         raise DurableWorkStoreError("worker entry point requires PROCESS_ROLE=worker")
+    if action == "run" and handlers is None:
+        raise DurableWorkStoreError(
+            "worker run requires handlers from the bootstrap composition root"
+        )
     selected_handlers = (
         dict(handlers)
         if handlers is not None
-        else (
-            _cli_handlers(settings)
-            if action == "run"
-            else {
-                queue: _HealthcheckOnlyHandler(queue)
-                for queue in settings.worker_queues
-            }
-        )
+        else {
+            queue: _HealthcheckOnlyHandler(queue)
+            for queue in settings.worker_queues
+        }
     )
     runtime = build_backend_runtime(
         settings,
@@ -2587,20 +2295,11 @@ def run_worker_command(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_worker_parser().parse_args(argv)
-    try:
-        settings = SleepBackendSettings.from_environment()
-        return run_worker_command(
-            args.action,
-            settings=settings,
-            lease_seconds=getattr(args, "lease_seconds", 30),
-            heartbeat_seconds=getattr(args, "heartbeat_seconds", 10.0),
-            idle_poll_seconds=getattr(args, "idle_poll_seconds", 0.25),
-            drain_seconds=getattr(args, "drain_seconds", 30.0),
-        )
-    except (ValueError, RuntimeError) as exc:
-        print(f"worker {args.action} failed: {type(exc).__name__}", file=sys.stderr)
-        return 2
+    """Compatibility entry point; concrete imports live in bootstrap.worker."""
+
+    module = importlib.import_module("sleepagent.bootstrap.worker")
+    entrypoint = cast(Callable[[Sequence[str] | None], int], module.main)
+    return entrypoint(argv)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a process.

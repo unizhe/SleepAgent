@@ -1332,14 +1332,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 from pydantic import Field
 
-from sleepagent.runtime.contracts import (
-    AgentId,
-    CommunicationDraft,
-    FactSnapshot,
-    StrictContract,
-    ToolReceipt,
-    TrustedContextItem,
-)
 if TYPE_CHECKING:
     from sleepagent.runtime.results import (
         ProductEpisodeRunRequest,

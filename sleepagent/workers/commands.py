@@ -31,7 +31,7 @@ from sleepagent.persistence.migrations import (
 )
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 from sleepagent.domain.episodes import UUID7Generator
-from sleepagent.workers.runtime import (
+from sleepagent.workers.kernel import (
     InvocationKind,
     LeaseClaim,
     LeaseLostError,
@@ -40,6 +40,8 @@ from sleepagent.workers.runtime import (
     WorkFinalizationMode,
     WorkHandler,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
     worker_uow_factory,
 )
 

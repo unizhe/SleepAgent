@@ -38,7 +38,7 @@ from sleepagent.domain.observation_semantics import (
     MovementMetricId,
     MovementPayloadV2,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     ReplayObservationContract,
     ReplayObservationInput,
     ReplayObservationInputV2,

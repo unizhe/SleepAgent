@@ -13,7 +13,7 @@ from sleepagent.domain.contracts import (
     DataSufficiency,
     RoleViewStatus,
 )
-from sleepagent.domain.product_data import public_product_subject_ref
+from sleepagent.application.product_data import public_product_subject_ref
 from sleepagent.workers.product import (
     PUBLIC_PRODUCT_TODAY_FIELD_ALLOWLIST,
     ProductAgentInvariantError,

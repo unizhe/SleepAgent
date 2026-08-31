@@ -22,7 +22,7 @@ from sleepagent.runtime.tooling import (
     ProductToolExecutor,
 )
 from sleepagent.domain.contracts import DataMode
-from sleepagent.domain.product_data import (
+from sleepagent.application.product_data import (
     ProductNightVitalSummary,
     ProductRevisionFacts,
     build_longitudinal_vital_risk_context,

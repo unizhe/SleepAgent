@@ -25,7 +25,7 @@ from sleepagent.domain.observation_semantics import (
     MovementPayloadV2,
     aggregate_movement_semantics_v2,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     LifecycleSnapshotRecord,
     LoadedNormalizationWork,
     NormalizationHandler,
@@ -34,7 +34,7 @@ from sleepagent.domain.postgres_slice import (
     ReplayObservationInputV2,
     _raw_aad,
 )
-from sleepagent.domain.product_data import ProductRevisionFacts
+from sleepagent.application.product_data import ProductRevisionFacts
 from sleepagent.integrations.perceptor.pull import (
     normalize_history,
     normalize_sleep_report,

@@ -112,7 +112,7 @@ from sleepagent.domain.contracts import (
     SleepObservation,
 )
 from sleepagent.domain.episodes import NightEpisodeV2, UUID7Generator
-from sleepagent.domain.product_data import (
+from sleepagent.application.product_data import (
     ProductLongitudinalRiskContext,
     ProductNightVitalSummary,
     ProductRevisionFacts,
@@ -120,8 +120,7 @@ from sleepagent.domain.product_data import (
     build_longitudinal_vital_risk_context,
     public_product_subject_ref,
 )
-from sleepagent.workers.runtime import (
-    B3ClaimInvariantError,
+from sleepagent.workers.kernel import (
     DispatchKnownNotSent,
     InvocationKind,
     LeaseLostError,
@@ -134,6 +133,9 @@ from sleepagent.workers.runtime import (
     WorkFinalizationMode,
     WorkHandler,
     WorkResult,
+)
+from sleepagent.workers.runtime import (
+    B3ClaimInvariantError,
     exact_worker_scope,
     worker_uow_factory,
 )

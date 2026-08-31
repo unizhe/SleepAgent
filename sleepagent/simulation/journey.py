@@ -23,7 +23,7 @@ from sleepagent.simulation.seed_registry import (
     load_replay_seed_registry,
     verify_packaged_seed,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     IngressResult,
     RawPayloadCipher,
     ReplayIngressHandler,

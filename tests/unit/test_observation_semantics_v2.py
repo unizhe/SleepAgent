@@ -32,7 +32,7 @@ from sleepagent.domain.observation_semantics import (
     movement_metric_definition,
     validate_movement_semantics_v2,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     ReplayObservationInputV2,
     canonicalize_replay_input_v2,
 )

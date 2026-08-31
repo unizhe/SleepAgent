@@ -68,7 +68,7 @@ from sleepagent.domain.episodes import (
     EpisodePublicationStatus,
     uuid7_from_parts,
 )
-from sleepagent.domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
     EpisodeLifecycleProjector,
     FastPathHandler,
     FastPathLease,
