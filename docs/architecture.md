@@ -1,21 +1,62 @@
-# Architecture
+# Current architecture
 
-SleepAgent 只有一个生产 Python package，并收口为七个职责目录：
+**Schema target: 027.** Migrations `001` through `027` and their manifest checksums are immutable historical data contracts.
 
-- `api`：public、product、demo transport 与 PostgreSQL query adapter。
-- `domain`：睡眠 episode、quality/risk 与 Product facts 的确定性规则。
-- `integrations`：云云/Perceptor Push、只读 Platform API/Pull、签名、规范化与 Push/Pull 对账边界。
-- `persistence`：001–013 PostgreSQL migrations、release manifest 与 scoped UoW。
-- `runtime`：固定四 Agent roster、provider、tool、policy、安全与结果语义。
-- `simulation`：registry-backed replay、journey 与 HTTP demo CLI。
-- `workers`：durable lease/fence/heartbeat runtime 和 queue handlers。
+## Topology
 
-`sleepagent.app:app` 是唯一 ASGI composition root；`sleepagent.workers.runtime` 是唯一 Worker CLI。API 与 Worker 共享 PostgreSQL release attestation，但 API 不启动 Worker，Worker 不挂载 HTTP surface。
+```mermaid
+flowchart LR
+    Radar[mmWave radar] --> Cloud[Perceptor cloud]
+    Cloud -->|signed Push| API[FastAPI API]
+    Cloud -->|History / SleepReport Pull| SCH[Scheduler]
+    SCH --> Q[(PostgreSQL durable work)]
+    API --> Q
+    Q --> W[Workers]
+    W --> OV2[Observation V2]
+    OV2 --> EP[Episode projection]
+    EP --> NF[NightFinalization]
+    NF --> SA[SharedNightAnalysis]
+    SA --> RP[elder / family / doctor projections]
+    SA --> CARE[Care governance]
+    CARE --> HITL[HITL]
+    HITL --> EXEC[human-attested execution]
+    EXEC --> OUT[CareOutcome]
+    OUT --> GOV[personalization governance]
+    GOV --> MEM[accepted Memory]
+    MEM --> SA2[next-cycle analysis]
+    DB[(PostgreSQL 16)] --- API
+    DB --- SCH
+    DB --- W
+    DB --- HITL
+    DB --- GOV
+```
 
-真实雷达链路为“雷达 → 云云/Perceptor Cloud → Push/Pull → Perceptor integration → canonical observations → PostgreSQL → NightEpisode → 现有 Agent Runtime”。Push webhook 与 live ingestion Worker 已接入 composition root；Pull 具有只读客户端、durable ingress、reconciliation 与 checkpoint 语义，但常驻调度和自动 morning finalization 尚未产品化。详见 [真实雷达架构](architecture/perceptor-real-radar.md)。
+`sleepagent.app:app` is the ASGI composition root. `python -m sleepagent.bootstrap.scheduler run` scans due acquisition schedules. `python -m sleepagent.workers.runtime run` claims only configured queues. PostgreSQL owns schema attestation, encrypted ingress, work state, leases/fences, episode/finalization revisions, analyses, role projections, Care authority, outcomes, and personalization governance.
 
-Product slow path 先把 automatic、显式 report 和 reanalysis 请求统一为 `product.report.run.v1`，重新应用持久化 quality/risk gate，再按精确 NightEpisode current revision、所消费的 Habit/Memory 事实和 runtime manifest 计算 desired-analysis identity。相同 identity 收口到一个 `product.shared_analysis.v1` work item；Planning、Evidence、条件式 Care 和必要 Safety 只运行一次，随后从同一个 `SharedNightAnalysis.v1` 确定性形成 elder/family/doctor 三个投影，并在 fence 内一次性提交。urgent 与 UNUSABLE 仍保持确定性且不调用 Product Agent 或 provider。
+## Device-to-night data path
 
-elder 可另行使用 `product.elder_narrative.v1` 对已提交 shared analysis 和确定性 elder 投影执行至多一次 SleepCare content-plan render。该 render 具有独立 identity 和 attempt，不会改变 shared analysis revision；失败或 binding 无效时继续使用确定性 elder 投影。family/doctor render 和所有 report GET/list 均不调用模型。
+`DeviceBinding` is the authoritative provider-device-to-subject mapping. A signed Push is durably committed before acknowledgement; bounded read-only History and SleepReport Pulls repair gaps and complete morning evidence. Provider payloads stay at the encrypted ingress/adapter boundary. Normalization emits trusted Observation Semantics V2 facts, keeping `movement_index` and `movement_event_count` distinct.
 
-公开 `POST /product/sleep/reports/run` 保留 nonce/replay 消费；仅 report GET/list 使用短时、method/path/body-bound 的 stateless JWS 验证，并通过当前 PostgreSQL authority/epoch SELECT 重新授权。查询事务不 commit，也不调用写入 Memory receipt 的读取路径。`sleepagent-report` 只调用这组 HTTP 接口，不形成新的 composition root。详细接口、状态和配置见 [Product report 运维说明](operations/product-report.md)。真实雷达接入不改变固定 1+2+1 Agent roster、HITL 或角色可见性边界。
+The Episode projector associates canonical observations with a subject-local sleep window. An observation that arrives after an Episode closed is deterministically associated with the eligible closed Episode and creates an immutable superseding revision when material. Existing revisions remain readable. No observation is guessed into an ambiguous binding or date.
+
+`NightFinalization` advances `OPEN → SOFT_FINALIZED → HARD_FINALIZED`; conflicts become `RECONCILIATION_REQUIRED`. The scheduled finalizer discovers due Episodes in bounded oldest-first pages. A material late revision can produce a new hard-finalization revision and bounded downstream reanalysis.
+
+## Shared analysis and roles
+
+The public/default `shared_only` path routes one report request to one desired shared-analysis identity. Fixed centrally orchestrated role runtimes—SleepCare, EvidenceReasoning, conditional CareStrategy, and conditional SafetyReview—operate under agent/tool allowlists and strict schemas. They are not autonomous peer agents.
+
+One accepted `SharedNightAnalysis` produces deterministic zh-CN elder, family, and doctor projections. The optional elder narrative is a bounded render over accepted facts; family/doctor projections and all reads remain deterministic. Urgent or unusable data stays on deterministic zero-model paths.
+
+Compatibility modes and V1/report reads remain for rollback and historical data. Current mode names converge substantially on shared analysis; `SHADOW` additionally exercises retained legacy comparison. These are compatibility surfaces, not separate current product architectures.
+
+## Care, outcome, and next cycle
+
+A structured CareStrategy candidate is re-evaluated when a source moves from SOFT to HARD finalization. Deterministic policy can create a Proposal; HITL approval creates a separate ApprovalGrant and terminal CarePlan. Execution is a trusted-operator human attestation, not device verification or end-user login.
+
+A completed eligible execution registers bounded follow-up evaluation. Current HARD-finalized nights can create an immutable `CareOutcome` with `causal_claim=false`, followed by a `PersonalizationEffectReceipt` and pending governance candidate. The outcome worker cannot directly write confirmed Memory. Only an authorized elder ACCEPT creates the governed Memory revision; pending/rejected candidates are excluded. Later EvidenceReasoning context pins and records the accepted exact-scope revision.
+
+Details: [Care governance](architecture/care-governance.md) and [Outcome/personalization](architecture/outcome-personalization.md).
+
+## Reliability model
+
+PostgreSQL `SKIP LOCKED`, leases, lease generations, fencing tokens, bounded retry/reclaim, and idempotent semantic keys provide **fenced at-least-once processing with idempotent convergence**. A stale process cannot commit after authority is reclaimed. This is not exactly-once distributed execution.

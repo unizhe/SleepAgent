@@ -42,6 +42,7 @@ env/
 *.log
 *.key
 *.pem
+!tests/fixtures/keys/replay_actor_public.pem
 *.docx
 .DS_Store
 

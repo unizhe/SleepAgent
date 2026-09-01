@@ -1,26 +1,114 @@
 # SleepAgent
 
-SleepAgent 是一个以 PostgreSQL 为唯一服务器持久化、以 durable queue 驱动睡眠分析与三角色（elder/family/doctor）投影的后端。它已接入真实云云/Perceptor 毫米波雷达的云端数据：生产 webhook 接收 Push，受限只读 Pull 完成设备发现、History 回补与 SleepReport，随后统一为 canonical observations、NightEpisode，并进入现有 Agent Runtime。
+SleepAgent is a research/portfolio backend for an elderly sleep-health scenario. It accepts vendor-processed mmWave radar data from the Perceptor cloud through Push and bounded Pull, normalizes it as Observation Semantics V2, and produces a shared sleep analysis with deterministic elder, family, and doctor projections. A governed CareStrategy can become a Care Plan only after human approval; a trusted operator records real-world execution, and later hard-finalized nights can produce a non-causal CareOutcome. An elder may accept the resulting bounded Memory candidate, which is then pinned and consumed by a later analysis cycle.
 
-SleepAgent 消费厂商处理后的生理与睡眠数据，不接收雷达 ADC/IQ 原始波形。当前唯一 ASGI 入口是 `sleepagent.app:app`，Worker 入口是 `python -m sleepagent.workers.runtime run`；SQLite 服务器路径、诊断后端和旧前端均已退役。P4 状态为 `COMPLETE_WITH_LIMITATIONS`，尚非 release-ready。
+SleepAgent is not a medical device, does not diagnose disease, and is not clinically validated.
 
-## 本地验证
+## Architecture
+
+```mermaid
+flowchart TD
+    R[Real mmWave radar] --> P[Perceptor cloud Push / Pull]
+    P --> O[Observation Semantics V2]
+    O --> E[NightEpisode + immutable revisions]
+    E --> F[NightFinalization]
+    F --> A[SharedNightAnalysis]
+    A --> RP[Deterministic zh-CN role projections]
+    A --> CS[CareStrategy]
+    CS --> H[HITL approval]
+    H --> CP[CarePlan]
+    CP --> CE[Human-attested CareExecution]
+    CE --> CO[Non-causal CareOutcome]
+    CO --> PG[Personalization governance]
+    PG --> M[Accepted governed Memory]
+    M --> A2[Next-cycle analysis]
+    DB[(PostgreSQL 16<br/>durable queues, leases, fences,<br/>idempotency and revisions)]
+    P --- DB
+    E --- DB
+    F --- DB
+    A --- DB
+    H --- DB
+    CE --- DB
+    CO --- DB
+    PG --- DB
+```
+
+PostgreSQL is the durable authority across asynchronous boundaries. The runtime provides **fenced at-least-once processing with idempotent convergence**; it does not claim exactly-once distributed execution. See [the current architecture](docs/architecture.md).
+
+## Agent roles
+
+The four roles are fixed, centrally governed runtimes—not an autonomous peer swarm:
+
+- **SleepCare** plans the episode and produces bounded elder-facing material.
+- **EvidenceReasoning** interprets allowlisted evidence and governed context.
+- **CareStrategy** may propose one policy-bounded care action.
+- **SafetyReview** conditionally reviews claims and safety boundaries.
+
+One accepted `SharedNightAnalysis` is projected deterministically into zh-CN elder, family, and doctor views. The urgent path remains deterministic and zero-model.
+
+## Data and Memory
+
+Observation Semantics V2 keeps `movement_index` separate from `movement_event_count`; ambiguous legacy movement is not promoted into trusted V2 analytics. `Habit` and `Memory` are governed, append-only personalization facts. Outcome-derived Memory remains pending until an authorized elder accepts or rejects it; only accepted exact-scope revisions are available to later analysis.
+
+Retrieval is bounded, allowlisted, and exact-scope. There is no vector database or semantic vector retrieval, no automatic Habit mutation, and no autonomous self-learning loop.
+
+## Safety and governance
+
+Agent/tool allowlists, strict schemas, deterministic policy, an urgent zero-model path, HITL approval, and PostgreSQL authority checks constrain the system. Terminal Care execution is a **trusted-operator** boundary: it is human-attested, but it is not cryptographically authenticated family/elder login and not device-verified execution. Every outcome has `causal_claim=false`.
+
+## Durable runtime
+
+Workers claim explicit queues with PostgreSQL `SKIP LOCKED`, bounded leases, fencing tokens, retry/reclaim ceilings, and idempotency keys. A scheduler creates durable acquisition/finalization work but is disabled by default and must be enabled deliberately. Expired work can be reclaimed; stale owners cannot commit; exhausted work becomes visible terminal state. See [runtime operations](docs/operations/runtime-operations.md).
+
+## Quickstart
+
+Requirements: Python 3.11 and PostgreSQL 16. Docker Compose is an optional development/integration harness, not a production deployment.
 
 ```bash
+git clone https://github.com/unizhe/SleepAgent.git
+cd SleepAgent
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install --require-hashes -r requirements/dev.lock
 cp .env.test.example .env.test
-scripts/verify_backend.sh all
+docker compose --env-file .env.test up -d --wait postgres
+docker compose --env-file .env.test run --rm migrate
+docker compose --env-file .env.test run --rm test-bootstrap
+set -a; source .env.test; set +a
+python -m sleepagent.persistence.migrate \
+  --database-url-env SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN check
+scripts/run_portfolio_demo.sh --env-file .env.test
+scripts/verify_closure.sh release --env-file .env.test
 ```
 
-`compose.yaml` 是 PostgreSQL + replay 的开发/集成 harness，不是 live production 部署清单。总体文档索引见 [docs/README.md](docs/README.md)，Perceptor 的当前[架构](docs/architecture/perceptor-real-radar.md)与[运维边界](docs/operations/perceptor.md)分别说明已交付能力和仍需部署方补齐的编排。
+For native PostgreSQL, create an isolated database, set the `SLEEPAGENT_BOOTSTRAP_*` role/password/principal variables to match the `SLEEPAGENT_TEST_POSTGRES_*` profile, then run the same migration, `sleepagent.persistence.test_bootstrap`, demo, and verification commands. Never reuse the committed test-only credentials outside an isolated local/CI database.
 
-## Product 睡眠报告 CLI
+The demo uses controlled fixtures and deterministic model boundaries; it needs no Perceptor or external LLM credentials. Its one story and isolated-state cleanup are documented in [docs/demo.md](docs/demo.md).
 
-`sleepagent-report` 是现有 Product HTTP API 的薄客户端，不会在本地构造 Agent Runtime、直接读取 PostgreSQL 或访问雷达厂商。它按认证主体的本地 wake date 运行、查询和分页列出报告：
+## Verification
 
-```bash
-sleepagent-report run --wake-date 2026-08-26
-sleepagent-report show --wake-date 2026-08-26 --json
-sleepagent-report list --limit 20
-```
+`scripts/verify_closure.sh` is the authoritative release verifier. It reports these explicit lanes:
 
-服务地址、service credential、actor identity/epochs 和绝对私钥路径只从环境配置读取；命令行不接受 role、subject 或密钥。`run` 默认轮询只读状态接口，可用 `--no-wait` 仅提交请求。部署和状态语义见 [Product report 运维说明](docs/operations/product-report.md)。
+- `STATIC`, `ARCHITECTURE`, `OPENAPI`, and `UNIT_CONTRACT`
+- `POSTGRES` and `PROCESS_FAULT`
+- `REPORT_E2E`
+- `CLOSURE_C1A_C1B_C2_C3`
+
+Each lane reports `PASS`, `FAIL`, `ENV_BLOCKED`, or `SKIPPED_EXPLICIT`. `FINAL = PASS` is emitted only when every required release lane passes; unavailable infrastructure never silently passes. The suite contains 1,200+ automated tests across unit/contract and integration-oriented suites, plus the named PostgreSQL, process/fault, report, architecture, OpenAPI, and closure lanes.
+
+## Known limitations
+
+- Terminal human identity is trusted-operator, not cryptographic end-user authentication.
+- Immutable Episode revisions have accepted write/storage amplification at portfolio scale.
+- CareOutcome is observational and non-causal; medical efficacy and clinical validation are not claimed.
+- External email, SMS, WeChat, notifications, and device control are intentionally not implemented.
+- Observation V1 and report rollback/shadow compatibility remain intentionally present; `shared_only` is the public/default path.
+- Scheduler activation, production ACLs, secrets, networking, backups, and deployment supervision require external operational setup.
+- Vendor-processed cloud data is consumed; SleepAgent does not process raw radar ADC/IQ signals.
+
+See [the complete limitations](docs/limitations.md) and [documentation index](docs/README.md).
+
+## License
+
+Licensed under the [MIT License](LICENSE).

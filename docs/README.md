@@ -1,11 +1,30 @@
-# SleepAgent 文档
+# SleepAgent documentation
 
-- [architecture.md](architecture.md)：当前进程、API、domain、runtime 与 worker 边界。
-- [architecture/perceptor-real-radar.md](architecture/perceptor-real-radar.md)：真实云云/Perceptor 雷达的 Push、Pull、canonical、NightEpisode 与 Agent 边界。
-- [operations.md](operations.md)：replay/PostgreSQL harness、迁移、验证和 live model 配置。
-- [operations/perceptor.md](operations/perceptor.md)：当前 Perceptor 部署组件、健康检查、恢复语义与已知人工编排缺口。
-- [contracts/README.md](contracts/README.md)：对外 HTTP 合同和 OpenAPI 快照。
-- [audits/P4-REAL-RADAR-FINAL.md](audits/P4-REAL-RADAR-FINAL.md)：P4 最终证据、修复与限制摘要。
-- [audits/P4-REPOSITORY-CONSOLIDATION.md](audits/P4-REPOSITORY-CONSOLIDATION.md)：P4 仓库收敛验证记录。
+The documents in **CURRENT** describe schema target **027** and the repository at public closure. Material under `history/` and the immutable audit snapshots describe earlier checkpoints and is not current architecture.
 
-逐阶段审计、施工计划和一次性验收脚本已移至仓库外 owner-only 历史归档；canonical 文档只描述当前行为。
+## CURRENT
+
+1. [Architecture](architecture.md) — current product and persistence topology.
+2. [Operations](operations.md) — startup, readiness, activation, recovery, and verification.
+3. [Perceptor operations](operations/perceptor.md) — real vendor-cloud Push/Pull and device-to-night flow.
+4. [Durable runtime operations](operations/runtime-operations.md) — queues, leases, fencing, retry, drain, and status.
+5. [Care governance](architecture/care-governance.md) — CareStrategy, HITL, trusted-operator Care Plan execution.
+6. [Outcome and personalization](architecture/outcome-personalization.md) — non-causal outcomes and human-governed Memory.
+7. [Portfolio demo](demo.md) — one deterministic end-to-end story.
+8. [Limitations](limitations.md) — scope, trust, scale, and deployment boundaries.
+
+Supporting current references:
+
+- [HTTP contracts](contracts/README.md)
+- [Product report CLI](operations/product-report.md)
+- [Resume/interview claim matrix](resume-claims.md)
+- [Pre-closure audit status](audit/README.md)
+
+## HISTORICAL / AUDIT
+
+- [`history/plans/`](history/plans/) — prior plans and review logs.
+- [`history/remediation/`](history/remediation/) — public-safe remediation ADRs and checkpoint evidence.
+- [`history/audits/`](history/audits/) — earlier P4 audits.
+- [`history/pre-closure/`](history/pre-closure/) — superseded G8/G9/G10/P4 documents, retained unchanged.
+
+The two local `docs/audit/FINAL_*.md` snapshots and two path-bearing remediation records are immutable pre-closure evidence. They are intentionally not tracked because the originals contain private absolute workstation paths; [the status index](audit/README.md) records their hashes and current finding disposition without rewriting them.

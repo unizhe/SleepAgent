@@ -8,9 +8,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sleepagent"
 version = "0.1.0"
-description = "MVP skeleton for an intelligent sleep health analysis system."
+description = "Research backend for governed sleep analysis and human-attested care follow-up."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
+license = "MIT"
+authors = [
+    {name = "Zhe Wang"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "cryptography>=42,<47",
     "fastapi>=0.115,<=0.136.1",
