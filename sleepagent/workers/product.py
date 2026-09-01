@@ -121,9 +121,10 @@ from sleepagent.application.product_data import (
     public_product_subject_ref,
 )
 from sleepagent.application.care_actions import (
-    build_care_action_proposal,
-    current_hard_finalization_revision,
-    persist_care_action_proposal,
+    CARE_EVALUATION_OPERATION,
+    CareEvaluationResult,
+    execute_care_evaluation,
+    reserve_care_evaluation_if_ready,
 )
 from sleepagent.observability import log_event
 from sleepagent.workers.kernel import (
@@ -175,6 +176,7 @@ PRODUCT_WORK_OPERATION_TYPES = frozenset(
         PRODUCT_REPORT_RUN_OPERATION,
         PRODUCT_SHARED_ANALYSIS_OPERATION,
         PRODUCT_ELDER_NARRATIVE_OPERATION,
+        CARE_EVALUATION_OPERATION,
     }
 )
 
@@ -1175,6 +1177,36 @@ class ProductAgentProcessor:
             )
             uow.commit()
         return routed
+
+    def evaluate_care_on_hard(
+        self,
+        scope: UowScope,
+        lease: ProductAgentLease,
+        *,
+        before_terminal_commit: Callable[[], None] | None = None,
+    ) -> CareEvaluationResult:
+        """Commit one deterministic Care evaluation under the work fence."""
+
+        evaluated_at = self.now_factory()
+        _require_aware(evaluated_at, "care_evaluated_at")
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                result = execute_care_evaluation(
+                    cursor,
+                    scope,
+                    operation_id=lease.operation_id,
+                    attempt_sequence=lease.attempt_sequence,
+                    lease_generation=lease.lease_generation,
+                    fencing_token=lease.fencing_token,
+                    worker_instance=lease.worker_instance,
+                    evaluated_at=evaluated_at,
+                    before_terminal_commit=before_terminal_commit,
+                )
+                uow.commit()
+            finally:
+                cursor.close()
+        return result
 
     def persist_and_commit(
         self,
@@ -4940,6 +4972,8 @@ class PostgresProductAgentRepository:
         self._lock_and_validate_epochs()
         elder_narrative_operation_id: str | None = None
         elder_narrative_operation_created = False
+        care_evaluation_operation_id: str | None = None
+        care_evaluation_operation_created = False
         cursor = self.connection.cursor()
         try:
             operation_json = self._lock_operation_fence(cursor, lease, artifact)
@@ -5137,59 +5171,32 @@ class PostgresProductAgentRepository:
                 artifact.schema_version == "product_agent_prepared_attempt.v3"
                 and artifact.shared_analysis is not None
             ):
-                finalization_revision_id = current_hard_finalization_revision(
+                care_reservation = reserve_care_evaluation_if_ready(
                     cursor,
                     self.scope,
                     night_episode_id=artifact.night_episode_id,
                     night_episode_revision_id=artifact.night_episode_revision_id,
-                )
-                care_build = build_care_action_proposal(
-                    artifact.shared_analysis,
-                    subject_id=analysis.subject_id,
                     analysis_revision_id=analysis.analysis_revision_id,
-                    night_finalization_revision_id=(
-                        finalization_revision_id or "not-hard-finalized"
+                    shared_analysis_sha256=(
+                        artifact.shared_analysis.shared_analysis_sha256
                     ),
-                    created_at=committed_at,
-                    source_is_current=True,
-                    source_is_hard_finalized=(
-                        finalization_revision_id is not None
-                    ),
+                    reserved_at=committed_at,
+                    operation_id=self.id_generator(committed_at),
                 )
-                if care_build.proposal is not None:
-                    log_event(
-                        "care_action_candidate_validated",
-                        action_type=(
-                            care_build.proposal.candidate.action_type.value
-                        ),
-                        policy_version=(
-                            care_build.proposal.policy.policy_version
-                        ),
+                if care_reservation is not None:
+                    care_evaluation_operation_id = (
+                        care_reservation.operation_id
                     )
-                    created = persist_care_action_proposal(
-                        cursor,
-                        self.scope,
-                        night_episode_id=artifact.night_episode_id,
-                        proposal=care_build.proposal,
-                        persisted_at=committed_at,
+                    care_evaluation_operation_created = (
+                        care_reservation.created
                     )
                     log_event(
                         (
-                            "care_action_proposal_created"
-                            if created
-                            else "care_action_proposal_deduplicated"
+                            "care_evaluation_reserved"
+                            if care_reservation.created
+                            else "care_evaluation_deduplicated"
                         ),
-                        action_type=(
-                            care_build.proposal.candidate.action_type.value
-                        ),
-                        policy_version=(
-                            care_build.proposal.policy.policy_version
-                        ),
-                    )
-                elif artifact.shared_analysis.care is not None:
-                    log_event(
-                        "care_action_candidate_rejected",
-                        reason_code=care_build.reason_code,
+                        operation_type=CARE_EVALUATION_OPERATION,
                     )
             persisted_receipt_ids: set[str] = set()
             for role_run in artifact.role_runs:
@@ -5529,6 +5536,18 @@ class PostgresProductAgentRepository:
                             ),
                         }
                         if elder_narrative_operation_id is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "care_evaluation_operation_id": (
+                                care_evaluation_operation_id
+                            ),
+                            "care_evaluation_operation_created": (
+                                care_evaluation_operation_created
+                            ),
+                        }
+                        if care_evaluation_operation_id is not None
                         else {}
                     ),
                 },
@@ -6394,6 +6413,30 @@ class ProductAgentWorkHandlerAdapter:
 
         try:
             processor = self._resolve_processor(context)
+            if operation_type == CARE_EVALUATION_OPERATION:
+                if not isinstance(processor, ProductAgentProcessor):
+                    raise ProductAgentInvariantError(
+                        "Care evaluation requires the production Product processor"
+                    )
+                care_result = processor.evaluate_care_on_hard(scope, lease)
+                log_event(
+                    (
+                        "care_action_proposal_created"
+                        if care_result.proposal_created
+                        else "care_evaluation_succeeded"
+                    ),
+                    reason_code=care_result.reason_code,
+                    proposal_present=care_result.proposal_id is not None,
+                )
+                return WorkResult(
+                    disposition=WorkDisposition.SUCCEEDED,
+                    result={
+                        "reason_code": care_result.reason_code,
+                        "proposal_id": care_result.proposal_id,
+                        "proposal_created": care_result.proposal_created,
+                    },
+                    finalization_mode=WorkFinalizationMode.HANDLER_OWNED,
+                )
             if operation_type == PRODUCT_REPORT_RUN_OPERATION:
                 if not isinstance(processor, ProductAgentProcessor):
                     raise ProductAgentInvariantError(

@@ -3247,3 +3247,129 @@ review found no remaining C1B blocker or scope expansion.
 FSA-COR-004                              = RESOLVED
 LATE_OBSERVATION_IMMUTABLE_REVISION_CLAIM = RESTORED
 ```
+
+## C2 — HARD-qualified deterministic Care reevaluation
+
+Entry checkpoint: `2cf2561252a668fd245d5f05da6be2e24843b02d`. The
+tracked tree was clean and the pre-existing untracked `docs/audit/` remained
+immutable and excluded from C2.
+
+### Root cause reconfirmation
+
+The report operation identity intentionally binds report inputs, not
+finalization state. Normalization, SOFT-finalization, and HARD-finalization
+fast-path handoffs therefore converge on one report/shared-analysis semantic
+authority. Care was previously evaluated only while committing a newly
+prepared SharedNightAnalysis. In HARD-before-report order this happened to see
+HARD and could create a proposal. In SOFT/report-before-HARD order it denied
+with `source_not_hard_finalized`; later HARD reused the succeeded report and
+never re-entered Care. The previous integration story only exercised the
+HARD-first order and masked FSA-COR-002.
+
+### Separate evaluation authority and exact identity
+
+C2 adds `care.evaluate.on_hard.v1` as a durable operation on the existing
+required `product_agent` queue. It does not add an Agent, queue, table, Care
+state machine, or model pipeline. Its semantic key binds subject, exact
+SharedNightAnalysis revision and verified semantic hash, exact qualifying HARD
+finalization revision, and the deterministic Care policy version/hash. The
+SharedNightAnalysis hash already binds accepted CareStrategy target/version
+and invocation material where CareStrategy ran.
+
+The shared-analysis commit and the finalization-pinned fast-path handoff both
+call the same reservation command. Reservation occurs only when the current
+non-provisional HARD revision and a SharedNightAnalysis agree on subject,
+Episode, and exact Episode revision, including the structured analysis's own
+source lineage. HARD without compatible analysis and SOFT with analysis both
+leave zero Care-evaluation operations; the later arrival edge reserves the
+one operation. Existing operation semantic uniqueness plus a transaction
+advisory lock closes the simultaneous HARD/analysis race.
+
+The existing Product worker handler loads and revalidates the exact immutable
+analysis revision/hash and HARD revision under its durable lease fence. It
+reuses `build_care_action_proposal`, the closed action taxonomy, deterministic
+G8 policy, and `persist_care_action_proposal`. Proposal insert and operation
+success are one transaction. A controlled crash after proposal insert but
+before terminal update rolled both back; lease expiry/reclaim then produced
+one succeeded evaluation and one proposal. A lost response after that atomic
+commit is a terminal succeeded operation, and repeated HARD, report, or
+reservation callbacks only reuse it. Human rejection, approval, revocation,
+supersession, G9 plan authority, and urgent zero-model handling remain owned by
+the unchanged G8/G9 state machines.
+
+The accepted CareStrategy invocation is selected by the accepted Care work
+product target hash, excluding the earlier catalog-preflight invocation. This
+preserves the structured result and prevents an otherwise false ambiguous
+invocation rejection.
+
+### Ordering, lineage, and model effects
+
+Fresh-database production-composition fixtures proved:
+
+```text
+HARD_BEFORE_REPORT                    = PASS
+REPORT_BEFORE_HARD                    = PASS
+ORDERING_SEMANTIC_CONVERGENCE         = PASS
+REPEAT_TRIGGER_IDEMPOTENCY            = PASS
+HARD_REPORT_RACE_CONVERGENCE          = PASS
+CARE_SOURCE_FINALIZATION_PINNING      = PASS
+CARE_SOURCE_ANALYSIS_PINNING          = PASS
+NO_UNNECESSARY_SHARED_ANALYSIS_RERUN  = PASS
+```
+
+Both eligible orders produced the same governed semantics:
+`recommend_consistent_wake_time`, catalog `consistent-wake-time` v1,
+`routine_adjustment`, elder audience, `{"tolerance_minutes": 30}`, one
+evidence reference, and `care-action-governance.v1`. Each proposal pinned its
+own exact analysis and HARD revisions. A noneligible HARD fixture completed
+evaluation with `no_care_strategy` and zero proposals. An explicit mismatched
+Episode/analysis lineage produced no reservation.
+
+The reverse-order fixture recorded one committed SharedNightAnalysis and one
+committed Product attempt before HARD and the same counts afterward. Durable
+model invocation count was unchanged. HARD-only reevaluation added zero
+SleepCare, EvidenceReasoning, SafetyReview, and CareStrategy calls; HARD does
+not alter model-routing facts, so an absent CareStrategy remains the explicit
+noneligible `no_care_strategy` result rather than being invented.
+
+C1B's production vendor-shaped late-observation test produced immutable
+Episode N+1, exact HARD F2, and a distinct late-reanalysis handoff. C2's
+analysis-side trigger is revision-generic and reserves only when S2's exact
+Episode revision matches current F2; the stale-lineage rejection and exact
+source-pinning tests prove S1 cannot authorize F2. Thus a compatible S2/F2
+pair creates a new semantic evaluation authority and then delegates proposal
+supersession or deduplication to unchanged G8 semantics.
+
+### Operational and migration authority
+
+Additive migration 024 adds only the protected, aggregate-only internal-status
+function `sleepagent_care_evaluation_operational_metrics_v1`. It reports
+pending count, oldest pending age, succeeded count, durable duplicate-trigger
+count, and failed/conflicted count with no subject or source identifiers. The
+API internal-status adapter and test-role bootstrap grant expose it; the
+existing Product queue metrics still determine required-consumer backlog
+health. The manifest pins 024 at
+`209f609be8c857143f7109429f6d4ea878995ae832d6870d32c06a5676762530`.
+Migrations 001–023 are unchanged.
+
+### Verification evidence
+
+- fresh isolated PostgreSQL 16 apply/bootstrap/check: schema 024;
+- mandatory fresh C2 ordering/race/crash/lineage/model lane: 3 passed;
+- final PostgreSQL marker: 44 passed, one pre-existing process-evidence-reader
+  skip, 1,197 deselected;
+- broad non-PostgreSQL/non-E2E lane: 1,195 passed, 47 deselected;
+- focused Care, migration, API/OpenAPI, and architecture selection: 115 passed;
+- Python 3.11 compile/import, architecture dependency baseline, migration
+  checksum, immutable 001–023 diff, and `git diff --check`: passed.
+
+The bounded runtime SCC baseline, forbidden-edge count, and self-import count
+did not grow. No external effect or CarePlan was created. The C2 build used two
+fix rounds: the first separated durable Care evaluation from shared-analysis
+commit ordering; the second added exact structured source-lineage validation,
+durable aggregate metrics, and explicit semantic/model-count assertions.
+
+```text
+FSA-COR-002        = RESOLVED
+CARE_ORDERING_CLAIM = RESTORED
+```

@@ -71,6 +71,10 @@ from sleepagent.application.night_finalization import (
     NightFinalizationService,
     NightFinalizationState,
 )
+from sleepagent.application.care_actions import (
+    CARE_EVALUATION_OPERATION,
+    reserve_care_evaluation_if_ready,
+)
 from sleepagent.infrastructure.postgres_sleep_slice import (
     FastPathHandler,
     FastPathLease,
@@ -1022,6 +1026,7 @@ def _replace_current_risk(
     seed: _ProductSeed,
     urgent: bool,
     update_operation: bool,
+    reviewed_nonurgent: bool = False,
 ) -> str:
     risk_id = f"risk-gate-{uuid4().hex}"
     with psycopg.connect(admin_dsn) as admin:  # type: ignore[attr-defined]
@@ -1041,12 +1046,14 @@ def _replace_current_risk(
                     "current_risk_id": risk_id,
                     "risk_state": (
                         RiskState.REVIEWED_SIGNAL
-                        if urgent
+                        if urgent or reviewed_nonurgent
                         else RiskState.NO_REVIEWED_SIGNAL
                     ),
                     "reason_codes": (
                         "acceptance_urgent"
                         if urgent
+                        else "acceptance_reviewed_nonurgent"
+                        if reviewed_nonurgent
                         else "acceptance_nonurgent",
                     ),
                     "health_escalation_allowed": urgent,
@@ -1218,7 +1225,7 @@ def _cancel_pending_product_work(
                     lease_owner = NULL, lease_expires_at = NULL,
                     fencing_token = NULL, worker_instance = NULL,
                     heartbeat_at = NULL, updated_at = clock_timestamp()
-                WHERE namespace_id = %s AND queue_name = 'product_agent'
+                WHERE namespace_id = %s
                   AND status IN ('pending', 'retry', 'running')
                 """,
                 (namespace_id,),
@@ -1232,12 +1239,47 @@ def _prepare_shared_acceptance_case(
     worker_dsn: str,
     worker_principal: str,
     report_pipeline_mode: ReportPipelineMode = ReportPipelineMode.SHARED_COMPAT,
+    worker_queues: tuple[str, ...] = ("product_agent",),
+    care_eligible: bool = False,
+    fast_path_compatible: bool = False,
 ) -> _PreparedSharedCase:
     seed = _seed_product_scope(
         psycopg,
         admin_dsn=admin_dsn,
         worker_principal=worker_principal,
     )
+    if care_eligible:
+        _seed_l2_personalization(
+            psycopg,
+            admin_dsn=admin_dsn,
+            seed=seed,
+        )
+        _replace_current_risk(
+            psycopg,
+            admin_dsn=admin_dsn,
+            seed=seed,
+            urgent=False,
+            reviewed_nonurgent=True,
+            update_operation=True,
+        )
+    if fast_path_compatible:
+        policy = default_sleep_slice_policy()
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_night_episode_revisions
+                    SET revision_json = jsonb_set(
+                      revision_json, '{policy_versions}', %s::jsonb
+                    )
+                    WHERE night_episode_revision_id = %s
+                    """,
+                    (
+                        json.dumps(policy.policy_versions),
+                        seed.night_episode_revision_id,
+                    ),
+                )
+                assert cursor.rowcount == 1
     _convert_seed_to_report_request(
         psycopg,
         admin_dsn=admin_dsn,
@@ -1248,6 +1290,7 @@ def _prepare_shared_acceptance_case(
         worker_dsn=worker_dsn,
         worker_principal=worker_principal,
         namespace_id=seed.namespace_id,
+        worker_queues=worker_queues,
     )
     processor = ProductAgentProcessor(
         factory,
@@ -1426,7 +1469,10 @@ def test_shared_only_commit_creates_one_shared_result_without_legacy_bridge() ->
     )
 
 
-def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis() -> None:
+@pytest.mark.parametrize("care_eligible", [True, False])
+def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis(
+    care_eligible: bool,
+) -> None:
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
     worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
@@ -1439,6 +1485,12 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
         admin_dsn=admin_dsn,
         worker_principal=worker_principal,
     )
+    if care_eligible:
+        _seed_l2_personalization(
+            psycopg,
+            admin_dsn=admin_dsn,
+            seed=seed,
+        )
     default_policy = default_sleep_slice_policy()
     fast_path_policy = replace(
         default_policy,
@@ -1651,6 +1703,15 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
             assert fast_result.product_agent_operation_id is None
             report_operation_ids.append(fast_result.report_operation_id)
         assert len(set(report_operation_ids)) == 1
+        if care_eligible:
+            _replace_current_risk(
+                psycopg,
+                admin_dsn=admin_dsn,
+                seed=replace(seed, operation_id=report_operation_ids[0]),
+                urgent=False,
+                reviewed_nonurgent=True,
+                update_operation=True,
+            )
         with psycopg.connect(admin_dsn) as admin:
             with admin.cursor() as cursor:
                 cursor.execute(
@@ -1706,6 +1767,22 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
             source=source,
         )
 
+        care_claim = _claim_product_work(
+            store,
+            worker_instance="hard-before-report-care",
+            operation_type=CARE_EVALUATION_OPERATION,
+        )
+        care_result = ProductAgentWorkHandlerAdapter(
+            processor=processor,
+            model_mode=ModelMode.DETERMINISTIC,
+        )(WorkContext(care_claim, store, threading.Event()))
+        assert care_result.disposition is WorkDisposition.SUCCEEDED
+        assert care_result.result["reason_code"] == (
+            "eligible" if care_eligible else "no_care_strategy"
+        )
+        assert (care_result.result["proposal_id"] is not None) is care_eligible
+        assert care_result.result["proposal_created"] is care_eligible
+
         with psycopg.connect(admin_dsn) as admin:
             with admin.cursor() as cursor:
                 cursor.execute(
@@ -1723,13 +1800,16 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
                       count(*) FILTER (
                         WHERE operation_type = 'product_agent'
                            OR queue_name = 'product_agent_compatibility'
+                      ),
+                      count(*) FILTER (
+                        WHERE operation_type = 'care.evaluate.on_hard.v1'
                       )
                     FROM public.sleep_domain_operations
                     WHERE namespace_id = %s AND subject_id = %s
                     """,
                     (seed.namespace_id, seed.subject_id),
                 )
-                assert cursor.fetchone() == (3, 1, 1, 0)
+                assert cursor.fetchone() == (3, 1, 1, 0, 1)
                 cursor.execute(
                     """
                     SELECT count(*)
@@ -1748,6 +1828,53 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
                     (seed.namespace_id, seed.subject_id),
                 )
                 assert cursor.fetchone() == (3, 3)
+                cursor.execute(
+                    """
+                    SELECT count(*),
+                           min(source_night_finalization_revision_id),
+                           min(source_analysis_revision_id)
+                    FROM public.backend_care_action_proposals_v3
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (seed.namespace_id, seed.subject_id),
+                )
+                assert cursor.fetchone() == (
+                    (1 if care_eligible else 0),
+                    (
+                        hard.night_finalization_revision_id
+                        if care_eligible
+                        else None
+                    ),
+                    (
+                        artifact.analysis.analysis_revision_id
+                        if care_eligible
+                        else None
+                    ),
+                )
+                if care_eligible:
+                    cursor.execute(
+                        """
+                        SELECT action_type,
+                               candidate_json ->> 'catalog_action_id',
+                               candidate_json ->> 'intent', audience_role,
+                               policy_version,
+                               candidate_json -> 'parameters',
+                               jsonb_array_length(candidate_json ->
+                                 'rationale_evidence_refs')
+                        FROM public.backend_care_action_proposals_v3
+                        WHERE namespace_id = %s AND subject_id = %s
+                        """,
+                        (seed.namespace_id, seed.subject_id),
+                    )
+                    assert cursor.fetchone() == (
+                        "recommend_consistent_wake_time",
+                        "consistent-wake-time",
+                        "routine_adjustment",
+                        "elder",
+                        "care-action-governance.v1",
+                        {"tolerance_minutes": 30},
+                        1,
+                    )
     finally:
         _cancel_pending_product_work(
             psycopg,
@@ -1755,6 +1882,379 @@ def test_normalization_and_finalization_handoffs_converge_on_one_shared_analysis
             namespace_id=seed.namespace_id,
         )
         provider.close()
+
+
+def test_soft_report_before_hard_automatically_reevaluates_care() -> None:
+    """FSA-COR-002: a succeeded SOFT analysis must not mask later HARD."""
+
+    psycopg = pytest.importorskip("psycopg")
+    admin_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
+    worker_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_WORKER_DSN")
+    worker_principal = os.environ.get(
+        "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL",
+        "sleepagent-worker-test",
+    )
+    case = _prepare_shared_acceptance_case(
+        psycopg,
+        admin_dsn=admin_dsn,
+        worker_dsn=worker_dsn,
+        worker_principal=worker_principal,
+        report_pipeline_mode=ReportPipelineMode.SHARED_ONLY,
+        worker_queues=("fast_path", "product_agent"),
+        care_eligible=True,
+        fast_path_compatible=True,
+    )
+    try:
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.backend_principal_grants
+                    SET allowed_handlers_json =
+                      '["fast_path","product_agent"]'::jsonb
+                    WHERE namespace_id = %s AND principal_id = %s
+                      AND purpose = 'worker'
+                    """,
+                    (case.seed.namespace_id, worker_principal),
+                )
+                assert cursor.rowcount == 1
+                cursor.execute(
+                    """
+                    SELECT deterministic_close_deadline_at
+                    FROM public.sleep_domain_night_episodes
+                    WHERE night_episode_id = %s
+                    """,
+                    (case.seed.night_episode_id,),
+                )
+                close_deadline = cursor.fetchone()[0]
+
+        finalizer = NightFinalizationService(
+            case.factory,
+            policy=NightFinalizationPolicy(minimum_observation_count=0),
+        )
+        soft = finalizer.finalize(
+            case.scope,
+            night_episode_id=case.seed.night_episode_id,
+            evaluated_at=close_deadline + timedelta(hours=3),
+        )
+        assert soft.state is NightFinalizationState.SOFT_FINALIZED
+
+        case.processor.persist_and_commit(
+            case.scope,
+            case.lease,
+            case.artifact,
+            source=case.source,  # type: ignore[arg-type]
+        )
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.backend_care_action_proposals_v3
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (0,)
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.sleep_domain_operations
+                    WHERE namespace_id = %s AND subject_id = %s
+                      AND operation_type = 'care.evaluate.on_hard.v1'
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (0,)
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.backend_invocations
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                model_invocation_count_before_hard = cursor.fetchone()[0]
+
+        hard = finalizer.finalize(
+            case.scope,
+            night_episode_id=case.seed.night_episode_id,
+            evaluated_at=close_deadline + timedelta(hours=25),
+        )
+        assert hard.state is NightFinalizationState.HARD_FINALIZED
+        assert hard.reanalysis_operation_id is not None
+        with case.factory.begin(case.scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                stale = reserve_care_evaluation_if_ready(
+                    cursor,
+                    case.scope,
+                    night_episode_id=case.seed.night_episode_id,
+                    night_episode_revision_id=(
+                        f"stale:{case.seed.night_episode_revision_id}"
+                    ),
+                    hard_finalization_revision_id=(
+                        hard.night_finalization_revision_id
+                    ),
+                    analysis_revision_id=(
+                        case.artifact.analysis.analysis_revision_id
+                    ),
+                    shared_analysis_sha256=(
+                        case.artifact.shared_analysis.shared_analysis_sha256
+                        if case.artifact.shared_analysis is not None
+                        else None
+                    ),
+                    reserved_at=datetime.now(tz=UTC),
+                    operation_id=case.processor.id_generator(),
+                )
+                assert stale is None
+                uow.commit()
+            finally:
+                cursor.close()
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET available_at = clock_timestamp(), priority = 30000
+                    WHERE operation_id = %s AND status = 'pending'
+                    """,
+                    (hard.reanalysis_operation_id,),
+                )
+                assert cursor.rowcount == 1
+
+        hard_claim = case.store.claim(
+            queue="fast_path",
+            worker_instance="report-before-hard-fast-path",
+            lease_seconds=300,
+        )
+        assert hard_claim is not None
+        assert hard_claim.work_id == hard.reanalysis_operation_id
+        race = threading.Barrier(2)
+
+        def trigger_from_hard() -> object:
+            race.wait()
+            return FastPathHandler(
+                case.factory,
+                emit_legacy_report_compatibility=False,
+            ).process(
+                case.store.uow_scope_for_claim(hard_claim),
+                FastPathLease(
+                    operation_id=hard_claim.work_id,
+                    lease_generation=hard_claim.lease_generation,
+                    fencing_token=hard_claim.fencing_token,
+                    worker_instance=hard_claim.worker_instance,
+                ),
+            )
+
+        def trigger_from_analysis() -> object:
+            race.wait()
+            with case.factory.begin(case.scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    reservation = reserve_care_evaluation_if_ready(
+                        cursor,
+                        case.scope,
+                        night_episode_id=case.seed.night_episode_id,
+                        night_episode_revision_id=(
+                            case.seed.night_episode_revision_id
+                        ),
+                        analysis_revision_id=(
+                            case.artifact.analysis.analysis_revision_id
+                        ),
+                        shared_analysis_sha256=(
+                            case.artifact.shared_analysis.shared_analysis_sha256
+                            if case.artifact.shared_analysis is not None
+                            else None
+                        ),
+                        reserved_at=datetime.now(tz=UTC),
+                        operation_id=case.processor.id_generator(),
+                    )
+                    uow.commit()
+                    return reservation
+                finally:
+                    cursor.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            hard_future = executor.submit(trigger_from_hard)
+            analysis_future = executor.submit(trigger_from_analysis)
+            hard_future.result(timeout=30)
+            race_reservation = analysis_future.result(timeout=30)
+        assert race_reservation is not None
+        failed_care_claim = _claim_product_work(
+            case.store,
+            worker_instance="report-before-hard-care-crash",
+            operation_type=CARE_EVALUATION_OPERATION,
+        )
+
+        def crash_before_terminal_commit() -> NoReturn:
+            raise RuntimeError("controlled_care_commit_crash")
+
+        with pytest.raises(RuntimeError, match="controlled_care_commit_crash"):
+            case.processor.evaluate_care_on_hard(
+                case.store.uow_scope_for_claim(failed_care_claim),
+                _lease_for_claim(failed_care_claim),
+                before_terminal_commit=crash_before_terminal_commit,
+            )
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.backend_care_action_proposals_v3
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (0,)
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_operations
+                    SET lease_expires_at = clock_timestamp() - interval '1 second'
+                    WHERE operation_id = %s AND status = 'running'
+                    """,
+                    (failed_care_claim.work_id,),
+                )
+                assert cursor.rowcount == 1
+
+        care_claim = _claim_product_work(
+            case.store,
+            worker_instance="report-before-hard-care-reclaim",
+            operation_type=CARE_EVALUATION_OPERATION,
+        )
+        assert care_claim.work_id == failed_care_claim.work_id
+        care_result = ProductAgentWorkHandlerAdapter(
+            processor=case.processor,
+            model_mode=ModelMode.DETERMINISTIC,
+        )(WorkContext(care_claim, case.store, threading.Event()))
+        assert care_result.disposition is WorkDisposition.SUCCEEDED
+        assert care_result.result["reason_code"] == "eligible"
+        assert care_result.result["proposal_created"] is True
+
+        repeated_hard = finalizer.finalize(
+            case.scope,
+            night_episode_id=case.seed.night_episode_id,
+            evaluated_at=close_deadline + timedelta(hours=25),
+        )
+        assert repeated_hard == hard
+        repeated_reservations = []
+        for hard_id in (hard.night_finalization_revision_id, None):
+            with case.factory.begin(case.scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    reservation = reserve_care_evaluation_if_ready(
+                        cursor,
+                        case.scope,
+                        night_episode_id=case.seed.night_episode_id,
+                        night_episode_revision_id=(
+                            case.seed.night_episode_revision_id
+                        ),
+                        hard_finalization_revision_id=hard_id,
+                        analysis_revision_id=(
+                            case.artifact.analysis.analysis_revision_id
+                        ),
+                        shared_analysis_sha256=(
+                            case.artifact.shared_analysis.shared_analysis_sha256
+                            if case.artifact.shared_analysis is not None
+                            else None
+                        ),
+                        reserved_at=datetime.now(tz=UTC),
+                        operation_id=case.processor.id_generator(),
+                    )
+                    assert reservation is not None
+                    repeated_reservations.append(reservation)
+                    uow.commit()
+                finally:
+                    cursor.close()
+        assert all(not item.created for item in repeated_reservations)
+        assert len({item.operation_id for item in repeated_reservations}) == 1
+
+        with psycopg.connect(admin_dsn) as admin:
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT count(*),
+                           min(source_night_finalization_revision_id),
+                           min(source_analysis_revision_id)
+                    FROM public.backend_care_action_proposals_v3
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (
+                    1,
+                    hard.night_finalization_revision_id,
+                    case.artifact.analysis.analysis_revision_id,
+                )
+                cursor.execute(
+                    """
+                    SELECT action_type,
+                           candidate_json ->> 'catalog_action_id',
+                           candidate_json ->> 'intent', audience_role,
+                           policy_version,
+                           candidate_json -> 'parameters',
+                           jsonb_array_length(candidate_json ->
+                             'rationale_evidence_refs')
+                    FROM public.backend_care_action_proposals_v3
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (
+                    "recommend_consistent_wake_time",
+                    "consistent-wake-time",
+                    "routine_adjustment",
+                    "elder",
+                    "care-action-governance.v1",
+                    {"tolerance_minutes": 30},
+                    1,
+                )
+                cursor.execute(
+                    """
+                    SELECT count(*), count(*) FILTER (WHERE status = 'succeeded'),
+                           sum((operation_json ->>
+                             'deduplicated_trigger_count')::BIGINT)
+                    FROM public.sleep_domain_operations
+                    WHERE namespace_id = %s AND subject_id = %s
+                      AND operation_type = 'care.evaluate.on_hard.v1'
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                operation_count, succeeded_count, deduplicated_count = (
+                    cursor.fetchone()
+                )
+                assert (operation_count, succeeded_count) == (1, 1)
+                assert deduplicated_count >= 2
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.sleep_domain_analysis_revisions
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (1,)
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.backend_product_attempts
+                    WHERE namespace_id = %s AND subject_id = %s
+                      AND attempt_state = 'committed' AND query_visible = TRUE
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (1,)
+                cursor.execute(
+                    """
+                    SELECT count(*) FROM public.backend_invocations
+                    WHERE namespace_id = %s AND subject_id = %s
+                    """,
+                    (case.seed.namespace_id, case.seed.subject_id),
+                )
+                assert cursor.fetchone() == (
+                    model_invocation_count_before_hard,
+                )
+    finally:
+        _cancel_pending_product_work(
+            psycopg,
+            admin_dsn=admin_dsn,
+            namespace_id=case.seed.namespace_id,
+        )
+        case.provider.close()
 
 
 def _lease_for_claim(claim: LeaseClaim) -> ProductAgentLease:

@@ -36,6 +36,9 @@ from sleepagent.persistence.uow import (
 from sleepagent.persistence.observation_semantics import (
     persist_observation_semantics_v2,
 )
+from sleepagent.application.care_actions import (
+    reserve_care_evaluation_if_ready,
+)
 from sleepagent.domain.contracts import (
     AdapterObservationCandidate,
     AlertCorrelationReceipt,
@@ -3135,6 +3138,8 @@ class PostgresSleepSliceRepository:
             )
         cursor = self.connection.cursor()
         try:
+            care_evaluation_operation_id: str | None = None
+            care_evaluation_operation_created = False
             if report_operation_id is not None:
                 report_semantic_key = _digest(
                     {
@@ -3391,6 +3396,24 @@ class PostgresSleepSliceRepository:
                         raise SleepSliceInvariantError(
                             "existing report operation changed during refresh"
                         )
+            finalization_revision_id = operation.operation_json.get(
+                "night_finalization_revision_id"
+            )
+            if isinstance(finalization_revision_id, str) and finalization_revision_id:
+                care_reservation = reserve_care_evaluation_if_ready(
+                    cursor,
+                    self.scope,
+                    night_episode_id=operation.night_episode_id,
+                    night_episode_revision_id=(
+                        result.current_risk.source_scope.night_episode_revision_id
+                    ),
+                    hard_finalization_revision_id=finalization_revision_id,
+                    reserved_at=committed_at,
+                    operation_id=self.id_generator(committed_at),
+                )
+                if care_reservation is not None:
+                    care_evaluation_operation_id = care_reservation.operation_id
+                    care_evaluation_operation_created = care_reservation.created
             operation_json = {
                 **operation.operation_json,
                 "result": {
@@ -3402,6 +3425,12 @@ class PostgresSleepSliceRepository:
                     "model_invocation_count": 0,
                     "product_agent_operation_id": product_agent_operation_id,
                     "report_operation_id": report_operation_id,
+                    "care_evaluation_operation_id": (
+                        care_evaluation_operation_id
+                    ),
+                    "care_evaluation_operation_created": (
+                        care_evaluation_operation_created
+                    ),
                 },
             }
             cursor.execute(

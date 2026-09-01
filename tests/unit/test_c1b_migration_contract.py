@@ -19,9 +19,10 @@ MIGRATION = ROOT / (
 
 
 def test_c1b_is_manifest_pinned_additive_migration_023() -> None:
-    assert LATEST_SCHEMA_VERSION == 23
-    assert EXPECTED_MIGRATION_IDENTITIES[-1].startswith(
-        "023:023_late_episode_association_authority:"
+    assert LATEST_SCHEMA_VERSION >= 23
+    assert any(
+        identity.startswith("023:023_late_episode_association_authority:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
     )
     assert MIGRATION.is_file()
 

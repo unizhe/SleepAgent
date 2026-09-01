@@ -797,6 +797,10 @@ class PostgresInternalStatus:
                     "SELECT public.sleepagent_care_outcome_operational_metrics_v1()"
                 )
                 care_outcome_row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT public.sleepagent_care_evaluation_operational_metrics_v1()"
+                )
+                care_evaluation_row = cursor.fetchone()
             finally:
                 cursor.close()
             uow.commit()
@@ -836,6 +840,18 @@ class PostgresInternalStatus:
         if not isinstance(outcome_value, Mapping):
             raise RuntimeError("care outcome operational metrics are unavailable")
         result["care_outcome"] = dict(outcome_value)
+        evaluation_value = (
+            None if care_evaluation_row is None else care_evaluation_row[0]
+        )
+        if isinstance(evaluation_value, str):
+            import json
+
+            evaluation_value = json.loads(evaluation_value)
+        if not isinstance(evaluation_value, Mapping):
+            raise RuntimeError(
+                "care evaluation operational metrics are unavailable"
+            )
+        result["care_evaluation"] = dict(evaluation_value)
         return result
 
 

@@ -1194,6 +1194,7 @@ def bootstrap_test_database_roles(
             "sleepagent_care_governance_operational_metrics_v3()",
             "sleepagent_care_execution_operational_metrics_v1()",
             "sleepagent_care_outcome_operational_metrics_v1()",
+            "sleepagent_care_evaluation_operational_metrics_v1()",
             "sleepagent_decide_care_action_proposal_v3(text,bigint,text,text,text,text,text,timestamptz)",
             "sleepagent_revoke_care_approval_v3(text,bigint,text,text,text,text,timestamptz)",
             "sleepagent_execute_care_plan_v1(text,bigint,text,text,text,text,timestamptz)",
