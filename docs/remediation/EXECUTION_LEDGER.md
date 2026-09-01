@@ -3097,3 +3097,153 @@ recent closed Episode nor guesses a historical night for late input.
 No migration was added or modified. The local commit subject is
 `closure(c1a): project live observations into episodes`; its hash is reported
 in the final handoff because a commit cannot contain its own resulting hash.
+
+## C1B — Late LIVE observation association to closed NightEpisode
+
+Entry checkpoint: `cf936bcf15465fdf61268c2ccb59351d7ab46b60`. The only
+entry-tree difference was the pre-existing untracked `docs/audit/`, classified
+as `PRE_EXISTING_AUDIT_OUTPUT`; it remained immutable and excluded from C1B.
+
+### Root cause reconfirmation
+
+After C1A, successful LIVE normalization enters the shared
+`EpisodeProjectionBoundary`, but a closed Episode clears
+`active_night_episode_id`. The boundary therefore loaded a dormant lifecycle
+with no Episode, and `EpisodeLifecycleProjector` either returned no mutation
+for an ordinary observation or could treat historical `IN_BED` as a request to
+open a new Episode. There was no bounded lookup of closed Episode authority.
+
+### Selected association and mutation authority
+
+Only a dormant lifecycle performs historical classification. The new pure
+`ClosedEpisodeAssociationResolver` receives a bounded, locked candidate set
+from the existing PostgreSQL slice repository. Candidates must match exact
+namespace, mode, generation, replay arm, subject, pinned Episode timezone,
+canonical local-date range, and historical DeviceBinding identity/version;
+they must be closed, finalized, non-conflicting protocol-v2 Episodes with
+persisted membership proof for that binding. The canonical observation loader
+also verifies that its event instant is inside the exact pinned binding
+version's effective interval.
+
+Event time must be inside the stored Episode collection/wake-or-deadline
+window. Arrival must be at or before the existing
+`EpisodeBoundaryPolicy.allowed_lateness_seconds` watermark; the production
+default remains the already governed two hours. Zero candidates becomes an
+explicit no-match or out-of-window quarantine, more than one eligible
+candidate becomes reconciliation-required quarantine, and exactly one feeds
+the existing `EpisodeLifecycleProjector` and Episode writer. Current-night
+`IN_BED` with no historical classification still follows unchanged normal
+opening behavior. LIVE and Replay share this resolver and mutation authority.
+
+The unique path creates revision N+1 linked to N, preserves the complete old
+membership set, and adds the late canonical observation once. The former
+revision is unchanged. The new membership populates the existing lateness
+watermark and `late_after_watermark` fields. Association evidence and sanitized
+outbox events are committed in the same canonical/revision/membership
+transaction. The existing subject lifecycle advisory lock, Episode CAS,
+membership uniqueness, and observation association uniqueness make retries
+and concurrent evaluation converge without last-write-wins behavior.
+
+### Finalization and bounded reanalysis
+
+The production finalizer observes that the current Episode revision differs
+from HARD finalization F1, retains F1, creates immutable F2 with F1 as parent,
+pins the new Episode revision, and automatically creates/reuses its existing
+late-reanalysis operation. Repeating finalization with no new Episode evidence
+returns F2 and the same operation. C1B does not alter Care ordering,
+personalization, scheduling, or storage optimization.
+
+### Fresh PostgreSQL production and quarantine proof
+
+A fresh isolated PostgreSQL 16 database applied 001→023 and bootstrapped
+distinct API and Worker roles. Vendor-shaped LIVE Push opened and populated an
+Episode, LIVE wake/report evidence closed it, and trusted SleepReport evidence
+produced HARD F1 with a dormant lifecycle pointer. A later vendor-shaped Push
+then passed real authentication, canonical reconciliation, and the shared
+production projection boundary. A controlled failure before projection commit
+left canonical, association, revision, and membership state absent; reclaim
+committed four late canonical facts as four sequential immutable Episode
+revisions and memberships. The original revision JSON remained byte-for-byte
+unchanged. Duplicate input and two concurrent rechecks created no additional
+revision. Finalization advanced to F2 and created its bounded reanalysis
+handoff without a test enqueue.
+
+In the same process story, four out-of-window observations and four historical
+no-match observations remained canonical but produced explicit quarantine and
+zero Episode mutation. Historical no-match `IN_BED` did not open a new night.
+An explicitly labeled, schema-valid adversarial overlap supplied two eligible
+closed candidates with different canonical wake dates and the same historical
+binding. Four new vendor LIVE observations each produced
+`LATE_ASSOCIATION_RECONCILIATION_REQUIRED`, recorded both candidate IDs, and
+changed neither Episode's revision number nor CAS. The mandatory unique path
+did not manually seed or call an Episode revision helper; only the adversarial
+ambiguity precondition used controlled persisted state.
+
+```text
+LATE_UNIQUE_ASSOCIATION               = PASS
+LATE_OUT_OF_WINDOW                    = PASS
+LATE_AMBIGUOUS_ASSOCIATION            = PASS
+LATE_NO_MATCH                         = PASS
+HISTORICAL_IN_BED_PROTECTION          = PASS
+IMMUTABLE_EPISODE_REVISION            = PASS
+LATE_MEMBERSHIP_IDEMPOTENCY           = PASS
+CONCURRENT_ASSOCIATION                = PASS
+FINALIZATION_REVISION_PROPAGATION     = PASS
+DOWNSTREAM_REANALYSIS_HANDOFF         = PASS
+FRESH_DB_LATE_OBSERVATION_PROCESS_PROOF = PASS
+QUARANTINE_RECONCILIATION_PROOF       = PASS
+```
+
+### Revision churn and query evidence
+
+For the bounded final LIVE namespace fixture, PostgreSQL contained 57
+canonical observations, three Episodes across the controlled ambiguity and
+generation-reset stories, 45 Episode revisions, 45 memberships, and 187,123
+logical revision-JSON bytes. The unique late payload contained four distinct
+canonical facts and therefore produced four sequential late revisions and
+four memberships under the accepted per-observation semantics. C1B performs
+no compaction or coalescing.
+
+`EXPLAIN` used `ux_sleep_domain_main_episode_date_v2` for the exact
+namespace/mode/generation/arm/subject and two-date Episode bound, the revision
+primary key for current authority, and an index-only scan of the new
+`idx_sleep_domain_membership_binding_episode_v2` for Episode/binding/version
+proof. The resolver fetch is capped at three rows, enough to distinguish zero,
+one, and ambiguity without scanning all historical Episodes.
+
+### Migration and verification evidence
+
+Additive migration 023 extends the existing association evidence with
+generation/run/arm authority, NOT VALID compatibility constraints and foreign
+keys, FORCE RLS, no PUBLIC grants, a subject/status evidence index, and the
+measured membership binding/Episode index. Migrations 001–022 are unchanged.
+The manifest pins 023 at
+`e545e0dc9ee6ebba0851bab181918367ec1f2cce0d8091fb523cccec3105196f`.
+Fresh 001→023 apply/bootstrap/check and an explicit populated-ledger 022→023
+apply/check both passed.
+
+- focused C1B resolver, projection, migration, and semantics selection: 38
+  passed;
+- authoritative broad non-PostgreSQL/non-E2E lane: 1,192 passed, 45
+  deselected;
+- fresh PostgreSQL 16 marker: 42 passed, one documented process-root
+  evidence-reader skipped, 1,194 deselected;
+- architecture: 6 passed; zero self-imports and forbidden dependency growth,
+  with the bounded runtime SCC baseline unchanged;
+- OpenAPI canonical snapshots, Python 3.11 compile/import, migration check,
+  migration 001–022 immutability, and `git diff --check`: passed.
+
+### Build log
+
+The frozen C1B work order was implemented directly under the codex-build
+workflow. Fix round one removed an outbox identity collision by making the
+late Episode revision event the mutation's single domain event. Fix round two
+corrected an ambiguity fixture canonical-slot collision and added the measured
+membership lookup index after `EXPLAIN`; the complete fresh database and broad
+lanes were repeated against the final checksum-pinned artifact. Full diff
+review found no remaining C1B blocker or scope expansion.
+
+```text
+FSA-COR-004                              = RESOLVED
+LATE_OBSERVATION_IMMUTABLE_REVISION_CLAIM = RESTORED
+```

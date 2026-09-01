@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,19 @@ from sleepagent.application.night_finalization import (
     NightFinalizationState,
 )
 from sleepagent.domain.contracts import DeviceBinding, DeviceBindingStatus
+from sleepagent.domain.episodes import (
+    EpisodeAssignmentBasis,
+    EpisodeDateConfidence,
+    NightEpisodeV2,
+    UUID7Generator,
+    episode_anchor_key,
+)
 from sleepagent.infrastructure.postgres_sleep_slice import (
+    EpisodeProjectionBoundary,
     NormalizationLease,
     RawPayloadCipher,
+    default_sleep_slice_policy,
+    project_authoritative_canonical_observations,
 )
 from sleepagent.integrations.perceptor.client import (
     HISTORY_ENDPOINT,
@@ -381,12 +392,13 @@ def _push_raw(
     heart_rate: int = 70,
     on_bed: int = 1,
     report_at: datetime = NOW,
+    signed_at: datetime = NOW,
     local_datetime: str = "2026-08-23T11:00:00.000",
 ) -> bytes:
     payload: dict[str, object] = {
         "client_id": CLIENT_ID,
         "version": "2.0",
-        "timestamp": int(NOW.timestamp()),
+        "timestamp": int(signed_at.timestamp()),
         "sign_version": "2.0",
         "sign_nonce": f"nonce-{message_id}",
         "sign_method": "HMAC-SHA1",
@@ -1409,6 +1421,568 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                 (episode_id,),
             ).fetchone() == ("hard_finalized", 1)
 
+        # C1B authority proof: a later-arriving vendor Push is normalized and
+        # reconciled normally, then routed back to the one compatible closed
+        # Episode.  The test never synthesizes an Episode revision directly.
+        late_received_at = NOW + timedelta(hours=1, minutes=8)
+        late_report_at = NOW + timedelta(minutes=4, seconds=30)
+        late_payload = _push_raw(
+            message_id="p4d2-b2-late-closed-night",
+            report_at=late_report_at,
+            signed_at=late_received_at,
+            local_datetime="2026-08-23T11:04:30.000",
+        )
+        late_webhook = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: late_received_at,
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            episode_before_late = connection.execute(
+                "SELECT current_revision_number, current_revision_id, "
+                "(SELECT revision_json FROM "
+                "sleep_domain_night_episode_revisions "
+                "WHERE night_episode_revision_id = episode.current_revision_id), "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = episode.night_episode_id) "
+                "FROM sleep_domain_night_episodes AS episode "
+                "WHERE night_episode_id = %s",
+                (episode_id,),
+            ).fetchone()
+        assert episode_before_late is not None
+
+        late_ingress = late_webhook.accept(
+            late_payload,
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert late_ingress.disposition == "accepted"
+        late_failure_count = 0
+
+        def fail_late_before_projection(phase: str) -> None:
+            nonlocal late_failure_count
+            assert phase == "before_episode_projection"
+            late_failure_count += 1
+            raise _SimulatedCrash("late projection pre-commit crash")
+
+        late_crash_runtime = _durable_ingestion_runtime(
+            pool=worker_pool,
+            worker_uow=worker_uow,
+            store=store,
+            processor=PerceptorNormalizationProcessor(
+                worker_uow,
+                cipher=cipher,
+                projection_fault_injector=fail_late_before_projection,
+                observation_semantics_version=ObservationSemanticsVersion.V2,
+            ),  # type: ignore[arg-type]
+            worker_instance="p4d2-b2-late-crash-worker",
+        )
+        assert late_crash_runtime.run_once() is True
+        assert late_failure_count == 1
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM sleep_domain_canonical_observations "
+                "WHERE raw_ingress_record_id = %s",
+                (late_ingress.raw_ingress_record_id,),
+            ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT current_revision_number FROM "
+                "sleep_domain_night_episodes WHERE night_episode_id = %s",
+                (episode_id,),
+            ).fetchone() == (episode_before_late[0],)
+
+        late_retry_runtime = _durable_ingestion_runtime(
+            pool=worker_pool,
+            worker_uow=worker_uow,
+            store=store,
+            processor=PerceptorNormalizationProcessor(
+                worker_uow,
+                cipher=cipher,
+                observation_semantics_version=ObservationSemanticsVersion.V2,
+            ),  # type: ignore[arg-type]
+            worker_instance="p4d2-b2-late-retry-worker",
+        )
+        late_retried = False
+        late_retry_deadline = time.monotonic() + 1.0
+        while time.monotonic() < late_retry_deadline:
+            if late_retry_runtime.run_once():
+                late_retried = True
+                break
+            time.sleep(0.01)
+        assert late_retried is True
+        with psycopg.connect(admin_dsn) as connection:
+            late_observation_ids = tuple(
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT observation_id FROM "
+                    "sleep_domain_canonical_observations "
+                    "WHERE raw_ingress_record_id = %s ORDER BY observation_id",
+                    (late_ingress.raw_ingress_record_id,),
+                ).fetchall()
+            )
+        assert len(late_observation_ids) == 4
+        with psycopg.connect(admin_dsn) as connection:
+            episode_after_late = connection.execute(
+                "SELECT current_revision_number, current_revision_id, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = episode.night_episode_id), "
+                "(SELECT count(*) FROM "
+                "sleep_domain_night_episode_revisions "
+                "WHERE night_episode_id = episode.night_episode_id), "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = episode.night_episode_id "
+                "AND observation_id = ANY(%s) "
+                "AND lateness_watermark_at = %s "
+                "AND late_after_watermark = FALSE) "
+                "FROM sleep_domain_night_episodes AS episode "
+                "WHERE night_episode_id = %s",
+                (
+                    list(late_observation_ids),
+                    NOW + timedelta(hours=2, minutes=7),
+                    episode_id,
+                ),
+            ).fetchone()
+            original_revision_json = connection.execute(
+                "SELECT revision_json FROM "
+                "sleep_domain_night_episode_revisions "
+                "WHERE night_episode_revision_id = %s",
+                (str(episode_before_late[1]),),
+            ).fetchone()
+            dormant = connection.execute(
+                "SELECT state, active_night_episode_id FROM "
+                "backend_monitoring_snapshots_v2 "
+                "WHERE namespace_id = %s AND subject_id = %s "
+                "AND namespace_generation = 1",
+                (NAMESPACE, SUBJECT),
+            ).fetchone()
+            associated_evidence = connection.execute(
+                "SELECT count(*), bool_and(status = 'associated'), "
+                "bool_and(reason_code = 'LATE_OBSERVATION_ASSOCIATED') "
+                "FROM sleep_domain_pending_episode_associations "
+                "WHERE namespace_id = %s AND source_resource_id = ANY(%s)",
+                (NAMESPACE, list(late_observation_ids)),
+            ).fetchone()
+        assert episode_after_late is not None
+        assert int(episode_after_late[0]) == int(episode_before_late[0]) + 4
+        assert int(episode_after_late[2]) == int(episode_before_late[3]) + 4
+        assert episode_after_late[0] == episode_after_late[3]
+        assert episode_after_late[4] == 4
+        assert original_revision_json == (episode_before_late[2],)
+        assert dormant == ("dormant", None)
+        assert associated_evidence == (4, True, True)
+
+        with psycopg.connect(admin_dsn) as connection:
+            connection.execute(
+                "INSERT INTO sleep_domain_pending_episode_associations ("
+                "association_id, namespace_id, data_mode, association_kind, "
+                "source_resource_id, subject_id, status, reason_code, "
+                "association_json, created_at, namespace_generation) VALUES ("
+                "'c1b-cross-subject-evidence', %s, 'live', 'observation', "
+                "'c1b-cross-subject-observation', 'different-subject', "
+                "'quarantined', 'LATE_ASSOCIATION_NO_MATCH', '{}'::jsonb, "
+                "%s, 1)",
+                (NAMESPACE, late_received_at),
+            )
+        with worker_uow.begin(final_scope) as uow:
+            scoped_cursor = uow.connection.cursor()
+            try:
+                scoped_cursor.execute(
+                    "SELECT count(*) FROM "
+                    "sleep_domain_pending_episode_associations "
+                    "WHERE association_id = 'c1b-cross-subject-evidence'"
+                )
+                assert scoped_cursor.fetchone() == (0,)
+            finally:
+                scoped_cursor.close()
+
+        concurrent_policy = default_sleep_slice_policy()
+
+        def concurrently_recheck_same_late_observation() -> bool:
+            boundary = EpisodeProjectionBoundary(concurrent_policy)
+            with worker_uow.begin(final_scope) as uow:
+                decisions = project_authoritative_canonical_observations(
+                    uow.connection,
+                    final_scope,
+                    (late_observation_ids[0],),
+                    committed_at=NOW + timedelta(hours=1, minutes=9),
+                    policy=concurrent_policy,
+                    projection_boundary=boundary,
+                    id_generator=boundary.id_generator,
+                )
+                uow.commit()
+            return decisions[0].persist_required
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            concurrent_results = tuple(
+                executor.map(
+                    lambda _index: concurrently_recheck_same_late_observation(),
+                    range(2),
+                )
+            )
+        assert concurrent_results == (False, False)
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number FROM "
+                "sleep_domain_night_episodes WHERE night_episode_id = %s",
+                (episode_id,),
+            ).fetchone() == (episode_after_late[0],)
+
+        revised_finalization = NightFinalizationService(worker_uow).finalize(
+            final_scope,
+            night_episode_id=episode_id,
+            evaluated_at=NOW + timedelta(hours=1, minutes=10),
+        )
+        assert revised_finalization.state is NightFinalizationState.HARD_FINALIZED
+        assert revised_finalization.finalization_revision_number == 2
+        assert revised_finalization.parent_finalization_revision_id == (
+            finalized.night_finalization_revision_id
+        )
+        assert revised_finalization.source_night_episode_revision_id == str(
+            episode_after_late[1]
+        )
+        assert revised_finalization.reanalysis_operation_id is not None
+        assert revised_finalization.reanalysis_operation_id != (
+            finalized.reanalysis_operation_id
+        )
+        repeated_finalization = NightFinalizationService(worker_uow).finalize(
+            final_scope,
+            night_episode_id=episode_id,
+            evaluated_at=NOW + timedelta(hours=1, minutes=11),
+        )
+        assert repeated_finalization == revised_finalization
+
+        repeated_late = late_webhook.accept(
+            late_payload,
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert repeated_late.duplicate is True
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_night_finalization_revisions "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone() == (episode_after_late[0], 2)
+
+        out_of_window_at = NOW + timedelta(hours=2, minutes=7, seconds=1)
+        out_of_window = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: out_of_window_at,
+        ).accept(
+            _push_raw(
+                message_id="p4d2-b2-late-out-of-window",
+                report_at=NOW + timedelta(minutes=4, seconds=45),
+                signed_at=out_of_window_at,
+                local_datetime="2026-08-23T11:04:45.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert out_of_window.disposition == "accepted"
+        out_of_window_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-late-out-of-window-worker",
+        )
+        assert out_of_window_result.canonical_created_count == 4
+
+        no_match_received_at = NOW + timedelta(hours=1, minutes=12)
+        no_match = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: no_match_received_at,
+        ).accept(
+            _push_raw(
+                message_id="p4d2-b2-late-no-match",
+                report_at=NOW - timedelta(days=1),
+                signed_at=no_match_received_at,
+                local_datetime="2026-08-22T11:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert no_match.disposition == "accepted"
+        no_match_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-late-no-match-worker",
+        )
+        assert no_match_result.canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            quarantined = connection.execute(
+                "SELECT reason_code, count(*) FROM "
+                "sleep_domain_pending_episode_associations "
+                "WHERE namespace_id = %s AND source_resource_id = ANY(%s) "
+                "GROUP BY reason_code ORDER BY reason_code",
+                (
+                    NAMESPACE,
+                    list(
+                        out_of_window_result.canonical_observation_ids
+                        + no_match_result.canonical_observation_ids
+                    ),
+                ),
+            ).fetchall()
+            unchanged_after_quarantine = connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM sleep_domain_night_episodes "
+                "WHERE namespace_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (NAMESPACE, episode_id),
+            ).fetchone()
+        assert quarantined == [
+            ("LATE_ASSOCIATION_NO_MATCH", 4),
+            ("LATE_ASSOCIATION_OUT_OF_WINDOW", 4),
+        ]
+        assert unchanged_after_quarantine == (episode_after_late[0], 1)
+
+        # Persist a schema-valid adversarial overlap that the ordinary Episode
+        # lifecycle cannot create: a second closed Episode with a different
+        # canonical wake date, the same pinned binding, and an overlapping
+        # collection window. The production boundary must quarantine rather
+        # than guess when both candidates are eligible.
+        ambiguity_received_at = NOW + timedelta(hours=1, minutes=20)
+        uuid7 = UUID7Generator()
+        ambiguous_episode_id = uuid7(ambiguity_received_at)
+        ambiguous_revision_id = uuid7(ambiguity_received_at)
+        ambiguous_opening_identity = "c1b-controlled-ambiguous-opening"
+        ambiguous_anchor = episode_anchor_key(
+            namespace_id=NAMESPACE,
+            namespace_generation=1,
+            subject_id=SUBJECT,
+            opening_source_idempotency_identity=ambiguous_opening_identity,
+        )
+        ambiguity_binding_observation_id = str(
+            no_match_result.canonical_observation_ids[0]
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            original_episode_row = connection.execute(
+                "SELECT episode_json, state, current_revision_number, "
+                "cas_version FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id,),
+            ).fetchone()
+            assert original_episode_row is not None
+            original_episode = NightEpisodeV2.model_validate(
+                original_episode_row[0]
+            )
+            ambiguous_episode = NightEpisodeV2.model_validate(
+                {
+                    **original_episode.model_dump(mode="python"),
+                    "night_episode_id": ambiguous_episode_id,
+                    "episode_anchor_key": ambiguous_anchor,
+                    "opening_source_idempotency_identity": (
+                        ambiguous_opening_identity
+                    ),
+                    "vendor_wake_local_date": date(2026, 8, 24),
+                    "episode_local_date": date(2026, 8, 24),
+                    "assignment_basis": EpisodeAssignmentBasis.VENDOR_WAKE_DATE,
+                    "date_confidence": EpisodeDateConfidence.VENDOR_ASSERTED,
+                    "current_revision": 1,
+                    "created_at": ambiguity_received_at,
+                    "updated_at": ambiguity_received_at,
+                }
+            )
+            ambiguous_revision_json = {
+                "schema_version": "night_episode_revision.v2",
+                "night_episode_revision_id": ambiguous_revision_id,
+                "night_episode_id": ambiguous_episode_id,
+                "subject_id": SUBJECT,
+                "revision_number": 1,
+                "parent_revision_id": None,
+                "revision_cause": "controlled_ambiguity_fixture",
+                "observation_ids": [ambiguity_binding_observation_id],
+                "policy_versions": default_sleep_slice_policy().policy_versions,
+                "episode": ambiguous_episode.model_dump(mode="json"),
+            }
+            connection.execute(
+                """
+                INSERT INTO sleep_domain_night_episodes (
+                  night_episode_id, namespace_id, data_mode, subject_id,
+                  night_key, state, current_revision_id,
+                  current_revision_number, cas_version, episode_json,
+                  created_at, updated_at, protocol_version, id_scheme,
+                  namespace_generation, run_id, arm_id, episode_anchor_key,
+                  opening_source_idempotency_identity, timezone_name,
+                  boundary_policy_version, collection_start_at,
+                  deterministic_close_deadline_at, bed_at, wake_at,
+                  bed_local_date, wake_local_date, vendor_wake_local_date,
+                  episode_local_date, assignment_basis, date_confidence,
+                  assignment_estimated, date_state, date_finalized_at,
+                  bed_utc_offset_seconds, wake_utc_offset_seconds,
+                  bed_fold, wake_fold, date_conflict, reconciliation_status
+                )
+                SELECT %s, namespace_id, data_mode, subject_id, %s, state, %s,
+                       1, 1, %s::jsonb, %s, %s, protocol_version, id_scheme,
+                       namespace_generation, run_id, arm_id, %s, %s,
+                       timezone_name, boundary_policy_version,
+                       collection_start_at, deterministic_close_deadline_at,
+                       bed_at, wake_at, bed_local_date, wake_local_date, %s,
+                       %s, 'vendor_wake_date', 'vendor_asserted', FALSE,
+                       'finalized', %s, bed_utc_offset_seconds,
+                       wake_utc_offset_seconds, bed_fold, wake_fold, FALSE, NULL
+                FROM sleep_domain_night_episodes
+                WHERE night_episode_id = %s
+                """,
+                (
+                    ambiguous_episode_id,
+                    f"v2:{ambiguous_anchor}",
+                    ambiguous_revision_id,
+                    ambiguous_episode.model_dump_json(),
+                    ambiguity_received_at,
+                    ambiguity_received_at,
+                    ambiguous_anchor,
+                    ambiguous_opening_identity,
+                    date(2026, 8, 24),
+                    date(2026, 8, 24),
+                    ambiguity_received_at,
+                    episode_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO sleep_domain_night_episode_revisions (
+                  night_episode_revision_id, namespace_id, data_mode,
+                  night_episode_id, subject_id, revision_number,
+                  parent_revision_id, revision_json, created_at,
+                  protocol_version, id_scheme, namespace_generation, run_id,
+                  arm_id, episode_anchor_key, timezone_name,
+                  boundary_policy_version, bed_local_date, wake_local_date,
+                  vendor_wake_local_date, episode_local_date, assignment_basis,
+                  date_confidence, assignment_estimated, date_state,
+                  date_conflict, episode_schema_version
+                )
+                SELECT %s, namespace_id, data_mode, %s, subject_id, 1, NULL,
+                       %s::jsonb, %s, protocol_version, id_scheme,
+                       namespace_generation, run_id, arm_id, %s,
+                       timezone_name, boundary_policy_version, bed_local_date,
+                       wake_local_date, %s, %s, 'vendor_wake_date',
+                       'vendor_asserted', FALSE, 'finalized', FALSE,
+                       episode_schema_version
+                FROM sleep_domain_night_episode_revisions
+                WHERE night_episode_revision_id = %s
+                """,
+                (
+                    ambiguous_revision_id,
+                    ambiguous_episode_id,
+                    json.dumps(ambiguous_revision_json, sort_keys=True),
+                    ambiguity_received_at,
+                    ambiguous_anchor,
+                    date(2026, 8, 24),
+                    date(2026, 8, 24),
+                    str(episode_after_late[1]),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO sleep_domain_episode_observation_memberships (
+                  membership_id, namespace_id, data_mode, night_episode_id,
+                  observation_id, subject_id, device_binding_id,
+                  binding_version, event_at, received_at,
+                  lateness_watermark_at, late_after_watermark,
+                  membership_json, associated_at
+                )
+                SELECT %s, namespace_id, data_mode, %s, observation_id,
+                       subject_id, device_binding_id, binding_version,
+                       COALESCE(measurement_at, event_occurred_at), received_at,
+                       NULL, FALSE, %s::jsonb, %s
+                FROM sleep_domain_canonical_observations
+                WHERE observation_id = %s
+                """,
+                (
+                    "c1b-controlled-ambiguity-membership",
+                    ambiguous_episode_id,
+                    json.dumps(
+                        {
+                            "schema_version": "controlled_ambiguity_fixture.v1",
+                            "night_episode_id": ambiguous_episode_id,
+                            "observation_id": ambiguity_binding_observation_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    ambiguity_received_at,
+                    ambiguity_binding_observation_id,
+                ),
+            )
+
+        ambiguous_late = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: ambiguity_received_at,
+        ).accept(
+            _push_raw(
+                message_id="p4d2-b2-late-ambiguous",
+                report_at=NOW + timedelta(minutes=6, seconds=30),
+                signed_at=ambiguity_received_at,
+                local_datetime="2026-08-23T11:06:30.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert ambiguous_late.disposition == "accepted"
+        ambiguous_late_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-late-ambiguous-worker",
+        )
+        assert ambiguous_late_result.canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            ambiguous_evidence = connection.execute(
+                "SELECT count(*), bool_and(status = 'quarantined'), "
+                "bool_and(reason_code = "
+                "'LATE_ASSOCIATION_RECONCILIATION_REQUIRED'), "
+                "bool_and(jsonb_array_length("
+                "association_json -> 'candidate_night_episode_ids') = 2) "
+                "FROM sleep_domain_pending_episode_associations "
+                "WHERE namespace_id = %s AND source_resource_id = ANY(%s)",
+                (
+                    NAMESPACE,
+                    list(ambiguous_late_result.canonical_observation_ids),
+                ),
+            ).fetchone()
+            ambiguity_episode_state = connection.execute(
+                "SELECT night_episode_id, current_revision_number, cas_version "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = ANY(%s) ORDER BY night_episode_id",
+                ([episode_id, ambiguous_episode_id],),
+            ).fetchall()
+            ambiguity_revision_count = connection.execute(
+                "SELECT count(*) FROM sleep_domain_night_episode_revisions "
+                "WHERE night_episode_id = %s",
+                (ambiguous_episode_id,),
+            ).fetchone()
+        assert ambiguous_evidence == (4, True, True, True)
+        assert ambiguity_episode_state == sorted(
+            [
+                (
+                    episode_id,
+                    original_episode_row[2],
+                    original_episode_row[3],
+                ),
+                (ambiguous_episode_id, 1, 1),
+            ]
+        )
+        assert ambiguity_revision_count == (1,)
+
         before_no_data = _count(admin_dsn, "sleep_domain_canonical_observations")
         no_data_ingress = ingress.accept(
             _read(
@@ -1432,9 +2006,9 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         assert no_data_result.canonical_observation_ids == ()
         assert no_data_result.checkpoint_advanced is True
         assert _count(admin_dsn, "sleep_domain_canonical_observations") == before_no_data
-        # The earlier LIVE OnBed=1 fixture legitimately opened the one Episode;
-        # an empty report adds neither canonical evidence nor another Episode.
-        assert _count(admin_dsn, "sleep_domain_night_episodes") == 1
+        # The empty report adds neither canonical evidence nor another Episode;
+        # the second row is the controlled ambiguity sentinel above.
+        assert _count(admin_dsn, "sleep_domain_night_episodes") == 2
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(

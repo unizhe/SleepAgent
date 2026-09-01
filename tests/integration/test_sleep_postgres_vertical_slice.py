@@ -69,7 +69,10 @@ from sleepagent.domain.episodes import (
     uuid7_from_parts,
 )
 from sleepagent.infrastructure.postgres_sleep_slice import (
+    ClosedEpisodeAssociationResolver,
+    ClosedEpisodeCandidate,
     EpisodeLifecycleProjector,
+    EpisodeProjectionBoundary,
     FastPathHandler,
     FastPathLease,
     IngressResult,
@@ -235,6 +238,247 @@ def _policy(*, urgent: bool = False) -> SleepSlicePolicy:
             cooldown_seconds=0,
         ),
     )
+
+
+def _closed_candidate(ids: Ids) -> tuple[ClosedEpisodeCandidate, datetime, datetime]:
+    projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
+    zone = ZoneInfo("Asia/Shanghai")
+    bed_at = datetime(2026, 8, 7, 23, 30, tzinfo=zone)
+    wake_at = datetime(2026, 8, 8, 7, 5, tzinfo=zone)
+    opened = projector.project(
+        scope=_scope(),
+        snapshot=LifecycleSnapshotRecord(None, "dormant", 0, None, None),
+        observation=_observation(
+            _input(state=BedPresenceState.IN_BED, at=bed_at, identity="open"),
+            observation_id=ids(bed_at),
+        ),
+        opening_identity="open",
+        timezone_name="Asia/Shanghai",
+        committed_at=bed_at + timedelta(seconds=2),
+        conflicting_episode=lambda _value: None,
+    )
+    assert opened is not None
+    closed = projector.project(
+        scope=_scope(),
+        snapshot=LifecycleSnapshotRecord(
+            ids(bed_at),
+            "active",
+            1,
+            bed_at,
+            bed_at,
+            StoredEpisode(
+                opened.episode,
+                "collecting",
+                opened.revision_id,
+                opened.observation_ids,
+                1,
+            ),
+        ),
+        observation=_observation(
+            _input(state=BedPresenceState.OUT_OF_BED, at=wake_at, identity="close"),
+            observation_id=ids(wake_at),
+        ),
+        opening_identity="close",
+        timezone_name="Asia/Shanghai",
+        committed_at=wake_at + timedelta(seconds=2),
+        conflicting_episode=lambda _value: None,
+    )
+    assert closed is not None
+    return (
+        ClosedEpisodeCandidate(
+            stored_episode=StoredEpisode(
+                closed.episode,
+                "awaiting_report",
+                closed.revision_id,
+                closed.observation_ids,
+                2,
+            ),
+            window_end_at=wake_at,
+            contains_observation_time=True,
+        ),
+        bed_at,
+        wake_at,
+    )
+
+
+def test_closed_episode_resolver_classifies_unique_window_and_ambiguity() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    resolver = ClosedEpisodeAssociationResolver(_policy().boundary)
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="late-in-bed",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+
+    unique = resolver.resolve(
+        observation=late,
+        timezone_name="Asia/Shanghai",
+        candidates=(candidate,),
+    )
+    assert unique is not None
+    assert unique.status == "associated"
+    assert unique.selected == candidate
+    assert unique.lateness_watermark_at == wake_at + timedelta(hours=2)
+
+    second_episode = candidate.stored_episode.episode.model_copy(
+        update={"night_episode_id": ids(wake_at)}
+    )
+    ambiguous = resolver.resolve(
+        observation=late,
+        timezone_name="Asia/Shanghai",
+        candidates=(
+            candidate,
+            replace(
+                candidate,
+                stored_episode=replace(
+                    candidate.stored_episode,
+                    episode=second_episode,
+                ),
+            ),
+        ),
+    )
+    assert ambiguous is not None
+    assert ambiguous.status == "ambiguous"
+    assert ambiguous.selected is None
+
+
+def test_closed_episode_resolver_bounds_lateness_and_protects_current_in_bed() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    resolver = ClosedEpisodeAssociationResolver(_policy().boundary)
+    in_window_time = bed_at + timedelta(hours=2)
+    out_of_window = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=in_window_time,
+            identity="too-late",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=2, seconds=1)}),
+        observation_id=ids(wake_at),
+    )
+    decision = resolver.resolve(
+        observation=out_of_window,
+        timezone_name="Asia/Shanghai",
+        candidates=(candidate,),
+    )
+    assert decision is not None
+    assert decision.status == "out_of_window"
+    assert decision.selected is None
+
+    historical_no_match = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at - timedelta(days=2),
+            identity="historical-no-match",
+        ).model_copy(update={"received_at": wake_at}),
+        observation_id=ids(wake_at),
+    )
+    no_match = resolver.resolve(
+        observation=historical_no_match,
+        timezone_name="Asia/Shanghai",
+        candidates=(),
+    )
+    assert no_match is not None
+    assert no_match.status == "no_match"
+
+    current = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=wake_at + timedelta(days=1),
+            identity="current-in-bed",
+        ),
+        observation_id=ids(wake_at),
+    )
+    assert (
+        resolver.resolve(
+            observation=current,
+            timezone_name="Asia/Shanghai",
+            candidates=(),
+        )
+        is None
+    )
+
+
+def test_late_projection_creates_membership_only_immutable_revision() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="late-membership",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+    watermark = wake_at + timedelta(hours=2)
+    mutation = projector.project_late_observation(
+        snapshot=LifecycleSnapshotRecord(ids(wake_at), "dormant", 3, bed_at, wake_at),
+        observation=late,
+        candidate=candidate,
+        committed_at=wake_at + timedelta(hours=1, seconds=1),
+        lateness_watermark_at=watermark,
+    )
+    assert mutation.parent_revision_id == candidate.stored_episode.current_revision_id
+    assert mutation.episode.current_revision == (
+        candidate.stored_episode.episode.current_revision + 1
+    )
+    assert mutation.episode.wake_at == candidate.stored_episode.episode.wake_at
+    assert mutation.new_membership_observation_ids == (late.observation_id,)
+    assert mutation.late_association_watermark_at == watermark
+    assert mutation.revision_cause == "late_observation_associated"
+
+
+def test_projection_boundary_never_guesses_between_closed_episodes() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    second = replace(
+        candidate,
+        stored_episode=replace(
+            candidate.stored_episode,
+            episode=candidate.stored_episode.episode.model_copy(
+                update={"night_episode_id": ids(wake_at)}
+            ),
+        ),
+    )
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="ambiguous-historical-in-bed",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+
+    class Repository:
+        def lock_subject_lifecycle(self) -> None:
+            return None
+
+        def load_lifecycle(self) -> LifecycleSnapshotRecord:
+            return LifecycleSnapshotRecord(
+                ids(wake_at), "dormant", 3, bed_at, wake_at
+            )
+
+        def load_closed_episode_candidates(
+            self, **_kwargs: object
+        ) -> tuple[ClosedEpisodeCandidate, ...]:
+            return candidate, second
+
+    decision = EpisodeProjectionBoundary(_policy(), id_generator=ids).prepare(
+        scope=_scope(),
+        repository=Repository(),  # type: ignore[arg-type]
+        observation=late,
+        opening_identity=late.idempotency_key,
+        timezone_name="Asia/Shanghai",
+        committed_at=wake_at + timedelta(hours=1, seconds=1),
+    )
+    assert decision.mutation is None
+    assert decision.late_association is not None
+    assert decision.late_association.status == "ambiguous"
+    assert decision.late_association.selected is None
 
 
 def test_episode_projector_finalizes_on_observed_wake_date() -> None:

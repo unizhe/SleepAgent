@@ -478,6 +478,11 @@ def test_replay_v2_handler_retains_semantics_through_repository_handoff() -> Non
         def load_lifecycle(self) -> LifecycleSnapshotRecord:
             return LifecycleSnapshotRecord(None, "dormant", 0, None, None)
 
+        def load_closed_episode_candidates(
+            self, **_kwargs: object
+        ) -> tuple[object, ...]:
+            return ()
+
         def find_conflicting_episode(self, **_kwargs: object) -> None:
             return None
 

@@ -362,6 +362,7 @@ class EpisodeRevisionMutation:
     newly_opened: bool
     closes_episode: bool
     conflicting_episode_id: str | None = None
+    late_association_watermark_at: datetime | None = None
 
     @property
     def new_membership_observation_ids(self) -> tuple[str, ...]:
@@ -401,12 +402,107 @@ class EpisodeProjectionDecision:
     fast_path_operation_id: str | None
     reconciliation_operation_id: str | None
     persist_required: bool
+    late_association: "LateObservationAssociation | None" = None
 
 
 @dataclass(frozen=True, slots=True)
 class AuthoritativeCanonicalObservation:
     observation: SleepObservation
     timezone_name: str
+
+
+LateAssociationStatus: TypeAlias = Literal[
+    "associated",
+    "no_match",
+    "out_of_window",
+    "ambiguous",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ClosedEpisodeCandidate:
+    stored_episode: StoredEpisode
+    window_end_at: datetime
+    contains_observation_time: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LateObservationAssociation:
+    status: LateAssociationStatus
+    reason_code: str
+    candidates: tuple[ClosedEpisodeCandidate, ...]
+    selected: ClosedEpisodeCandidate | None = None
+    lateness_watermark_at: datetime | None = None
+
+
+class ClosedEpisodeAssociationResolver:
+    """Deterministically classify no-active historical observations."""
+
+    def __init__(self, policy: EpisodeBoundaryPolicy) -> None:
+        self.policy = policy
+
+    def resolve(
+        self,
+        *,
+        observation: SleepObservation,
+        timezone_name: str,
+        candidates: tuple[ClosedEpisodeCandidate, ...],
+    ) -> LateObservationAssociation | None:
+        event_at = _observation_time(observation)
+        if event_at is None:
+            raise SleepSliceInvariantError(
+                "canonical observation has no deterministic event time"
+            )
+        matching = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.contains_observation_time
+        )
+        eligible = tuple(
+            candidate
+            for candidate in matching
+            if observation.received_at
+            <= candidate.window_end_at
+            + timedelta(seconds=self.policy.allowed_lateness_seconds)
+        )
+        if len(eligible) > 1:
+            return LateObservationAssociation(
+                status="ambiguous",
+                reason_code="LATE_ASSOCIATION_RECONCILIATION_REQUIRED",
+                candidates=eligible,
+            )
+        if len(eligible) == 1:
+            selected = eligible[0]
+            watermark = selected.window_end_at + timedelta(
+                seconds=self.policy.allowed_lateness_seconds
+            )
+            return LateObservationAssociation(
+                status="associated",
+                reason_code="LATE_OBSERVATION_ASSOCIATED",
+                candidates=eligible,
+                selected=selected,
+                lateness_watermark_at=watermark,
+            )
+        if matching:
+            return LateObservationAssociation(
+                status="out_of_window",
+                reason_code="LATE_ASSOCIATION_OUT_OF_WINDOW",
+                candidates=matching,
+            )
+
+        event_night = self.policy.derive_local_sleep_date(
+            event_at, timezone_name
+        )
+        arrival_night = self.policy.derive_local_sleep_date(
+            observation.received_at, timezone_name
+        )
+        if candidates or event_night < arrival_night:
+            return LateObservationAssociation(
+                status="no_match",
+                reason_code="LATE_ASSOCIATION_NO_MATCH",
+                candidates=candidates,
+            )
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,6 +797,57 @@ class EpisodeLifecycleProjector:
             closes_episode=False,
         )
 
+    def project_late_observation(
+        self,
+        *,
+        snapshot: LifecycleSnapshotRecord,
+        observation: SleepObservation,
+        candidate: ClosedEpisodeCandidate,
+        committed_at: datetime,
+        lateness_watermark_at: datetime,
+    ) -> EpisodeRevisionMutation:
+        """Create one immutable membership-only revision of a closed Episode."""
+
+        current = candidate.stored_episode
+        if snapshot.state != "dormant" or snapshot.episode is not None:
+            raise SleepSliceInvariantError(
+                "late association requires dormant lifecycle authority"
+            )
+        if observation.subject_id != current.episode.subject_id:
+            raise SleepSliceInvariantError("closed Episode subject mismatch")
+        historical_snapshot = LifecycleSnapshotRecord(
+            monitoring_snapshot_id=snapshot.monitoring_snapshot_id,
+            state=snapshot.state,
+            cas_version=snapshot.cas_version,
+            created_at=snapshot.created_at,
+            updated_at=snapshot.updated_at,
+            episode=current,
+        )
+        episode = NightEpisodeV2.model_validate(
+            {
+                **current.episode.model_dump(mode="python"),
+                "current_revision": current.episode.current_revision + 1,
+                "updated_at": committed_at,
+            }
+        )
+        return EpisodeRevisionMutation(
+            episode=episode,
+            database_state=current.database_state,
+            revision_id=self.id_generator(committed_at),
+            parent_revision_id=current.current_revision_id,
+            observation_ids=tuple(
+                sorted(
+                    set((*current.observation_ids, observation.observation_id))
+                )
+            ),
+            revision_cause="late_observation_associated",
+            expected_episode_cas=current.cas_version,
+            snapshot=historical_snapshot,
+            newly_opened=False,
+            closes_episode=False,
+            late_association_watermark_at=lateness_watermark_at,
+        )
+
     def close_at_deadline(
         self,
         *,
@@ -768,6 +915,9 @@ class EpisodeProjectionBoundary:
             policy,
             id_generator=self.id_generator,
         )
+        self.closed_episode_resolver = ClosedEpisodeAssociationResolver(
+            policy.boundary
+        )
 
     def prepare(
         self,
@@ -802,6 +952,42 @@ class EpisodeProjectionBoundary:
                 reconciliation_operation_id=None,
                 persist_required=False,
             )
+        if snapshot.episode is None:
+            late_association = self.closed_episode_resolver.resolve(
+                observation=observation,
+                timezone_name=timezone_name,
+                candidates=repository.load_closed_episode_candidates(
+                    observation=observation,
+                    timezone_name=timezone_name,
+                ),
+            )
+            if late_association is not None:
+                mutation = None
+                if late_association.status == "associated":
+                    if (
+                        late_association.selected is None
+                        or late_association.lateness_watermark_at is None
+                    ):
+                        raise SleepSliceInvariantError(
+                            "associated late observation lacks selected authority"
+                        )
+                    mutation = self.projector.project_late_observation(
+                        snapshot=snapshot,
+                        observation=observation,
+                        candidate=late_association.selected,
+                        committed_at=committed_at,
+                        lateness_watermark_at=(
+                            late_association.lateness_watermark_at
+                        ),
+                    )
+                return EpisodeProjectionDecision(
+                    snapshot=snapshot,
+                    mutation=mutation,
+                    fast_path_operation_id=None,
+                    reconciliation_operation_id=None,
+                    persist_required=True,
+                    late_association=late_association,
+                )
         mutation = self.projector.project(
             scope=scope,
             snapshot=snapshot,
@@ -1225,6 +1411,7 @@ class NormalizationHandler:
                 mutation=mutation,
                 fast_path_operation_id=fast_path_operation_id,
                 reconciliation_operation_id=reconciliation_operation_id,
+                late_association=projection.late_association,
                 policy=self.policy,
                 committed_at=committed_at,
             )
@@ -1875,10 +2062,127 @@ class PostgresSleepSliceRepository:
             raise SleepSliceInvariantError(
                 "canonical observation does not match pinned DeviceBinding"
             )
+        event_at = _observation_time(observation)
+        if event_at is None or event_at < binding.effective_from:
+            raise SleepSliceInvariantError(
+                "canonical observation precedes pinned DeviceBinding"
+            )
+        if (
+            binding.effective_until is not None
+            and event_at >= binding.effective_until
+        ):
+            raise SleepSliceInvariantError(
+                "canonical observation exceeds pinned DeviceBinding interval"
+            )
         return AuthoritativeCanonicalObservation(
             observation=observation,
             timezone_name=binding.timezone_name,
         )
+
+    def load_closed_episode_candidates(
+        self,
+        *,
+        observation: SleepObservation,
+        timezone_name: str,
+    ) -> tuple[ClosedEpisodeCandidate, ...]:
+        """Lock a bounded set of historically compatible closed Episodes."""
+
+        event_at = _observation_time(observation)
+        if event_at is None:
+            raise SleepSliceInvariantError(
+                "canonical observation has no deterministic event time"
+            )
+        local_event_date = event_at.astimezone(ZoneInfo(timezone_name)).date()
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT episode.episode_json, episode.state,
+                       episode.current_revision_id, revision.revision_json,
+                       episode.cas_version, episode.collection_start_at,
+                       COALESCE(
+                         episode.wake_at,
+                         episode.deterministic_close_deadline_at
+                       ) AS window_end_at
+                FROM public.sleep_domain_night_episodes AS episode
+                JOIN public.sleep_domain_night_episode_revisions AS revision
+                  ON revision.night_episode_revision_id =
+                     episode.current_revision_id
+                 AND revision.namespace_id = episode.namespace_id
+                 AND revision.data_mode = episode.data_mode
+                WHERE episode.namespace_id = %s
+                  AND episode.data_mode = %s
+                  AND episode.namespace_generation = %s
+                  AND episode.subject_id = %s
+                  AND COALESCE(episode.run_id, '') = COALESCE(%s, '')
+                  AND COALESCE(episode.arm_id, '') = COALESCE(%s, '')
+                  AND episode.protocol_version >= 2
+                  AND episode.state <> 'collecting'
+                  AND episode.date_state = 'finalized'
+                  AND episode.date_conflict = FALSE
+                  AND episode.timezone_name = %s
+                  AND episode.episode_local_date BETWEEN %s AND %s
+                  AND EXISTS (
+                    SELECT 1
+                    FROM public.sleep_domain_episode_observation_memberships
+                      AS member
+                    WHERE member.namespace_id = episode.namespace_id
+                      AND member.data_mode = episode.data_mode
+                      AND member.night_episode_id = episode.night_episode_id
+                      AND member.subject_id = episode.subject_id
+                      AND member.device_binding_id = %s
+                      AND member.binding_version = %s
+                  )
+                ORDER BY episode.episode_local_date, episode.night_episode_id
+                LIMIT 3
+                FOR UPDATE OF episode
+                """,
+                (
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.namespace_generation,
+                    self.scope.subject_id,
+                    self.scope.run_id,
+                    self.scope.arm_id,
+                    timezone_name,
+                    local_event_date,
+                    local_event_date + timedelta(days=1),
+                    observation.device_binding_id,
+                    observation.binding_version,
+                ),
+            )
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
+        candidates: list[ClosedEpisodeCandidate] = []
+        for row in rows:
+            episode = NightEpisodeV2.model_validate(_json_value(row[0]))
+            revision_payload = _json_value(row[3])
+            window_start_at = row[5]
+            window_end_at = row[6]
+            if window_start_at is None or window_end_at is None:
+                continue
+            candidates.append(
+                ClosedEpisodeCandidate(
+                    stored_episode=StoredEpisode(
+                        episode=episode,
+                        database_state=str(row[1]),
+                        current_revision_id=str(row[2]),
+                        observation_ids=tuple(
+                            str(value)
+                            for value in revision_payload.get(
+                                "observation_ids", ()
+                            )
+                        ),
+                        cas_version=int(row[4]),
+                    ),
+                    window_end_at=window_end_at,
+                    contains_observation_time=(
+                        window_start_at <= event_at <= window_end_at
+                    ),
+                )
+            )
+        return tuple(candidates)
 
     def has_episode_membership(self, observation_id: str) -> bool:
         cursor = self.connection.cursor()
@@ -1925,6 +2229,7 @@ class PostgresSleepSliceRepository:
                 reconciliation_operation_id=(
                     projection.reconciliation_operation_id
                 ),
+                late_association=projection.late_association,
                 policy=policy,
                 committed_at=committed_at,
             )
@@ -1943,6 +2248,7 @@ class PostgresSleepSliceRepository:
         mutation: EpisodeRevisionMutation | None,
         fast_path_operation_id: str | None,
         reconciliation_operation_id: str | None,
+        late_association: LateObservationAssociation | None,
         policy: SleepSlicePolicy,
         committed_at: datetime,
     ) -> None:
@@ -2048,6 +2354,7 @@ class PostgresSleepSliceRepository:
                 mutation=mutation,
                 fast_path_operation_id=fast_path_operation_id,
                 reconciliation_operation_id=reconciliation_operation_id,
+                late_association=late_association,
                 policy=policy,
                 committed_at=committed_at,
             )
@@ -3181,10 +3488,21 @@ class PostgresSleepSliceRepository:
         mutation: EpisodeRevisionMutation | None,
         fast_path_operation_id: str | None,
         reconciliation_operation_id: str | None,
+        late_association: LateObservationAssociation | None,
         policy: SleepSlicePolicy,
         committed_at: datetime,
     ) -> None:
+        if late_association is not None:
+            self._write_late_association(
+                cursor,
+                observation=observation,
+                association=late_association,
+                policy=policy,
+                committed_at=committed_at,
+            )
         if mutation is None:
+            if late_association is not None:
+                return
             self._write_monitoring_snapshot(
                 cursor,
                 snapshot=snapshot,
@@ -3193,12 +3511,13 @@ class PostgresSleepSliceRepository:
             )
             return
         self._write_episode_mutation(cursor, mutation, policy, committed_at)
-        self._write_monitoring_snapshot(
-            cursor,
-            snapshot=snapshot,
-            episode=mutation,
-            committed_at=committed_at,
-        )
+        if late_association is None:
+            self._write_monitoring_snapshot(
+                cursor,
+                snapshot=snapshot,
+                episode=mutation,
+                committed_at=committed_at,
+            )
         if mutation.conflicting_episode_id is not None:
             if reconciliation_operation_id is None:
                 raise SleepSliceInvariantError(
@@ -3252,7 +3571,11 @@ class PostgresSleepSliceRepository:
                 policy=policy,
                 committed_at=committed_at,
             )
-        event_type = mutation.domain_event_type
+        event_type = (
+            "LATE_EPISODE_REVISION_CREATED"
+            if late_association is not None
+            else mutation.domain_event_type
+        )
         event_payload: dict[str, Any] = {
             "schema_version": "committed_event.v2",
             "event_type": event_type,
@@ -3291,6 +3614,137 @@ class PostgresSleepSliceRepository:
             payload=event_payload,
             created_at=committed_at,
         )
+
+    def _write_late_association(
+        self,
+        cursor: Any,
+        *,
+        observation: SleepObservation,
+        association: LateObservationAssociation,
+        policy: SleepSlicePolicy,
+        committed_at: datetime,
+    ) -> None:
+        association_id = f"episode-association:{_digest({'observation_id': observation.observation_id})}"
+        candidate_ids = sorted(
+            candidate.stored_episode.episode.night_episode_id
+            for candidate in association.candidates
+        )
+        selected_id = (
+            None
+            if association.selected is None
+            else association.selected.stored_episode.episode.night_episode_id
+        )
+        status = (
+            "associated" if association.status == "associated" else "quarantined"
+        )
+        payload = {
+            "schema_version": "episode_association.v2",
+            "association_id": association_id,
+            "association_kind": "observation",
+            "source_resource_id": observation.observation_id,
+            "status": status,
+            "reason_code": association.reason_code,
+            "candidate_night_episode_ids": candidate_ids,
+            "selected_night_episode_id": selected_id,
+            "device_binding_id": observation.device_binding_id,
+            "binding_version": observation.binding_version,
+            "event_at": (
+                None
+                if _observation_time(observation) is None
+                else _observation_time(observation).isoformat()
+            ),
+            "received_at": observation.received_at.isoformat(),
+            "lateness_watermark_at": (
+                None
+                if association.lateness_watermark_at is None
+                else association.lateness_watermark_at.isoformat()
+            ),
+            "boundary_policy_version": policy.boundary.policy_version,
+            "allowed_lateness_seconds": (
+                policy.boundary.allowed_lateness_seconds
+            ),
+        }
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_pending_episode_associations (
+              association_id, namespace_id, data_mode, association_kind,
+              source_resource_id, subject_id, status, reason_code,
+              association_json, created_at, resolved_at,
+              namespace_generation, run_id, arm_id
+            ) VALUES (
+              %s, %s, %s, 'observation', %s, %s, %s, %s, %s::jsonb, %s, %s,
+              %s, %s, %s
+            ) ON CONFLICT (
+              namespace_id, data_mode, association_kind, source_resource_id
+            ) DO NOTHING
+            """,
+            (
+                association_id,
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                observation.observation_id,
+                observation.subject_id,
+                status,
+                association.reason_code,
+                _json(payload),
+                committed_at,
+                committed_at if status == "associated" else None,
+                self.scope.namespace_generation,
+                self.scope.run_id,
+                self.scope.arm_id,
+            ),
+        )
+        inserted = cursor.rowcount == 1
+        cursor.execute(
+            """
+            SELECT status, reason_code, association_json
+            FROM public.sleep_domain_pending_episode_associations
+            WHERE namespace_id = %s AND data_mode = %s
+              AND association_kind = 'observation'
+              AND source_resource_id = %s
+            """,
+            (
+                self.scope.namespace_id,
+                self.scope.data_mode,
+                observation.observation_id,
+            ),
+        )
+        existing = cursor.fetchone()
+        if (
+            existing is None
+            or str(existing[0]) != status
+            or str(existing[1]) != association.reason_code
+            or _json_value(existing[2]) != _json_value(_json(payload))
+        ):
+            raise SleepSliceConflict("late Episode association evidence conflicts")
+        if inserted:
+            event_suffix = {
+                "associated": "ASSOCIATED",
+                "no_match": "NO_MATCH",
+                "out_of_window": "OUT_OF_WINDOW",
+                "ambiguous": "AMBIGUOUS",
+            }[association.status]
+            self._insert_outbox(
+                cursor,
+                event_id=self.id_generator(committed_at),
+                event_type=f"LATE_OBSERVATION_{event_suffix}",
+                aggregate_type="LateObservationAssociation",
+                aggregate_id=association_id,
+                aggregate_version=1,
+                sequence=1,
+                subject_id=observation.subject_id,
+                operation_id=None,
+                payload={
+                    "schema_version": "committed_event.v2",
+                    "event_type": f"LATE_OBSERVATION_{event_suffix}",
+                    "association_id": association_id,
+                    "observation_id": observation.observation_id,
+                    "reason_code": association.reason_code,
+                    "candidate_count": len(candidate_ids),
+                    "synthetic_non_release": self.scope.data_mode == "replay",
+                },
+                created_at=committed_at,
+            )
 
     def _write_episode_mutation(
         self,
@@ -3433,6 +3887,16 @@ class PostgresSleepSliceRepository:
             "policy_versions": policy.policy_versions,
             "episode": episode.model_dump(mode="json"),
         }
+        if mutation.late_association_watermark_at is not None:
+            revision_payload["late_association"] = {
+                "reason_code": "LATE_OBSERVATION_ASSOCIATED",
+                "lateness_watermark_at": (
+                    mutation.late_association_watermark_at.isoformat()
+                ),
+                "new_observation_ids": list(
+                    mutation.new_membership_observation_ids
+                ),
+            }
         cursor.execute(
             """
             INSERT INTO public.sleep_domain_night_episode_revisions (
@@ -3488,6 +3952,9 @@ class PostgresSleepSliceRepository:
                 observation_ids=new_membership_ids[
                     offset : offset + EPISODE_MEMBERSHIP_BATCH_SIZE
                 ],
+                lateness_watermark_at=(
+                    mutation.late_association_watermark_at
+                ),
                 committed_at=committed_at,
             )
 
@@ -3497,6 +3964,7 @@ class PostgresSleepSliceRepository:
         *,
         episode: NightEpisodeV2,
         observation_ids: tuple[str, ...],
+        lateness_watermark_at: datetime | None,
         committed_at: datetime,
     ) -> None:
         """Persist and verify one RLS-bounded immutable membership batch."""
@@ -3522,8 +3990,9 @@ class PostgresSleepSliceRepository:
               canonical.observation_id, canonical.subject_id,
               canonical.device_binding_id, canonical.binding_version,
               COALESCE(canonical.measurement_at, canonical.event_occurred_at),
-              canonical.received_at, NULL,
-              FALSE,
+              canonical.received_at, %s,
+              CASE WHEN %s::timestamptz IS NULL THEN FALSE
+                   ELSE canonical.received_at > %s END,
               jsonb_build_object(
                 'membership_id', 'episode-membership:' || encode(digest(
                   convert_to(%s, 'UTF8') || decode('00', 'hex') ||
@@ -3539,8 +4008,10 @@ class PostgresSleepSliceRepository:
                   canonical.measurement_at, canonical.event_occurred_at
                 ),
                 'received_at', canonical.received_at,
-                'lateness_watermark_at', NULL,
-                'late_after_watermark', FALSE,
+                'lateness_watermark_at', %s::timestamptz,
+                'late_after_watermark',
+                  CASE WHEN %s::timestamptz IS NULL THEN FALSE
+                       ELSE canonical.received_at > %s END,
                 'associated_at', %s
               ),
               %s
@@ -3554,8 +4025,14 @@ class PostgresSleepSliceRepository:
             (
                 episode.night_episode_id,
                 episode.night_episode_id,
+                lateness_watermark_at,
+                lateness_watermark_at,
+                lateness_watermark_at,
                 episode.night_episode_id,
                 episode.night_episode_id,
+                lateness_watermark_at,
+                lateness_watermark_at,
+                lateness_watermark_at,
                 committed_at,
                 committed_at,
                 self.scope.namespace_id,
@@ -3577,6 +4054,11 @@ class PostgresSleepSliceRepository:
                   canonical.measurement_at, canonical.event_occurred_at
                 )
                 AND membership.received_at = canonical.received_at
+                AND membership.lateness_watermark_at IS NOT DISTINCT FROM
+                    %s::timestamptz
+                AND membership.late_after_watermark =
+                  CASE WHEN %s::timestamptz IS NULL THEN FALSE
+                       ELSE canonical.received_at > %s END
               ), FALSE)
             FROM public.sleep_domain_canonical_observations AS canonical
             JOIN public.sleep_domain_episode_observation_memberships AS membership
@@ -3591,6 +4073,9 @@ class PostgresSleepSliceRepository:
             (
                 list(observation_ids),
                 episode.night_episode_id,
+                lateness_watermark_at,
+                lateness_watermark_at,
+                lateness_watermark_at,
                 self.scope.namespace_id,
                 self.scope.data_mode,
                 self.scope.subject_id,

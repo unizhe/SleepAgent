@@ -32,6 +32,7 @@ from sleepagent.persistence.uow import (
     UowScope,
 )
 from sleepagent.persistence.migrate import PostgresMigrationRunner
+from sleepagent.persistence.migrations import LATEST_SCHEMA_VERSION
 from sleepagent.workers.kernel import WorkContext, WorkDisposition
 from sleepagent.workers.outcomes import CareOutcomeWorkHandler
 from sleepagent.workers.runtime import PostgresDurableWorkStore
@@ -949,7 +950,7 @@ def test_g10_upgrade_021_backfills_completed_execution_and_queues_evaluation() -
             runner = PostgresMigrationRunner(
                 admin, applied_by="g10-upgrade-proof"
             )
-            assert runner.apply() == 22
+            assert runner.apply() == LATEST_SCHEMA_VERSION
             registration = admin.execute(
                 """
                 SELECT state, execution_authority, current_evaluation_revision
