@@ -1088,3 +1088,42 @@ and Worker reconciliation path as 885 accepted and persisted V2 facts with
 zero semantic rejects, conflicts, unknown extensions, contract drift, legacy
 execution, or external effects. The live field inventory matches the complete
 semantic matrix; the G7.1-R2 ledger is accepted.
+
+## Act 16 — Build: G8 governed CareAction and HITL approval authority
+
+### Round 1 — Canonical authority and parser review
+
+Re-baselined generic HITL, Product binding/scope/epoch authority, current care
+catalog, SharedNightAnalysis commit, and the legacy interaction care path.
+Added one source-pinned candidate/policy/proposal/decision/grant path, worker
+commit integration, authenticated Product surface, and aggregate operations
+signals. Native PostgreSQL exposed `grant` as a reserved alias in migration and
+read SQL; semantic aliases replaced it and the manifest was repinned.
+
+### Round 2 — Expiry, concurrency, and final authority audit
+
+The expanded non-owner database proof reached expiry and exposed ambiguity
+between the PL/pgSQL `decision_id` variable and conflict-target column. Both
+expiry/supersession inserts now name the primary-key constraint. Migration 020
+was repinned and fresh 001→020 plus 019→020 were rebuilt and reproved.
+
+Final review recursively rejects nested destination keys and explicitly proves
+zero delivery intents, journal entries, replay effects, and Memory revisions.
+It confirms one CAS winner, exact retry convergence, restart/revocation,
+supersession, RLS/direct-write denial, bounded audit text, and no G9 behavior.
+No third fix round was used.
+
+### Codex verification
+
+- Focused selection: 98 passed; final focused selections: 38 passed plus one
+  real PostgreSQL G8 acceptance pass.
+- Unit marker and broad non-E2E/non-PostgreSQL: 1,139 passed each.
+- Full fresh PostgreSQL marker: 38 passed, one pre-existing environment-gated
+  process-root reader skipped.
+- Fresh/upgrade migration, manifest hash, RLS/privileges, OpenAPI, compilation,
+  architecture, and diff whitespace: PASS.
+
+Final diff review found no grant producer outside the authenticated decision
+function, arbitrary recipient authority, Memory outcome write, DeliveryIntent,
+effect handler, or changes to migrations 001–019. G8 stops at an inert,
+exact-bound ApprovalGrant.

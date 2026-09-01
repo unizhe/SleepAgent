@@ -2609,3 +2609,115 @@ LEGACY_REPORT_EXECUTION              = ZERO
 EXTERNAL_EFFECTS                     = ZERO
 G7_RUNTIME_AND_OPERATIONS_COMPLETE   = YES
 ```
+
+## G8 — Governed CareAction proposal and HITL approval authority
+
+`G8_STATUS = IN_PROGRESS`
+
+### Pre-implementation authority baseline
+
+Recorded before G8 production-code changes at entry HEAD
+`0ca22a29d833bd716527ed4f1faa643b268582da`:
+
+```text
+SharedNightAnalysis
+  -> accepted CareStrategy work product
+  -> structured runtime CareActionCandidate
+  -> deterministic G8 care policy (allowlist, evidence, finalization,
+     source currency, subject/audience, urgency, duplicate and TTL checks)
+  -> immutable durable CareActionProposal in AWAITING_APPROVAL
+  -> authenticated Product principal plus authoritative actor-subject binding
+  -> server-side role/scope policy
+  -> append-only human decision with transactional CAS
+  -> distinct durable ApprovalGrant bound to proposal semantic hash, subject,
+     action type, audience/scope, approver authority, policy and expiry
+  -> inert future G9 capability only; no DeliveryIntent or external effect
+```
+
+The repository already has reusable generic `ActionProposal`,
+`HumanDecisionRequest`, `ApprovalGrant`, `VerifiedApprovalCapability`, expiry,
+revocation, exact-target validation, and in-memory/persistent CAS patterns in
+`runtime/hitl.py`. It also has authenticated Product principals, authoritative
+`backend_actor_subject_bindings`, role-specific scopes, subject epochs, RLS,
+and append-only authorization audit. The canonical shared Product commit stores
+the accepted `CareStrategy` inside the exact `SharedNightAnalysis` revision.
+
+The existing generic path is not itself sufficient for G8: its persistent
+adapter stores a whole decision aggregate as JSON, a grant appears only when an
+execution capability is acquired, and its proposal is not a normalized,
+source-pinned care-action authority. The older interaction confirmation and
+`backend_care_actions_v2` path is interaction/replay-delivery oriented and is
+not sourced from canonical `SharedNightAnalysis`. G8 therefore evolves the
+existing HITL contracts and CAS/authority conventions with one canonical,
+normalized care proposal/decision/grant persistence path. It does not create a
+second execution or delivery framework.
+
+The current reviewed Care catalog contains `consistent-wake-time`,
+`morning-light`, `nighttime-gentle-support`, and `morning-review-feedback`.
+G8 policy will permit only explicit non-medical semantic mappings from this
+catalog; unknown catalog/action values, arbitrary recipients, report prose,
+legacy/shadow outputs, and urgent zero-model safety results fail closed.
+
+### G8 closure evidence
+
+`G8_STATUS = COMPLETE`
+
+- `CareActionCandidateV2` is accepted only from canonical structured
+  `SharedNightAnalysis.care` and the exact CareStrategy invocation. Report or
+  EvidenceClaim prose, legacy/shadow output, malformed/unsupported catalog
+  actions, urgent safety results, and arbitrary recipient/channel fields fail
+  closed.
+- `care-action-governance.v1` verifies the closed four-action non-medical
+  taxonomy, evidence, current hard finalization and analysis, exact human
+  role/scope, and action-specific TTL. It persists its decision, reason,
+  version, and hash.
+- Additive migration 020 stores immutable source-pinned proposals, append-only
+  decisions, and separate inert approval grants. Semantic retries deduplicate;
+  material analysis N+1 expires older authority and requires a new proposal.
+- Authenticated Product list/detail/approve/reject/revoke routes and SECURITY
+  DEFINER functions enforce the service principal, subject binding, exact
+  role, current epoch, scope, RLS, CAS, expiry, and idempotency. Direct API
+  table writes are denied.
+- The grant binds proposal/candidate hashes, subject, action, semantic
+  audience/scope, approver authority, policy, epoch, and expiry. Revoked,
+  expired, wrong-subject, and wrong-action grants are unusable.
+- The protected aggregate operational snapshot exposes pending/oldest,
+  approved-unconsumed, expired, revoked-grant, and conflict/error counts with
+  no subject data. The full frozen contract is
+  `docs/architecture/care-action-governance.md`.
+
+Native isolated PostgreSQL 16.14 proved fresh 001→020, upgrade 019→020, and
+manifest check at schema 020. Migration 020 is pinned to
+`c08627937dc0f4096038dc095af18da418469a507eb4667b04ce44a52922c846`.
+The non-owner API role resolved human authority in an independent Python
+process, approved a worker-persisted proposal, and issued one durable grant.
+Retry returned that grant; API pool restart retained it; revocation remained
+durable. The same database proof covered wrong-role denial, concurrent
+approve/reject convergence, post-expiry denial, analysis supersession and
+replacement, direct-write denial, and append-only conflict audit.
+
+Verification evidence:
+
+- focused G8/Product/app/foundation/architecture: 98 passed;
+- final focused unit/Product/architecture: 38 passed;
+- independent-process PostgreSQL G8 acceptance: 1 passed;
+- unit marker: 1,139 passed, 41 deselected;
+- broad non-E2E/non-PostgreSQL: 1,139 passed, 41 deselected;
+- definitive fresh PostgreSQL marker: 38 passed, 1 skipped, 1,141 deselected;
+  the sole skip is the pre-existing environment-gated completed process-root
+  reader, while the G8 independent-process test passed in this marker suite;
+- architecture, OpenAPI, compile/import, migration check, and diff whitespace:
+  PASS.
+
+Namespace-scoped post-approval/revocation counts were zero for delivery
+intents, delivery journal, replay delivery effects, and governed Memory
+revisions. No email, SMS, notification, Alarm/AlarmStop, device control,
+DeliveryIntent producer, or effect consumer was added.
+
+```text
+CARE_ACTION_GOVERNANCE_READY       = YES
+HITL_APPROVAL_AUTHORITY_READY      = YES
+PROCESS_BOUNDARY_HITL_PROOF        = PASS
+EXTERNAL_EFFECTS                   = ZERO
+G8_COMPLETE                        = YES
+```

@@ -12,6 +12,10 @@ from starlette.requests import Request
 
 from sleepagent.api.product_contracts import (
     AcceptedOperationResponse,
+    CareProposalDecisionRequest,
+    CareProposalDetailResponse,
+    CareProposalListResponse,
+    CareProposalMutationResponse,
     HabitChangeRequest,
     HabitChangeResponse,
     HabitProfileResponse,
@@ -147,6 +151,44 @@ class ProductBackend(Protocol):
         limit: int,
         cursor: str | None,
     ) -> ProductCareResponse: ...
+
+    def list_care_proposals(
+        self,
+        context: ProductRequestContext,
+        *,
+        state: str | None,
+        limit: int,
+    ) -> CareProposalListResponse: ...
+
+    def get_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+    ) -> CareProposalDetailResponse | None: ...
+
+    def decide_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+        expected_version: int,
+        choice: Literal["approve", "reject"],
+        idempotency_key: str,
+        reason_code: str,
+        reason: str | None,
+    ) -> CareProposalMutationResponse: ...
+
+    def revoke_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        reason_code: str,
+        reason: str | None,
+    ) -> CareProposalMutationResponse: ...
 
     def reserve_report_run(
         self,
@@ -296,6 +338,105 @@ class ProductApiService:
         if kind == "care":
             return self.backend.get_care(context, limit=limit, cursor=cursor)
         raise RuntimeError("Product read dispatch drifted")
+
+    def list_care_proposals(
+        self,
+        request: Request,
+        *,
+        state: str | None,
+        limit: int,
+    ) -> CareProposalListResponse:
+        context = self.identity_resolver.resolve(
+            request,
+            body=b"",
+            purpose="sleep_care",
+        )
+        context.require_scope(READ_SCOPES["care"])
+        return self.backend.list_care_proposals(
+            context,
+            state=state,
+            limit=limit,
+        )
+
+    def get_care_proposal(
+        self,
+        request: Request,
+        *,
+        proposal_id: str,
+    ) -> CareProposalDetailResponse:
+        context = self.identity_resolver.resolve(
+            request,
+            body=b"",
+            purpose="sleep_care",
+        )
+        context.require_scope(READ_SCOPES["care"])
+        result = self.backend.get_care_proposal(
+            context,
+            proposal_id=proposal_id,
+        )
+        if result is None:
+            raise ProductApiError(
+                "not_found",
+                "The governed care proposal was not found.",
+                status_code=404,
+            )
+        return result
+
+    def mutate_care_proposal(
+        self,
+        request: Request,
+        payload: CareProposalDecisionRequest,
+        *,
+        proposal_id: str,
+        action: Literal["approve", "reject", "revoke"],
+        idempotency_key: str | None,
+        request_body: bytes | None,
+    ) -> CareProposalMutationResponse:
+        if request_body is None:
+            raise ProductApiError(
+                "authenticated_body_missing",
+                "The authenticated request body is required.",
+                status_code=400,
+            )
+        context = self.identity_resolver.resolve(
+            request,
+            body=request_body,
+            purpose="sleep_care",
+        )
+        context.require_scope("product:sleep:care:confirm")
+        caller_key = _idempotency_key(idempotency_key)
+        if action == "revoke":
+            result = self.backend.revoke_care_proposal(
+                context,
+                proposal_id=proposal_id,
+                expected_version=payload.expected_version,
+                idempotency_key=caller_key,
+                reason_code=payload.reason_code,
+                reason=payload.reason,
+            )
+        else:
+            result = self.backend.decide_care_proposal(
+                context,
+                proposal_id=proposal_id,
+                expected_version=payload.expected_version,
+                choice=action,
+                idempotency_key=caller_key,
+                reason_code=payload.reason_code,
+                reason=payload.reason,
+            )
+        if result.outcome == "conflict":
+            raise ProductApiError(
+                "decision_conflict",
+                "The proposal already has different terminal authority.",
+                status_code=409,
+            )
+        if result.outcome in {"expired", "superseded"}:
+            raise ProductApiError(
+                "proposal_stale",
+                "The proposal is expired or superseded.",
+                status_code=409,
+            )
+        return result
 
     def run_report(
         self,

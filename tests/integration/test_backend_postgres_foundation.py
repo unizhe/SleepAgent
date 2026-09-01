@@ -1191,3 +1191,59 @@ def test_every_cross_scope_claim_returns_an_exact_subject_uow_scope(
         "fencing_token TEXT",
     ):
         assert declaration in function
+
+
+def test_g8_migration_is_normalized_rls_and_external_effect_free() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/020_care_action_governance.sql"
+    ).read_text(encoding="utf-8")
+    for table in (
+        "backend_care_action_proposals_v3",
+        "backend_care_action_decisions_v3",
+        "backend_approval_grants_v3",
+    ):
+        assert f"CREATE TABLE public.{table}" in body
+        assert f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY" in body
+        assert f"ALTER TABLE public.{table} FORCE ROW LEVEL SECURITY" in body
+    assert "CareActionProposal semantic content is immutable" in body
+    assert "Care governance audit rows are append-only" in body
+    assert "ApprovalGrant semantic content is immutable" in body
+    assert "sleepagent_decide_care_action_proposal_v3" in body
+    assert "sleepagent_revoke_care_approval_v3" in body
+    assert "product:sleep:care:confirm" in body
+    assert "source_night_finalization_revision_id" in body
+    assert "source_shared_analysis_sha256" in body
+    assert "proposal_semantic_sha256" in body
+    assert "FROM PUBLIC" in body
+    assert "CREATE TABLE public.backend_delivery_intents" not in body
+    assert "INSERT INTO public.backend_delivery_intents" not in body
+    assert "send_email" not in body
+
+
+def test_g8_operational_snapshot_is_aggregate_only() -> None:
+    body = Path(
+        "sleepagent/persistence/migrations/020_care_action_governance.sql"
+    ).read_text(encoding="utf-8")
+    function = body.split(
+        "CREATE OR REPLACE FUNCTION public.sleepagent_care_governance_operational_metrics_v3()",
+        1,
+    )[1].split("REVOKE ALL ON FUNCTION", 1)[0]
+    for signal in (
+        "pending_care_proposals",
+        "oldest_pending_approval_age_seconds",
+        "approved_not_consumed_count",
+        "expired_proposal_count",
+        "revoked_grant_count",
+        "decision_conflict_error_count",
+    ):
+        assert signal in function
+    returned = function.split("SELECT jsonb_build_object(", 1)[1]
+    for forbidden in (
+        "'subject_id'",
+        "'proposal_id'",
+        "'actor_id'",
+        "'binding_id'",
+        "'candidate_json'",
+        "'reason_text'",
+    ):
+        assert forbidden not in returned

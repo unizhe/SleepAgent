@@ -423,6 +423,85 @@ class ProductCareResponse(PublicModel):
     next_cursor: str | None = None
 
 
+class CareProposalSummary(PublicModel):
+    proposal_id: NonEmpty
+    state: Literal[
+        "awaiting_approval", "approved", "rejected", "expired", "revoked"
+    ]
+    version: int = Field(ge=1)
+    action_type: Literal[
+        "recommend_consistent_wake_time",
+        "recommend_morning_light",
+        "request_manual_follow_up",
+        "request_morning_review_feedback",
+    ]
+    audience_role: ProductRole
+    required_approver_role: ProductRole
+    display_explanation: str | None = Field(default=None, max_length=500)
+    source_analysis_revision_id: NonEmpty
+    night_episode_id: NonEmpty
+    evidence_refs: tuple[NonEmpty, ...]
+    created_at: datetime
+    expires_at: datetime
+    grant_id: str | None = None
+    grant_state: Literal["active", "revoked", "expired"] | None = None
+
+    @field_validator("created_at", "expires_at")
+    @classmethod
+    def care_proposal_times_are_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Care proposal timestamps must include a timezone offset")
+        return value
+
+    @model_validator(mode="after")
+    def grant_shape_matches(self) -> "CareProposalSummary":
+        if (self.grant_id is None) != (self.grant_state is None):
+            raise ValueError("Care grant id and state must appear together")
+        return self
+
+
+class CareProposalListResponse(PublicModel):
+    schema_version: Literal["care_action_proposal_list.v1"] = (
+        "care_action_proposal_list.v1"
+    )
+    items: tuple[CareProposalSummary, ...]
+
+
+class CareProposalDetailResponse(PublicModel):
+    schema_version: Literal["care_action_proposal_detail.v1"] = (
+        "care_action_proposal_detail.v1"
+    )
+    proposal: CareProposalSummary
+    policy_version: NonEmpty
+    policy_reason_code: NonEmpty
+    urgency: Literal["normal", "watch"]
+    caveat: Literal[
+        "approval_is_authority_only_no_action_has_been_delivered"
+    ] = "approval_is_authority_only_no_action_has_been_delivered"
+
+
+class CareProposalDecisionRequest(PublicModel):
+    expected_version: int = Field(ge=1)
+    reason_code: NonEmpty = Field(max_length=100)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class CareProposalMutationResponse(PublicModel):
+    schema_version: Literal["care_action_proposal_mutation.v1"] = (
+        "care_action_proposal_mutation.v1"
+    )
+    outcome: Literal[
+        "applied", "idempotent", "conflict", "expired", "superseded"
+    ]
+    proposal_id: NonEmpty
+    state: Literal[
+        "awaiting_approval", "approved", "rejected", "expired", "revoked"
+    ]
+    version: int = Field(ge=1)
+    decision_id: str | None = None
+    grant_id: str | None = None
+
+
 class InteractionStartRequest(PublicModel):
     intent: NonEmpty = Field(max_length=200)
     episode_revision_id: str | None = Field(default=None, max_length=200)

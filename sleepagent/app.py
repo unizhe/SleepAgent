@@ -785,6 +785,10 @@ class PostgresInternalStatus:
                     "SELECT public.sleepagent_internal_operational_metrics()"
                 )
                 row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT public.sleepagent_care_governance_operational_metrics_v3()"
+                )
+                care_row = cursor.fetchone()
             finally:
                 cursor.close()
             uow.commit()
@@ -797,7 +801,16 @@ class PostgresInternalStatus:
             value = json.loads(value)
         if not isinstance(value, Mapping):
             raise RuntimeError("internal operational metrics are not an object")
-        return dict(value)
+        result = dict(value)
+        care_value = None if care_row is None else care_row[0]
+        if isinstance(care_value, str):
+            import json
+
+            care_value = json.loads(care_value)
+        if not isinstance(care_value, Mapping):
+            raise RuntimeError("care governance operational metrics are unavailable")
+        result["care_governance"] = dict(care_value)
+        return result
 
 
 def build_api_runtime_services(

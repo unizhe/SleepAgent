@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated, Callable, cast
+from typing import Annotated, Callable, Literal, cast
 
 from fastapi import APIRouter, Header, Query, Request
 
 from sleepagent.api.product_contracts import (
     AcceptedOperationResponse,
+    CareProposalDecisionRequest,
+    CareProposalDetailResponse,
+    CareProposalListResponse,
+    CareProposalMutationResponse,
     ErrorResponse,
     FeedbackRequest,
     HabitChangeRequest,
@@ -97,6 +101,115 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
             limit=limit,
             cursor=cursor,
         ))
+
+    @router.get(
+        "/care/proposals",
+        response_model=CareProposalListResponse,
+    )
+    def list_care_proposals(
+        request: Request,
+        state: Annotated[
+            Literal[
+                "awaiting_approval", "approved", "rejected", "expired", "revoked"
+            ]
+            | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> CareProposalListResponse:
+        return provider().list_care_proposals(
+            request,
+            state=state,
+            limit=limit,
+        )
+
+    @router.get(
+        "/care/proposals/{proposal_id}",
+        response_model=CareProposalDetailResponse,
+    )
+    def get_care_proposal(
+        proposal_id: str,
+        request: Request,
+    ) -> CareProposalDetailResponse:
+        return provider().get_care_proposal(
+            request,
+            proposal_id=proposal_id,
+        )
+
+    def _mutate_care_proposal(
+        *,
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: str,
+        action: Literal["approve", "reject", "revoke"],
+        request_body: bytes,
+    ) -> CareProposalMutationResponse:
+        return provider().mutate_care_proposal(
+            request,
+            payload,
+            proposal_id=proposal_id,
+            action=action,
+            idempotency_key=idempotency_key,
+            request_body=request_body,
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/approve",
+        response_model=CareProposalMutationResponse,
+    )
+    async def approve_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="approve",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/reject",
+        response_model=CareProposalMutationResponse,
+    )
+    async def reject_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="reject",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/revoke",
+        response_model=CareProposalMutationResponse,
+    )
+    async def revoke_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="revoke",
+            request_body=await request.body(),
+        )
 
     @router.get("/records", response_model=ProductRecordsResponse)
     def records(

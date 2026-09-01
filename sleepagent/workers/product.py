@@ -120,6 +120,12 @@ from sleepagent.application.product_data import (
     build_longitudinal_vital_risk_context,
     public_product_subject_ref,
 )
+from sleepagent.application.care_actions import (
+    build_care_action_proposal,
+    current_hard_finalization_revision,
+    persist_care_action_proposal,
+)
+from sleepagent.observability import log_event
 from sleepagent.workers.kernel import (
     DispatchKnownNotSent,
     InvocationKind,
@@ -5127,6 +5133,64 @@ class PostgresProductAgentRepository:
                     committed_at,
                 ),
             )
+            if (
+                artifact.schema_version == "product_agent_prepared_attempt.v3"
+                and artifact.shared_analysis is not None
+            ):
+                finalization_revision_id = current_hard_finalization_revision(
+                    cursor,
+                    self.scope,
+                    night_episode_id=artifact.night_episode_id,
+                    night_episode_revision_id=artifact.night_episode_revision_id,
+                )
+                care_build = build_care_action_proposal(
+                    artifact.shared_analysis,
+                    subject_id=analysis.subject_id,
+                    analysis_revision_id=analysis.analysis_revision_id,
+                    night_finalization_revision_id=(
+                        finalization_revision_id or "not-hard-finalized"
+                    ),
+                    created_at=committed_at,
+                    source_is_current=True,
+                    source_is_hard_finalized=(
+                        finalization_revision_id is not None
+                    ),
+                )
+                if care_build.proposal is not None:
+                    log_event(
+                        "care_action_candidate_validated",
+                        action_type=(
+                            care_build.proposal.candidate.action_type.value
+                        ),
+                        policy_version=(
+                            care_build.proposal.policy.policy_version
+                        ),
+                    )
+                    created = persist_care_action_proposal(
+                        cursor,
+                        self.scope,
+                        night_episode_id=artifact.night_episode_id,
+                        proposal=care_build.proposal,
+                        persisted_at=committed_at,
+                    )
+                    log_event(
+                        (
+                            "care_action_proposal_created"
+                            if created
+                            else "care_action_proposal_deduplicated"
+                        ),
+                        action_type=(
+                            care_build.proposal.candidate.action_type.value
+                        ),
+                        policy_version=(
+                            care_build.proposal.policy.policy_version
+                        ),
+                    )
+                elif artifact.shared_analysis.care is not None:
+                    log_event(
+                        "care_action_candidate_rejected",
+                        reason_code=care_build.reason_code,
+                    )
             persisted_receipt_ids: set[str] = set()
             for role_run in artifact.role_runs:
                 request_receipts = role_run.fact_snapshot.memory_read_receipt_refs

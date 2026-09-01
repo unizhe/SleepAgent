@@ -22,6 +22,10 @@ from sleepagent.config import DeploymentMode, SleepBackendSettings
 from sleepagent.api.product_contracts import (
     CareActionRecord,
     CareFollowupRecord,
+    CareProposalDetailResponse,
+    CareProposalListResponse,
+    CareProposalMutationResponse,
+    CareProposalSummary,
     HabitChangeRequest,
     HabitChangeResponse,
     HabitProfileResponse,
@@ -150,6 +154,7 @@ from sleepagent.runtime.reports import (
     validate_elder_message_atoms,
 )
 from sleepagent.runtime.results import PRODUCT_EPISODE_RUNNER_VERSION
+from sleepagent.observability import log_event
 
 
 UTC = timezone.utc
@@ -1621,6 +1626,252 @@ class PostgresProductBackend(ProductBackend):
                 id_index=1,
             ),
         )
+
+    def list_care_proposals(
+        self,
+        context: ProductRequestContext,
+        *,
+        state: str | None,
+        limit: int,
+    ) -> CareProposalListResponse:
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT proposal.proposal_id,
+                      CASE WHEN proposal.expires_at <= %s
+                             AND proposal.state IN ('awaiting_approval', 'approved')
+                        THEN 'expired' ELSE proposal.state END AS effective_state,
+                      proposal.version, proposal.action_type,
+                      proposal.audience_role, proposal.required_approver_role,
+                      proposal.candidate_json ->> 'display_explanation',
+                      proposal.source_analysis_revision_id,
+                      proposal.night_episode_id,
+                      proposal.candidate_json -> 'rationale_evidence_refs',
+                      proposal.created_at, proposal.expires_at,
+                      approval_grant.grant_id,
+                      CASE WHEN approval_grant.state = 'active'
+                             AND approval_grant.expires_at <= %s
+                        THEN 'expired' ELSE approval_grant.state END AS effective_grant_state,
+                      proposal.policy_version, proposal.policy_reason_code,
+                      proposal.urgency
+                    FROM public.backend_care_action_proposals_v3 AS proposal
+                    LEFT JOIN public.backend_approval_grants_v3 AS approval_grant
+                      ON approval_grant.proposal_id = proposal.proposal_id
+                    WHERE proposal.namespace_id = %s AND proposal.data_mode = %s
+                      AND proposal.namespace_generation = %s
+                      AND proposal.run_id IS NOT DISTINCT FROM %s
+                      AND proposal.arm_id IS NOT DISTINCT FROM %s
+                      AND proposal.subject_id = %s
+                      AND (%s::text IS NULL OR
+                        (CASE WHEN proposal.expires_at <= %s
+                               AND proposal.state IN ('awaiting_approval', 'approved')
+                          THEN 'expired' ELSE proposal.state END) = %s)
+                    ORDER BY proposal.created_at DESC, proposal.proposal_id DESC
+                    LIMIT %s
+                    """,
+                    (
+                        self.now_factory(),
+                        self.now_factory(),
+                        *_product_scope_params(context),
+                        state,
+                        self.now_factory(),
+                        state,
+                        limit,
+                    ),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+            uow.commit()
+        return CareProposalListResponse(
+            items=tuple(_care_proposal_summary(row) for row in rows)
+        )
+
+    def get_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+    ) -> CareProposalDetailResponse | None:
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT proposal.proposal_id,
+                      CASE WHEN proposal.expires_at <= %s
+                             AND proposal.state IN ('awaiting_approval', 'approved')
+                        THEN 'expired' ELSE proposal.state END,
+                      proposal.version, proposal.action_type,
+                      proposal.audience_role, proposal.required_approver_role,
+                      proposal.candidate_json ->> 'display_explanation',
+                      proposal.source_analysis_revision_id,
+                      proposal.night_episode_id,
+                      proposal.candidate_json -> 'rationale_evidence_refs',
+                      proposal.created_at, proposal.expires_at,
+                      approval_grant.grant_id,
+                      CASE WHEN approval_grant.state = 'active'
+                             AND approval_grant.expires_at <= %s
+                        THEN 'expired' ELSE approval_grant.state END,
+                      proposal.policy_version, proposal.policy_reason_code,
+                      proposal.urgency
+                    FROM public.backend_care_action_proposals_v3 AS proposal
+                    LEFT JOIN public.backend_approval_grants_v3 AS approval_grant
+                      ON approval_grant.proposal_id = proposal.proposal_id
+                    WHERE proposal.proposal_id = %s
+                      AND proposal.namespace_id = %s AND proposal.data_mode = %s
+                      AND proposal.namespace_generation = %s
+                      AND proposal.run_id IS NOT DISTINCT FROM %s
+                      AND proposal.arm_id IS NOT DISTINCT FROM %s
+                      AND proposal.subject_id = %s
+                    """,
+                    (
+                        self.now_factory(),
+                        self.now_factory(),
+                        proposal_id,
+                        *_product_scope_params(context),
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            uow.commit()
+        if row is None:
+            return None
+        return CareProposalDetailResponse(
+            proposal=_care_proposal_summary(row),
+            policy_version=str(row[14]),
+            policy_reason_code=str(row[15]),
+            urgency=cast(Literal["normal", "watch"], str(row[16])),
+        )
+
+    def decide_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+        expected_version: int,
+        choice: Literal["approve", "reject"],
+        idempotency_key: str,
+        reason_code: str,
+        reason: str | None,
+    ) -> CareProposalMutationResponse:
+        result = self._care_proposal_mutation(
+            context,
+            function_name="sleepagent_decide_care_action_proposal_v3",
+            parameters=(
+                proposal_id,
+                expected_version,
+                choice,
+                idempotency_key,
+                context.binding_id,
+                reason_code,
+                reason,
+                self.now_factory(),
+            ),
+        )
+        if result.outcome == "conflict":
+            log_event("decision_conflict")
+        elif result.outcome in {"expired", "superseded"}:
+            log_event("proposal_expired", reason_code=result.outcome)
+        else:
+            log_event(
+                {"approve": "hitl_approved", "reject": "hitl_rejected"}[
+                    choice
+                ]
+            )
+        if (
+            choice == "approve"
+            and result.outcome == "applied"
+            and result.grant_id is not None
+        ):
+            log_event("approval_grant_issued")
+        return result
+
+    def revoke_care_proposal(
+        self,
+        context: ProductRequestContext,
+        *,
+        proposal_id: str,
+        expected_version: int,
+        idempotency_key: str,
+        reason_code: str,
+        reason: str | None,
+    ) -> CareProposalMutationResponse:
+        result = self._care_proposal_mutation(
+            context,
+            function_name="sleepagent_revoke_care_approval_v3",
+            parameters=(
+                proposal_id,
+                expected_version,
+                idempotency_key,
+                context.binding_id,
+                reason_code,
+                reason,
+                self.now_factory(),
+            ),
+        )
+        log_event(
+            "approval_grant_revoked"
+            if result.outcome in {"applied", "idempotent"}
+            else "decision_conflict"
+        )
+        return result
+
+    def _care_proposal_mutation(
+        self,
+        context: ProductRequestContext,
+        *,
+        function_name: Literal[
+            "sleepagent_decide_care_action_proposal_v3",
+            "sleepagent_revoke_care_approval_v3",
+        ],
+        parameters: tuple[Any, ...],
+    ) -> CareProposalMutationResponse:
+        placeholders = ",".join("%s" for _ in parameters)
+        try:
+            with self.uow_factory.begin(_uow_scope(context)) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    cursor.execute(
+                        f"SELECT public.{function_name}({placeholders})",
+                        parameters,
+                    )
+                    row = cursor.fetchone()
+                finally:
+                    cursor.close()
+                uow.commit()
+        except Exception as exc:
+            message = str(exc)
+            if any(
+                code in message
+                for code in (
+                    "care_approver_unauthorized",
+                    "care_revoker_unauthorized",
+                    "care_decision_invalid_context",
+                    "care_revoke_invalid_context",
+                )
+            ):
+                raise ProductApiError(
+                    "authorization_denied",
+                    "The authoritative binding cannot decide this proposal.",
+                    status_code=403,
+                ) from exc
+            if "care_proposal_not_found" in message:
+                raise ProductApiError(
+                    "not_found",
+                    "The governed care proposal was not found.",
+                    status_code=404,
+                ) from exc
+            raise
+        if row is None or row[0] is None:
+            raise RuntimeError("Care proposal mutation returned no result")
+        value = row[0]
+        if isinstance(value, str):
+            value = json.loads(value)
+        return CareProposalMutationResponse.model_validate(value)
 
     def select_habit_questions(
         self,
@@ -4444,6 +4695,45 @@ def _care_record(row: Any) -> CareActionRecord | CareFollowupRecord:
         "projection_corrupt",
         "The care projection contains an unsupported record type.",
         status_code=500,
+    )
+
+
+def _care_proposal_summary(row: Any) -> CareProposalSummary:
+    refs = json.loads(row[9]) if isinstance(row[9], str) else row[9]
+    if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
+        raise ProductApiError(
+            "projection_corrupt",
+            "The care proposal evidence references are invalid.",
+            status_code=500,
+        )
+    return CareProposalSummary(
+        proposal_id=str(row[0]),
+        state=cast(
+            Literal[
+                "awaiting_approval", "approved", "rejected", "expired", "revoked"
+            ],
+            str(row[1]),
+        ),
+        version=int(row[2]),
+        action_type=cast(
+            Literal[
+                "recommend_consistent_wake_time",
+                "recommend_morning_light",
+                "request_manual_follow_up",
+                "request_morning_review_feedback",
+            ],
+            str(row[3]),
+        ),
+        audience_role=ProductRole(str(row[4])),
+        required_approver_role=ProductRole(str(row[5])),
+        display_explanation=None if row[6] is None else str(row[6]),
+        source_analysis_revision_id=str(row[7]),
+        night_episode_id=str(row[8]),
+        evidence_refs=tuple(refs),
+        created_at=row[10],
+        expires_at=row[11],
+        grant_id=None if row[12] is None else str(row[12]),
+        grant_state=None if row[13] is None else str(row[13]),
     )
 
 

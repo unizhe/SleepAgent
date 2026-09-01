@@ -7,6 +7,11 @@ import pytest
 from starlette.requests import Request
 
 from sleepagent.api.product_contracts import (
+    CareProposalDecisionRequest,
+    CareProposalDetailResponse,
+    CareProposalListResponse,
+    CareProposalMutationResponse,
+    CareProposalSummary,
     FamilyTodayContent,
     FeedbackRequest,
     HabitChangeRequest,
@@ -151,6 +156,7 @@ class Backend:
     def __init__(self) -> None:
         self.reservations: list[dict[str, Any]] = []
         self.report_reservations: list[dict[str, Any]] = []
+        self.care_mutations: list[dict[str, Any]] = []
 
     def get_today_projection(
         self,
@@ -221,6 +227,52 @@ class Backend:
             subject_ref=public_product_subject_ref(context.subject_id),
             role=context.role,
             items=(),
+        )
+
+    def list_care_proposals(self, context, *, state, limit):
+        del context, state, limit
+        return CareProposalListResponse(items=())
+
+    def get_care_proposal(self, context, *, proposal_id):
+        return CareProposalDetailResponse(
+            proposal=CareProposalSummary(
+                proposal_id=proposal_id,
+                state="awaiting_approval",
+                version=2,
+                action_type="recommend_consistent_wake_time",
+                audience_role=context.role,
+                required_approver_role=context.role,
+                source_analysis_revision_id="analysis-1",
+                night_episode_id="night-1",
+                evidence_refs=("claim-1",),
+                created_at=datetime(2026, 9, 1, tzinfo=UTC),
+                expires_at=datetime(2026, 9, 2, tzinfo=UTC),
+            ),
+            policy_version="care-action-governance.v1",
+            policy_reason_code="eligible",
+            urgency="normal",
+        )
+
+    def decide_care_proposal(self, context, **values):
+        self.care_mutations.append({"context": context, **values})
+        return CareProposalMutationResponse(
+            outcome="applied",
+            proposal_id=values["proposal_id"],
+            state="approved" if values["choice"] == "approve" else "rejected",
+            version=values["expected_version"] + 1,
+            decision_id="decision-1",
+            grant_id="grant-1" if values["choice"] == "approve" else None,
+        )
+
+    def revoke_care_proposal(self, context, **values):
+        self.care_mutations.append({"context": context, "choice": "revoke", **values})
+        return CareProposalMutationResponse(
+            outcome="applied",
+            proposal_id=values["proposal_id"],
+            state="revoked",
+            version=values["expected_version"] + 1,
+            decision_id="decision-2",
+            grant_id="grant-1",
         )
 
     def reserve_report_run(self, context, **values):
@@ -390,6 +442,43 @@ def test_missing_idempotency_key_fails_after_authentication_before_any_write() -
     assert captured.value.status_code == 400
     assert backend.reservations == []
     assert len(identity.calls) == 1
+
+
+def test_care_proposal_approval_uses_authenticated_context_and_is_authority_only() -> None:
+    backend = Backend()
+    identity = Identity(_context(ProductRole.ELDER))
+    service = ProductApiService(identity_resolver=identity, backend=backend)
+    body = b'{"expected_version":2,"reason_code":"reviewed"}'
+
+    result = service.mutate_care_proposal(
+        _request(),
+        CareProposalDecisionRequest(
+            expected_version=2,
+            reason_code="reviewed",
+        ),
+        proposal_id="care-proposal-1",
+        action="approve",
+        idempotency_key="approve-1",
+        request_body=body,
+    )
+
+    assert result.state == "approved"
+    assert result.grant_id == "grant-1"
+    assert identity.calls[-1] == (body, "sleep_care")
+    assert backend.care_mutations == [
+        {
+            "context": identity.context,
+            "proposal_id": "care-proposal-1",
+            "expected_version": 2,
+            "choice": "approve",
+            "idempotency_key": "approve-1",
+            "reason_code": "reviewed",
+            "reason": None,
+        }
+    ]
+    encoded = repr(result.model_dump(mode="json"))
+    for forbidden in ("delivery", "email", "sms", "completed"):
+        assert forbidden not in encoded
 
 
 def test_doctor_cannot_confirm_personal_care_action() -> None:
