@@ -100,9 +100,10 @@ def test_outcome_memory_is_one_exact_evidence_consumer_not_broad_retrieval() -> 
 
 
 def test_c3_is_manifest_pinned_additive_migration_025() -> None:
-    assert LATEST_SCHEMA_VERSION == 25
-    assert EXPECTED_MIGRATION_IDENTITIES[-1].startswith(
-        "025:025_outcome_personalization_governance:"
+    assert LATEST_SCHEMA_VERSION >= 25
+    assert any(
+        identity.startswith("025:025_outcome_personalization_governance:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
     )
     assert MIGRATION.is_file()
 

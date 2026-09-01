@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from sleepagent.api.postgres import PostgresProductBackend
+from sleepagent.app import PostgresInternalStatus
 from sleepagent.config import (
     DataMode,
     DeploymentMode,
@@ -207,6 +208,34 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
         )
     finally:
         provider.close()
+        with psycopg.connect(admin_dsn) as admin:
+            admin.execute(
+                "UPDATE public.sleep_domain_normalization_work "
+                "SET status = 'quarantined', "
+                "last_error_code = 'test_fixture_cleanup', "
+                "lease_owner = NULL, worker_instance = NULL, "
+                "fencing_token = NULL, heartbeat_at = NULL, "
+                "lease_expires_at = NULL, updated_at = clock_timestamp() "
+                "WHERE namespace_id = %s "
+                "AND status IN ('pending', 'retry', 'running')",
+                (namespace_id,),
+            )
+            admin.execute(
+                "UPDATE public.backend_retention_jobs "
+                "SET status = 'dead_letter', worker_instance = NULL, "
+                "fencing_token = NULL, heartbeat_at = NULL, "
+                "lease_expires_at = NULL, updated_at = clock_timestamp() "
+                "WHERE namespace_id = %s "
+                "AND status IN ('pending', 'retry', 'running')",
+                (namespace_id,),
+            )
+            admin.execute(
+                "UPDATE public.backend_principal_grants "
+                "SET status = 'revoked', valid_until = clock_timestamp(), "
+                "updated_at = clock_timestamp() "
+                "WHERE grant_id = %s",
+                (f"worker-grant-{suffix}",),
+            )
 
 
 def _authorization_snapshot() -> str:
@@ -842,6 +871,21 @@ def test_expired_claim_reuses_the_same_business_attempt(
     assert second.lease_generation == first.lease_generation + 1
     assert second.fencing_token != first.fencing_token
 
+    table, identifier = {
+        "normalization": ("sleep_domain_normalization_work", "work_id"),
+        "operation": ("sleep_domain_operations", "operation_id"),
+        "delivery": ("backend_delivery_intents", "delivery_intent_id"),
+        "retention": ("backend_retention_jobs", "retention_job_id"),
+    }[kind]
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        assert admin.execute(
+            f"SELECT execution_reclaim_count, attempt_count FROM public.{table} "
+            f"WHERE {identifier} = %s",
+            (work_id,),
+        ).fetchone() == (1, 1)
+
     assert attempt_budget_harness.store.finalize(
         first,
         WorkResult(disposition=WorkDisposition.SUCCEEDED),
@@ -850,6 +894,106 @@ def test_expired_claim_reuses_the_same_business_attempt(
         second,
         WorkResult(disposition=WorkDisposition.SUCCEEDED),
     ) is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "terminal_status"),
+    [
+        ("normalization", "quarantined"),
+        ("operation", "dead_letter"),
+        ("delivery", "dead_letter"),
+        ("retention", "dead_letter"),
+    ],
+)
+def test_expired_claim_reclaim_budget_routes_to_governed_terminal_state(
+    attempt_budget_harness: _AttemptBudgetHarness,
+    kind: str,
+    terminal_status: str,
+) -> None:
+    queue, work_id = _queue_and_work_id(
+        attempt_budget_harness,
+        kind,
+        max_attempts=1,
+    )
+    table, identifier = {
+        "normalization": ("sleep_domain_normalization_work", "work_id"),
+        "operation": ("sleep_domain_operations", "operation_id"),
+        "delivery": ("backend_delivery_intents", "delivery_intent_id"),
+        "retention": ("backend_retention_jobs", "retention_job_id"),
+    }[kind]
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        admin.execute(
+            f"UPDATE public.{table} SET max_execution_reclaims = 2 "
+            f"WHERE {identifier} = %s",
+            (work_id,),
+        )
+
+    claims = []
+    for generation in (1, 2, 3):
+        claim = attempt_budget_harness.store.claim(
+            queue=queue,
+            worker_instance=f"{kind}-crash-worker-{generation}",
+            lease_seconds=30,
+        )
+        assert claim is not None
+        assert claim.work_id == work_id
+        assert claim.attempt == 1
+        assert claim.lease_generation == generation
+        claims.append(claim)
+        _expire_work(attempt_budget_harness, kind=kind, work_id=work_id)
+
+    assert attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance=f"{kind}-must-not-reclaim",
+        lease_seconds=30,
+    ) is None
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        status, reclaim_count, attempt_count, lease_expires_at = admin.execute(
+            f"SELECT status, execution_reclaim_count, attempt_count, "
+            f"lease_expires_at FROM public.{table} WHERE {identifier} = %s",
+            (work_id,),
+        ).fetchone()
+    assert status == terminal_status
+    assert reclaim_count == 2
+    assert attempt_count == 1
+    assert lease_expires_at is None
+    assert len({claim.fencing_token for claim in claims}) == 3
+    if kind == "operation":
+        api_dsn = _required_environment("SLEEPAGENT_TEST_POSTGRES_API_DSN")
+        api_principal = os.environ.get(
+            "SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL",
+            "sleepagent-bff-test",
+        )
+        api_provider = PsycopgPoolProvider.from_dsn(
+            api_dsn,
+            configuration=PoolConfiguration(min_size=1, max_size=1),
+        )
+        api_provider.open()
+        try:
+            metrics = PostgresInternalStatus(
+                type(
+                    "Settings",
+                    (),
+                    {
+                        "data_mode": DataMode.LIVE,
+                        "service_principal_id": api_principal,
+                        "outcome_evaluation_enabled": False,
+                    },
+                )(),
+                UnitOfWorkFactory(api_provider),
+            ).operational_metrics()
+        finally:
+            api_provider.close()
+        assert metrics["status"] == "unhealthy"
+        operation_queue = next(
+            item for item in metrics["queues"] if item["queue"] == "unknown"
+        )
+        assert operation_queue["dead_letter_count"] >= 1
+        assert operation_queue["lease_reclaim_count"] >= 2
 
 
 def test_reserved_invocation_rebinds_once_and_old_generation_stays_fenced(

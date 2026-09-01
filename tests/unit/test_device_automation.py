@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from sleepagent.application.acquisition import PostgresAcquisitionScheduler
+from sleepagent.application.acquisition import AcquisitionSchedule
 from sleepagent.application.night_finalization import (
     NightFinalizationPolicy,
     _decide,
@@ -108,3 +109,63 @@ def test_scheduler_disabled_mode_creates_no_database_work() -> None:
     )
 
     assert scheduler.fire_due() == ()
+
+
+@pytest.mark.parametrize(("cadence", "jitter"), ((60, 60), (60, 61)))
+def test_schedule_contract_rejects_jitter_at_or_above_cadence(
+    cadence: int, jitter: int
+) -> None:
+    with pytest.raises(ValueError, match="less than cadence"):
+        AcquisitionSchedule.model_validate(
+            {
+                "schedule_id": "schedule-1",
+                "namespace_id": "live:test",
+                "data_mode": "live",
+                "namespace_generation": 1,
+                "subject_id": "subject-1",
+                "device_binding_id": "binding-1",
+                "binding_version": 1,
+                "job_type": "night.finalization_scan",
+                "enabled": True,
+                "next_run_at": DEADLINE,
+                "consecutive_failures": 0,
+                "cadence_seconds": cadence,
+                "jitter_seconds": jitter,
+                "max_attempts": 5,
+                "schedule_policy_version": "test.v1",
+                "schedule_policy_sha256": "a" * 64,
+                "cas_version": 0,
+                "created_at": DEADLINE,
+                "updated_at": DEADLINE,
+            }
+        )
+
+
+@pytest.mark.parametrize("jitter", (0, 59))
+def test_schedule_contract_accepts_zero_and_near_cadence_jitter(
+    jitter: int,
+) -> None:
+    schedule = AcquisitionSchedule.model_validate(
+        {
+            "schedule_id": "schedule-1",
+            "namespace_id": "live:test",
+            "data_mode": "live",
+            "namespace_generation": 1,
+            "subject_id": "subject-1",
+            "device_binding_id": "binding-1",
+            "binding_version": 1,
+            "job_type": "night.finalization_scan",
+            "enabled": True,
+            "next_run_at": DEADLINE,
+            "consecutive_failures": 0,
+            "cadence_seconds": 60,
+            "jitter_seconds": jitter,
+            "max_attempts": 5,
+            "schedule_policy_version": "test.v1",
+            "schedule_policy_sha256": "a" * 64,
+            "cas_version": 0,
+            "created_at": DEADLINE,
+            "updated_at": DEADLINE,
+        }
+    )
+    assert schedule.jitter_seconds == jitter

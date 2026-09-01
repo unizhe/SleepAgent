@@ -59,6 +59,8 @@ class AcquisitionSchedule(BaseModel):
             raise ValueError("live schedule cannot carry replay identifiers")
         if self.data_mode == "replay" and not (self.run_id and self.arm_id):
             raise ValueError("replay schedule requires run and arm identifiers")
+        if self.jitter_seconds >= self.cadence_seconds:
+            raise ValueError("jitter_seconds must be less than cadence_seconds")
         return self
 
 
@@ -106,6 +108,8 @@ class AcquisitionScheduleService:
             raise ValueError("schedule requires an active DeviceBinding")
         if next_run_at.tzinfo is None or next_run_at.utcoffset() is None:
             raise ValueError("next_run_at must be timezone-aware")
+        if jitter_seconds < 0 or jitter_seconds >= cadence_seconds:
+            raise ValueError("jitter_seconds must satisfy 0 <= jitter < cadence")
         policy = {
             "schema_version": "acquisition_schedule_policy.v1",
             "policy_version": policy_version,
