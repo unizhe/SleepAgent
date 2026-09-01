@@ -105,6 +105,9 @@ def _insert_night(
     wake_at: datetime,
     finalization_revision_number: int = 1,
     parent_finalization_revision_id: str | None = None,
+    data_mode: str = "live",
+    run_id: str | None = None,
+    arm_id: str | None = None,
 ) -> tuple[str, str]:
     episode_id = f"g10-night-{suffix}"
     episode_revision_id = f"g10-episode-revision-{suffix}"
@@ -127,19 +130,22 @@ def _insert_night(
               night_episode_id, namespace_id, data_mode, subject_id, night_key,
               state, current_revision_id, current_revision_number, cas_version,
               episode_json, created_at, updated_at, namespace_generation,
-              timezone_name, episode_local_date, bed_at, wake_at
-            ) VALUES (%s,%s,'live',%s,%s,'closed',%s,1,1,%s::jsonb,%s,%s,1,
-              'Asia/Shanghai',%s,%s,%s)
+              run_id, arm_id, timezone_name, episode_local_date, bed_at, wake_at
+            ) VALUES (%s,%s,%s,%s,%s,'closed',%s,1,1,%s::jsonb,%s,%s,1,
+              %s,%s,'Asia/Shanghai',%s,%s,%s)
             """,
             (
                 episode_id,
                 namespace_id,
+                data_mode,
                 subject_id,
                 wake_at.date().isoformat(),
                 episode_revision_id,
                 json.dumps(episode_payload["episode"]),
                 wake_at,
                 wake_at,
+                run_id,
+                arm_id,
                 wake_at.date(),
                 bed_at,
                 wake_at,
@@ -153,18 +159,22 @@ def _insert_night(
               created_at, namespace_generation, timezone_name,
               episode_local_date, assignment_basis, date_confidence,
               assignment_estimated, date_state, date_conflict,
-              episode_schema_version
-            ) VALUES (%s,%s,'live',%s,%s,1,%s::jsonb,%s,1,'Asia/Shanghai',%s,
-              'observed_wake','observed',FALSE,'finalized',FALSE,'night_episode.v2')
+              episode_schema_version, run_id, arm_id
+            ) VALUES (%s,%s,%s,%s,%s,1,%s::jsonb,%s,1,'Asia/Shanghai',%s,
+              'observed_wake','observed',FALSE,'finalized',FALSE,'night_episode.v2',
+              %s,%s)
             """,
             (
                 episode_revision_id,
                 namespace_id,
+                data_mode,
                 episode_id,
                 subject_id,
                 json.dumps(episode_payload),
                 wake_at,
                 wake_at.date(),
+                run_id,
+                arm_id,
             ),
         )
         cursor.execute(
@@ -172,18 +182,22 @@ def _insert_night(
             INSERT INTO public.sleep_domain_night_finalizations (
               night_finalization_id, namespace_id, data_mode,
               namespace_generation, subject_id, night_episode_id, state,
-              policy_version, policy_sha256, created_at, updated_at
-            ) VALUES (%s,%s,'live',1,%s,%s,'open','night-finalization.v1',
-              %s,%s,%s)
+              policy_version, policy_sha256, created_at, updated_at,
+              run_id, arm_id
+            ) VALUES (%s,%s,%s,1,%s,%s,'open','night-finalization.v1',
+              %s,%s,%s,%s,%s)
             """,
             (
                 finalization_id,
                 namespace_id,
+                data_mode,
                 subject_id,
                 episode_id,
                 hashlib.sha256(b"night-finalization.v1").hexdigest(),
                 wake_at,
                 wake_at,
+                run_id,
+                arm_id,
             ),
         )
         cursor.execute(
@@ -195,14 +209,15 @@ def _insert_night(
               parent_finalization_revision_id,
               source_night_episode_revision_id, state, provisional,
               coverage_status, revision_cause, material_sha256,
-              finalization_json, created_at
-            ) VALUES (%s,%s,%s,'live',1,%s,%s,%s,%s,%s,'hard_finalized',FALSE,
-              'complete',%s,%s,'{}'::jsonb,%s)
+              finalization_json, created_at, run_id, arm_id
+            ) VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s,%s,'hard_finalized',FALSE,
+              'complete',%s,%s,'{}'::jsonb,%s,%s,%s)
             """,
             (
                 finalization_revision_id,
                 finalization_id,
                 namespace_id,
+                data_mode,
                 subject_id,
                 episode_id,
                 finalization_revision_number,
@@ -215,6 +230,8 @@ def _insert_night(
                 ),
                 hashlib.sha256(finalization_revision_id.encode()).hexdigest(),
                 wake_at,
+                run_id,
+                arm_id,
             ),
         )
         cursor.execute(

@@ -19,9 +19,10 @@ MIGRATION = ROOT / (
 
 
 def test_c2_is_manifest_pinned_additive_migration_024() -> None:
-    assert LATEST_SCHEMA_VERSION == 24
-    assert EXPECTED_MIGRATION_IDENTITIES[-1].startswith(
-        "024:024_care_evaluation_operational_metrics:"
+    assert LATEST_SCHEMA_VERSION >= 24
+    assert any(
+        identity.startswith("024:024_care_evaluation_operational_metrics:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
     )
     assert MIGRATION.is_file()
 

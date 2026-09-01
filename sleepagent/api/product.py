@@ -27,6 +27,10 @@ from sleepagent.api.product_contracts import (
     MemoryChangeRequest,
     MemoryQueryRequest,
     MemoryQueryResponse,
+    OutcomePersonalizationCandidate,
+    OutcomePersonalizationCandidateList,
+    OutcomePersonalizationDecisionRequest,
+    OutcomePersonalizationDecisionResponse,
     PendingL2Change,
     ProductCareResponse,
     ProductReportRunAccepted,
@@ -271,6 +275,30 @@ class ProductBackend(Protocol):
         context: ProductRequestContext,
         request: MemoryQueryRequest,
     ) -> MemoryQueryResponse: ...
+
+    def list_outcome_personalization_candidates(
+        self,
+        context: ProductRequestContext,
+        *,
+        status: str | None,
+        limit: int,
+    ) -> OutcomePersonalizationCandidateList: ...
+
+    def get_outcome_personalization_candidate(
+        self,
+        context: ProductRequestContext,
+        *,
+        governance_id: str,
+    ) -> OutcomePersonalizationCandidate | None: ...
+
+    def decide_outcome_personalization_candidate(
+        self,
+        context: ProductRequestContext,
+        *,
+        governance_id: str,
+        choice: Literal["accept", "reject"],
+        request: OutcomePersonalizationDecisionRequest,
+    ) -> OutcomePersonalizationDecisionResponse: ...
 
 
 class ProductApiService:
@@ -713,6 +741,77 @@ class ProductApiService:
                 status_code=403,
             )
         return self.backend.query_memory(context, payload)
+
+    def list_outcome_personalization_candidates(
+        self,
+        request: Request,
+        *,
+        status: str | None,
+        limit: int,
+    ) -> OutcomePersonalizationCandidateList:
+        context = self._personalization_context(request, b"")
+        context.require_scope("product:sleep:today:read")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Only the elder may review outcome personalization candidates.",
+                status_code=403,
+            )
+        return self.backend.list_outcome_personalization_candidates(
+            context,
+            status=status,
+            limit=limit,
+        )
+
+    def get_outcome_personalization_candidate(
+        self,
+        request: Request,
+        *,
+        governance_id: str,
+    ) -> OutcomePersonalizationCandidate:
+        context = self._personalization_context(request, b"")
+        context.require_scope("product:sleep:today:read")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Only the elder may review outcome personalization candidates.",
+                status_code=403,
+            )
+        item = self.backend.get_outcome_personalization_candidate(
+            context,
+            governance_id=governance_id,
+        )
+        if item is None:
+            raise ProductApiError(
+                "not_found",
+                "Outcome personalization candidate was not found.",
+                status_code=404,
+            )
+        return item
+
+    def decide_outcome_personalization_candidate(
+        self,
+        request: Request,
+        payload: OutcomePersonalizationDecisionRequest,
+        *,
+        governance_id: str,
+        choice: Literal["accept", "reject"],
+        request_body: bytes,
+    ) -> OutcomePersonalizationDecisionResponse:
+        context = self._personalization_context(request, request_body)
+        context.require_scope("product:sleep:care:confirm")
+        if context.role != ProductRole.ELDER:
+            raise ProductApiError(
+                "authorization_denied",
+                "Only the elder may decide outcome personalization candidates.",
+                status_code=403,
+            )
+        return self.backend.decide_outcome_personalization_candidate(
+            context,
+            governance_id=governance_id,
+            choice=choice,
+            request=payload,
+        )
 
     def _personalization_context(
         self,

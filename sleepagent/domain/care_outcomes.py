@@ -867,7 +867,7 @@ def _personalization_receipt(
     if relevant:
         candidate_seed = stable_hash(
             {
-                "care_outcome_id": outcome.care_outcome_id,
+                "care_plan_id": outcome.care_plan_id,
                 "concept_id": "care_outcome.consistent_wake_time_episode",
             }
         )

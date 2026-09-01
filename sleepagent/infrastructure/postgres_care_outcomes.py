@@ -24,6 +24,10 @@ from sleepagent.domain.care_outcomes import (
     evaluate_care_outcome,
     outcome_policy_for,
 )
+from sleepagent.application.personalization_governance import (
+    OutcomePersonalizationGovernance,
+    build_outcome_personalization_governance,
+)
 from sleepagent.observability import log_event
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 
@@ -487,6 +491,17 @@ class PostgresCareOutcomeEvaluator:
                 ),
             )
             receipt_created = outcome_created and cursor.rowcount == 1
+            if receipt_created:
+                governance = build_outcome_personalization_governance(
+                    outcome,
+                    receipt,
+                )
+                _register_personalization_governance(
+                    cursor,
+                    scope=self.scope,
+                    governance=governance,
+                    registered_at=receipt.created_at,
+                )
         cursor.execute(
             """
             UPDATE public.backend_care_outcome_evaluations_v1
@@ -516,6 +531,99 @@ class PostgresCareOutcomeEvaluator:
         if cursor.rowcount != 1:
             raise CareExecutionError("Care outcome evaluation projection lost CAS")
         return receipt_created
+
+
+def _register_personalization_governance(
+    cursor: Any,
+    *,
+    scope: UowScope,
+    governance: OutcomePersonalizationGovernance | None,
+    registered_at: datetime,
+) -> None:
+    if governance is None:
+        return
+    supersedes_governance_id = None
+    if governance.supersedes_receipt_id is not None:
+        cursor.execute(
+            """
+            SELECT governance_id
+            FROM public.backend_personalization_governance_v1
+            WHERE receipt_id = %s
+            FOR UPDATE
+            """,
+            (governance.supersedes_receipt_id,),
+        )
+        prior = cursor.fetchone()
+        if prior is not None:
+            supersedes_governance_id = str(prior[0])
+            cursor.execute(
+                """
+                UPDATE public.backend_personalization_governance_v1
+                SET status = 'superseded', state_version = state_version + 1,
+                    superseded_at = %s, updated_at = %s
+                WHERE governance_id = %s AND status = 'pending'
+                """,
+                (
+                    registered_at,
+                    registered_at,
+                    supersedes_governance_id,
+                ),
+            )
+            if cursor.rowcount == 1:
+                log_event("personalization_candidate_superseded")
+    candidate = governance.memory_candidate
+    cursor.execute(
+        """
+        INSERT INTO public.backend_personalization_governance_v1 (
+          governance_id, receipt_id, care_outcome_id,
+          supersedes_governance_id, namespace_id, data_mode,
+          namespace_generation, run_id, arm_id, subject_id, care_plan_id,
+          action_type, care_outcome_semantic_sha256, outcome_policy_version,
+          outcome_policy_sha256, evaluation_revision, outcome_category,
+          candidate_semantic_sha256, candidate_target_sha256,
+          memory_id, memory_concept_id, memory_purpose, memory_source_ref,
+          causal_claim, confirmation_required, status, state_version,
+          governance_json, candidate_json, registered_at, updated_at
+        ) VALUES (
+          %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+          %s,%s,%s,%s,%s,FALSE,TRUE,'pending',1,%s::jsonb,%s::jsonb,%s,%s
+        ) ON CONFLICT (receipt_id) DO NOTHING
+        """,
+        (
+            governance.governance_id,
+            governance.receipt_id,
+            governance.care_outcome_id,
+            supersedes_governance_id,
+            scope.namespace_id,
+            scope.data_mode,
+            scope.namespace_generation,
+            scope.run_id,
+            scope.arm_id,
+            governance.subject_id,
+            governance.care_plan_id,
+            governance.action_type,
+            governance.care_outcome_semantic_hash,
+            governance.outcome_policy_version,
+            governance.outcome_policy_hash,
+            governance.evaluation_revision,
+            governance.outcome_category.value,
+            governance.candidate_semantic_hash,
+            governance.candidate_target_hash,
+            candidate.candidate_id,
+            candidate.concept_id,
+            governance.memory_purpose,
+            candidate.source_ref,
+            governance.model_dump_json(),
+            candidate.model_dump_json(),
+            registered_at,
+            registered_at,
+        ),
+    )
+    log_event(
+        "personalization_candidate_registered"
+        if cursor.rowcount == 1
+        else "personalization_candidate_deduplicated"
+    )
 
 
 def _api_scope(principal: CareExecutionPrincipal) -> UowScope:

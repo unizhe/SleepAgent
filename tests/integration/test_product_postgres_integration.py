@@ -229,12 +229,22 @@ def _seed_product_scope(
     admin_dsn: str,
     worker_principal: str,
     care_required: bool = False,
+    existing_scope: _ProductSeed | None = None,
+    episode_day_offset: int = 0,
 ) -> _ProductSeed:
     suffix = uuid4().hex
-    namespace_id = f"replay:product-{suffix}"
-    run_id = f"run-{suffix}"
-    arm_id = f"arm-{suffix}"
-    subject_id = f"subject-{suffix}"
+    namespace_id = (
+        f"replay:product-{suffix}"
+        if existing_scope is None
+        else existing_scope.namespace_id
+    )
+    run_id = f"run-{suffix}" if existing_scope is None else existing_scope.run_id
+    arm_id = f"arm-{suffix}" if existing_scope is None else existing_scope.arm_id
+    subject_id = (
+        f"subject-{suffix}"
+        if existing_scope is None
+        else existing_scope.subject_id
+    )
     provider_account_id = f"account-{suffix}"
     device_binding_id = f"binding-{suffix}"
     device_id = f"device-{suffix}"
@@ -246,7 +256,8 @@ def _seed_product_scope(
     policy_sha256 = hashlib.sha256(f"policy:{suffix}".encode()).hexdigest()
     ids = UUID7Generator()
     now = datetime.now(tz=UTC)
-    collection_start = now - timedelta(hours=10)
+    episode_now = now + timedelta(days=episode_day_offset)
+    collection_start = episode_now - timedelta(hours=10)
     wake_at = collection_start + timedelta(hours=8)
     committed_at = wake_at + timedelta(seconds=1)
     opening_identity = f"synthetic-opening:{suffix}"
@@ -406,6 +417,7 @@ def _seed_product_scope(
                   namespace_id, data_mode, current_generation, status,
                   synthetic_non_release
                 ) VALUES (%s, 'replay', 1, 'active', TRUE)
+                ON CONFLICT DO NOTHING
                 """,
                 (namespace_id,),
             )
@@ -415,6 +427,7 @@ def _seed_product_scope(
                   namespace_id, data_mode, generation, status,
                   configuration_sha256
                 ) VALUES (%s, 'replay', 1, 'active', %s)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     namespace_id,
@@ -428,6 +441,7 @@ def _seed_product_scope(
                   scenario_id, scenario_sha256, generation, status,
                   synthetic_non_release
                 ) VALUES (%s, %s, 'replay', 1, %s, %s, 1, 'active', TRUE)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     run_id,
@@ -442,6 +456,7 @@ def _seed_product_scope(
                   arm_id, run_id, namespace_id, data_mode,
                   namespace_generation, arm_name, configuration_sha256
                 ) VALUES (%s, %s, %s, 'replay', 1, 'baseline', %s)
+                ON CONFLICT DO NOTHING
                 """,
                 (
                     arm_id,
@@ -455,6 +470,7 @@ def _seed_product_scope(
                 INSERT INTO public.backend_subjects (
                   namespace_id, data_mode, subject_id, timezone_name, status
                 ) VALUES (%s, 'replay', %s, 'Asia/Shanghai', 'active')
+                ON CONFLICT DO NOTHING
                 """,
                 (namespace_id, subject_id),
             )
@@ -464,6 +480,7 @@ def _seed_product_scope(
                   namespace_id, data_mode, subject_id, authorization_epoch,
                   privacy_epoch, retrieval_policy_epoch
                 ) VALUES (%s, 'replay', %s, 1, 1, 1)
+                ON CONFLICT DO NOTHING
                 """,
                 (namespace_id, subject_id),
             )
@@ -473,13 +490,21 @@ def _seed_product_scope(
                   grant_id, principal_id, namespace_id, data_mode, purpose,
                   scopes_json, allowed_handlers_json, authorization_epoch,
                   status, valid_from
-                ) VALUES (
+                ) SELECT
                   %s, %s, %s, 'replay', 'worker', '[]'::jsonb,
                   '["product_agent"]'::jsonb, 1, 'active',
                   clock_timestamp() - interval '1 minute'
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM public.backend_principal_grants
+                  WHERE principal_id = %s AND namespace_id = %s
+                    AND data_mode = 'replay' AND purpose = 'worker'
+                    AND status = 'active'
                 )
                 """,
-                (f"grant-{suffix}", worker_principal, namespace_id),
+                (
+                    f"grant-{suffix}", worker_principal, namespace_id,
+                    worker_principal, namespace_id,
+                ),
             )
             cursor.execute(
                 """
@@ -1242,18 +1267,20 @@ def _prepare_shared_acceptance_case(
     worker_queues: tuple[str, ...] = ("product_agent",),
     care_eligible: bool = False,
     fast_path_compatible: bool = False,
+    seed_l2_for_care: bool = True,
 ) -> _PreparedSharedCase:
     seed = _seed_product_scope(
         psycopg,
         admin_dsn=admin_dsn,
         worker_principal=worker_principal,
     )
-    if care_eligible:
+    if care_eligible and seed_l2_for_care:
         _seed_l2_personalization(
             psycopg,
             admin_dsn=admin_dsn,
             seed=seed,
         )
+    if care_eligible:
         _replace_current_risk(
             psycopg,
             admin_dsn=admin_dsn,

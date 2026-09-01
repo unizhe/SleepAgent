@@ -146,6 +146,9 @@ from sleepagent.workers.runtime import (
     exact_worker_scope,
     worker_uow_factory,
 )
+from sleepagent.application.personalization_governance import (
+    CARE_OUTCOME_MEMORY_CONCEPT_ID,
+)
 
 if TYPE_CHECKING:
     from sleepagent.runtime.factory import (
@@ -157,6 +160,7 @@ UTC = timezone.utc
 EVIDENCE_MEMORY_CONCEPT_IDS = (
     "sleep.context.night_routine",
     "sleep.context.environment",
+    CARE_OUTCOME_MEMORY_CONCEPT_ID,
 )
 CARE_MEMORY_CONCEPT_IDS = (
     "sleep.preference.care_delivery",

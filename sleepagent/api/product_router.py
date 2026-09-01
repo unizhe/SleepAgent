@@ -31,6 +31,10 @@ from sleepagent.api.product_contracts import (
     MemoryChangeRequest,
     MemoryQueryRequest,
     MemoryQueryResponse,
+    OutcomePersonalizationCandidate,
+    OutcomePersonalizationCandidateList,
+    OutcomePersonalizationDecisionRequest,
+    OutcomePersonalizationDecisionResponse,
     PendingL2Change,
     ProductCareResponse,
     ProductReportRunAccepted,
@@ -505,6 +509,71 @@ def create_product_router(provider: ProductServiceProvider) -> APIRouter:
         return provider().memory_query(
             request,
             payload,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/personalization/outcome-candidates",
+        response_model=OutcomePersonalizationCandidateList,
+    )
+    def outcome_personalization_candidates(
+        request: Request,
+        status: Annotated[
+            Literal["pending", "accepted", "rejected", "superseded"] | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> OutcomePersonalizationCandidateList:
+        return provider().list_outcome_personalization_candidates(
+            request,
+            status=status,
+            limit=limit,
+        )
+
+    @router.get(
+        "/personalization/outcome-candidates/{governance_id}",
+        response_model=OutcomePersonalizationCandidate,
+    )
+    def outcome_personalization_candidate(
+        governance_id: str,
+        request: Request,
+    ) -> OutcomePersonalizationCandidate:
+        return provider().get_outcome_personalization_candidate(
+            request,
+            governance_id=governance_id,
+        )
+
+    @router.post(
+        "/personalization/outcome-candidates/{governance_id}/accept",
+        response_model=OutcomePersonalizationDecisionResponse,
+    )
+    async def accept_outcome_personalization_candidate(
+        governance_id: str,
+        payload: OutcomePersonalizationDecisionRequest,
+        request: Request,
+    ) -> OutcomePersonalizationDecisionResponse:
+        return provider().decide_outcome_personalization_candidate(
+            request,
+            payload,
+            governance_id=governance_id,
+            choice="accept",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/outcome-candidates/{governance_id}/reject",
+        response_model=OutcomePersonalizationDecisionResponse,
+    )
+    async def reject_outcome_personalization_candidate(
+        governance_id: str,
+        payload: OutcomePersonalizationDecisionRequest,
+        request: Request,
+    ) -> OutcomePersonalizationDecisionResponse:
+        return provider().decide_outcome_personalization_candidate(
+            request,
+            payload,
+            governance_id=governance_id,
+            choice="reject",
             request_body=await request.body(),
         )
 

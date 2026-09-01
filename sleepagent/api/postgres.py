@@ -38,6 +38,10 @@ from sleepagent.api.product_contracts import (
     MemoryChangeRequest,
     MemoryQueryRequest,
     MemoryQueryResponse,
+    OutcomePersonalizationCandidate,
+    OutcomePersonalizationCandidateList,
+    OutcomePersonalizationDecisionRequest,
+    OutcomePersonalizationDecisionResponse,
     PendingL2Change,
     ProductCareResponse,
     ProductNarrativeState,
@@ -80,6 +84,9 @@ from sleepagent.api.public_auth import (
 )
 from sleepagent.api.public_contracts import PublicErrorCode
 from sleepagent.domain.episodes import EpisodeAssignmentBasis, UUID7Generator
+from sleepagent.application.personalization_governance import (
+    CARE_OUTCOME_MEMORY_CONCEPT_ID,
+)
 from sleepagent.domain.habit import (
     HABIT_CONCEPTS,
     HabitAnswer,
@@ -119,6 +126,7 @@ from sleepagent.runtime.memory import (
     MemoryChange,
     MemoryConfirmation,
     MemoryOperation,
+    MemoryItemStatus,
     MemoryPurpose,
     MemoryQueryIntent,
     apply_memory_change,
@@ -162,6 +170,7 @@ UTC = timezone.utc
 _REPORT_EVIDENCE_MEMORY_CONCEPT_IDS = (
     "sleep.context.night_routine",
     "sleep.context.environment",
+    CARE_OUTCOME_MEMORY_CONCEPT_ID,
 )
 _REPORT_CARE_MEMORY_CONCEPT_IDS = (
     "sleep.preference.care_delivery",
@@ -169,6 +178,17 @@ _REPORT_CARE_MEMORY_CONCEPT_IDS = (
 )
 _REPORT_MODEL_MODE_ENV = "SLEEPAGENT_PRODUCT_ANALYSIS_MODEL_MODE"
 _BACKEND_DEPLOYMENT_MODE_ENV = "SLEEPAGENT_BACKEND_DEPLOYMENT_MODE"
+_OUTCOME_PERSONALIZATION_SELECT = """
+SELECT item.governance_id, item.status, item.state_version, item.receipt_id,
+       item.care_outcome_id, item.care_plan_id, item.action_type,
+       item.outcome_category, item.candidate_semantic_sha256,
+       item.candidate_target_sha256, item.candidate_json,
+       item.outcome_policy_version, item.outcome_policy_sha256,
+       item.evaluation_revision, item.registered_at, item.decided_at,
+       item.memory_revision_ref, item.memory_revision_sha256,
+       item.governance_json
+FROM public.backend_personalization_governance_v1 AS item
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2223,71 +2243,25 @@ class PostgresProductBackend(ProductBackend):
                     memory_change = MemoryChange.model_validate(
                         handle_payload["change"]
                     )
-                    state = _load_memory_state(cursor, context)
-                    try:
-                        updated_memory = apply_memory_change(
-                            state,
-                            memory_change,
-                            MemoryConfirmation(
-                                confirmation_id=confirmation_id,
-                                actor_id=context.actor_id,
-                                subject_id=context.subject_id,
-                                target_change_id=memory_change.change_id,
-                                target_change_hash=str(memory_change.change_hash),
-                                approved_at=now,
-                                expires_at=memory_change.confirmation_expires_at,
-                            ),
-                            now=now,
-                        )
-                    except (PermissionError, ValueError) as exc:
-                        if "forged" in str(exc):
-                            raise RuntimeError(
-                                "Governed Memory revision integrity check failed"
-                            ) from exc
-                        raise ProductApiError(
-                            "state_conflict",
-                            "The Memory change is stale or no longer applicable.",
-                            status_code=409,
-                        ) from exc
-                    memory_revision = cast(
-                        GovernedMemoryItemV2,
-                        updated_memory.revisions[-1],
-                    )
-                    revision_hash = stable_hash(memory_revision)
-                    cursor.execute(
-                        """
-                        INSERT INTO public.backend_governed_memory_revisions_v2 (
-                          revision_ref, namespace_id, data_mode,
-                          namespace_generation, run_id, arm_id, subject_id,
-                          state_version, memory_id, memory_version, concept_id,
-                          status, revision_sha256, revision_json,
-                          confirmation_ref, committed_at
-                        ) VALUES (
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s::jsonb, %s, %s
-                        )
-                        """,
-                        (
-                            memory_revision.revision_ref,
-                            context.namespace_id,
-                            context.data_mode,
-                            context.namespace_generation,
-                            context.run_id,
-                            context.arm_id,
-                            context.subject_id,
-                            updated_memory.version,
-                            memory_revision.memory_id,
-                            memory_revision.version,
-                            memory_revision.concept_id,
-                            memory_revision.status.value,
-                            revision_hash,
-                            memory_revision.model_dump_json(),
-                            confirmation_id,
-                            now,
+                    (
+                        state_version,
+                        revision_ref,
+                        revision_hash,
+                    ) = _apply_and_persist_memory_change(
+                        cursor,
+                        context,
+                        memory_change,
+                        MemoryConfirmation(
+                            confirmation_id=confirmation_id,
+                            actor_id=context.actor_id,
+                            subject_id=context.subject_id,
+                            target_change_id=memory_change.change_id,
+                            target_change_hash=str(memory_change.change_hash),
+                            approved_at=now,
+                            expires_at=memory_change.confirmation_expires_at,
                         ),
+                        now=now,
                     )
-                    revision_ref = memory_revision.revision_ref
-                    state_version = updated_memory.version
                 cursor.execute(
                     """
                     UPDATE public.backend_pending_handles
@@ -2469,6 +2443,392 @@ class PostgresProductBackend(ProductBackend):
                 cursor.close()
             uow.commit()
         return MemoryQueryResponse(receipt=receipt.model_dump(mode="json"))
+
+    def list_outcome_personalization_candidates(
+        self,
+        context: ProductRequestContext,
+        *,
+        status: str | None,
+        limit: int,
+    ) -> OutcomePersonalizationCandidateList:
+        _require_outcome_personalization_elder(context)
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    _OUTCOME_PERSONALIZATION_SELECT
+                    + """
+                    WHERE item.namespace_id = %s AND item.data_mode = %s
+                      AND item.namespace_generation = %s
+                      AND COALESCE(item.run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(item.arm_id, '') = COALESCE(%s, '')
+                      AND item.subject_id = %s
+                      AND (%s::text IS NULL OR item.status = %s)
+                    ORDER BY item.registered_at DESC, item.governance_id
+                    LIMIT %s
+                    """,
+                    (*_product_scope_params(context), status, status, limit),
+                )
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+            uow.commit()
+        return OutcomePersonalizationCandidateList(
+            items=tuple(_outcome_personalization_item(row) for row in rows)
+        )
+
+    def get_outcome_personalization_candidate(
+        self,
+        context: ProductRequestContext,
+        *,
+        governance_id: str,
+    ) -> OutcomePersonalizationCandidate | None:
+        _require_outcome_personalization_elder(context)
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    _OUTCOME_PERSONALIZATION_SELECT
+                    + """
+                    WHERE item.governance_id = %s
+                      AND item.namespace_id = %s AND item.data_mode = %s
+                      AND item.namespace_generation = %s
+                      AND COALESCE(item.run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(item.arm_id, '') = COALESCE(%s, '')
+                      AND item.subject_id = %s
+                    """,
+                    (governance_id, *_product_scope_params(context)),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            uow.commit()
+        return None if row is None else _outcome_personalization_item(row)
+
+    def decide_outcome_personalization_candidate(
+        self,
+        context: ProductRequestContext,
+        *,
+        governance_id: str,
+        choice: Literal["accept", "reject"],
+        request: OutcomePersonalizationDecisionRequest,
+    ) -> OutcomePersonalizationDecisionResponse:
+        _require_outcome_personalization_elder(context)
+        now = self.now_factory()
+        with self.uow_factory.begin(_uow_scope(context)) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                _lock_l2_subject(cursor, context, capability="memory")
+                authority = _current_outcome_confirmation_authority(
+                    cursor,
+                    context,
+                )
+                cursor.execute(
+                    """
+                    SELECT governance_id
+                    FROM public.backend_personalization_governance_decisions_v1
+                    WHERE namespace_id = %s AND data_mode = %s
+                      AND namespace_generation = %s
+                      AND COALESCE(run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(arm_id, '') = COALESCE(%s, '')
+                      AND subject_id = %s AND actor_id = %s
+                      AND idempotency_key = %s
+                    """,
+                    (
+                        *_product_scope_params(context),
+                        context.actor_id,
+                        request.idempotency_key,
+                    ),
+                )
+                reused = cursor.fetchone()
+                if reused is not None and str(reused[0]) != governance_id:
+                    raise ProductApiError(
+                        "idempotency_conflict",
+                        "Idempotency-Key was already used for another candidate.",
+                        status_code=409,
+                    )
+                cursor.execute(
+                    """
+                    SELECT status, state_version, receipt_id, care_outcome_id,
+                           care_plan_id, action_type, outcome_category,
+                           candidate_semantic_sha256, candidate_target_sha256,
+                           candidate_json, decision_id, memory_revision_ref,
+                           memory_revision_sha256, outcome_policy_version,
+                           outcome_policy_sha256, evaluation_revision
+                    FROM public.backend_personalization_governance_v1
+                    WHERE governance_id = %s
+                      AND namespace_id = %s AND data_mode = %s
+                      AND namespace_generation = %s
+                      AND COALESCE(run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(arm_id, '') = COALESCE(%s, '')
+                      AND subject_id = %s
+                    FOR UPDATE
+                    """,
+                    (governance_id, *_product_scope_params(context)),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise ProductApiError(
+                        "not_found",
+                        "Outcome personalization candidate was not found.",
+                        status_code=404,
+                    )
+                status = str(row[0])
+                if status in {"accepted", "rejected"}:
+                    response = _existing_outcome_personalization_decision(
+                        cursor,
+                        context=context,
+                        governance_id=governance_id,
+                        choice=choice,
+                        request=request,
+                    )
+                    uow.commit()
+                    return response
+                if status != "pending":
+                    raise ProductApiError(
+                        "candidate_superseded",
+                        "A newer CareOutcome made this candidate non-actionable.",
+                        status_code=409,
+                    )
+                if (
+                    int(row[1]) != request.expected_state_version
+                    or str(row[7]) != request.candidate_semantic_hash
+                    or str(row[8]) != request.candidate_target_hash
+                ):
+                    raise ProductApiError(
+                        "confirmation_binding_changed",
+                        "The candidate no longer matches its exact target.",
+                        status_code=409,
+                    )
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM public.backend_care_outcome_evaluations_v1
+                    WHERE current_care_outcome_id = %s
+                      AND namespace_id = %s AND data_mode = %s
+                      AND namespace_generation = %s
+                      AND COALESCE(run_id, '') = COALESCE(%s, '')
+                      AND COALESCE(arm_id, '') = COALESCE(%s, '')
+                      AND subject_id = %s
+                    """,
+                    (str(row[3]), *_product_scope_params(context)),
+                )
+                if cursor.fetchone() is None:
+                    raise ProductApiError(
+                        "candidate_superseded",
+                        "The source CareOutcome is no longer current.",
+                        status_code=409,
+                    )
+                decision_id = "personalization-decision:" + stable_hash(
+                    {
+                        "governance_id": governance_id,
+                        "actor_id": context.actor_id,
+                        "choice": choice,
+                        "idempotency_key": request.idempotency_key,
+                    }
+                )[:32]
+                memory_change_id = None
+                memory_change_hash = None
+                memory_revision_ref = None
+                memory_revision_hash = None
+                if choice == "accept":
+                    candidate = MemoryChangeCandidate.model_validate(
+                        _json_object(row[9])
+                    )
+                    if (
+                        candidate.subject_id != context.subject_id
+                        or candidate.concept_id
+                        != CARE_OUTCOME_MEMORY_CONCEPT_ID
+                        or candidate.source_ref != f"evidence:{row[3]}"
+                        or candidate.candidate_hash != str(row[7])
+                        or candidate.typed_value != str(row[6])
+                        or candidate.provenance_type != "accepted_evidence"
+                        or not candidate.confirmation_required
+                    ):
+                        raise ProductApiError(
+                            "unsupported_candidate",
+                            "The outcome candidate is outside the governed allowlist.",
+                            status_code=409,
+                        )
+                    memory_state = _load_memory_state(cursor, context)
+                    prior = next(
+                        (
+                            item
+                            for item in reversed(memory_state.revisions)
+                            if isinstance(item, GovernedMemoryItemV2)
+                            and item.memory_id == candidate.candidate_id
+                        ),
+                        None,
+                    )
+                    operation = MemoryOperation.REMEMBER
+                    target_ref = None
+                    target_hash = None
+                    effective_candidate = candidate
+                    if prior is not None:
+                        if prior.status != MemoryItemStatus.ACTIVE:
+                            raise ProductApiError(
+                                "state_conflict",
+                                "The governed Memory lineage is terminal.",
+                                status_code=409,
+                            )
+                        operation = MemoryOperation.CORRECT
+                        target_ref = prior.revision_ref
+                        target_hash = stable_hash(prior)
+                        effective_candidate = MemoryChangeCandidate.model_validate(
+                            candidate.model_dump(
+                                mode="python",
+                                exclude={"candidate_hash"},
+                            )
+                            | {"operation": "replace"}
+                        )
+                    change = MemoryChange(
+                        change_id=(
+                            "memory-change:outcome:"
+                            + governance_id.rsplit(":", 1)[-1]
+                        ),
+                        operation=operation,
+                        memory_id=candidate.candidate_id,
+                        subject_id=context.subject_id,
+                        expected_state_version=memory_state.version,
+                        proposed_value=effective_candidate,
+                        causal_ref=governance_id,
+                        source_actor_id="care-outcome-evaluator",
+                        source_actor_role="system",
+                        source_scope_kind=SourceScopeKind.HISTORICAL_RANGE,
+                        target_revision_ref=target_ref,
+                        target_revision_hash=target_hash,
+                        confirmation_actor_id=context.actor_id,
+                        created_at=now,
+                        confirmation_expires_at=now + timedelta(minutes=5),
+                    )
+                    memory_change_id = change.change_id
+                    memory_change_hash = str(change.change_hash)
+                    (
+                        _state_version,
+                        memory_revision_ref,
+                        memory_revision_hash,
+                    ) = _apply_and_persist_memory_change(
+                        cursor,
+                        context,
+                        change,
+                        MemoryConfirmation(
+                            confirmation_id=decision_id,
+                            actor_id=context.actor_id,
+                            subject_id=context.subject_id,
+                            target_change_id=change.change_id,
+                            target_change_hash=str(change.change_hash),
+                            approved_at=now,
+                            expires_at=change.confirmation_expires_at,
+                        ),
+                        now=now,
+                    )
+                decision_payload = {
+                    "schema_version": "outcome_personalization_decision.v1",
+                    "decision_id": decision_id,
+                    "governance_id": governance_id,
+                    "receipt_id": str(row[2]),
+                    "care_outcome_id": str(row[3]),
+                    "care_plan_id": str(row[4]),
+                    "choice": choice,
+                    "reason_code": request.reason_code,
+                    "candidate_semantic_hash": str(row[7]),
+                    "candidate_target_hash": str(row[8]),
+                    "memory_change_hash": memory_change_hash,
+                    "memory_revision_ref": memory_revision_ref,
+                    "causal_claim": False,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO public.backend_personalization_governance_decisions_v1 (
+                      decision_id, governance_id, namespace_id, data_mode,
+                      namespace_generation, run_id, arm_id, subject_id,
+                      choice, idempotency_key, actor_id, actor_role,
+                      actor_binding_id, authorization_epoch, privacy_epoch,
+                      retrieval_policy_epoch, authority_policy_sha256,
+                      candidate_semantic_sha256, candidate_target_sha256,
+                      handle_state_version, memory_change_id,
+                      memory_change_sha256, memory_revision_ref,
+                      memory_revision_sha256, decision_json, decided_at
+                    ) VALUES (
+                      %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'elder',%s,%s,%s,
+                      %s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
+                    )
+                    """,
+                    (
+                        decision_id,
+                        governance_id,
+                        context.namespace_id,
+                        context.data_mode,
+                        context.namespace_generation,
+                        context.run_id,
+                        context.arm_id,
+                        context.subject_id,
+                        choice,
+                        request.idempotency_key,
+                        context.actor_id,
+                        authority.binding_id,
+                        context.authorization_epoch,
+                        context.privacy_epoch,
+                        context.retrieval_epoch,
+                        context.policy_sha256,
+                        str(row[7]),
+                        str(row[8]),
+                        int(row[1]),
+                        memory_change_id,
+                        memory_change_hash,
+                        memory_revision_ref,
+                        memory_revision_hash,
+                        _json(decision_payload),
+                        now,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE public.backend_personalization_governance_v1
+                    SET status = %s, state_version = state_version + 1,
+                        decision_id = %s, memory_revision_ref = %s,
+                        memory_revision_sha256 = %s, decided_at = %s,
+                        updated_at = %s
+                    WHERE governance_id = %s AND status = 'pending'
+                      AND state_version = %s
+                    """,
+                    (
+                        "accepted" if choice == "accept" else "rejected",
+                        decision_id,
+                        memory_revision_ref,
+                        memory_revision_hash,
+                        now,
+                        now,
+                        governance_id,
+                        int(row[1]),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ProductApiError(
+                        "state_conflict",
+                        "The personalization decision lost its CAS.",
+                        status_code=409,
+                    )
+            finally:
+                cursor.close()
+            uow.commit()
+        log_event(
+            "personalization_candidate_accepted"
+            if choice == "accept"
+            else "personalization_candidate_rejected"
+        )
+        if choice == "accept":
+            log_event("governed_memory_revision_created_from_outcome")
+        return OutcomePersonalizationDecisionResponse(
+            governance_id=governance_id,
+            decision_id=decision_id,
+            status="accepted" if choice == "accept" else "rejected",
+            state_version=int(row[1]) + 1,
+            candidate_semantic_hash=str(row[7]),
+            candidate_target_hash=str(row[8]),
+            memory_revision_ref=memory_revision_ref,
+            memory_revision_hash=memory_revision_hash,
+        )
 
     def reserve_command(
         self,
@@ -3247,6 +3607,210 @@ def _load_memory_state(
         subject_id=context.subject_id,
         version=len(revisions),
         revisions=tuple(revisions),
+    )
+
+
+def _apply_and_persist_memory_change(
+    cursor: Any,
+    context: ProductRequestContext,
+    change: MemoryChange,
+    confirmation: MemoryConfirmation,
+    *,
+    now: datetime,
+) -> tuple[int, str, str]:
+    state = _load_memory_state(cursor, context)
+    try:
+        updated = apply_memory_change(
+            state,
+            change,
+            confirmation,
+            now=now,
+        )
+    except (PermissionError, ValueError) as exc:
+        if "forged" in str(exc):
+            raise RuntimeError(
+                "Governed Memory revision integrity check failed"
+            ) from exc
+        raise ProductApiError(
+            "state_conflict",
+            "The Memory change is stale or no longer applicable.",
+            status_code=409,
+        ) from exc
+    revision = cast(GovernedMemoryItemV2, updated.revisions[-1])
+    revision_hash = stable_hash(revision)
+    cursor.execute(
+        """
+        INSERT INTO public.backend_governed_memory_revisions_v2 (
+          revision_ref, namespace_id, data_mode,
+          namespace_generation, run_id, arm_id, subject_id,
+          state_version, memory_id, memory_version, concept_id,
+          status, revision_sha256, revision_json,
+          confirmation_ref, committed_at
+        ) VALUES (
+          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+          %s, %s, %s, %s::jsonb, %s, %s
+        )
+        """,
+        (
+            revision.revision_ref,
+            context.namespace_id,
+            context.data_mode,
+            context.namespace_generation,
+            context.run_id,
+            context.arm_id,
+            context.subject_id,
+            updated.version,
+            revision.memory_id,
+            revision.version,
+            revision.concept_id,
+            revision.status.value,
+            revision_hash,
+            revision.model_dump_json(),
+            confirmation.confirmation_id,
+            now,
+        ),
+    )
+    return updated.version, revision.revision_ref, revision_hash
+
+
+def _require_outcome_personalization_elder(
+    context: ProductRequestContext,
+) -> None:
+    if context.role is not ProductRole.ELDER:
+        raise ProductApiError(
+            "authorization_denied",
+            "Only the elder may govern outcome personalization.",
+            status_code=403,
+        )
+
+
+def _current_outcome_confirmation_authority(
+    cursor: Any,
+    context: ProductRequestContext,
+) -> ResolvedActorAuthority:
+    authority = _resolve_confirmation_authority(
+        cursor,
+        context,
+        confirmation_actor_id=context.actor_id,
+    )
+    current_policy = _authorization_policy_sha256(
+        principal_id=context.service_principal_id,
+        resolved=authority,
+        purpose=context.purpose,
+    )
+    if (
+        authority.binding_id != context.binding_id
+        or authority.authorization_epoch != context.authorization_epoch
+        or authority.privacy_epoch != context.privacy_epoch
+        or authority.retrieval_policy_epoch != context.retrieval_epoch
+        or current_policy != context.policy_sha256
+    ):
+        raise ProductApiError(
+            "stale_actor_assertion",
+            "The elder authority or governance epoch is stale.",
+            status_code=403,
+        )
+    return authority
+
+
+def _outcome_personalization_item(row: Any) -> OutcomePersonalizationCandidate:
+    candidate = MemoryChangeCandidate.model_validate(_json_object(row[10]))
+    governance = _json_object(row[18])
+    evidence_refs: list[str] = [str(row[4])]
+    for key in ("baseline_revision_ids", "followup_revision_ids"):
+        values = governance.get(key, ())
+        if isinstance(values, list):
+            evidence_refs.extend(str(item) for item in values)
+    category = str(row[7])
+    observed = {
+        "improved": (
+            "在这次已完成的照护计划之后，后续可比较数据中观察到"
+            "起床时间稳定性提高；这不是因果结论。"
+        ),
+        "stable": (
+            "在这次已完成的照护计划之后，后续可比较数据中观察到"
+            "起床时间稳定性大致不变；这不是因果结论。"
+        ),
+        "worsened": (
+            "在这次已完成的照护计划之后，后续可比较数据中观察到"
+            "起床时间稳定性下降；这不是因果结论。"
+        ),
+    }[category]
+    return OutcomePersonalizationCandidate(
+        governance_id=str(row[0]),
+        status=str(row[1]),
+        state_version=int(row[2]),
+        receipt_id=str(row[3]),
+        care_outcome_id=str(row[4]),
+        care_plan_id=str(row[5]),
+        action_type=str(row[6]),
+        outcome_category=category,
+        candidate_semantic_hash=str(row[8]),
+        candidate_target_hash=str(row[9]),
+        memory_id=candidate.candidate_id,
+        memory_concept_id=CARE_OUTCOME_MEMORY_CONCEPT_ID,
+        memory_purpose="personal_evidence_context",
+        proposed_value=category,
+        observed_summary_zh_cn=observed,
+        confirmation_prompt_zh_cn=(
+            "系统根据一次已完成的照护计划和后续睡眠数据，提出一条可供"
+            "后续分析参考的个性化记忆。确认后才会在后续分析中使用。"
+        ),
+        source_evidence_refs=tuple(dict.fromkeys(evidence_refs)),
+        outcome_policy_version=str(row[11]),
+        outcome_policy_hash=str(row[12]),
+        evaluation_revision=int(row[13]),
+        registered_at=row[14],
+        decided_at=row[15],
+        memory_revision_ref=None if row[16] is None else str(row[16]),
+        memory_revision_hash=None if row[17] is None else str(row[17]),
+    )
+
+
+def _existing_outcome_personalization_decision(
+    cursor: Any,
+    *,
+    context: ProductRequestContext,
+    governance_id: str,
+    choice: Literal["accept", "reject"],
+    request: OutcomePersonalizationDecisionRequest,
+) -> OutcomePersonalizationDecisionResponse:
+    cursor.execute(
+        """
+        SELECT decision_id, choice, idempotency_key, actor_id,
+               candidate_semantic_sha256, candidate_target_sha256,
+               memory_revision_ref, memory_revision_sha256,
+               handle_state_version
+        FROM public.backend_personalization_governance_decisions_v1
+        WHERE governance_id = %s
+        """,
+        (governance_id,),
+    )
+    row = cursor.fetchone()
+    exact = row is not None and (
+        str(row[1]) == choice
+        and str(row[2]) == request.idempotency_key
+        and str(row[3]) == context.actor_id
+        and str(row[4]) == request.candidate_semantic_hash
+        and str(row[5]) == request.candidate_target_hash
+        and int(row[8]) == request.expected_state_version
+    )
+    if not exact:
+        raise ProductApiError(
+            "decision_conflict",
+            "The candidate already has another terminal decision.",
+            status_code=409,
+        )
+    return OutcomePersonalizationDecisionResponse(
+        governance_id=governance_id,
+        decision_id=str(row[0]),
+        status="accepted" if choice == "accept" else "rejected",
+        state_version=int(row[8]) + 1,
+        candidate_semantic_hash=str(row[4]),
+        candidate_target_hash=str(row[5]),
+        memory_revision_ref=None if row[6] is None else str(row[6]),
+        memory_revision_hash=None if row[7] is None else str(row[7]),
+        idempotent_replay=True,
     )
 
 

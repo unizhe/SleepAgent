@@ -801,6 +801,10 @@ class PostgresInternalStatus:
                     "SELECT public.sleepagent_care_evaluation_operational_metrics_v1()"
                 )
                 care_evaluation_row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT public.sleepagent_personalization_governance_metrics_v1()"
+                )
+                personalization_governance_row = cursor.fetchone()
             finally:
                 cursor.close()
             uow.commit()
@@ -852,6 +856,20 @@ class PostgresInternalStatus:
                 "care evaluation operational metrics are unavailable"
             )
         result["care_evaluation"] = dict(evaluation_value)
+        personalization_value = (
+            None
+            if personalization_governance_row is None
+            else personalization_governance_row[0]
+        )
+        if isinstance(personalization_value, str):
+            import json
+
+            personalization_value = json.loads(personalization_value)
+        if not isinstance(personalization_value, Mapping):
+            raise RuntimeError(
+                "personalization governance operational metrics are unavailable"
+            )
+        result["personalization_governance"] = dict(personalization_value)
         return result
 
 

@@ -775,6 +775,8 @@ def bootstrap_test_database_roles(
             "backend_care_outcome_evaluations_v1",
             "backend_care_outcomes_v1",
             "backend_personalization_effect_receipts_v1",
+            "backend_personalization_governance_v1",
+            "backend_personalization_governance_decisions_v1",
             "sleep_domain_care_followups",
             "backend_reanalysis_links",
             "backend_replay_scenario_clocks",
@@ -796,6 +798,7 @@ def bootstrap_test_database_roles(
             "backend_habit_profile_revisions_v2",
             "backend_governed_memory_revisions_v2",
             "backend_memory_read_receipts_v2",
+            "backend_personalization_governance_decisions_v1",
         )
         worker_tables = (
             "sleepagent_schema_migrations",
@@ -881,6 +884,7 @@ def bootstrap_test_database_roles(
             "backend_care_outcome_evaluations_v1",
             "backend_care_outcomes_v1",
             "backend_personalization_effect_receipts_v1",
+            "backend_personalization_governance_v1",
             "sleep_domain_care_followups",
             "sleep_domain_care_followup_transition_receipts",
             "backend_reanalysis_links",
@@ -912,7 +916,10 @@ def bootstrap_test_database_roles(
             connection,
             sql,
             "UPDATE",
-            ("backend_acquisition_schedules",),
+            (
+                "backend_acquisition_schedules",
+                "backend_personalization_governance_v1",
+            ),
             api_role,
         )
         # Product report reservation locks the exact marked-current episode
@@ -1042,6 +1049,7 @@ def bootstrap_test_database_roles(
             "backend_delivery_reconciliation_receipts_v2",
             "backend_product_attempts",
             "backend_memory_read_receipts_v2",
+            "backend_personalization_governance_v1",
             "backend_care_outcomes_v1",
             "backend_personalization_effect_receipts_v1",
             "backend_pending_handles",
@@ -1068,6 +1076,7 @@ def bootstrap_test_database_roles(
             "backend_retention_jobs",
             "backend_shred_receipts",
             "backend_retention_events",
+            "backend_personalization_governance_v1",
         )
         worker_update_tables = (
             "sleep_domain_normalization_work",
@@ -1091,6 +1100,7 @@ def bootstrap_test_database_roles(
             "backend_consumer_checkpoints",
             "backend_personalization_profiles_v2",
             "backend_care_outcome_evaluations_v1",
+            "backend_personalization_governance_v1",
             "backend_product_attempts",
             "backend_pending_handles",
             "backend_product_interactions",
@@ -1195,6 +1205,7 @@ def bootstrap_test_database_roles(
             "sleepagent_care_execution_operational_metrics_v1()",
             "sleepagent_care_outcome_operational_metrics_v1()",
             "sleepagent_care_evaluation_operational_metrics_v1()",
+            "sleepagent_personalization_governance_metrics_v1()",
             "sleepagent_decide_care_action_proposal_v3(text,bigint,text,text,text,text,text,timestamptz)",
             "sleepagent_revoke_care_approval_v3(text,bigint,text,text,text,text,timestamptz)",
             "sleepagent_execute_care_plan_v1(text,bigint,text,text,text,text,timestamptz)",

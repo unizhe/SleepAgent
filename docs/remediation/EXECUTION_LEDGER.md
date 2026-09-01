@@ -3373,3 +3373,179 @@ durable aggregate metrics, and explicit semantic/model-count assertions.
 FSA-COR-002        = RESOLVED
 CARE_ORDERING_CLAIM = RESTORED
 ```
+
+## C3 — Outcome receipt to human-governed Memory
+
+Entry checkpoint: `78e1b14e733aabf6ee93c406059664b1aa0ce9a8`. The
+tracked worktree was clean; the pre-existing untracked `docs/audit/` evidence
+remained untouched.
+
+### Pre-fix root cause reconfirmation
+
+The production G10 path terminates after inserting an immutable
+`PersonalizationEffectReceipt` with a confirmation-required
+`governed_memory` candidate. It neither creates an existing L2 pending handle
+nor invokes `MemoryChange` / `MemoryConfirmation`. The receipt row is
+append-only and unique by `care_outcome_id`, so its proposed state cannot be a
+mutable accept/reject authority.
+
+The existing generic Memory authority is separate and sound: a typed
+`MemoryChange` is stored in `backend_pending_handles`, exact elder authority
+and token/hash/state/epoch bindings authorize `MemoryConfirmation`, and only
+`apply_memory_change` can append a governed revision. Outcome receipts carry
+none of that durable decision authority or exact confirmation lineage.
+
+On a fresh isolated PostgreSQL 16.14 database at schema 024, the unchanged
+production G10 integration story created two immutable outcome receipts
+(including late-outcome supersession) and proved, before any C3 fix:
+
+```text
+PersonalizationEffectReceipt candidate_proposed = PRESENT
+governed Memory revisions for subject           = 0
+confirmed Habit revisions for subject            = 0
+```
+
+Command: authoritative Python 3.11 running
+`tests/integration/test_g10_care_outcome_postgres.py::test_g10_completed_execution_waits_then_evaluates_once_and_proposes_candidate`
+against a fresh apply/bootstrap/check at schema 024; result: `1 passed`.
+
+Both production Product context assemblers read only confirmed governed
+Memory through exact concept allowlists. Those lists omit
+`care_outcome.consistent_wake_time_episode`, and neither assembler reads the
+receipt table. Therefore a subsequent shared-analysis context cannot contain
+the receipt candidate: the database has no governed revision to select and
+the supported concept is absent from the bounded query.
+
+Reconfirmed root cause: no receipt-to-existing-governance adapter or durable
+decision handle exists, and the outcome concept is absent from the one bounded
+future-analysis read surface. C3 will add that bridge without mutating the
+receipt or introducing a second Memory authority.
+
+### Bridge architecture and immutable authorities
+
+C3 adds one application adapter from the exact G10 receipt/outcome pair to a
+durable `PENDING | ACCEPTED | REJECTED | SUPERSEDED` governance handle. The
+receipt and CareOutcome tables remain immutable evidence. Migration 025 adds
+only the subject-scoped handle and append-only terminal decision ledger; it
+does not add a Memory or Habit ledger. Receipt registration is synchronous in
+the existing outcome transaction, deterministic by receipt/candidate hashes,
+and deduplicated by the receipt identity. A newer receipt supersedes only an
+older pending handle; an already accepted Memory revision remains historical.
+
+The supported contract is the exact allowlisted concept
+`care_outcome.consistent_wake_time_episode`, purpose
+`personal_evidence_context`, provenance `accepted_evidence`, and source
+`evidence:<care_outcome_id>`. Its structured enum value is the observational
+outcome category (`improved`, `stable`, or `worsened`), never free-form prose.
+The handle binds Receipt, exact CareOutcome revision/hash, CarePlan/action,
+subject/scope, candidate semantic and target hashes, policy version/hash,
+baseline/follow-up finalization refs, `causal_claim=false`, and
+`confirmation_required=true`. Unknown concepts fail closed.
+
+The Product API supplies the minimal elder-only list/show/accept/reject
+surface. A decision re-resolves current actor-subject authority and verifies
+role, scope, binding, namespace/mode, authorization/privacy/retrieval epochs,
+authorization policy hash, handle state version, and both candidate hashes.
+ACCEPT constructs the existing `MemoryChange` and `MemoryConfirmation`, then
+uses the same reducer/persistence helper as ordinary `user_report` Memory.
+REJECT appends only a decision. Both are one database transaction with the
+existing L2 subject advisory lock and handle row CAS. Same-command retries
+return the same decision/revision; competing ACCEPT/REJECT converges on one
+terminal decision. A later accepted receipt uses existing `CORRECT`
+supersession on the stable CarePlan Memory lineage. No Outcome Worker path can
+create confirmed Memory or Habit state.
+
+Human-facing zh-CN text says only that comparable follow-up data were observed
+after one completed Care plan and explicitly says it is not a causal
+conclusion. This surface uses the existing authenticated Product service and
+elder binding convention. It does not change the separately audited Care CLI
+trusted-operator/end-user-authentication boundary.
+
+### Bounded future read and lifecycle
+
+Only the existing EvidenceReasoning personal-evidence query gains the exact
+new concept. The bounded Product/API lists are now:
+
+```text
+Evidence / personal_evidence_context:
+  sleep.context.night_routine
+  sleep.context.environment
+  care_outcome.consistent_wake_time_episode
+
+Care / care_preference_context:
+  sleep.preference.care_delivery
+  sleep.preference.communication
+```
+
+There is no wildcard, receipt-table read, embedding, vector, lexical, or broad
+recall path. Existing subject, namespace, mode, role, purpose, source-scope,
+token budget, current-revision, expiry, forget, and supersession filters remain
+authoritative. Focused lifecycle regression proved active is selected,
+correction selects only the latest revision, and expired/forgotten tombstones
+select nothing.
+
+### Fresh process, decision, and lineage proof
+
+A fresh isolated PostgreSQL 16.14 process story used the production Care,
+outcome, Product API, generic Memory reducer, worker store, Product loader, and
+deterministic shared-analysis composition:
+
+```text
+Care proposal -> elder approval -> CarePlan start/complete
+-> two later HARD nights -> O1 -> immutable R1 -> pending G1
+-> next shared analysis before confirmation excludes G1
+-> authorized ACCEPT -> existing governed revision M1
+-> later R2 REJECT -> no revision
+-> later pending R3 superseded by O4/R4 -> stale ACCEPT denied
+-> R4 ACCEPT -> existing CORRECT revision M2; M1 remains auditable
+-> process/pool restart -> new Episode/shared analysis
+-> EvidenceReasoning context and persisted MemoryReadReceipt pin M2
+-> later candidate ACCEPT || REJECT -> one decision, at most one M3
+```
+
+The same story denied stale epoch, wrong subject, role, namespace, mode, and
+target hash. It proved one handle per receipt, idempotent ACCEPT and REJECT,
+pending/rejected absence from governed context, zero direct Habit mutation,
+zero receipt/worker Memory mutation before ACCEPT, and exact
+O -> R -> decision -> Memory -> next-cycle lineage. The production test never
+inserts a Memory revision, patches loader output, or injects candidate context.
+
+### Migration, security, operations, and verification
+
+Additive migration 025 is manifest-pinned at
+`ea7f75abbd327bba725b15b57715e143785703037e598d1c32b4d13e437803c8`.
+Fresh 001 -> 025 apply/bootstrap/check and populated 024 -> 025 upgrade both
+passed. Migrations 001--024 are unchanged. New tables use RLS plus FORCE RLS,
+subject/generation/run/arm scope policies, no PUBLIC table privileges, an
+append-only decision trigger, and a constrained pending-to-terminal handle
+trigger. The aggregate SECURITY DEFINER metrics function has a fixed
+`search_path`, protected internal-status context, no PUBLIC execute, and emits
+pending/oldest/accepted/rejected/superseded/conflict-or-error aggregates
+without subject identifiers. Sanitized registration, deduplication,
+acceptance, rejection, supersession, and Memory-creation events contain no raw
+health payload or Memory prose.
+
+Final verification under authoritative Python 3.11:
+
+- fresh mandatory C3 process proof: 1 passed;
+- full PostgreSQL marker lane: 45 passed, one evidence-reader skip, 1,206
+  deselected;
+- broad non-PostgreSQL/non-E2E lane: 1,204 passed, 48 deselected;
+- focused C3/C2/Memory/L2 lane: 70 passed;
+- focused architecture/C3 lane: 15 passed;
+- OpenAPI/API, generic Memory, Habit, G9, G10, and C1A/C1B/C2 regressions are
+  included in those green lanes;
+- schema checksum/check, Python 3.11 compile/import, architecture baseline,
+  and `git diff --check`: passed. Mypy was not installed in the authoritative
+  environment and was not used as evidence.
+
+No self-import, forbidden dependency edge, or bounded SCC was added. The local
+commit requested for the PASS handoff uses
+`closure(c3): govern outcome personalization memory`; `docs/audit/` remains
+untracked and unstaged.
+
+```text
+FSA-COR-003             = RESOLVED
+PERSONALIZATION_LOOP    = RESTORED
+HABIT_FROM_CARE_OUTCOME = DEFERRED
+```

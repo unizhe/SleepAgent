@@ -770,6 +770,97 @@ class MemoryQueryResponse(PublicModel):
     receipt: dict[str, Any]
 
 
+class OutcomePersonalizationCandidate(PublicModel):
+    schema_version: Literal["outcome_personalization_candidate.v1"] = (
+        "outcome_personalization_candidate.v1"
+    )
+    governance_id: NonEmpty
+    status: Literal["pending", "accepted", "rejected", "superseded"]
+    state_version: int = Field(ge=1)
+    receipt_id: NonEmpty
+    care_outcome_id: NonEmpty
+    care_plan_id: NonEmpty
+    action_type: NonEmpty
+    outcome_category: Literal["improved", "stable", "worsened"]
+    candidate_semantic_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    candidate_target_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    memory_id: NonEmpty
+    memory_concept_id: Literal[
+        "care_outcome.consistent_wake_time_episode"
+    ]
+    memory_purpose: Literal["personal_evidence_context"]
+    proposed_value: Literal["improved", "stable", "worsened"]
+    causal_claim: Literal[False] = False
+    confirmation_required: Literal[True] = True
+    observed_summary_zh_cn: NonEmpty
+    confirmation_prompt_zh_cn: NonEmpty
+    source_evidence_refs: tuple[NonEmpty, ...] = ()
+    outcome_policy_version: NonEmpty
+    outcome_policy_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    evaluation_revision: int = Field(ge=1)
+    registered_at: datetime
+    decided_at: datetime | None = None
+    memory_revision_ref: str | None = None
+    memory_revision_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class OutcomePersonalizationCandidateList(PublicModel):
+    schema_version: Literal["outcome_personalization_candidate_list.v1"] = (
+        "outcome_personalization_candidate_list.v1"
+    )
+    items: tuple[OutcomePersonalizationCandidate, ...] = ()
+
+
+class OutcomePersonalizationDecisionRequest(PublicModel):
+    expected_state_version: int = Field(ge=1)
+    candidate_semantic_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    candidate_target_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    idempotency_key: Annotated[
+        str, StringConstraints(min_length=8, max_length=160)
+    ]
+    reason_code: Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=80,
+            pattern=r"^[a-z0-9][a-z0-9_.-]*$",
+        ),
+    ] = "human_personalization_review"
+
+
+class OutcomePersonalizationDecisionResponse(PublicModel):
+    schema_version: Literal["outcome_personalization_decision.v1"] = (
+        "outcome_personalization_decision.v1"
+    )
+    governance_id: NonEmpty
+    decision_id: NonEmpty
+    status: Literal["accepted", "rejected"]
+    state_version: int = Field(ge=2)
+    candidate_semantic_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    candidate_target_hash: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    memory_revision_ref: str | None = None
+    memory_revision_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    idempotent_replay: bool = False
+
+
 class AcceptedOperationResponse(PublicModel):
     schema_version: Literal["product_accepted_operation.v1"] = (
         "product_accepted_operation.v1"
@@ -847,6 +938,10 @@ __all__ = [
     "MemoryChangeRequest",
     "MemoryQueryRequest",
     "MemoryQueryResponse",
+    "OutcomePersonalizationCandidate",
+    "OutcomePersonalizationCandidateList",
+    "OutcomePersonalizationDecisionRequest",
+    "OutcomePersonalizationDecisionResponse",
     "PendingL2Change",
     "ProductRole",
     "ProductCareResponse",
