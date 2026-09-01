@@ -49,6 +49,7 @@ from sleepagent.domain.contracts import (
     DeterministicQualityAssessment,
     DeterministicQualityPolicy,
     DeterministicRiskPolicy,
+    DeviceBinding,
     DeviceBindingReference,
     DomainEvent,
     DomainNamespace,
@@ -92,6 +93,7 @@ from sleepagent.domain.canonical_observation import (
     CanonicalObservationV2,
 )
 from sleepagent.domain.observation_semantics import MovementPayloadV2
+from sleepagent.domain.reconciliation import RECONCILIATION_CONFLICT_QUALITY_FLAG
 from sleepagent.domain.schema_versions import dispatch_versioned_json
 from sleepagent.workers.retention import (
     PostgresRetentionKeyCoordinator,
@@ -388,6 +390,23 @@ class EpisodeRevisionMutation:
         if self.episode.date_conflict:
             return "NIGHT_EPISODE_DATE_RECONCILIATION_REQUIRED"
         return "NIGHT_EPISODE_REVISION_COMMITTED"
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeProjectionDecision:
+    """One shared lifecycle decision for replay and LIVE canonical input."""
+
+    snapshot: LifecycleSnapshotRecord
+    mutation: EpisodeRevisionMutation | None
+    fast_path_operation_id: str | None
+    reconciliation_operation_id: str | None
+    persist_required: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativeCanonicalObservation:
+    observation: SleepObservation
+    timezone_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -728,6 +747,148 @@ class EpisodeLifecycleProjector:
         )
 
 
+class EpisodeProjectionBoundary:
+    """Project one authoritative canonical observation under the lifecycle lock.
+
+    Transport adapters may select canonical authority differently, but LIVE and
+    replay must enter this exact boundary before Episode persistence.  The
+    boundary deliberately consumes a bound ``SleepObservation`` only; raw or
+    adapter candidates are not accepted.
+    """
+
+    def __init__(
+        self,
+        policy: SleepSlicePolicy,
+        *,
+        id_generator: Callable[[datetime | None], str] | None = None,
+    ) -> None:
+        self.policy = policy
+        self.id_generator = id_generator or UUID7Generator()
+        self.projector = EpisodeLifecycleProjector(
+            policy,
+            id_generator=self.id_generator,
+        )
+
+    def prepare(
+        self,
+        *,
+        scope: UowScope,
+        repository: "PostgresSleepSliceRepository",
+        observation: SleepObservation,
+        opening_identity: str,
+        timezone_name: str,
+        committed_at: datetime,
+        canonical_is_persisted: bool = False,
+        enqueue_finalized_replay_journey: bool = False,
+    ) -> EpisodeProjectionDecision:
+        if observation.subject_id != scope.subject_id:
+            raise SleepSliceInvariantError(
+                "canonical observation subject does not match lifecycle scope"
+            )
+        repository.lock_subject_lifecycle()
+        snapshot = repository.load_lifecycle()
+        if (
+            RECONCILIATION_CONFLICT_QUALITY_FLAG
+            in observation.quality.quality_flags
+            or (
+                canonical_is_persisted
+                and repository.has_episode_membership(observation.observation_id)
+            )
+        ):
+            return EpisodeProjectionDecision(
+                snapshot=snapshot,
+                mutation=None,
+                fast_path_operation_id=None,
+                reconciliation_operation_id=None,
+                persist_required=False,
+            )
+        mutation = self.projector.project(
+            scope=scope,
+            snapshot=snapshot,
+            observation=observation,
+            opening_identity=opening_identity,
+            timezone_name=timezone_name,
+            committed_at=committed_at,
+            conflicting_episode=lambda value: repository.find_conflicting_episode(
+                episode_local_date=value,
+                excluding_episode_id=(
+                    None
+                    if snapshot.episode is None
+                    else snapshot.episode.episode.night_episode_id
+                ),
+            ),
+        )
+        fast_path_operation_id = (
+            self.id_generator(committed_at)
+            if mutation is not None
+            and (
+                mutation.enqueues_fast_path
+                or (
+                    enqueue_finalized_replay_journey
+                    and _date_state(mutation.episode) == "finalized"
+                )
+            )
+            else None
+        )
+        reconciliation_operation_id = (
+            self.id_generator(committed_at)
+            if mutation is not None
+            and mutation.conflicting_episode_id is not None
+            else None
+        )
+        return EpisodeProjectionDecision(
+            snapshot=snapshot,
+            mutation=mutation,
+            fast_path_operation_id=fast_path_operation_id,
+            reconciliation_operation_id=reconciliation_operation_id,
+            persist_required=True,
+        )
+
+
+def project_authoritative_canonical_observations(
+    connection: TransactionBoundConnection,
+    scope: UowScope,
+    observation_ids: tuple[str, ...],
+    *,
+    committed_at: datetime,
+    policy: SleepSlicePolicy,
+    projection_boundary: EpisodeProjectionBoundary,
+    id_generator: Callable[[datetime | None], str],
+    fault_injector: Callable[[str], None] | None = None,
+) -> tuple[EpisodeProjectionDecision, ...]:
+    """Atomically project reconciler-selected canonical rows for Push or Pull."""
+
+    repository = PostgresSleepSliceRepository(
+        connection,
+        scope,
+        id_generator=id_generator,
+    )
+    decisions: list[EpisodeProjectionDecision] = []
+    for observation_id in dict.fromkeys(observation_ids):
+        selected = repository.load_authoritative_canonical_observation(
+            observation_id
+        )
+        if fault_injector is not None:
+            fault_injector("before_episode_projection")
+        decision = projection_boundary.prepare(
+            scope=scope,
+            repository=repository,
+            observation=selected.observation,
+            opening_identity=selected.observation.idempotency_key,
+            timezone_name=selected.timezone_name,
+            committed_at=committed_at,
+            canonical_is_persisted=True,
+        )
+        repository.persist_episode_projection(
+            observation=selected.observation,
+            projection=decision,
+            policy=policy,
+            committed_at=committed_at,
+        )
+        decisions.append(decision)
+    return tuple(decisions)
+
+
 def decide_fast_path_followup(
     risk: CurrentRisk,
     *,
@@ -940,7 +1101,7 @@ class NormalizationHandler:
         self.policy = policy or default_sleep_slice_policy()
         self.id_generator = id_generator or UUID7Generator()
         self.now_factory = now_factory
-        self.projector = EpisodeLifecycleProjector(
+        self.projection_boundary = EpisodeProjectionBoundary(
             self.policy,
             id_generator=self.id_generator,
         )
@@ -1040,51 +1201,27 @@ class NormalizationHandler:
                 candidate_id=self.id_generator(committed_at),
                 observation_semantics_version=self.observation_semantics_version,
             )
-            repository.lock_subject_lifecycle()
-            snapshot = repository.load_lifecycle()
-            mutation = self.projector.project(
+            projection = self.projection_boundary.prepare(
                 scope=scope,
-                snapshot=snapshot,
+                repository=repository,
                 observation=observation,
                 opening_identity=replay_input.idempotency_identity,
                 timezone_name=replay_input.timezone_name,
                 committed_at=committed_at,
-                conflicting_episode=lambda value: (
-                    repository.find_conflicting_episode(
-                        episode_local_date=value,
-                        excluding_episode_id=(
-                            None
-                            if snapshot.episode is None
-                            else snapshot.episode.episode.night_episode_id
-                        ),
-                    )
+                enqueue_finalized_replay_journey=(
+                    work.replay_journey_id is not None
                 ),
             )
-            fast_path_operation_id = (
-                self.id_generator(committed_at)
-                if mutation is not None
-                and (
-                    mutation.enqueues_fast_path
-                    or (
-                        work.replay_journey_id is not None
-                        and _date_state(mutation.episode) == "finalized"
-                    )
-                )
-                else None
-            )
-            reconciliation_operation_id = (
-                self.id_generator(committed_at)
-                if mutation is not None
-                and mutation.conflicting_episode_id is not None
-                else None
-            )
+            mutation = projection.mutation
+            fast_path_operation_id = projection.fast_path_operation_id
+            reconciliation_operation_id = projection.reconciliation_operation_id
             repository.persist_normalization_handoff(
                 lease=lease,
                 work=work,
                 candidate=candidate,
                 observation=observation,
                 canonical_semantics=canonical_semantics,
-                snapshot=snapshot,
+                snapshot=projection.snapshot,
                 mutation=mutation,
                 fast_path_operation_id=fast_path_operation_id,
                 reconciliation_operation_id=reconciliation_operation_id,
@@ -1690,6 +1827,110 @@ class PostgresSleepSliceRepository:
             cursor.close()
         return None if row is None else str(row[0])
 
+    def load_authoritative_canonical_observation(
+        self,
+        observation_id: str,
+    ) -> AuthoritativeCanonicalObservation:
+        """Load the reconciler-selected canonical row and pinned binding time."""
+
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT canonical.observation_json, binding.binding_json
+                FROM public.sleep_domain_canonical_observations AS canonical
+                JOIN public.sleep_domain_device_bindings AS binding
+                  ON binding.device_binding_id = canonical.device_binding_id
+                 AND binding.namespace_id = canonical.namespace_id
+                 AND binding.data_mode = canonical.data_mode
+                 AND binding.subject_id = canonical.subject_id
+                 AND binding.binding_version = canonical.binding_version
+                WHERE canonical.observation_id = %s
+                  AND canonical.namespace_id = %s
+                  AND canonical.data_mode = %s
+                  AND canonical.subject_id = %s
+                """,
+                (
+                    observation_id,
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.subject_id,
+                ),
+            )
+            row = cursor.fetchone()
+        finally:
+            cursor.close()
+        if row is None:
+            raise SleepSliceInvariantError(
+                "authoritative canonical observation or binding is unavailable"
+            )
+        observation = SleepObservation.model_validate(_json_value(row[0]))
+        binding = DeviceBinding.model_validate(_json_value(row[1]))
+        if (
+            observation.device_binding_id != binding.device_binding_id
+            or observation.binding_version != binding.binding_version
+            or observation.subject_id != binding.subject_id
+            or observation.device_id != binding.device_id
+        ):
+            raise SleepSliceInvariantError(
+                "canonical observation does not match pinned DeviceBinding"
+            )
+        return AuthoritativeCanonicalObservation(
+            observation=observation,
+            timezone_name=binding.timezone_name,
+        )
+
+    def has_episode_membership(self, observation_id: str) -> bool:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM public.sleep_domain_episode_observation_memberships
+                WHERE namespace_id = %s AND data_mode = %s
+                  AND subject_id = %s AND observation_id = %s
+                LIMIT 1
+                """,
+                (
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.subject_id,
+                    observation_id,
+                ),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            cursor.close()
+
+    def persist_episode_projection(
+        self,
+        *,
+        observation: SleepObservation,
+        projection: EpisodeProjectionDecision,
+        policy: SleepSlicePolicy,
+        committed_at: datetime,
+    ) -> None:
+        """Persist a LIVE projection in the caller's reconciliation transaction."""
+
+        if not projection.persist_required:
+            return
+        cursor = self.connection.cursor()
+        try:
+            self._persist_episode_projection(
+                cursor,
+                observation=observation,
+                snapshot=projection.snapshot,
+                mutation=projection.mutation,
+                fast_path_operation_id=projection.fast_path_operation_id,
+                reconciliation_operation_id=(
+                    projection.reconciliation_operation_id
+                ),
+                policy=policy,
+                committed_at=committed_at,
+            )
+        finally:
+            cursor.close()
+
     def persist_normalization_handoff(
         self,
         *,
@@ -1800,117 +2041,16 @@ class PostgresSleepSliceRepository:
                     committed_at,
                 ),
             )
-            if mutation is None:
-                self._write_monitoring_snapshot(
-                    cursor,
-                    snapshot=snapshot,
-                    episode=None,
-                    committed_at=committed_at,
-                )
-            else:
-                self._write_episode_mutation(cursor, mutation, policy, committed_at)
-                self._write_monitoring_snapshot(
-                    cursor,
-                    snapshot=snapshot,
-                    episode=mutation,
-                    committed_at=committed_at,
-                )
-                if mutation.conflicting_episode_id is not None:
-                    if reconciliation_operation_id is None:
-                        raise SleepSliceInvariantError(
-                            "date conflict requires a reconciliation operation"
-                        )
-                    reconciliation_id = self.id_generator(committed_at)
-                    self._insert_date_reconciliation_operation(
-                        cursor,
-                        operation_id=reconciliation_operation_id,
-                        reconciliation_id=reconciliation_id,
-                        mutation=mutation,
-                        policy=policy,
-                        committed_at=committed_at,
-                    )
-                    cursor.execute(
-                        """
-                        INSERT INTO public.backend_episode_date_reconciliation (
-                          reconciliation_id, operation_id, protocol_version,
-                          namespace_id, data_mode,
-                          namespace_generation, run_id, arm_id, subject_id,
-                          candidate_night_episode_id,
-                          conflicting_night_episode_id, candidate_revision_id,
-                          proposed_episode_local_date, status, reason_code,
-                          created_at
-                        ) VALUES (
-                          %s, %s, 2, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          'reconciliation_required', 'canonical_date_conflict', %s
-                        )
-                        """,
-                        (
-                            reconciliation_id,
-                            reconciliation_operation_id,
-                            self.scope.namespace_id,
-                            self.scope.data_mode,
-                            self.scope.namespace_generation,
-                            self.scope.run_id,
-                            self.scope.arm_id,
-                            observation.subject_id,
-                            mutation.episode.night_episode_id,
-                            mutation.conflicting_episode_id,
-                            mutation.revision_id,
-                            mutation.episode.episode_local_date,
-                            committed_at,
-                        ),
-                    )
-                if fast_path_operation_id is not None:
-                    self._insert_fast_path_operation(
-                        cursor,
-                        operation_id=fast_path_operation_id,
-                        mutation=mutation,
-                        policy=policy,
-                        committed_at=committed_at,
-                    )
-                event_type = mutation.domain_event_type
-                event_payload: dict[str, Any] = {
-                    "schema_version": "committed_event.v2",
-                    "event_type": event_type,
-                    "night_episode_id": mutation.episode.night_episode_id,
-                    "episode_local_date": (
-                        None
-                        if mutation.episode.episode_local_date is None
-                        else mutation.episode.episode_local_date.isoformat()
-                    ),
-                    "assignment_basis": mutation.episode.assignment_basis.value,
-                    "date_state": _date_state(mutation.episode),
-                    "synthetic_non_release": self.scope.data_mode == "replay",
-                }
-                if mutation.promotes_revision:
-                    event_payload["night_episode_revision_id"] = (
-                        mutation.revision_id
-                    )
-                else:
-                    event_payload["candidate_night_episode_revision_id"] = (
-                        mutation.revision_id
-                    )
-                    event_payload["conflicting_night_episode_id"] = (
-                        mutation.conflicting_episode_id
-                    )
-                    event_payload["reconciliation_operation_id"] = (
-                        reconciliation_operation_id
-                    )
-                self._insert_outbox(
-                    cursor,
-                    event_id=self.id_generator(committed_at),
-                    event_type=event_type,
-                    aggregate_type="NightEpisode",
-                    aggregate_id=mutation.episode.night_episode_id,
-                    aggregate_version=mutation.episode.current_revision,
-                    sequence=mutation.episode.current_revision,
-                    subject_id=observation.subject_id,
-                    operation_id=(
-                        fast_path_operation_id or reconciliation_operation_id
-                    ),
-                    payload=event_payload,
-                    created_at=committed_at,
-                )
+            self._persist_episode_projection(
+                cursor,
+                observation=observation,
+                snapshot=snapshot,
+                mutation=mutation,
+                fast_path_operation_id=fast_path_operation_id,
+                reconciliation_operation_id=reconciliation_operation_id,
+                policy=policy,
+                committed_at=committed_at,
+            )
             self._insert_outbox(
                 cursor,
                 event_id=self.id_generator(committed_at),
@@ -3032,6 +3172,126 @@ class PostgresSleepSliceRepository:
 
     # -- private SQL helpers --------------------------------------------------------
 
+    def _persist_episode_projection(
+        self,
+        cursor: Any,
+        *,
+        observation: SleepObservation,
+        snapshot: LifecycleSnapshotRecord,
+        mutation: EpisodeRevisionMutation | None,
+        fast_path_operation_id: str | None,
+        reconciliation_operation_id: str | None,
+        policy: SleepSlicePolicy,
+        committed_at: datetime,
+    ) -> None:
+        if mutation is None:
+            self._write_monitoring_snapshot(
+                cursor,
+                snapshot=snapshot,
+                episode=None,
+                committed_at=committed_at,
+            )
+            return
+        self._write_episode_mutation(cursor, mutation, policy, committed_at)
+        self._write_monitoring_snapshot(
+            cursor,
+            snapshot=snapshot,
+            episode=mutation,
+            committed_at=committed_at,
+        )
+        if mutation.conflicting_episode_id is not None:
+            if reconciliation_operation_id is None:
+                raise SleepSliceInvariantError(
+                    "date conflict requires a reconciliation operation"
+                )
+            reconciliation_id = self.id_generator(committed_at)
+            self._insert_date_reconciliation_operation(
+                cursor,
+                operation_id=reconciliation_operation_id,
+                reconciliation_id=reconciliation_id,
+                mutation=mutation,
+                policy=policy,
+                committed_at=committed_at,
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_episode_date_reconciliation (
+                  reconciliation_id, operation_id, protocol_version,
+                  namespace_id, data_mode,
+                  namespace_generation, run_id, arm_id, subject_id,
+                  candidate_night_episode_id,
+                  conflicting_night_episode_id, candidate_revision_id,
+                  proposed_episode_local_date, status, reason_code,
+                  created_at
+                ) VALUES (
+                  %s, %s, 2, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  'reconciliation_required', 'canonical_date_conflict', %s
+                )
+                """,
+                (
+                    reconciliation_id,
+                    reconciliation_operation_id,
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.namespace_generation,
+                    self.scope.run_id,
+                    self.scope.arm_id,
+                    observation.subject_id,
+                    mutation.episode.night_episode_id,
+                    mutation.conflicting_episode_id,
+                    mutation.revision_id,
+                    mutation.episode.episode_local_date,
+                    committed_at,
+                ),
+            )
+        if fast_path_operation_id is not None:
+            self._insert_fast_path_operation(
+                cursor,
+                operation_id=fast_path_operation_id,
+                mutation=mutation,
+                policy=policy,
+                committed_at=committed_at,
+            )
+        event_type = mutation.domain_event_type
+        event_payload: dict[str, Any] = {
+            "schema_version": "committed_event.v2",
+            "event_type": event_type,
+            "night_episode_id": mutation.episode.night_episode_id,
+            "episode_local_date": (
+                None
+                if mutation.episode.episode_local_date is None
+                else mutation.episode.episode_local_date.isoformat()
+            ),
+            "assignment_basis": mutation.episode.assignment_basis.value,
+            "date_state": _date_state(mutation.episode),
+            "synthetic_non_release": self.scope.data_mode == "replay",
+        }
+        if mutation.promotes_revision:
+            event_payload["night_episode_revision_id"] = mutation.revision_id
+        else:
+            event_payload["candidate_night_episode_revision_id"] = (
+                mutation.revision_id
+            )
+            event_payload["conflicting_night_episode_id"] = (
+                mutation.conflicting_episode_id
+            )
+            event_payload["reconciliation_operation_id"] = (
+                reconciliation_operation_id
+            )
+        self._insert_outbox(
+            cursor,
+            event_id=self.id_generator(committed_at),
+            event_type=event_type,
+            aggregate_type="NightEpisode",
+            aggregate_id=mutation.episode.night_episode_id,
+            aggregate_version=mutation.episode.current_revision,
+            sequence=mutation.episode.current_revision,
+            subject_id=observation.subject_id,
+            operation_id=fast_path_operation_id or reconciliation_operation_id,
+            payload=event_payload,
+            created_at=committed_at,
+        )
+
     def _write_episode_mutation(
         self,
         cursor: Any,
@@ -3945,7 +4205,10 @@ def _require_aware(value: datetime, name: str) -> None:
 
 
 __all__ = [
+    "AuthoritativeCanonicalObservation",
     "EpisodeLifecycleProjector",
+    "EpisodeProjectionBoundary",
+    "EpisodeProjectionDecision",
     "EpisodeRevisionMutation",
     "FastPathCommitResult",
     "FastPathHandler",
@@ -3974,4 +4237,5 @@ __all__ = [
     "StoredEpisode",
     "decide_fast_path_followup",
     "default_sleep_slice_policy",
+    "project_authoritative_canonical_observations",
 ]

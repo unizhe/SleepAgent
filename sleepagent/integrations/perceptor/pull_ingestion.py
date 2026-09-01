@@ -23,11 +23,16 @@ from sleepagent.config import (
     SleepBackendSettings,
 )
 from sleepagent.domain.contracts import DataMode, DeviceBinding, bind_adapter_candidate
+from sleepagent.domain.episodes import UUID7Generator
 from sleepagent.infrastructure.postgres_sleep_slice import (
+    EpisodeProjectionBoundary,
     NormalizationLease,
     RawPayloadCipher,
+    SleepSlicePolicy,
     SleepSliceInvariantError,
     SleepSliceLeaseLost,
+    default_sleep_slice_policy,
+    project_authoritative_canonical_observations,
 )
 from sleepagent.integrations.perceptor.client import (
     GET_CURRENT_ENDPOINT,
@@ -754,6 +759,9 @@ class PerceptorPullNormalizationProcessor:
         cipher: RawPayloadCipher,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
         fault_injector: Callable[[str], None] | None = None,
+        id_generator: Callable[[datetime | None], str] | None = None,
+        policy: SleepSlicePolicy | None = None,
+        projection_fault_injector: Callable[[str], None] | None = None,
         observation_semantics_version: ObservationSemanticsVersion = (
             ObservationSemanticsVersion.V1
         ),
@@ -762,6 +770,13 @@ class PerceptorPullNormalizationProcessor:
         self.cipher = cipher
         self.now_factory = now_factory
         self.fault_injector = fault_injector
+        self.policy = policy or default_sleep_slice_policy()
+        self.projection_boundary = EpisodeProjectionBoundary(
+            self.policy,
+            id_generator=id_generator or UUID7Generator(),
+        )
+        self.id_generator = self.projection_boundary.id_generator
+        self.projection_fault_injector = projection_fault_injector
         self.observation_semantics_version = observation_semantics_version
         self.reconciler = PerceptorObservationReconciler()
 
@@ -1150,6 +1165,19 @@ class PerceptorPullNormalizationProcessor:
                         normalized=normalized,
                         committed_at=committed_at,
                     )
+                project_authoritative_canonical_observations(
+                    uow.connection,
+                    scope,
+                    tuple(
+                        item.canonical_observation_id
+                        for item in reconciliations
+                    ),
+                    committed_at=committed_at,
+                    policy=self.policy,
+                    projection_boundary=self.projection_boundary,
+                    id_generator=self.id_generator,
+                    fault_injector=self.projection_fault_injector,
+                )
                 summary = {
                     "canonical_observation_ids": [
                         item.canonical_observation_id for item in reconciliations

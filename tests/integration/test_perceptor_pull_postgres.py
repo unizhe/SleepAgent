@@ -22,6 +22,10 @@ from sleepagent.config import (
     ProviderMode,
     SleepBackendSettings,
 )
+from sleepagent.application.night_finalization import (
+    NightFinalizationService,
+    NightFinalizationState,
+)
 from sleepagent.domain.contracts import DeviceBinding, DeviceBindingStatus
 from sleepagent.infrastructure.postgres_sleep_slice import (
     NormalizationLease,
@@ -36,6 +40,7 @@ from sleepagent.integrations.perceptor.client import (
 )
 from sleepagent.integrations.perceptor.ingestion import (
     WEBHOOK_PATH,
+    PerceptorNormalizationProcessor,
     PerceptorWebhookService,
 )
 from sleepagent.integrations.perceptor.pull_ingestion import (
@@ -59,6 +64,7 @@ from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
+    UowScope,
 )
 from sleepagent.process import DatabaseAttestation, SleepBackendRuntime
 from sleepagent.workers.ingestion import NormalizationWorkHandlerAdapter
@@ -273,6 +279,21 @@ def _seed(admin_dsn: str) -> DeviceBinding:
                     NOW - timedelta(days=1),
                 ),
             )
+            cursor.execute(
+                "INSERT INTO sleep_domain_device_identities (namespace_id, "
+                "data_mode, provider_id, provider_account_id, "
+                "provider_device_key, device_id, provider_device_json, "
+                "created_at) VALUES (%s, 'live', 'perceptor', %s, %s, "
+                "'internal-p4d2-b2-radar', %s::jsonb, %s) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    NAMESPACE,
+                    ACCOUNT,
+                    PROVIDER_DEVICE_ID,
+                    json.dumps(binding_json["provider_device"]),
+                    NOW - timedelta(days=1),
+                ),
+            )
         connection.commit()
     return DeviceBinding.model_validate(binding_json)
 
@@ -354,7 +375,14 @@ def _reassign_binding(
     return reassigned
 
 
-def _push_raw(*, message_id: str, heart_rate: int = 70) -> bytes:
+def _push_raw(
+    *,
+    message_id: str,
+    heart_rate: int = 70,
+    on_bed: int = 1,
+    report_at: datetime = NOW,
+    local_datetime: str = "2026-08-23T11:00:00.000",
+) -> bytes:
     payload: dict[str, object] = {
         "client_id": CLIENT_ID,
         "version": "2.0",
@@ -370,8 +398,9 @@ def _push_raw(*, message_id: str, heart_rate: int = 70) -> bytes:
         "type": "VitalSignsDataEvent",
         "data": (
             f'{{"HeartRate":{heart_rate},"BreathRate":16,"BodyShake":1,'
-            f'"OnBed":1,"ReportTime":"{int(NOW.timestamp() * 1000)}",'
-            '"DateTime":"2026-08-23T11:00:00.000"}'
+            f'"OnBed":{on_bed},'
+            f'"ReportTime":"{int(report_at.timestamp() * 1000)}",'
+            f'"DateTime":"{local_datetime}"}}'
         ),
     }
     payload["sign"] = sign_parameters(
@@ -592,6 +621,33 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             store, worker_uow, cipher, worker="p4d2-b2-push-worker"
         )
         assert push_result.canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT episode.night_episode_id, episode.subject_id, "
+                    "episode.timezone_name, episode.state, "
+                    "episode.current_revision_number, member.device_binding_id, "
+                    "member.binding_version, count(*) OVER () "
+                    "FROM sleep_domain_night_episodes AS episode "
+                    "JOIN sleep_domain_episode_observation_memberships AS member "
+                    "ON member.night_episode_id = episode.night_episode_id "
+                    "AND member.namespace_id = episode.namespace_id "
+                    "AND member.data_mode = episode.data_mode "
+                    "WHERE episode.namespace_id = %s",
+                    (NAMESPACE,),
+                )
+                push_episode = cursor.fetchone()
+                assert push_episode is not None
+                episode_id = str(push_episode[0])
+                assert push_episode[1:] == (
+                    SUBJECT,
+                    "Asia/Shanghai",
+                    "collecting",
+                    1,
+                    BINDING_ID,
+                    1,
+                    1,
+                )
 
         exact_data = _history_data(local_send_time="2026-08-23T11:00:00")
         exact_coordinates = PullRequestCoordinates(
@@ -637,6 +693,16 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     (NAMESPACE,),
                 )
                 assert cursor.fetchone() == (3,)
+                cursor.execute(
+                    "SELECT current_revision_number, "
+                    "(SELECT count(*) FROM "
+                    "sleep_domain_episode_observation_memberships "
+                    "WHERE night_episode_id = %s) "
+                    "FROM sleep_domain_night_episodes "
+                    "WHERE night_episode_id = %s",
+                    (episode_id, episode_id),
+                )
+                assert cursor.fetchone() == (4, 4)
 
         overlapping_coordinates = PullRequestCoordinates(
             endpoint=HISTORY_ENDPOINT,
@@ -666,6 +732,16 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         assert overlapping_result.push_pull_overlap_count == 3
         assert overlapping_result.conflict_created_count == 0
         assert _count(admin_dsn, "sleep_domain_canonical_observations") == 4
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone() == (4, 4)
 
         work_count_before_repeat: int
         with psycopg.connect(admin_dsn) as connection:
@@ -724,6 +800,17 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         assert conflict_result.conflict_created_count == 1
         assert conflict_result.checkpoint_advanced is False
         assert _count(admin_dsn, "sleep_domain_observation_conflicts") == 1
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships AS member "
+                "JOIN sleep_domain_canonical_observations AS canonical "
+                "ON canonical.observation_id = member.observation_id "
+                "WHERE member.night_episode_id = %s "
+                "AND canonical.observation_json -> 'quality' "
+                "-> 'quality_flags' ? 'push_pull_conflict'",
+                (episode_id,),
+            ).fetchone() == (0,)
 
         realtime_data = {
             "endTime": int((NOW + timedelta(minutes=4)).timestamp() * 1000),
@@ -770,12 +857,121 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             == before_realtime + 3
         )
 
+        projection_retry_push = webhook.accept(
+            _push_raw(
+                message_id="p4d2-b2-projection-retry",
+                report_at=NOW + timedelta(minutes=3),
+                local_datetime="2026-08-23T11:03:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert projection_retry_push.disposition == "accepted"
+        before_projection_failure = _count(
+            admin_dsn, "sleep_domain_canonical_observations"
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            episode_before_projection_failure = connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone()
+        assert episode_before_projection_failure is not None
+
+        def fail_before_projection(phase: str) -> None:
+            assert phase == "before_episode_projection"
+            raise _SimulatedCrash("simulated crash before Episode projection")
+
+        projection_crash_runtime = _durable_ingestion_runtime(
+            pool=worker_pool,
+            worker_uow=worker_uow,
+            store=store,
+            processor=PerceptorNormalizationProcessor(
+                worker_uow,
+                cipher=cipher,
+                projection_fault_injector=fail_before_projection,
+            ),  # type: ignore[arg-type]
+            worker_instance="p4d2-b2-projection-crash-worker",
+        )
+        assert projection_crash_runtime.run_once() is True
+        assert (
+            _count(admin_dsn, "sleep_domain_canonical_observations")
+            == before_projection_failure
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone() == episode_before_projection_failure
+            assert connection.execute(
+                "SELECT status, attempt_count FROM "
+                "sleep_domain_normalization_work WHERE work_id = %s",
+                (projection_retry_push.normalization_work_id,),
+            ).fetchone() == ("retry", 1)
+
+        projection_retry_runtime = _durable_ingestion_runtime(
+            pool=worker_pool,
+            worker_uow=worker_uow,
+            store=store,
+            processor=PerceptorNormalizationProcessor(
+                worker_uow,
+                cipher=cipher,
+            ),  # type: ignore[arg-type]
+            worker_instance="p4d2-b2-projection-retry-worker",
+        )
+        projection_retried = False
+        projection_retry_deadline = time.monotonic() + 1.0
+        while time.monotonic() < projection_retry_deadline:
+            if projection_retry_runtime.run_once():
+                projection_retried = True
+                break
+            time.sleep(0.01)
+        assert projection_retried is True
+        assert (
+            _count(admin_dsn, "sleep_domain_canonical_observations")
+            == before_projection_failure + 4
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            projection_retry_episode = connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone()
+        assert projection_retry_episode == (
+            int(episode_before_projection_failure[0]) + 4,
+            int(episode_before_projection_failure[1]) + 4,
+        )
+
         before_backfill_canonical = _count(
             admin_dsn, "sleep_domain_canonical_observations"
         )
         before_backfill_acquisitions = _count(
             admin_dsn, "sleep_domain_observation_acquisitions"
         )
+        with psycopg.connect(admin_dsn) as connection:
+            episode_before_post_commit_crash = connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone()
+        assert episode_before_post_commit_crash is not None
         backfill_coordinates = PullRequestCoordinates(
             endpoint=HISTORY_ENDPOINT,
             window_start_at=NOW + timedelta(minutes=4),
@@ -845,6 +1041,20 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
+                    "SELECT current_revision_number, "
+                    "(SELECT count(*) FROM "
+                    "sleep_domain_episode_observation_memberships "
+                    "WHERE night_episode_id = %s) "
+                    "FROM sleep_domain_night_episodes "
+                    "WHERE night_episode_id = %s",
+                    (episode_id, episode_id),
+                )
+                episode_after_post_commit_crash = cursor.fetchone()
+                assert episode_after_post_commit_crash == (
+                    int(episode_before_post_commit_crash[0]) + 3,
+                    int(episode_before_post_commit_crash[1]) + 3,
+                )
+                cursor.execute(
                     "SELECT status, attempt_count, lease_generation, "
                     "work_json ->> 'reconciliation_committed', last_error_code, "
                     "lease_expires_at, worker_instance "
@@ -894,6 +1104,16 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             _count(admin_dsn, "sleep_domain_observation_acquisitions")
             == before_backfill_acquisitions + 3
         )
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone() == episode_after_post_commit_crash
         resumed_plan = ingress.plan_history_window(
             binding=binding,
             requested_start_at=NOW + timedelta(minutes=20),
@@ -1012,8 +1232,19 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                 / "fixtures"
                 / "perceptor_v2_5_2"
                 / "sanitized_recorded_real_pull_get_sleep_report_full.json"
-            ).read_text(encoding="utf-8")
-        )
+                ).read_text(encoding="utf-8")
+            )
+        with psycopg.connect(admin_dsn) as connection:
+            episode_before_sleep_report = connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone()
+        assert episode_before_sleep_report is not None
         full_report_ingress = ingress.accept(
             _read(
                 SLEEP_REPORT_ENDPOINT,
@@ -1025,7 +1256,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             binding=binding,
             coordinates=PullRequestCoordinates(
                 endpoint=SLEEP_REPORT_ENDPOINT,
-                report_date=date(2026, 8, 22),
+                report_date=date(2026, 8, 23),
             ),
         )
         assert full_report_ingress.disposition == "accepted"
@@ -1086,6 +1317,97 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     ),
                 )
                 assert cursor.fetchone() == (0,)
+                cursor.execute(
+                    "SELECT current_revision_number, "
+                    "(SELECT count(*) FROM "
+                    "sleep_domain_episode_observation_memberships "
+                    "WHERE night_episode_id = %s) "
+                    "FROM sleep_domain_night_episodes "
+                    "WHERE night_episode_id = %s",
+                    (episode_id, episode_id),
+                )
+                assert cursor.fetchone() == (
+                    int(episode_before_sleep_report[0]) + 18,
+                    int(episode_before_sleep_report[1]) + 18,
+                )
+
+        closing_push = webhook.accept(
+            _push_raw(
+                message_id="p4d2-b2-push-close",
+                on_bed=0,
+                report_at=NOW + timedelta(minutes=7),
+                local_datetime="2026-08-23T11:07:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert closing_push.disposition == "accepted"
+        closing_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-push-close-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert closing_result.canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            live_chain = connection.execute(
+                "SELECT episode.state, episode.episode_local_date, "
+                "episode.timezone_name, episode.current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_night_episode_revisions AS revision "
+                "WHERE revision.night_episode_id = episode.night_episode_id), "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.night_episode_id = episode.night_episode_id), "
+                "(SELECT coalesce(sum(octet_length(revision_json::text)), 0) "
+                "FROM sleep_domain_night_episode_revisions AS revision "
+                "WHERE revision.night_episode_id = episode.night_episode_id) "
+                "FROM sleep_domain_night_episodes AS episode "
+                "WHERE episode.night_episode_id = %s",
+                (episode_id,),
+            ).fetchone()
+        assert live_chain is not None
+        assert live_chain[0:3] == (
+            "awaiting_report",
+            date(2026, 8, 23),
+            "Asia/Shanghai",
+        )
+        assert live_chain[3] == live_chain[4]
+        assert live_chain[3] == live_chain[5]
+        assert int(live_chain[6]) > 0
+
+        final_scope = UowScope(
+            namespace_id=NAMESPACE,
+            namespace_generation=1,
+            data_mode="live",
+            process_role="worker",
+            purpose="worker",
+            service_principal_id=_dsn(
+                "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
+            ),
+            subject_id=SUBJECT,
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+            worker_instance="p4d2-b2-live-finalizer",
+        )
+        finalized = NightFinalizationService(worker_uow).finalize(
+            final_scope,
+            night_episode_id=episode_id,
+            evaluated_at=NOW + timedelta(minutes=8),
+        )
+        assert finalized.state is NightFinalizationState.HARD_FINALIZED
+        assert finalized.source_report_version_id is not None
+        assert finalized.source_night_episode_revision_id is not None
+        assert finalized.reanalysis_operation_id is not None
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT state, current_revision_number FROM "
+                "sleep_domain_night_finalizations "
+                "WHERE night_episode_id = %s",
+                (episode_id,),
+            ).fetchone() == ("hard_finalized", 1)
 
         before_no_data = _count(admin_dsn, "sleep_domain_canonical_observations")
         no_data_ingress = ingress.accept(
@@ -1099,7 +1421,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             binding=binding,
             coordinates=PullRequestCoordinates(
                 endpoint=SLEEP_REPORT_ENDPOINT,
-                report_date=date(2026, 8, 23),
+                report_date=date(2026, 8, 24),
             ),
         )
         assert no_data_ingress.disposition == "accepted"
@@ -1110,7 +1432,9 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         assert no_data_result.canonical_observation_ids == ()
         assert no_data_result.checkpoint_advanced is True
         assert _count(admin_dsn, "sleep_domain_canonical_observations") == before_no_data
-        assert _count(admin_dsn, "sleep_domain_night_episodes") == 0
+        # The earlier LIVE OnBed=1 fixture legitimately opened the one Episode;
+        # an empty report adds neither canonical evidence nor another Episode.
+        assert _count(admin_dsn, "sleep_domain_night_episodes") == 1
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(

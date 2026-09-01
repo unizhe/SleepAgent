@@ -305,7 +305,7 @@ def test_normalization_adapter_classifies_unhandled_processor_error_retryable() 
     assert context.lease_is_valid is True
 
 
-def test_normalization_adapter_does_not_reclassify_non_pull_processor_error() -> None:
+def test_normalization_adapter_classifies_live_push_projection_error_retryable() -> None:
     store = Store()
     claim = _normalization_claim(normalizer="perceptor_push")
     context = WorkContext(claim, store, threading.Event())
@@ -313,9 +313,11 @@ def test_normalization_adapter_does_not_reclassify_non_pull_processor_error() ->
         processor=_RaisingNormalizationProcessor(RuntimeError("push failure"))
     )
 
-    with pytest.raises(RuntimeError, match="push failure"):
-        adapter(context)
+    result = adapter(context)
 
+    assert result.disposition == WorkDisposition.RETRYABLE
+    assert result.error_code == "unclassified_normalization_processor_failure"
+    assert result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
     assert context.lease_is_valid is True
 
 

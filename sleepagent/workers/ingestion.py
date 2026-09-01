@@ -110,14 +110,15 @@ class NormalizationWorkHandlerAdapter:
         except SleepSliceConflict:
             return _retryable("sleep_slice_conflict")
         except Exception:
-            # Normalization writes are fenced and idempotent.  A processor may
-            # fail after committing an internal crash boundary (for example,
-            # Pull reconciliation before checkpoint advancement), so an
-            # otherwise-unclassified exception must release the claim for a
-            # durable retry rather than quarantine it as outcome-unknown.  The
-            # exception is deliberately narrow: Push and replay normalization
-            # retain the runtime's existing outcome-unknown classification.
-            if context.claim.payload.get("normalizer") != "perceptor_pull":
+            # Perceptor Push atomically commits reconciliation + projection;
+            # Pull atomically commits that pair before checkpoint advancement.
+            # Both are fenced and idempotent, so an unclassified provider
+            # exception must release the claim for durable retry. Replay keeps
+            # the runtime's existing outcome-unknown classification.
+            if context.claim.payload.get("normalizer") not in {
+                "perceptor_push",
+                "perceptor_pull",
+            }:
                 raise
             return _retryable("unclassified_normalization_processor_failure")
 

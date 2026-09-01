@@ -228,7 +228,14 @@ class NightFinalizationService:
                 AND source.data_mode = episode.data_mode
                 AND source.provider_id = binding.provider_id
                 AND source.provider_account_id = binding.provider_account_id
-                AND source.provider_device_key = identity.provider_device_key
+                AND source.provider_device_key IN (
+                  identity.provider_device_key,
+                  'sha256:' || encode(digest(convert_to(
+                    episode.namespace_generation::text || chr(31) ||
+                    identity.provider_device_key,
+                    'UTF8'
+                  ), 'sha256'), 'hex')
+                )
                 AND source.local_report_date = episode.episode_local_date
               ORDER BY source.report_version DESC
               LIMIT 1

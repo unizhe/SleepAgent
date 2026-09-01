@@ -2966,3 +2966,134 @@ EXTERNAL_EFFECTS                   = ZERO
 G10_COMPLETE                       = YES
 SLEEPAGENT_PRODUCT_LOOP_CLOSED     = YES
 ```
+
+## C1A — LIVE canonical observation to NightEpisode closure
+
+Entry checkpoint: `c5cc0e05284ec9fe9b08adc6efdf2273b1069f58`. The only
+entry-tree difference was untracked `docs/audit/`, classified as
+`PRE_EXISTING_AUDIT_OUTPUT`; it is immutable and excluded from C1A.
+
+### Root cause reconfirmation (pre-implementation)
+
+At the audited entry HEAD, the production Worker composes
+`PerceptorLiveNormalizationDispatcher` for LIVE and `NormalizationHandler`
+for replay. LIVE Push atomically reconciles candidates into canonical
+observations and then writes a successful normalization receipt/completes the
+work, but never locks or invokes the Episode lifecycle. LIVE Pull commits a
+durable reconciliation receipt containing canonical observation identities,
+then separately advances its checkpoint/completes the work, but likewise
+never invokes the Episode lifecycle. Replay alone locks the subject lifecycle,
+calls `EpisodeLifecycleProjector`, and persists the NightEpisode, immutable
+revision, and observation membership in its normalization transaction.
+Consequently a LIVE normalization operation can become terminally successful
+at canonical authority without any durable Episode projection handoff.
+
+The bounded C1A implementation will reuse the existing
+`EpisodeLifecycleProjector` and PostgreSQL Episode/revision/membership writer;
+it will not create a LIVE-specific lifecycle state machine.
+
+### Selected architecture and shared boundary
+
+`ATOMIC_SHARED_TRANSACTION` was selected. Both provider reconcilers already
+own a PostgreSQL transaction that includes canonical selection and the durable
+normalization receipt. That transaction now reloads only the reconciler-
+selected canonical row with its pinned DeviceBinding, enters the shared
+`EpisodeProjectionBoundary`, and persists through the existing
+`PostgresSleepSliceRepository` Episode/revision/membership writer before the
+success receipt can commit. No migration, broker, projection queue, or second
+Episode state machine was required.
+
+Replay now enters the same boundary before its existing atomic normalization
+handoff. LIVE Push and Pull adapters differ only in reconciliation/composition;
+all three paths use the one `EpisodeLifecycleProjector`, one Episode mutation
+writer, and one membership writer. Canonical observations marked with the
+Observation V2 `push_pull_conflict` quality authority are not projected, and a
+canonical observation with existing membership is a projection no-op.
+
+The existing finalizer's SleepReport evidence join also now recognizes the
+exact generation-scoped provider-device key emitted by durable Pull, derived
+from authoritative DeviceBinding identity. The historical raw-key match is
+retained. This is an identity compatibility correction only; finalization
+state and timing policy are unchanged.
+
+### LIVE Push, Pull, retry, and parity proof
+
+- Real Worker composition (`PerceptorLiveNormalizationDispatcher`) processed
+  vendor-shaped Push `OnBed=1`, created one LIVE NightEpisode in `collecting`,
+  revision 1, and one membership. Subject, binding version 1, and
+  `Asia/Shanghai` came from the pinned DeviceBinding.
+- Overlapping LIVE History Pull selected the existing Push canonical facts and
+  added their previously unassociated observations to that active Episode.
+  Repeated overlap left revision and membership counts unchanged.
+- A conflicting HeartRate value created conflict evidence but zero Episode
+  membership for the `push_pull_conflict` canonical alternative.
+- A controlled Push failure immediately before projection rolled back the
+  entire reconciliation transaction: canonical, revision, and membership
+  counts were unchanged and the fenced durable work became retryable. Reclaim
+  converged to four canonical observations, four revisions, and four
+  memberships exactly once.
+- The existing Pull crash point after atomic reconciliation + projection but
+  before checkpoint advancement left canonical and Episode authority durable.
+  Reclaim advanced the checkpoint without another Episode revision or
+  membership.
+- Replay lifecycle and PostgreSQL vertical-slice regressions passed through the
+  same projection boundary and unchanged lifecycle projector semantics.
+
+### Fresh-database process and HARD finalization proof
+
+The authoritative proof used a fresh isolated PostgreSQL 16.14 database,
+applied unchanged migrations 001 through 022, and bootstrapped distinct API
+and Worker test roles. It did not seed Episode/finalization rows or call a
+test-only projection helper. The process chain was:
+
+```text
+LIVE vendor Push OnBed=1
+→ Observation V2 reconciliation
+→ NightEpisode + immutable revision + membership
+→ overlapping LIVE History Pull and trusted LIVE SleepReport
+→ LIVE Push OnBed=0 and committed Episode date
+→ NightFinalizationService
+→ HARD_FINALIZED
+```
+
+The trusted non-empty report was pinned by provider/account/device/date and the
+finalization revision pinned both the LIVE-created Episode revision and source
+report version. The current finalizer emitted its existing fast-path handoff.
+
+```text
+LIVE_TO_EPISODE_PROCESS_PROOF = PASS
+LIVE_TO_HARD_FINALIZATION     = PASS
+```
+
+### Episode revision churn measurement
+
+For the generation-1 mandatory process chain, observed PostgreSQL counts were:
+
+```text
+canonical observations       = 37
+Episode revisions            = 36
+Episode memberships          = 36
+logical revision JSON bytes  = 149009
+```
+
+The one-observation difference is the deliberately retained non-authoritative
+conflict alternative. C1A did not optimize revision behavior.
+
+### Deferred boundary and verification evidence
+
+`CLOSED_EPISODE_LATE_ASSOCIATION = DEFERRED_TO_C1B`. C1A neither discovers a
+recent closed Episode nor guesses a historical night for late input.
+
+- focused Perceptor/Observation/Episode/Worker Python 3.11 tests: 99 passed;
+- focused architecture and affected regression selection: 104 passed;
+- fresh PostgreSQL C1A production-composition proof: 1 passed;
+- authoritative broad non-PostgreSQL/non-E2E lane: 1,185 passed, 45 deselected;
+- fresh PostgreSQL 16.14 marker: 42 passed, 1 documented evidence-reader
+  skipped, 1,187 deselected;
+- migrations applied and checked clean at schema 022 before and after testing;
+- OpenAPI snapshot check, Python 3.11 compile/import, architecture dependency
+  baseline, `git diff --check`, and unchanged migration-file checks passed.
+
+No migration was added or modified. The local commit subject is
+`closure(c1a): project live observations into episodes`; its hash is reported
+in the final handoff because a commit cannot contain its own resulting hash.
