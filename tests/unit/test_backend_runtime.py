@@ -150,7 +150,13 @@ def test_runtime_lifespan_opens_only_pool_and_attests_database() -> None:
 
     assert runtime.started is True
     assert pool.calls == ["open"]
-    assert runtime.readiness()["ready"] is True
+    readiness = runtime.readiness()
+    assert readiness["ready"] is True
+    assert readiness["outcome_evaluation"] == {
+        "status": "DISABLED",
+        "consumer_configured": False,
+        "ready": True,
+    }
 
     asyncio.run(runtime.close())
     assert pool.calls == ["open", "close"]
@@ -217,6 +223,7 @@ def test_dependency_manifest_is_capability_scoped_and_secret_free() -> None:
     assert '"process_role":"api"' in manifest
     assert '"enabled_handlers":[]' in manifest
     assert '"model_mode":"disabled"' in manifest
+    assert '"outcome_evaluation":"disabled"' in manifest
     assert "top-secret" not in manifest
     assert "do-not-print" not in manifest
 
@@ -224,3 +231,44 @@ def test_dependency_manifest_is_capability_scoped_and_secret_free() -> None:
     worker_manifest = worker.dependency_manifest()
     assert worker_manifest.enabled_handlers == ("fast_path", "product_agent")
     assert worker_manifest.enabled_surfaces == ()
+
+
+def test_enabled_outcome_worker_reports_configured_and_ready_consumer() -> None:
+    settings = _settings(ProcessRole.WORKER).model_copy(
+        update={
+            "outcome_evaluation_enabled": True,
+            "worker_queues": (
+                "fast_path",
+                "product_agent",
+                "care.outcome.evaluate.v1",
+            ),
+        }
+    )
+    runtime = SleepBackendRuntime(
+        settings,
+        pool=Pool(),
+        uow_factory=object(),
+        attestor=lambda: DatabaseAttestation(
+            database_identity=settings.database_identity,
+            database_role=settings.database_role,
+            schema_version=LATEST_SCHEMA_VERSION,
+            migrations_clean=True,
+            migration_manifest_sha256=MIGRATION_MANIFEST_SHA256,
+            applied_migration_identities=EXPECTED_MIGRATION_IDENTITIES,
+        ),
+        worker_handlers={
+            "fast_path": object(),
+            "product_agent": object(),
+            "care.outcome.evaluate.v1": object(),
+        },
+    )
+
+    asyncio.run(runtime.start())
+    try:
+        assert runtime.readiness()["outcome_evaluation"] == {
+            "status": "ENABLED",
+            "consumer_configured": True,
+            "ready": True,
+        }
+    finally:
+        asyncio.run(runtime.close())

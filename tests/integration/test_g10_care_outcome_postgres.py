@@ -26,6 +26,7 @@ from sleepagent.infrastructure.postgres_care_execution import (
     PostgresCarePlanRepository,
 )
 from sleepagent.persistence.uow import (
+    InternalControlScope,
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
@@ -72,6 +73,7 @@ def _worker_settings(dsn: str, principal: str) -> SleepBackendSettings:
         database_scope=DataMode.LIVE,
         namespace_prefixes=("live:",),
         worker_queues=(CARE_OUTCOME_QUEUE,),
+        outcome_evaluation_enabled=True,
         service_credential_ref="test:g10-worker",
         signing_key_ref="test:g10-signing",
         encryption_key_ref="test:g10-encryption",
@@ -821,6 +823,7 @@ def test_g10_completed_execution_waits_then_evaluates_once_and_proposes_candidat
                 {
                     "data_mode": type("Mode", (), {"value": "live"})(),
                     "service_principal_id": api_principal,
+                    "outcome_evaluation_enabled": True,
                 },
             )(),
             factory,
@@ -836,10 +839,48 @@ def test_g10_completed_execution_waits_then_evaluates_once_and_proposes_candidat
             "personalization_candidates_proposed",
             "personalization_candidates_accepted",
             "personalization_candidates_rejected",
+            "outcome_evaluation",
+            "consumer_configured",
+            "consumer_ready",
         }
         assert expected_metrics == set(metrics)
-        assert all(metrics[key] >= 0 for key in expected_metrics)
+        assert metrics["outcome_evaluation"] == "ENABLED"
+        assert metrics["consumer_configured"] is True
+        assert metrics["consumer_ready"] is True
+        numeric_metrics = expected_metrics - {
+            "outcome_evaluation",
+            "consumer_configured",
+            "consumer_ready",
+        }
+        assert all(metrics[key] >= 0 for key in numeric_metrics)
         assert "subject" not in json.dumps(metrics, sort_keys=True)
+
+        care_tables = (
+            "backend_care_action_proposals_v3",
+            "backend_care_action_decisions_v3",
+            "backend_approval_grants_v3",
+            "backend_care_plans_v1",
+            "backend_care_execution_states_v1",
+            "backend_care_execution_events_v1",
+            "backend_care_outcome_evaluations_v1",
+            "backend_care_outcomes_v1",
+            "backend_personalization_effect_receipts_v1",
+            "backend_personalization_governance_v1",
+        )
+        with factory.begin(
+            InternalControlScope(
+                data_mode="live",
+                service_principal_id=api_principal,
+            )
+        ) as internal_uow:
+            direct_internal_counts = {
+                table: internal_uow.connection.execute(
+                    f"SELECT count(*) FROM public.{table}"
+                ).fetchone()[0]
+                for table in care_tables
+            }
+            internal_uow.commit()
+        assert direct_internal_counts == {table: 0 for table in care_tables}
     finally:
         api_pool.close()
     with psycopg.connect(worker_dsn) as worker:

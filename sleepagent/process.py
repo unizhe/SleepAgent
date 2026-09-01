@@ -69,6 +69,7 @@ class RuntimeDependencyManifest(BaseModel):
     enabled_handlers: tuple[str, ...]
     model_mode: str
     provider_mode: str
+    outcome_evaluation: str
     control_clock: str = "system_utc"
     lease_clock: str = "postgresql_server_time"
     config_sha256: str
@@ -231,6 +232,11 @@ class SleepBackendRuntime:
             "enabled_handlers": tuple(sorted(self.worker_handlers)),
             "model_mode": self.settings.model_mode.value,
             "provider_mode": self.settings.provider_mode.value,
+            "outcome_evaluation": (
+                "enabled"
+                if self.settings.outcome_evaluation_enabled
+                else "disabled"
+            ),
             "config_sha256": self.settings.public_fingerprint(),
         }
         digest = sha256(
@@ -243,6 +249,15 @@ class SleepBackendRuntime:
     def readiness(self) -> dict[str, object]:
         attestation = self._attestation
         ready = self._started and attestation is not None
+        outcome_consumer_configured = (
+            self.settings.process_role is ProcessRole.WORKER
+            and "care.outcome.evaluate.v1" in self.worker_handlers
+        )
+        outcome_process_ready = ready and (
+            not self.settings.outcome_evaluation_enabled
+            or self.settings.process_role is not ProcessRole.WORKER
+            or outcome_consumer_configured
+        )
         return {
             "ready": ready,
             "process_role": self.settings.process_role.value,
@@ -251,6 +266,15 @@ class SleepBackendRuntime:
                 None if attestation is None else attestation.schema_version
             ),
             "config_sha256": self.settings.public_fingerprint(),
+            "outcome_evaluation": {
+                "status": (
+                    "ENABLED"
+                    if self.settings.outcome_evaluation_enabled
+                    else "DISABLED"
+                ),
+                "consumer_configured": outcome_consumer_configured,
+                "ready": outcome_process_ready,
+            },
         }
 
     def _validate_attestation(self, value: DatabaseAttestation) -> None:

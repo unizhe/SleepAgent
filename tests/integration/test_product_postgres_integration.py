@@ -865,6 +865,7 @@ def _worker_runtime(
         database_scope=BackendDataMode.REPLAY,
         namespace_prefixes=(namespace_id,),
         worker_queues=worker_queues,
+        outcome_evaluation_enabled="care.outcome.evaluate.v1" in worker_queues,
         model_mode=ModelMode.DETERMINISTIC,
         service_credential_ref="test:worker-service",
         signing_key_ref="test:worker-signing",

@@ -17,6 +17,7 @@ x-runtime-environment: &runtime-environment
   SLEEPAGENT_BACKEND_SIGNING_KEY_REF: file:/run/sleepagent/actor-public.pem
   SLEEPAGENT_BACKEND_ENCRYPTION_KEY_REF: test:key-provider/encryption
   SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER: ${SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER:-sleepagent-bff-v1}
+  SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED: ${SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED:-false}
 
 services:
   postgres:

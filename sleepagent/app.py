@@ -844,6 +844,21 @@ class PostgresInternalStatus:
         if not isinstance(outcome_value, Mapping):
             raise RuntimeError("care outcome operational metrics are unavailable")
         result["care_outcome"] = dict(outcome_value)
+        result["care_outcome"].update(
+            {
+                "outcome_evaluation": (
+                    "ENABLED"
+                    if getattr(self.settings, "outcome_evaluation_enabled", False)
+                    else "DISABLED"
+                ),
+                "consumer_configured": getattr(
+                    self.settings, "outcome_evaluation_enabled", False
+                ),
+                "consumer_ready": getattr(
+                    self.settings, "outcome_evaluation_enabled", False
+                ),
+            }
+        )
         evaluation_value = (
             None if care_evaluation_row is None else care_evaluation_row[0]
         )

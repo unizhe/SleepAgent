@@ -109,6 +109,7 @@ class SleepBackendSettings(BaseModel):
     emit_legacy_report_compatibility: bool = Field(default=False, strict=True)
     acquisition_scheduler_enabled: bool = Field(default=False, strict=True)
     live_delivery_enabled: bool = Field(default=False, strict=True)
+    outcome_evaluation_enabled: bool = Field(default=False, strict=True)
     service_credential_ref: str = Field(default="unconfigured", min_length=1)
     signing_key_ref: str = Field(min_length=1)
     encryption_key_ref: str = Field(min_length=1)
@@ -249,6 +250,18 @@ class SleepBackendSettings(BaseModel):
         configured_acquisition = set(self.worker_queues).intersection(
             acquisition_queues
         )
+        outcome_queue = "care.outcome.evaluate.v1"
+        if self.process_role is ProcessRole.WORKER:
+            has_outcome_consumer = outcome_queue in self.worker_queues
+            if self.outcome_evaluation_enabled and not has_outcome_consumer:
+                raise ValueError(
+                    "enabled outcome evaluation requires the "
+                    "care.outcome.evaluate.v1 consumer"
+                )
+            if not self.outcome_evaluation_enabled and has_outcome_consumer:
+                raise ValueError(
+                    "care.outcome.evaluate.v1 requires outcome evaluation opt-in"
+                )
         if self.acquisition_scheduler_enabled and (
             self.process_role is not ProcessRole.WORKER
             or not configured_acquisition
@@ -427,6 +440,9 @@ class SleepBackendSettings(BaseModel):
             ),
             live_delivery_enabled=_boolean(
                 env, "LIVE_DELIVERY_ENABLED", False
+            ),
+            outcome_evaluation_enabled=_boolean(
+                env, "OUTCOME_EVALUATION_ENABLED", False
             ),
             service_credential_ref=required("SERVICE_CREDENTIAL_REF"),
             signing_key_ref=required("SIGNING_KEY_REF"),

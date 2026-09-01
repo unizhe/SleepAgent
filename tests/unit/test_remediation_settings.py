@@ -41,6 +41,7 @@ def test_remediation_switch_defaults_use_v2_and_shared_only() -> None:
     assert settings.emit_legacy_report_compatibility is False
     assert settings.acquisition_scheduler_enabled is False
     assert settings.live_delivery_enabled is False
+    assert settings.outcome_evaluation_enabled is False
 
 
 @pytest.mark.parametrize(
@@ -51,6 +52,7 @@ def test_remediation_switch_defaults_use_v2_and_shared_only() -> None:
         ("EMIT_LEGACY_REPORT_COMPATIBILITY", "yes"),
         ("ACQUISITION_SCHEDULER_ENABLED", "1"),
         ("LIVE_DELIVERY_ENABLED", "TRUE"),
+        ("OUTCOME_EVALUATION_ENABLED", "enabled"),
     ),
 )
 def test_remediation_switch_environment_values_fail_closed(
@@ -218,3 +220,44 @@ def test_scheduled_perceptor_pull_requires_dedicated_client_id_reference() -> No
     settings = SleepBackendSettings.from_environment(environment)
 
     assert settings.perceptor_client_id_ref == "test:vendor-id"
+
+
+def test_enabled_outcome_evaluation_requires_consumer() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "product_agent",
+            "SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED": "true",
+        }
+    )
+    with pytest.raises(ValueError, match="requires the"):
+        SleepBackendSettings.from_environment(environment)
+
+
+def test_outcome_evaluation_disabled_is_explicit_and_rejects_consumer() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "care.outcome.evaluate.v1",
+        }
+    )
+    with pytest.raises(ValueError, match="opt-in"):
+        SleepBackendSettings.from_environment(environment)
+
+
+def test_enabled_outcome_evaluation_with_consumer_passes() -> None:
+    environment = _environment()
+    environment.update(
+        {
+            "SLEEPAGENT_BACKEND_PROCESS_ROLE": "worker",
+            "SLEEPAGENT_BACKEND_ENABLED_SURFACES": "",
+            "SLEEPAGENT_BACKEND_WORKER_QUEUES": "care.outcome.evaluate.v1",
+            "SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED": "true",
+        }
+    )
+    settings = SleepBackendSettings.from_environment(environment)
+    assert settings.outcome_evaluation_enabled is True
