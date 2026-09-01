@@ -389,6 +389,128 @@ def _revise_episode(
     return revision_id
 
 
+def _attach_episode_to_binding(
+    psycopg: object,
+    admin_dsn: str,
+    *,
+    namespace_id: str,
+    subject_id: str,
+    provider_account_id: str,
+    device_id: str,
+    device_binding_id: str,
+    binding_version: int,
+    episode_id: str,
+    event_at: datetime,
+) -> None:
+    suffix = uuid4().hex
+    raw_id = f"r1-raw-{suffix}"
+    candidate_id = f"r1-candidate-{suffix}"
+    observation_id = f"r1-observation-{suffix}"
+    with psycopg.connect(admin_dsn) as connection:  # type: ignore[attr-defined]
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_raw_inbox (
+                  raw_ingress_record_id, namespace_id, data_mode, provider_id,
+                  provider_account_id, event_type, measurement_at,
+                  event_occurred_at, received_at, signature_verification,
+                  idempotency_identity, idempotency_version,
+                  pre_normalization_payload_sha256, encrypted_payload,
+                  encryption_key_id, encrypted_at, content_type,
+                  payload_size_bytes, retention_until, raw_metadata_json
+                ) VALUES (%s,%s,'live','perceptor',%s,'bed_presence',%s,%s,%s,
+                  'verified',%s,'v1',%s,%s,'test-key',%s,'application/json',1,
+                  %s,'{}'::jsonb)
+                """,
+                (
+                    raw_id,
+                    namespace_id,
+                    provider_account_id,
+                    event_at,
+                    event_at,
+                    event_at,
+                    f"r1:{suffix}",
+                    hashlib.sha256(raw_id.encode()).hexdigest(),
+                    b"x",
+                    event_at,
+                    event_at + timedelta(days=30),
+                ),
+            )
+
+
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_adapter_candidates (
+                  candidate_id,namespace_id,data_mode,raw_ingress_record_id,
+                  provider_account_id,source_key,idempotency_key,
+                  observation_type,candidate_json,received_at,created_at
+                ) VALUES (%s,%s,'live',%s,%s,%s,%s,'bed_presence',
+                  '{}'::jsonb,%s,%s)
+                """,
+                (
+                    candidate_id,
+                    namespace_id,
+                    raw_id,
+                    provider_account_id,
+                    f"r1-source:{suffix}",
+                    f"r1-candidate:{suffix}",
+                    event_at,
+                    event_at,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_canonical_observations (
+                  observation_id,namespace_id,data_mode,candidate_id,
+                  raw_ingress_record_id,subject_id,device_id,device_binding_id,
+                  binding_version,observation_type,source_key,idempotency_key,
+                  observation_json,measurement_at,event_occurred_at,
+                  received_at,created_at
+                ) VALUES (%s,%s,'live',%s,%s,%s,%s,%s,%s,'bed_presence',
+                  %s,%s,'{}'::jsonb,%s,%s,%s,%s)
+                """,
+                (
+                    observation_id,
+                    namespace_id,
+                    candidate_id,
+                    raw_id,
+                    subject_id,
+                    device_id,
+                    device_binding_id,
+                    binding_version,
+                    f"r1-source:{suffix}",
+                    f"r1-observation:{suffix}",
+                    event_at,
+                    event_at,
+                    event_at,
+                    event_at,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_episode_observation_memberships (
+                  membership_id,namespace_id,data_mode,night_episode_id,
+                  observation_id,subject_id,device_binding_id,binding_version,
+                  event_at,received_at,lateness_watermark_at,
+                  late_after_watermark,membership_json,associated_at
+                ) VALUES (%s,%s,'live',%s,%s,%s,%s,%s,%s,%s,NULL,FALSE,
+                  '{}'::jsonb,%s)
+                """,
+                (
+                    f"r1-membership-{suffix}",
+                    namespace_id,
+                    episode_id,
+                    observation_id,
+                    subject_id,
+                    device_binding_id,
+                    binding_version,
+                    event_at,
+                    event_at,
+                    event_at,
+                ),
+            )
+
+
 def test_g7_device_scheduler_and_finalization_authorities() -> None:
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = _dsn("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
@@ -613,7 +735,7 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
         )
 
         schedules = AcquisitionScheduleService(api_factory)
-        due_at = datetime.now(tz=UTC) - timedelta(minutes=1)
+        due_at = datetime.now(tz=UTC) - timedelta(days=2)
         schedule = schedules.create(
             scope_two,
             binding=transferred,
@@ -679,6 +801,11 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
                 "WHERE operation_id = %s",
                 (fire.operation_id,),
             ).fetchone()[0] == 1
+            assert admin.execute(
+                "SELECT next_run_at > %s, next_run_at > clock_timestamp() "
+                "FROM public.backend_acquisition_schedules WHERE schedule_id=%s",
+                (fire.scheduled_for, schedule.schedule_id),
+            ).fetchone() == (True, True)
 
         worker_settings = SimpleNamespace(
             process_role=ProcessRole.WORKER,
@@ -712,6 +839,12 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
         assert recovered_claim.work_id == first_claim.work_id == fire.operation_id
         assert recovered_claim.lease_generation == first_claim.lease_generation + 1
         assert recovered_claim.attempt == first_claim.attempt
+        with psycopg.connect(admin_dsn) as admin:
+            assert admin.execute(
+                "SELECT execution_reclaim_count, attempt_count "
+                "FROM public.sleep_domain_operations WHERE operation_id=%s",
+                (fire.operation_id,),
+            ).fetchone() == (1, 1)
         assert exact_worker_scope(
             WorkContext(recovered_claim, store, threading.Event()),
             allowed_handler=AcquisitionJobType.HISTORY_OVERLAP_PULL.value,
@@ -773,6 +906,72 @@ def test_g7_device_scheduler_and_finalization_authorities() -> None:
             worker_factory,
             policy=NightFinalizationPolicy(minimum_observation_count=0),
         )
+        older_episode, _, older_deadline = _seed_episode(
+            psycopg,
+            admin_dsn,
+            namespace_id=namespace_id,
+            subject_id=subject_one,
+            local_date=date(2026, 8, 26),
+        )
+        newer_episode, _, newer_deadline = _seed_episode(
+            psycopg,
+            admin_dsn,
+            namespace_id=namespace_id,
+            subject_id=subject_one,
+            local_date=date(2026, 8, 27),
+        )
+        for due_episode, due_deadline in (
+            (older_episode, older_deadline),
+            (newer_episode, newer_deadline),
+        ):
+            _attach_episode_to_binding(
+                psycopg,
+                admin_dsn,
+                namespace_id=namespace_id,
+                subject_id=subject_one,
+                provider_account_id=provider_account_id,
+                device_id=second.binding.device_id,
+                device_binding_id=second.binding.device_binding_id,
+                binding_version=second.binding.binding_version,
+                episode_id=due_episode,
+                event_at=due_deadline - timedelta(hours=2),
+            )
+        evaluated_at = newer_deadline + timedelta(hours=25)
+        first_due_page = finalizer.finalize_due_for_binding(
+            final_scope,
+            device_binding_id=second.binding.device_binding_id,
+            evaluated_at=evaluated_at,
+            batch_size=1,
+        )
+        second_due_page = finalizer.finalize_due_for_binding(
+            final_scope,
+            device_binding_id=second.binding.device_binding_id,
+            evaluated_at=evaluated_at,
+            batch_size=1,
+        )
+        assert [item.night_episode_id for item in first_due_page] == [older_episode]
+        assert [item.night_episode_id for item in second_due_page] == [newer_episode]
+        expected_batch_handoffs = {
+            item.reanalysis_operation_id
+            for item in (*first_due_page, *second_due_page)
+        }
+        batch_handoffs = set()
+        for batch_index in range(20):
+            batch_claim = store.claim(
+                queue="fast_path",
+                worker_instance=f"g7-batch-report-worker-{batch_index}",
+                lease_seconds=30,
+            )
+            assert batch_claim is not None
+            if batch_claim.work_id in expected_batch_handoffs:
+                batch_handoffs.add(batch_claim.work_id)
+            assert store.finalize(
+                batch_claim,
+                WorkResult(disposition=WorkDisposition.SUCCEEDED),
+            )
+            if batch_handoffs == expected_batch_handoffs:
+                break
+        assert batch_handoffs == expected_batch_handoffs
         crossing_date = date(2026, 8, 30)
         episode, episode_revision, deadline = _seed_episode(
             psycopg,

@@ -197,14 +197,26 @@ class _NightFinalizationExecutor:
         if job_type is not AcquisitionJobType.NIGHT_FINALIZATION_SCAN:
             raise B3ClaimInvariantError("provider executor is unavailable")
         scope = exact_worker_scope(context, allowed_handler=job_type.value)
-        from datetime import datetime
+        from datetime import datetime, timezone
 
-        result = self.service.finalize_latest_for_binding(
+        evaluated_at = datetime.now(tz=timezone.utc)
+        results = self.service.finalize_due_for_binding(
             scope,
             device_binding_id=str(payload["device_binding_id"]),
-            evaluated_at=datetime.fromisoformat(str(payload["scheduled_for"])),
+            evaluated_at=evaluated_at,
         )
-        return result.model_dump(mode="json")
+        return {
+            "schema_version": "night_finalization_scan_result.v1",
+            "scheduled_for": datetime.fromisoformat(
+                str(payload["scheduled_for"])
+            ).isoformat(),
+            "evaluated_at": evaluated_at.isoformat(),
+            "processed_count": len(results),
+            "night_episode_ids": [item.night_episode_id for item in results],
+            "finalization_revision_ids": [
+                item.night_finalization_revision_id for item in results
+            ],
+        }
 
 
 __all__ = [

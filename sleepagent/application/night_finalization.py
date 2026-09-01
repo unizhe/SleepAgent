@@ -134,6 +134,129 @@ class NightFinalizationService:
             evaluated_at=evaluated_at,
         )
 
+    def finalize_due_for_binding(
+        self,
+        scope: UowScope,
+        *,
+        device_binding_id: str,
+        evaluated_at: datetime | None = None,
+        batch_size: int = 25,
+    ) -> tuple[NightFinalizationRevision, ...]:
+        """Finalize one bounded, oldest-first page of policy-due Episodes.
+
+        The durable schedule time identifies the scan operation. Policy time is
+        the explicit execution/retry instant supplied here, so a recovered scan
+        can advance grace/maximum-wait policy without changing its identity.
+        """
+
+        if not 1 <= batch_size <= 100:
+            raise ValueError("batch_size must be between 1 and 100")
+        now = evaluated_at or self.now_factory()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("evaluated_at must be timezone-aware")
+        episode_ids = self._discover_due_episode_ids(
+            scope,
+            device_binding_id=device_binding_id,
+            evaluated_at=now,
+            batch_size=batch_size,
+        )
+        finalized: list[NightFinalizationRevision] = []
+        for episode_id in episode_ids:
+            try:
+                finalized.append(
+                    self.finalize(
+                        scope,
+                        night_episode_id=episode_id,
+                        evaluated_at=now,
+                    )
+                )
+            except NightFinalizationPending:
+                # Evidence may change between discovery and the fenced Episode
+                # transaction. A later bounded scan will reconsider it.
+                continue
+        return tuple(finalized)
+
+    def _discover_due_episode_ids(
+        self,
+        scope: UowScope,
+        *,
+        device_binding_id: str,
+        evaluated_at: datetime,
+        batch_size: int,
+    ) -> tuple[str, ...]:
+        if scope.process_role != "worker" or scope.subject_id is None:
+            raise PermissionError("night finalization requires exact worker scope")
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT episode.night_episode_id
+                    FROM public.sleep_domain_night_episodes AS episode
+                    JOIN public.sleep_domain_night_episode_revisions AS episode_revision
+                      ON episode_revision.night_episode_revision_id =
+                         episode.current_revision_id
+                     AND episode_revision.namespace_id = episode.namespace_id
+                     AND episode_revision.data_mode = episode.data_mode
+                    LEFT JOIN public.sleep_domain_night_finalizations AS finalization
+                      ON finalization.namespace_id = episode.namespace_id
+                     AND finalization.data_mode = episode.data_mode
+                     AND finalization.night_episode_id = episode.night_episode_id
+                    LEFT JOIN public.sleep_domain_night_finalization_revisions
+                      AS finalization_revision
+                      ON finalization_revision.night_finalization_revision_id =
+                         finalization.current_finalization_revision_id
+                    WHERE episode.namespace_id = %s AND episode.data_mode = %s
+                      AND episode.namespace_generation = %s
+                      AND episode.subject_id = %s
+                      AND episode.current_revision_id IS NOT NULL
+                      AND EXISTS (
+                        SELECT 1
+                        FROM public.sleep_domain_episode_observation_memberships
+                          AS member
+                        WHERE member.namespace_id = episode.namespace_id
+                          AND member.data_mode = episode.data_mode
+                          AND member.night_episode_id = episode.night_episode_id
+                          AND member.device_binding_id = %s
+                      )
+                      AND (
+                        finalization.night_finalization_id IS NULL
+                        OR finalization_revision.source_night_episode_revision_id
+                           IS DISTINCT FROM episode.current_revision_id
+                        OR (
+                          finalization.state = 'soft_finalized'
+                          AND episode.deterministic_close_deadline_at
+                            + make_interval(secs => %s) <= %s
+                        )
+                      )
+                      AND (
+                        episode.date_conflict
+                        OR episode.deterministic_close_deadline_at
+                          + make_interval(secs => %s) <= %s
+                      )
+                    ORDER BY episode.episode_local_date ASC NULLS FIRST,
+                      episode.deterministic_close_deadline_at,
+                      episode.night_episode_id
+                    LIMIT %s
+                    """,
+                    (
+                        scope.namespace_id,
+                        scope.data_mode,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        device_binding_id,
+                        self.policy.maximum_wait_seconds,
+                        evaluated_at,
+                        self.policy.wake_grace_seconds,
+                        evaluated_at,
+                        batch_size,
+                    ),
+                )
+                rows = tuple(cursor.fetchall())
+            finally:
+                cursor.close()
+        return tuple(str(row[0]) for row in rows)
+
     def finalize(
         self,
         scope: UowScope,
