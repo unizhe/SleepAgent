@@ -64,6 +64,7 @@ DEFAULT_QUEUE_ORDER = (
     "perceptor.history_overlap_pull",
     "perceptor.sleep_report_pull",
     "night.finalization_scan",
+    "care.outcome.evaluate.v1",
     "ingestion",
     "fast_path",
     "product_agent",

@@ -17,6 +17,10 @@ from sleepagent.application.care_execution import (
     CarePlanFilter,
     CarePlanView,
 )
+from sleepagent.application.care_outcomes import (
+    CareOutcomeReadService,
+    CareOutcomeView,
+)
 from sleepagent.config import ProcessRole, SleepBackendSettings
 from sleepagent.domain.care_actions import CareAudience
 from sleepagent.domain.care_execution import (
@@ -28,6 +32,9 @@ from sleepagent.domain.care_execution import (
 )
 from sleepagent.infrastructure.postgres_care_execution import (
     PostgresCarePlanRepository,
+)
+from sleepagent.infrastructure.postgres_care_outcomes import (
+    PostgresCareOutcomeReadRepository,
 )
 from sleepagent.persistence.uow import (
     PoolConfiguration,
@@ -65,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     history = commands.add_parser("history", help="显示不可变执行历史")
     history.add_argument("care_plan_id")
     _output_arguments(history)
+
+    outcome = commands.add_parser("outcome", help="显示一个照护计划的观察结果")
+    outcome.add_argument("care_plan_id")
+    _output_arguments(outcome)
+
+    outcomes = commands.add_parser("outcomes", help="列出照护计划观察结果")
+    outcomes.add_argument("--limit", type=_limit, default=50)
+    _output_arguments(outcomes)
 
     for command_name in ("start", "complete", "cancel"):
         command = commands.add_parser(command_name)
@@ -134,7 +149,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             arm_id=resolved.arm_id,
         )
         service = CarePlanApplicationService(PostgresCarePlanRepository(factory))
-        payload, text = execute_command(arguments, service, principal)
+        outcome_service = CareOutcomeReadService(
+            PostgresCareOutcomeReadRepository(factory)
+        )
+        payload, text = execute_command(
+            arguments, service, principal, outcome_service=outcome_service
+        )
         print(
             json.dumps(payload, ensure_ascii=False, sort_keys=True)
             if arguments.json
@@ -159,7 +179,30 @@ def execute_command(
     arguments: argparse.Namespace,
     service: CarePlanApplicationService,
     principal: CareExecutionPrincipal,
+    *,
+    outcome_service: CareOutcomeReadService | None = None,
 ) -> tuple[dict[str, Any], str]:
+    if arguments.command in {"outcome", "outcomes"}:
+        if outcome_service is None:
+            raise CareExecutionError("Care outcome read service is unavailable")
+        if arguments.command == "outcome":
+            view = outcome_service.outcome(
+                principal, care_plan_id=arguments.care_plan_id
+            )
+            return (
+                _outcome_payload(view, trace=arguments.trace),
+                _render_outcome(view),
+            )
+        views = outcome_service.outcomes(principal, limit=arguments.limit)
+        return (
+            {
+                "schema_version": "terminal_care_outcome_list.v1",
+                "items": [
+                    _outcome_payload(item, trace=arguments.trace) for item in views
+                ],
+            },
+            _render_outcome_list(views),
+        )
     if arguments.command == "list":
         views = service.list(
             principal,
@@ -302,6 +345,169 @@ def _render_history(
             lines.append(f"备注：{event.note}")
     lines.extend(("", "这些记录是人工陈述，不是设备测量或医疗效果证明。"))
     return "\n".join(lines)
+
+
+def _render_outcome_list(views: tuple[CareOutcomeView, ...]) -> str:
+    if not views:
+        return "照护观察结果\n────────────────────────────\n当前没有已完成的照护计划。"
+    lines = ["照护观察结果", "────────────────────────────"]
+    for index, view in enumerate(views, start=1):
+        lines.extend(
+            (
+                f"{index}. {render_action_zh_cn(view.plan)}",
+                f"   计划编号：{view.plan.care_plan_id}",
+                f"   状态：{_outcome_state_zh_cn(view)}",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _render_outcome(view: CareOutcomeView) -> str:
+    lines = [
+        "照护观察结果",
+        "────────────────────────────",
+        "",
+        "照护计划：",
+        render_action_zh_cn(view.plan),
+        "",
+        "执行状态：",
+        execution_state_zh_cn(CareExecutionState(view.execution_state)),
+        "",
+        "执行时间：",
+        "未记录" if view.completed_at is None else _instant_text(view.completed_at),
+        "",
+        "观察窗口：",
+        _outcome_window(view),
+        "",
+        "状态：",
+        _outcome_state_zh_cn(view),
+    ]
+    outcome = view.outcome
+    if outcome is None:
+        lines.extend(("", "说明：", _bounded_reason_zh_cn(view.reason_code)))
+        return "\n".join(lines)
+    comparison = outcome.comparison_facts[0] if outcome.comparison_facts else None
+    lines.extend(
+        (
+            "",
+            "执行前：",
+            "无可比较数值" if comparison is None else _comparison_value(comparison.baseline_value, comparison.unit),
+            "",
+            "执行后：",
+            "无可比较数值" if comparison is None else _comparison_value(comparison.followup_value, comparison.unit),
+            "",
+            "观察结果：",
+            _category_zh_cn(outcome.outcome_category.value, comparison),
+            "",
+            "证据质量：",
+            _quality_zh_cn(outcome.evidence_quality.value),
+            "",
+            "说明：",
+            "；".join(outcome.caveats),
+        )
+    )
+    receipt = view.personalization_receipt
+    if receipt is not None:
+        lines.extend(
+            (
+                "",
+                "个性化候选：",
+                _receipt_state_zh_cn(receipt.state.value),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _outcome_payload(view: CareOutcomeView, *, trace: bool) -> dict[str, Any]:
+    outcome = view.outcome
+    receipt = view.personalization_receipt
+    payload: dict[str, Any] = {
+        "schema_version": "terminal_care_outcome_view.v1",
+        "care_plan_id": view.plan.care_plan_id,
+        "action": render_action_zh_cn(view.plan),
+        "execution_state": view.execution_state,
+        "completed_at": None if view.completed_at is None else view.completed_at.isoformat(),
+        "observation_window_start": None if view.observation_window_start is None else view.observation_window_start.isoformat(),
+        "observation_window_end": None if view.observation_window_end is None else view.observation_window_end.isoformat(),
+        "lifecycle_state": view.lifecycle_state.value,
+        "reason_code": view.reason_code,
+        "outcome_category": None if outcome is None else outcome.outcome_category.value,
+        "evidence_quality": None if outcome is None else outcome.evidence_quality.value,
+        "causal_claim": False,
+        "personalization_state": None if receipt is None else receipt.state.value,
+    }
+    if trace and outcome is not None:
+        payload["trace"] = {
+            "baseline_revision_ids": list(outcome.baseline_revision_ids),
+            "baseline_episode_revision_ids": list(
+                outcome.baseline_episode_revision_ids
+            ),
+            "followup_revision_ids": list(outcome.followup_revision_ids),
+            "followup_episode_revision_ids": list(
+                outcome.followup_episode_revision_ids
+            ),
+            "evaluation_policy_version": outcome.policy_version,
+            "evaluation_policy_hash": outcome.policy_hash,
+            "outcome_hash": outcome.semantic_hash,
+            "personalization_receipt_id": (
+                None if receipt is None else receipt.receipt_id
+            ),
+        }
+    return payload
+
+
+def _outcome_state_zh_cn(view: CareOutcomeView) -> str:
+    return {
+        "waiting_for_followup": "等待后续睡眠数据",
+        "ready_for_evaluation": "后续数据已就绪，等待评估",
+        "evaluated": "已完成执行前后观察",
+        "insufficient_data": "数据不足，暂无法评估",
+        "not_comparable": "指标语义不可比较，暂无法评估",
+        "superseded": "该观察结果已被新版本取代",
+    }[view.lifecycle_state.value]
+
+
+def _outcome_window(view: CareOutcomeView) -> str:
+    if view.observation_window_start is None or view.observation_window_end is None:
+        return "尚未登记"
+    return f"{_date(view.observation_window_start)} ～ {_date(view.observation_window_end)}"
+
+
+def _bounded_reason_zh_cn(reason: str | None) -> str:
+    return {
+        None: "尚未形成观察结果。",
+        "eligible_hard_finalized_followup_not_available": "后续夜晚尚未 HARD_FINALIZED。",
+        "execution_only_ready": "人工执行记录正在形成完成性观察。",
+        "execution_not_eligible": "该执行记录不符合评估条件。",
+    }.get(reason, "当前证据尚不足以形成观察结果。")
+
+
+def _category_zh_cn(category: str, comparison: Any) -> str:
+    if comparison is not None:
+        return str(comparison.interpretation)
+    return {
+        "execution_only": "已记录人工确认的任务完成。",
+        "insufficient_data": "数据不足，暂无法评估。",
+        "not_comparable": "当前指标语义不可比较。",
+    }.get(category, "已形成非因果的执行前后观察。")
+
+
+def _quality_zh_cn(value: str) -> str:
+    return {"high": "高", "moderate": "中等", "limited": "有限", "insufficient": "不足"}[value]
+
+
+def _receipt_state_zh_cn(value: str) -> str:
+    return {
+        "no_personalization_change": "未提出个性化变更",
+        "candidate_proposed": "已提出候选，等待现有治理流程确认",
+        "candidate_accepted": "候选已由现有治理流程接受",
+        "candidate_rejected": "候选已由现有治理流程拒绝",
+        "superseded": "候选已被新证据取代",
+    }[value]
+
+
+def _comparison_value(value: float, unit: str) -> str:
+    return f"{value:g} {unit}"
 
 
 def _view_payload(view: CarePlanView, *, trace: bool) -> dict[str, Any]:

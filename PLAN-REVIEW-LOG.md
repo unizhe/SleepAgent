@@ -1174,3 +1174,55 @@ Habit/Memory execution mutation, CareOutcome persistence, arbitrary role
 authority, mutable plan/event evidence, PUBLIC command authority, or changes to
 migrations 001–020. G9 stops at durable human attestation; external effects
 remain zero and outcome evaluation remains not started.
+
+## Act 18 — Build: G10 care outcome and personalization feedback closure
+
+### Round 1 — Deterministic outcome authority and governed proposal boundary
+
+Re-baselined G9 human-attested execution, current HARD_FINALIZED revision
+authority, Observation Semantics V2, Product longitudinal context, and the
+existing elder-confirmed Habit/Memory paths. Added action-keyed deterministic
+evaluation policy, immutable CareOutcome and PersonalizationEffectReceipt
+contracts, a fenced durable Worker boundary, migration 022 persistence,
+aggregate operations signals, and bounded zh-CN terminal views. The candidate
+is compatible with the existing governed Memory contract but cannot write a
+confirmed Habit or Memory revision.
+
+### Round 2 — Upgrade, expiry, lineage, and fence audit
+
+The user-owned PostgreSQL 16.14 distribution became available during the
+acceptance audit. Its first process run exposed an indeterminate nullable SQL
+parameter, which was fixed with an explicit text cast. The expanded round then
+closed upgrade, expiry, and lineage gaps: pre-022 completed G9 plans receive an
+idempotent backfill; one delayed semantic operation closes idle windows without
+polling; sufficient current HARD_FINALIZED follow-up advances WAITING to READY;
+and every outcome pins both finalization and episode revision identities.
+
+The projection write revalidates the exact operation fence. A deliberately
+lost response was reclaimed without duplicate authority, and revised late
+evidence created one outcome/receipt supersession chain. Receipt lineage now
+binds stale proposals, current metrics exclude superseded proposals, and the
+candidate hash is byte-for-byte canonical with existing Memory governance.
+The exact candidate passed existing elder confirmation and current-memory
+projection tests without any direct Memory write. No third fix round was used.
+
+### Codex verification
+
+- Focused G10: 27 passed; final G8/G9/G10, Habit/Memory, architecture,
+  API/runtime/settings, compile/import, and diff selection: 225 passed.
+- Unit marker: 1,185 passed, 45 deselected.
+- Broad non-E2E/non-PostgreSQL: 1,185 passed, 45 deselected.
+- Architecture: 6 passed with the frozen 0/0/1 dependency baseline.
+- PostgreSQL 16.14 focused G10 fresh/process plus populated 021→022 upgrade:
+  2 passed.
+- Full fresh PostgreSQL marker: 42 passed; only the documented completed
+  process-root evidence-reader skipped.
+- Manifest target 22 and migration hash
+  `168818d849c061e17d1e22110c16cf8914408d201b60c888309d37b33c911c0f`
+  are internally consistent; compilation, import, and `git diff --check` pass.
+
+Final review found no changes to migrations 001–021, direct confirmed
+Habit/Memory mutation, external effect, generic Movement reconstruction,
+additional action/Agent role, PUBLIC table privilege, or dependency-baseline
+growth. G10 implementation and release proofs pass. The coherent commit remains
+pending the required user approval; nothing is pushed.

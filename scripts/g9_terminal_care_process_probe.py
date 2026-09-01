@@ -14,10 +14,14 @@ from sleepagent.application.care_execution import (
     CareExecutionPrincipal,
     CarePlanApplicationService,
 )
+from sleepagent.application.care_outcomes import CareOutcomeReadService
 from sleepagent.care_cli import build_parser, execute_command
 from sleepagent.domain.care_actions import CareAudience
 from sleepagent.infrastructure.postgres_care_execution import (
     PostgresCarePlanRepository,
+)
+from sleepagent.infrastructure.postgres_care_outcomes import (
+    PostgresCareOutcomeReadRepository,
 )
 from sleepagent.persistence.uow import (
     PoolConfiguration,
@@ -82,6 +86,9 @@ def main() -> int:
             arguments,
             CarePlanApplicationService(PostgresCarePlanRepository(factory)),
             principal,
+            outcome_service=CareOutcomeReadService(
+                PostgresCareOutcomeReadRepository(factory)
+            ),
         )
         if os.environ.get("SLEEPAGENT_G9_PROBE_DROP_RESPONSE") == "1":
             # Acceptance-only uncertain-response simulation: the application

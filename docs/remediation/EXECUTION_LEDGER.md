@@ -2845,3 +2845,124 @@ EXTERNAL_EFFECTS                   = ZERO
 OUTCOME_EVALUATION                 = NOT_STARTED
 G9_COMPLETE                        = YES
 ```
+
+## G10 — Care outcome evaluation and personalization feedback closure
+
+Entry checkpoint: `f1c83d8dd115a2fd542fe101aa056971481fd094`
+(`remediation(g9): add terminal care execution`). The entry tree was clean,
+migration 021 was tracked, and `G9_COMPLETE = YES` before any G10 edit.
+
+### Existing authority re-baseline
+
+- G9 `CareExecutionEvent` is human-attested execution evidence only. The
+  atomic G9 command already requires active proposal/grant, matching subject,
+  executor role, execution window, and valid authority before completion.
+- NightFinalization owns current HARD/SOFT authority and immutable late-data
+  revisions. G10 consumes its current HARD_FINALIZED source episode revision;
+  it does not create a parallel nightly fact store.
+- Observation Semantics V2 owns metric/unit/window/provenance/trust meaning.
+  G10 requires an exact compatibility key and rejects generic or ambiguous
+  Movement.
+- Habit Profile revisions require reviewed concepts, Habit evidence, and exact
+  elder confirmation. One care execution does not establish a Habit.
+- Governed Memory revisions require a typed `MemoryChangeCandidate`, exact
+  target/subject/version binding, and elder confirmation. G10 creates only a
+  compatible proposal receipt and never writes a confirmed revision.
+- Existing product longitudinal calculations remain separate health/risk
+  context and are not reused as a convenient action success score.
+
+The authoritative G10 governance contract is
+`docs/architecture/care-outcome-personalization-governance.md`.
+
+### Implemented outcome authority
+
+`care-outcome-evaluation.v1` defines all four closed G8 actions. Consistent
+wake time compares deterministic variability across compatible observed local
+wake facts. Morning light is explicitly indirect and cannot claim radar
+observed compliance. Manual follow-up and morning review have execution-only
+semantics. No LLM selects a metric, baseline, threshold, quality, or category.
+
+Only valid completed human execution registers evaluation. Current
+HARD_FINALIZED facts before completion form the bounded baseline; current
+HARD_FINALIZED facts after completion and within the policy window form the
+bounded follow-up. Exact finalization revision IDs/material hashes and source
+episode revisions are pinned in outcome evidence. SOFT-only evidence waits.
+
+Lifecycle is waiting → ready → evaluated, with insufficient-data and
+not-comparable outcomes. Completion with no follow-up never becomes STABLE or
+IMPROVED. Every persisted result has `causal_claim=false` and uses
+IMPROVED/STABLE/WORSENED only as non-causal before/after observations.
+
+CareOutcome rows are immutable and semantically idempotent. A changed current
+finalization set creates a new revision linked to the retained prior outcome.
+Migration 022 registers evaluation on G9 completion and uses the existing
+fenced durable operation queue; future HARD_FINALIZED revisions cause bounded
+re-evaluation without a polling framework. One delayed semantic operation at
+the policy window end closes an otherwise idle incomplete evaluation as
+INSUFFICIENT_DATA, and an idempotent migration backfill registers G9
+completions that predate schema 022.
+
+### Personalization closure
+
+Every outcome produces a distinct immutable PersonalizationEffectReceipt.
+Comparable consistent-wake-time results, including stable or worsened episodes,
+may propose a confirmation-required `accepted_evidence` governed Memory
+candidate with the exact existing `MemoryChangeCandidate` canonical hash. The
+existing exact elder-confirmation function accepts that candidate and exposes
+the confirmed governed revision to future analysis. A late outcome receipt
+explicitly supersedes the prior receipt. The receipt and candidate cannot
+directly write Habit or Memory. No one-episode Habit or Semantic authority is
+created.
+
+Future analysis consumes only the state that the existing elder-confirmed
+Memory path accepts and versions. Evaluation Worker authority stops at outcome,
+receipt, and proposal evidence.
+
+### Product, operations, persistence, and isolation
+
+The care CLI adds `outcome` and `outcomes` with deterministic zh-CN waiting,
+insufficient, evaluated, quality, and non-causality views. Trace mode is bounded
+to revision, policy, outcome, and receipt identities.
+
+The protected internal aggregate adds pending/ready/evaluated outcome counts,
+oldest wait age, insufficient/not-comparable/superseded counts, and candidate
+proposal/accept/reject counts. Logs use the sanitized G10 event vocabulary and
+carry no raw health payload or human note.
+
+Additive migration 022 creates one mutable registration projection plus two
+append-only evidence tables, all with RLS/FORCE RLS and no PUBLIC access. It
+does not alter migrations 001–021 and performs no confirmed Habit/Memory or
+external-effect write.
+
+### Verification evidence
+
+- authoritative Python 3.11 G10 domain/CLI/static migration selection: 27
+  passed;
+- final focused G8/G9/G10, Habit/Memory, architecture, API/runtime, compile,
+  import, settings, and diff-whitespace selection: 225 passed;
+- authoritative Python 3.11 unit marker: 1,185 passed, 45 deselected;
+- broad non-E2E/non-PostgreSQL gate: 1,185 passed, 45 deselected;
+- architecture: 6 passed; 0 self-imports, 0 forbidden edges, one unchanged
+  bounded runtime-contract SCC;
+- migration manifest resolves target 22 and pins migration 022 at
+  `168818d849c061e17d1e22110c16cf8914408d201b60c888309d37b33c911c0f`;
+- PostgreSQL 16.14 fresh 001→022 apply/bootstrap/check passed;
+- PostgreSQL 021→022 populated completed-plan upgrade/backfill passed;
+- focused PostgreSQL G10 process and upgrade proof: 2 passed;
+- full fresh PostgreSQL marker: 42 passed, with only the documented completed
+  process-root evidence-reader skipped;
+- the real process proof covers WAITING and READY terminal views, delayed
+  expiry isolation, lost-response reclaim, same-finalization deduplication,
+  one semantic outcome, late-data revision 2 and receipt supersession,
+  independent zh-CN trace rendering, subject RLS, append-only evidence, no
+  PUBLIC grants, actual operational metrics, Worker Memory denial, and zero
+  delivery/Habit/Memory effects.
+
+```text
+CARE_OUTCOME_READY                 = YES
+PERSONALIZATION_FEEDBACK_READY     = YES
+CAUSAL_CLAIMS                      = ZERO
+EXTERNAL_EFFECTS                   = ZERO
+G10_COMPLETE                       = YES
+SLEEPAGENT_PRODUCT_LOOP_CLOSED     = YES
+```

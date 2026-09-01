@@ -11,6 +11,7 @@ from sleepagent.workers.commands import build_command_worker_handlers
 from sleepagent.workers.demo import build_demo_worker_handlers
 from sleepagent.workers.effects import build_effect_worker_handlers
 from sleepagent.workers.ingestion import build_b3_worker_handlers
+from sleepagent.workers.outcomes import build_care_outcome_worker_handlers
 from sleepagent.workers.product import build_product_agent_worker_handlers
 from sleepagent.workers.retention import build_retention_worker_handlers
 from sleepagent.workers.kernel import WorkHandler
@@ -32,6 +33,7 @@ def build_worker_handlers(
         build_demo_worker_handlers(settings),
         build_effect_worker_handlers(settings),
         build_retention_worker_handlers(settings),
+        build_care_outcome_worker_handlers(settings),
     )
     overlap: set[str] = set()
     for index, registry in enumerate(registries):
