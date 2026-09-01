@@ -1,4 +1,4 @@
-"""Terminal-first zh-CN interface for authorized human care execution."""
+"""Trusted-operator terminal interface for human-attested care execution."""
 
 from __future__ import annotations
 
@@ -46,7 +46,11 @@ from sleepagent.persistence.uow import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sleepagent-care",
-        description="查看照护计划并记录经授权人工执行情况。",
+        description=(
+            "受信任操作员工具：查看照护计划并记录人工证明；"
+            "不提供终端用户密码学身份认证。变更命令需要 "
+            "--acknowledge-trusted-operator。"
+        ),
     )
     parser.add_argument("--actor-id", required=True)
     parser.add_argument("--subject-id", required=True)
@@ -83,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     for command_name in ("start", "complete", "cancel"):
         command = commands.add_parser(command_name)
+        command.add_argument(
+            "--acknowledge-trusted-operator",
+            action="store_true",
+            help=(
+                "确认调用者持有受授权服务/数据库凭据；这不是终端用户登录"
+            ),
+        )
         command.add_argument("care_plan_id")
         command.add_argument("--idempotency-key", required=True)
         command.add_argument("--note")
@@ -95,6 +106,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     pool: PsycopgPoolProvider[Any] | None = None
     try:
+        if (
+            arguments.command in {"start", "complete", "cancel"}
+            and not arguments.acknowledge_trusted_operator
+        ):
+            raise CareExecutionError(
+                "mutation requires --acknowledge-trusted-operator; "
+                "CLI actor fields are trusted-operator assertions, not "
+                "cryptographic end-user authentication"
+            )
         settings = SleepBackendSettings.from_environment()
         if settings.process_role is not ProcessRole.API:
             raise CareExecutionError("Care CLI requires an API capability profile")

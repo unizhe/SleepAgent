@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 26,
+  "target_version": 27,
   "migrations": [
     {
       "version": 1,
@@ -181,6 +181,13 @@
       "version": 26,
       "filename": "026_runtime_reliability_closure.sql",
       "sha256": "510da0debf2df545bb39a73ee86688d79055d82596fa059e197a0f8875c5e27a",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 27,
+      "filename": "027_care_operational_access_closure.sql",
+      "sha256": "5315c005b66acba351ebe3bab0f8f0c015d87841de6d49b9fdbc035485c04339",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

@@ -82,6 +82,41 @@ def test_cli_exposes_outcome_commands() -> None:
     help_text = build_parser().format_help()
     assert "outcome" in help_text
     assert "outcomes" in help_text
+    assert "acknowledge-trusted-operator" in help_text
+    assert "不提供终端用户密码学身份认证" in help_text
+
+
+def test_care_mutation_requires_explicit_trusted_operator_acknowledgement() -> None:
+    authority = [
+        "--actor-id",
+        "operator-1",
+        "--subject-id",
+        "subject-1",
+        "--role",
+        "elder",
+        "--authorization-epoch",
+        "1",
+        "--privacy-epoch",
+        "1",
+        "--retrieval-policy-epoch",
+        "1",
+    ]
+    without_guard = build_parser().parse_args(
+        [*authority, "start", "plan-1", "--idempotency-key", "start-1"]
+    )
+    with_guard = build_parser().parse_args(
+        [
+            *authority,
+            "start",
+            "plan-1",
+            "--acknowledge-trusted-operator",
+            "--idempotency-key",
+            "start-1",
+        ]
+    )
+
+    assert without_guard.acknowledge_trusted_operator is False
+    assert with_guard.acknowledge_trusted_operator is True
 
 
 def test_waiting_view_says_waiting_not_no_improvement() -> None:

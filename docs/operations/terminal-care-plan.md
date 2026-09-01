@@ -19,6 +19,19 @@ CareStrategy version, evidence references, structured parameters, policy and
 renderer versions, and validity window. Its validity never extends past the
 grant or proposal expiry.
 
+## Trusted-operator identity boundary
+
+The Terminal Care CLI is an operator/demo tool. Its actor, subject, role, and
+epoch arguments are trusted-operator assertions made under possession of the
+authorized API service/database credential. They are not cryptographically
+authenticated end-user identity. Anyone holding that privileged credential is
+inside this trust boundary. Mutating commands therefore require the explicit
+`--acknowledge-trusted-operator` guard. The Product BFF personalization
+confirmation surface remains a separate signed-actor HTTP boundary.
+
+The DeviceBinding CLI follows the same service-credential operator boundary;
+its caller-supplied identity fields must not be presented as real-user login.
+
 ## Human execution contract
 
 Execution state is separate from proposal/grant state:
@@ -49,7 +62,7 @@ closed. PostgreSQL serializes the state row; it does not use last-write-wins.
 
 ## Authority loss and history
 
-Every state-changing command revalidates the authenticated API principal,
+Every state-changing command revalidates the trusted API service principal,
 actor-subject binding, executor role, execution scope, authority epoch,
 namespace generation, subject, grant, proposal, and validity window. A revoked
 grant makes a nonterminal plan `INVALIDATED`; an expired window makes it
@@ -71,11 +84,11 @@ python -m sleepagent.care_cli \
 
 python -m sleepagent.care_cli [authority arguments] show PLAN_ID
 python -m sleepagent.care_cli [authority arguments] start PLAN_ID \
-  --idempotency-key KEY [--note NOTE]
+  --acknowledge-trusted-operator --idempotency-key KEY [--note NOTE]
 python -m sleepagent.care_cli [authority arguments] complete PLAN_ID \
-  --idempotency-key KEY [--note NOTE]
+  --acknowledge-trusted-operator --idempotency-key KEY [--note NOTE]
 python -m sleepagent.care_cli [authority arguments] cancel PLAN_ID \
-  --idempotency-key KEY [--note NOTE]
+  --acknowledge-trusted-operator --idempotency-key KEY [--note NOTE]
 python -m sleepagent.care_cli [authority arguments] history PLAN_ID
 ```
 
