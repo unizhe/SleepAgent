@@ -22,6 +22,7 @@ from sleepagent.config import DeploymentMode, SleepBackendSettings
 from sleepagent.api.product_contracts import (
     CareActionRecord,
     CareFollowupRecord,
+    CarePlanRecord,
     CareProposalDetailResponse,
     CareProposalListResponse,
     CareProposalMutationResponse,
@@ -1552,6 +1553,25 @@ class PostgresProductBackend(ProductBackend):
                         AND decision.privacy_epoch = %s
                         AND decision.retrieval_policy_epoch = %s
                         AND action.action_json ->> 'action_kind' <> ''
+                    ), authorized_plans AS (
+                      SELECT plan.*, execution.state AS execution_state,
+                        execution.updated_at AS execution_updated_at,
+                        grant_row.state AS grant_state,
+                        proposal.state AS proposal_state,
+                        proposal.expires_at AS proposal_expires_at
+                      FROM public.backend_care_plans_v1 AS plan
+                      JOIN public.backend_care_execution_states_v1 AS execution
+                        ON execution.care_plan_id = plan.care_plan_id
+                      JOIN public.backend_approval_grants_v3 AS grant_row
+                        ON grant_row.grant_id = plan.approval_grant_id
+                      JOIN public.backend_care_action_proposals_v3 AS proposal
+                        ON proposal.proposal_id = plan.proposal_id
+                      WHERE plan.namespace_id = %s AND plan.data_mode = %s
+                        AND plan.namespace_generation = %s
+                        AND plan.run_id IS NOT DISTINCT FROM %s
+                        AND plan.arm_id IS NOT DISTINCT FROM %s
+                        AND plan.subject_id = %s
+                        AND plan.executor_role = %s
                     ), records AS (
                       SELECT 'care_action'::text AS record_type,
                         action.care_action_id AS record_id,
@@ -1560,6 +1580,7 @@ class PostgresProductBackend(ProductBackend):
                         action.source_analysis_revision_id,
                         action.confirmed_at, action.updated_at,
                         NULL::text AS night_episode_id,
+                        NULL::timestamptz AS valid_until,
                         action.confirmed_at AS sort_time
                       FROM authorized_actions AS action
                       UNION ALL
@@ -1567,7 +1588,8 @@ class PostgresProductBackend(ProductBackend):
                         'care-followup:' || followup.night_episode_id,
                         NULL::text, followup.state, NULL::text, NULL::text,
                         NULL::timestamptz, followup.updated_at,
-                        followup.night_episode_id, followup.updated_at
+                        followup.night_episode_id, NULL::timestamptz,
+                        followup.updated_at
                       FROM public.sleep_domain_care_followups AS followup
                       WHERE followup.state <> 'none'
                         AND EXISTS (
@@ -1583,10 +1605,33 @@ class PostgresProductBackend(ProductBackend):
                               COALESCE(followup.arm_id, '')
                             AND action.subject_id = followup.subject_id
                         )
+                      UNION ALL
+                      SELECT 'care_plan'::text, plan.care_plan_id,
+                        NULL::text,
+                        CASE
+                          WHEN plan.execution_state NOT IN (
+                            'not_started', 'in_progress'
+                          ) THEN plan.execution_state
+                          WHEN plan.proposal_state = 'expired'
+                               AND plan.proposal_expires_at > %s
+                            THEN 'superseded'
+                          WHEN plan.proposal_state <> 'approved'
+                               OR plan.grant_state = 'revoked'
+                            THEN 'invalidated'
+                          WHEN plan.grant_state = 'expired'
+                               OR plan.valid_until <= %s
+                            THEN 'expired'
+                          ELSE plan.execution_state
+                        END,
+                        plan.action_type, plan.source_analysis_revision_id,
+                        plan.created_at, plan.execution_updated_at,
+                        NULL::text, plan.valid_until,
+                        plan.execution_updated_at
+                      FROM authorized_plans AS plan
                     )
                     SELECT record_type, record_id, interaction_id, state,
                       action_kind, source_analysis_revision_id, confirmed_at,
-                      updated_at, night_episode_id, sort_time
+                      updated_at, night_episode_id, valid_until, sort_time
                     FROM records
                     WHERE (%s::timestamptz IS NULL OR
                       (sort_time, record_id) < (%s, %s))
@@ -1598,6 +1643,10 @@ class PostgresProductBackend(ProductBackend):
                         context.authorization_epoch,
                         context.privacy_epoch,
                         context.retrieval_epoch,
+                        *_product_scope_params(context),
+                        context.role.value,
+                        self.now_factory(),
+                        self.now_factory(),
                         after_time,
                         after_time,
                         after_id,
@@ -1622,7 +1671,7 @@ class PostgresProductBackend(ProductBackend):
                 rows=rows,
                 visible=visible,
                 limit=limit,
-                time_index=9,
+                time_index=10,
                 id_index=1,
             ),
         )
@@ -1788,6 +1837,13 @@ class PostgresProductBackend(ProductBackend):
             and result.grant_id is not None
         ):
             log_event("approval_grant_issued")
+            log_event("care_plan_created")
+        elif (
+            choice == "approve"
+            and result.outcome == "idempotent"
+            and result.grant_id is not None
+        ):
+            log_event("care_plan_deduplicated")
         return result
 
     def revoke_care_proposal(
@@ -4663,7 +4719,9 @@ def _operation_state(status: str) -> PublicOperationState:
     }.get(status, PublicOperationState.BLOCKED)
 
 
-def _care_record(row: Any) -> CareActionRecord | CareFollowupRecord:
+def _care_record(
+    row: Any,
+) -> CareActionRecord | CareFollowupRecord | CarePlanRecord:
     record_type = str(row[0])
     if record_type == "care_action":
         return CareActionRecord(
@@ -4690,6 +4748,30 @@ def _care_record(row: Any) -> CareActionRecord | CareFollowupRecord:
                 str(row[3]),
             ),
             updated_at=row[7],
+        )
+    if record_type == "care_plan":
+        return CarePlanRecord(
+            care_plan_id=str(row[1]),
+            state=cast(
+                Literal[
+                    "not_started", "in_progress", "completed", "cancelled",
+                    "expired", "invalidated", "superseded",
+                ],
+                str(row[3]),
+            ),
+            action_type=cast(
+                Literal[
+                    "recommend_consistent_wake_time",
+                    "recommend_morning_light",
+                    "request_manual_follow_up",
+                    "request_morning_review_feedback",
+                ],
+                str(row[4]),
+            ),
+            source_analysis_revision_id=str(row[5]),
+            created_at=row[6],
+            updated_at=row[7],
+            valid_until=row[9],
         )
     raise ProductApiError(
         "projection_corrupt",

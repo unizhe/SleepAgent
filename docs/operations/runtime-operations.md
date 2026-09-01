@@ -46,8 +46,9 @@ Start in this order:
 
 The disabled scheduler returns `{"enabled":false,"fires":0}` and performs no
 authoritative acquisition write. Enabling it is a deployment decision, not a
-source default. `SLEEPAGENT_BACKEND_LIVE_DELIVERY_ENABLED` remains `false` until
-a later delivery/HITL goal.
+source default. `SLEEPAGENT_BACKEND_LIVE_DELIVERY_ENABLED` remains `false`;
+external delivery has been removed from the core remediation roadmap. G9 care
+execution is an internal terminal workflow and has no network-side effect.
 
 `/livez` answers only whether the API process is alive. `/readyz` checks the
 started runtime, database/schema attestation, and exact release configuration.
@@ -79,6 +80,7 @@ payload, prompt, or free-form error identifier.
 | oldest OPEN / SOFT_FINALIZED night | finalization tables | within policy window | older than 86,400 seconds | reconciliation-required is unhealthy; inspect evidence/date authority |
 | late finalization revisions | immutable revisions | explainable monotonic count | unexpected growth | verify materiality and upstream duplicate data |
 | latest report / shared-analysis completion | operations | advances after eligible finalized nights | stale with eligible work | inspect Product queue/model boundary without exposing health context |
+| terminal care execution | care plan/state/event tables | executable plans are recent and conflicts are zero | oldest executable age or bounded conflicts increase | inspect authority expiry, CLI retries, and conflicting human commands; never inspect note text in metrics |
 
 The one-day night-age default is conservative operational policy, not a medical
 threshold. Scheduler thresholds are relative to each configured cadence;

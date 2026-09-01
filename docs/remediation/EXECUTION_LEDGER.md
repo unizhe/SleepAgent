@@ -2721,3 +2721,127 @@ PROCESS_BOUNDARY_HITL_PROOF        = PASS
 EXTERNAL_EFFECTS                   = ZERO
 G8_COMPLETE                        = YES
 ```
+
+## G9 — Terminal Care Plan and human execution tracking
+
+`G9_STATUS = COMPLETE_PENDING_COMMIT`
+
+### Re-baselined care/execution authority
+
+At committed G8 entry `90e07c6cffe13673439f558eef28799884826071`, the
+repository contained the governed G8 proposal/decision/grant path, generic HITL
+CAS conventions, authenticated Product authority, append-only audit patterns,
+the older replay/delivery-oriented `backend_care_actions_v2` interaction, and a
+per-night `sleep_domain_care_followups` projection. There was no terminal care
+CLI or durable human-attested execution model. The older interaction and
+follow-up structures do not have the source-pinned grant authority or separate
+execution state required by G9, so they were not reused as execution truth.
+
+G9 reuses the G8 grant, principal/binding resolution, role/scope/epoch checks,
+RLS, unit-of-work, CAS, idempotency, sanitized logs, and aggregate operational
+surface. It adds one normalized immutable plan table, one current-state
+projection, and one append-only event table rather than a delivery or generic
+workflow framework.
+
+### Authority and execution contract
+
+```text
+ACTIVE ApprovalGrant
+  -> one deterministic immutable CarePlanEntry
+  -> deterministic zh-CN terminal view
+  -> authorized START / COMPLETE / CANCEL
+  -> append-only human_attested CareExecutionEvent
+  -> durable separate execution projection
+```
+
+The plan binds the exact G8 grant/proposal/candidate semantics, subject, closed
+action taxonomy, executor role, source hard-finalization/shared-analysis,
+CareStrategy invocation/version, evidence references, structured parameters,
+policy/renderer identities, and a window bounded by G8 authority. Grant insert
+creates the plan atomically; deterministic identity plus unique grant binding
+deduplicates retries. Migration 021 idempotently backfills valid existing
+grants. Rejected and unapproved proposals create no plan.
+
+Execution states are `NOT_STARTED`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED`,
+with derived/persisted `EXPIRED`, `INVALIDATED`, and `SUPERSEDED` authority-loss
+conditions. Consistent wake time is a bounded-period action requiring START.
+Morning light is one-time and permits direct completion. Manual follow-up and
+morning review are follow-up tasks permitting direct completion. These rules
+are deterministic versioned policy, not CLI ordering.
+
+Every human event records `source_authority=human_attested`, the resolved actor
+principal/binding/role, subject and epoch, occurrence/record times, previous and
+resulting CAS state/version, idempotency key/fingerprint, and optional bounded
+sanitized note. Completion is not measurement, clinical verification, or
+outcome. Exact retries return the original event; different command semantics
+under the same key and concurrent stale versions fail closed.
+
+Revocation, expiry, or source supersession blocks future commands and retains
+earlier events. Nonterminal projections become invalidated/expired/superseded.
+A valid completion that predates later authority loss remains historical
+completion while current grant authority is reported separately. No historical
+event is rewritten or transferred to a replacement analysis.
+
+### Product, operations, and isolation
+
+`python -m sleepagent.care_cli` provides list/show/start/complete/cancel/history,
+state filters, deterministic zh-CN templates, JSON, and bounded trace output.
+The CLI resolves server-side authority and calls the application boundary, not
+SQL. Existing Product care projection now distinguishes plan not-started,
+in-progress, completed, cancelled, expired, invalidated, and superseded without
+claiming success/effectiveness.
+
+The protected operational aggregate reports plan lifecycle counts, oldest
+executable age, and command conflict/error count with no subject or note.
+Migration 021 uses RLS/FORCE RLS on plan/state/event tables, no PUBLIC mutation,
+append-only plan/event triggers, state transition validation, and an API-only
+SECURITY DEFINER command under current binding/scope/epoch authority.
+
+Independent Python processes using the actual terminal parser, application
+service, non-owner API role, and PostgreSQL adapter proved list -> START ->
+process restart -> IN_PROGRESS -> COMPLETE -> immutable history. Exact retries,
+including a deliberately dropped post-commit client response, restart recovery,
+wrong subject/role/scope/epoch, expiry, revocation, completed-before-revocation
+history, supersession, and START/CANCEL plus COMPLETE/CANCEL contention converge
+safely. The real internal-status application surface returned every required
+aggregate metric without subject/note content, and captured structured logs
+proved the complete sanitized G9 lifecycle vocabulary.
+
+Plan creation, start, completion, and cancellation create zero delivery or
+network effect and zero governed Habit/Memory revision. No CareOutcome or
+follow-up evaluation was added. The authoritative operator contract is
+`docs/operations/terminal-care-plan.md`.
+
+Native PostgreSQL 16.14 proved fresh 001→021, manifest check at schema 021,
+and exact committed G8 schema 020→021 with a populated, future-valid active
+grant. That upgrade immediately produced one plan and one state with
+`created_at >= issued_at` and `valid_until <= expires_at`. Migration 021 is
+pinned to
+`123c9b09dd6d22b2371d7a58608527a59c50d9dfd4f9f1bb49c174c684ee8e73`;
+migrations 001–020 remain unchanged.
+
+Verification evidence:
+
+- G9 domain/application/CLI: 18 passed;
+- focused G9/G8 real-PostgreSQL process and authority proofs: 3 passed, with
+  the strengthened G9-only RLS/append-only proof 2 passed;
+- focused Product/app/foundation/architecture: 124 passed;
+- unit marker: 1,158 passed, 43 deselected;
+- broad non-E2E/non-PostgreSQL: 1,158 passed, 43 deselected;
+- definitive fresh PostgreSQL marker: 40 passed, 1 skipped, 1,160 deselected;
+  the sole skip is the pre-existing environment-gated completed G7.2
+  process-root reader, while G9's independent terminal processes passed;
+- architecture: 6 passed; OpenAPI snapshot, Python 3.11 compilation/import,
+  migration apply/check, manifest hash, and `git diff --check`: PASS.
+
+The packaged `python -m sleepagent.care_cli` entry point also resolved the
+non-owner API authority directly and returned the completed zh-CN morning-light
+plan with `completion_semantics=human_attested_execution_only`.
+
+```text
+TERMINAL_CARE_PLAN_READY           = YES
+HUMAN_EXECUTION_TRACKING_READY     = YES
+EXTERNAL_EFFECTS                   = ZERO
+OUTCOME_EVALUATION                 = NOT_STARTED
+G9_COMPLETE                        = YES
+```

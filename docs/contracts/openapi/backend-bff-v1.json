@@ -144,6 +144,88 @@
         "title": "CareFollowupRecord",
         "type": "object"
       },
+      "CarePlanRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "action_type": {
+            "enum": [
+              "recommend_consistent_wake_time",
+              "recommend_morning_light",
+              "request_manual_follow_up",
+              "request_morning_review_feedback"
+            ],
+            "title": "Action Type",
+            "type": "string"
+          },
+          "care_plan_id": {
+            "minLength": 1,
+            "title": "Care Plan Id",
+            "type": "string"
+          },
+          "completion_semantics": {
+            "const": "human_attested_execution_only",
+            "default": "human_attested_execution_only",
+            "title": "Completion Semantics",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "record_type": {
+            "const": "care_plan",
+            "default": "care_plan",
+            "title": "Record Type",
+            "type": "string"
+          },
+          "source_analysis_revision_id": {
+            "minLength": 1,
+            "title": "Source Analysis Revision Id",
+            "type": "string"
+          },
+          "source_authority": {
+            "const": "approved_care_plan",
+            "default": "approved_care_plan",
+            "title": "Source Authority",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "not_started",
+              "in_progress",
+              "completed",
+              "cancelled",
+              "expired",
+              "invalidated",
+              "superseded"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "valid_until": {
+            "format": "date-time",
+            "title": "Valid Until",
+            "type": "string"
+          }
+        },
+        "required": [
+          "care_plan_id",
+          "state",
+          "action_type",
+          "source_analysis_revision_id",
+          "created_at",
+          "updated_at",
+          "valid_until"
+        ],
+        "title": "CarePlanRecord",
+        "type": "object"
+      },
       "CareProposalDecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2361,6 +2443,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/CareFollowupRecord"
+                },
+                {
+                  "$ref": "#/components/schemas/CarePlanRecord"
                 }
               ]
             },

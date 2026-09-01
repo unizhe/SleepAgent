@@ -789,6 +789,10 @@ class PostgresInternalStatus:
                     "SELECT public.sleepagent_care_governance_operational_metrics_v3()"
                 )
                 care_row = cursor.fetchone()
+                cursor.execute(
+                    "SELECT public.sleepagent_care_execution_operational_metrics_v1()"
+                )
+                care_execution_row = cursor.fetchone()
             finally:
                 cursor.close()
             uow.commit()
@@ -810,6 +814,16 @@ class PostgresInternalStatus:
         if not isinstance(care_value, Mapping):
             raise RuntimeError("care governance operational metrics are unavailable")
         result["care_governance"] = dict(care_value)
+        execution_value = (
+            None if care_execution_row is None else care_execution_row[0]
+        )
+        if isinstance(execution_value, str):
+            import json
+
+            execution_value = json.loads(execution_value)
+        if not isinstance(execution_value, Mapping):
+            raise RuntimeError("care execution operational metrics are unavailable")
+        result["care_execution"] = dict(execution_value)
         return result
 
 

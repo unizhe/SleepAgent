@@ -413,13 +413,43 @@ class CareFollowupRecord(PublicModel):
         return value
 
 
+class CarePlanRecord(PublicModel):
+    record_type: Literal["care_plan"] = "care_plan"
+    care_plan_id: NonEmpty
+    state: Literal[
+        "not_started", "in_progress", "completed", "cancelled",
+        "expired", "invalidated", "superseded",
+    ]
+    action_type: Literal[
+        "recommend_consistent_wake_time",
+        "recommend_morning_light",
+        "request_manual_follow_up",
+        "request_morning_review_feedback",
+    ]
+    source_analysis_revision_id: NonEmpty
+    created_at: datetime
+    updated_at: datetime
+    valid_until: datetime
+    source_authority: Literal["approved_care_plan"] = "approved_care_plan"
+    completion_semantics: Literal["human_attested_execution_only"] = (
+        "human_attested_execution_only"
+    )
+
+    @field_validator("created_at", "updated_at", "valid_until")
+    @classmethod
+    def care_plan_times_are_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Care plan timestamps must include a timezone offset")
+        return value
+
+
 class ProductCareResponse(PublicModel):
     schema_version: Literal["product_sleep_care.v1"] = "product_sleep_care.v1"
     data_mode: Literal["live", "replay"]
     synthetic_non_release: bool
     subject_ref: NonEmpty
     role: ProductRole
-    items: tuple[CareActionRecord | CareFollowupRecord, ...]
+    items: tuple[CareActionRecord | CareFollowupRecord | CarePlanRecord, ...]
     next_cursor: str | None = None
 
 

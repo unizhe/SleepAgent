@@ -1127,3 +1127,50 @@ Final diff review found no grant producer outside the authenticated decision
 function, arbitrary recipient authority, Memory outcome write, DeliveryIntent,
 effect handler, or changes to migrations 001–019. G8 stops at an inert,
 exact-bound ApprovalGrant.
+
+## Act 17 — Build: G9 terminal CarePlan and human execution tracking
+
+### Round 1 — Grant authority, execution contract, and PostgreSQL proof
+
+Re-baselined the legacy replay/delivery care interaction and per-night follow-up
+projection against G8's source-pinned grant authority. Added a closed immutable
+CarePlan contract, action-specific execution policy, separate status lifecycle,
+human-attested append-only events, application service, terminal CLI, and
+PostgreSQL 021 persistence. Grant insert creates one deterministic plan in the
+approval transaction; active pre-021 grants receive a bounded idempotent
+backfill. The first native PostgreSQL run exposed a proof fixture clock two
+minutes ahead of database time; the fixture was corrected to use a past base
+without weakening the production time fence.
+
+### Round 2 — Process recovery, authority loss, and isolation review
+
+Expanded the non-owner PostgreSQL matrix through independent terminal
+processes for list, START, restart/show, COMPLETE, and immutable history.
+Added direct-completion policy, terminal resurrection rejection, wrong
+subject/role/scope/epoch, expiry, explicit revocation, material supersession,
+duplicate/key-conflict handling, START/CANCEL and COMPLETE/CANCEL contention,
+completed-before-revocation history, a deliberately lost post-commit client
+response, and zero delivery/Habit/Memory evidence. Static and terminal tests
+cover every CLI command and closed action renderer, safe zh-CN rendering,
+missing/expired plans, RLS/FORCE RLS, append-only evidence, the actual aggregate
+metrics surface, sanitized structured lifecycle logs, and the explicit absence
+of CareOutcome persistence. No third fix round was used.
+
+### Codex verification
+
+- G9 domain/application/CLI: 18 passed; focused Product/app/foundation and
+  architecture: 124 passed.
+- Unit marker and broad non-E2E/non-PostgreSQL: 1,158 passed each.
+- Fresh PostgreSQL marker: 40 passed, one pre-existing environment-gated G7.2
+  process-root reader skipped; G9's independent terminal process proof passed.
+- Exact G8 schema 020→021 populated-grant upgrade, fresh 001→021, manifest
+  check, RLS/privileges, append-only triggers, OpenAPI, compilation,
+  architecture, and diff whitespace: PASS.
+- The packaged `python -m sleepagent.care_cli` entry point resolved a real
+  non-owner API authority and rendered its durable completed plan.
+
+Final diff review found no proposal-to-plan bypass, delivery/effect producer,
+Habit/Memory execution mutation, CareOutcome persistence, arbitrary role
+authority, mutable plan/event evidence, PUBLIC command authority, or changes to
+migrations 001–020. G9 stops at durable human attestation; external effects
+remain zero and outcome evaluation remains not started.
