@@ -3549,3 +3549,210 @@ FSA-COR-003             = RESOLVED
 PERSONALIZATION_LOOP    = RESTORED
 HABIT_FROM_CARE_OUTCOME = DEFERRED
 ```
+
+## R1 — Bounded runtime, security, deployment, capacity, and verification closure
+
+Entry checkpoint: `87a5507292bb15922f7c7d5550b264a5cec3be8c`. The
+tracked worktree was clean. The pre-existing untracked historical audit
+snapshots under `docs/audit/` were preserved and are excluded from R1 edits.
+Migrations 001--025 and their manifest identities are the immutable entry
+schema baseline. R1 is limited to FSA-PER-001, FSA-PER-002, FSA-COR-005,
+FSA-SEC-001, FSA-SEC-002, FSA-OPS-001, FSA-PERF-001, and FSA-TEST-001;
+LICENSE, public documentation, legacy cleanup, optional findings, and product
+loop semantics remain out of scope.
+
+The authoritative audit findings were re-read at entry. Finding-by-finding
+post-C3 source reconfirmation, selected policies, migrations, benchmark data,
+and verification evidence will be recorded below as R1 proceeds.
+
+### Root-cause reconfirmation and bounded policies
+
+- **FSA-PER-001:** all four active claim authorities (normalization,
+  operations, delivery, and retention) treated an expired lease as the same
+  business attempt and advanced only lease generation. A process could die
+  after every committed claim without ever reaching handler retry
+  finalization. Migration 026 adds a per-row `execution_reclaim_count` and
+  `max_execution_reclaims` (default 3), increments only expired-claim
+  recovery, and leaves `attempt_count` as handler-failure authority.
+  Exhaustion routes normalization to `quarantined`, operations and retention
+  to `dead_letter`, and delivery to `outcome_unknown` after dispatch/permit or
+  `dead_letter` before dispatch. Leases are cleared and later claims exclude
+  the row. The aggregate operational snapshot counts the independent reclaim
+  counter and classifies terminal/quarantined work as unhealthy.
+- **FSA-PER-002:** application validation and the schedule table previously
+  admitted jitter greater than or equal to cadence. The signed offset could
+  leave the next due time non-advancing, while a badly overdue schedule stayed
+  immediately due. Application validation and a PostgreSQL CHECK now enforce
+  `0 <= jitter_seconds < cadence_seconds`. A fire advances to the greater of
+  the prior jittered cadence and one full jittered cadence after PostgreSQL
+  time. One scan remains limit-bounded and emits at most one fire per selected
+  schedule, so missed slots are skipped rather than burst-emitted.
+- **FSA-COR-005:** the scheduled executor called
+  `finalize_latest_for_binding`, so a newer Episode could permanently mask an
+  older due Episode. It now discovers a bounded page (default 25, maximum 100)
+  in deterministic oldest-first order and finalizes every returned ID. The
+  durable `scheduled_for` remains operation identity; every retry chooses and
+  records an explicit current UTC `evaluated_at` for time-dependent policy.
+- **FSA-SEC-001:** Care policies from migrations 020--025 contained
+  `purpose=internal_status` read short-circuits. Migration 027 recreates the
+  ten affected base-table policies without that bypass. The five aggregate
+  functions remain SECURITY DEFINER, fixed-search-path, no-PUBLIC-execute,
+  aggregate-only functions and now share an exact API/internal-status/BFF/
+  database-role principal guard.
+- **FSA-SEC-002:** Terminal Care mutations accepted caller actor fields under
+  the privileged service/database credential but the boundary was not stated
+  or acknowledged. Current help and the narrow operations note now call this
+  `TRUSTED_OPERATOR`, explicitly deny cryptographic end-user authentication,
+  and require `--acknowledge-trusted-operator` for START/COMPLETE/CANCEL.
+- **FSA-OPS-001:** `care.outcome.evaluate.v1` could be omitted while the
+  deployment still appeared healthy. `outcome_evaluation_enabled` now defaults
+  to false; a Worker with the capability enabled but no consumer, or a
+  consumer with the capability disabled, fails settings validation. Runtime
+  dependency/readiness and internal operational status expose ENABLED/
+  DISABLED plus consumer configuration/readiness, and the canonical test/
+  compose queue profile includes the evaluator when enabled.
+  Process readiness reports process-local handler ownership. The aggregate
+  internal-status fields attest the fail-closed shared configuration contract;
+  they are not a distributed Worker-heartbeat or liveness registry.
+- **FSA-PERF-001:** the immutable Episode writer still copies the cumulative
+  observation-ID set into every revision. R1 measures this unchanged design
+  and does not add compaction, deltas, event sourcing, or a migration rewrite.
+- **FSA-TEST-001:** the old `verify_backend.sh all` was a selective wrapper and
+  did not visibly attest full PostgreSQL, report, or C1A--C3 lanes. The new
+  `verify_closure.sh` sources an explicit env file, reports every required
+  lane as PASS/FAIL/ENV_BLOCKED/SKIPPED_EXPLICIT, and makes any blocked release
+  lane produce `FINAL = NOT_VERIFIED` with exit 77. Legacy named verifier lanes
+  remain; legacy `all` delegates to the closure release verifier.
+
+### PostgreSQL authorities and proof
+
+Migrations 026 and 027 are additive and manifest-pinned at:
+
+```text
+026 510da0debf2df545bb39a73ee86688d79055d82596fa059e197a0f8875c5e27a
+027 5315c005b66acba351ebe3bab0f8f0c015d87841de6d49b9fdbc035485c04339
+manifest b2af1f452ac12dc8d153876c1ab2d22631ef252ae6024ba958c5911dcefb41d2
+```
+
+Migrations 001--025 are unchanged. PostgreSQL 16.14 fresh 001→027
+apply/bootstrap/check passed. An isolated temporary database applied exactly
+001--025, then the normal manifest runner applied 026--027 and rechecked the
+ledger, new columns, jitter constraint, Care policies, and protected principal
+function. The final full marker ran from another fresh database.
+
+The four-category crash test used a ceiling of two reclaims: initial claim,
+two expired-lease recoveries at business attempt one, a third expiry, then
+deterministic terminal routing and no further claim. The operations case
+additionally proved aggregate status `unhealthy`, dead-letter count nonzero,
+and reclaim count at least two. Separate tests prove one recovery retains the
+business attempt and succeeds, stale fences cannot finalize, and delivery
+send-started recovery retains its `outcome_unknown` boundary.
+
+Scheduler tests cover zero jitter, cadence-minus-one, equal cadence, greater
+than cadence, application rejection, database rejection, concurrency, strict
+advancement beyond prior `scheduled_for`, and an observable future next slot
+after a two-day overdue fire. Finalization tests create older due A and newer
+due B, process batch size one twice, and prove A then B plus both durable
+report handoffs.
+
+The Care PostgreSQL matrix retains subject, namespace, live/replay,
+generation, API/Demo/principal, and Worker authority tests. Under the exact
+`InternalControlScope`, direct SELECT across all ten Care base tables returns
+zero rows while all protected aggregate functions still return sanitized
+metrics. No raw Care prose or subject identifier is returned.
+
+### Episode capacity benchmark and decision
+
+`python -m scripts.benchmark_episode_capacity` ran the packaged
+`canonical-replay-fixtures:normal-one-night:v1` through the real demo
+reservation, replay-journey, ingestion, normalization, Episode projector,
+production reconstruction repository, and bounded finalization lookup on
+PostgreSQL 16.14. It intentionally used the current serial per-observation
+authority.
+
+```text
+canonical observations                         497
+Episode revisions                              495
+memberships                                    495
+repeated observation-ID references             122,760
+logical revision JSON bytes                    5,861,786
+serial ingest wall time                        103.011 s
+full Episode reconstruction median / p95       1249.396 / 1350.669 ms
+due-finalization lookup median / p95            15.834 /   18.766 ms
+bounded finalization transition                245.247 ms
+measured physical table delta                  6,479,872 bytes
+measured physical index delta                    974,848 bytes
+measured physical total delta                  7,454,720 bytes
+```
+
+Logical revision-JSON projection is 5,861,786 bytes for one night,
+41,032,502 for 7 days, 175,853,580 for 30 days, and 2,139,551,890 for 365
+days. The corresponding row projection is 495 revision plus 495 membership
+rows per night. Applying the measured one-night physical delta only as an
+explicit extrapolation gives 52,183,040 / 223,641,600 / 2,720,972,800 bytes
+for 7 / 30 / 365 days; these are not measured long-horizon PostgreSQL sizes.
+
+Decision: `ACCEPTABLE_FOR_PORTFOLIO_SCALE`. The amplification and roughly
+1.25-second full reconstruction are recorded debt, but current one-subject,
+personal-project scale stays within bounded storage, request timeout, and
+correctness constraints. R1 stops performance work here; any future public-
+scale optimization should first benchmark a bounded current-revision read or
+delta-membership design and requires separate approval.
+
+### Final verifier and regression evidence
+
+The authoritative Python 3.11 release verifier produced:
+
+```text
+STATIC                     PASS
+ARCHITECTURE               PASS
+OPENAPI                    PASS
+UNIT_CONTRACT              PASS
+POSTGRES                   PASS
+PROCESS_FAULT              PASS
+REPORT_E2E                 PASS (CONTROLLED_EQUIVALENT)
+CLOSURE_C1A_C1B_C2_C3      PASS
+FINAL = PASS
+```
+
+Evidence counts and follow-up checks:
+
+- broad non-PostgreSQL/non-E2E/non-lifespan: 1,215 passed, 56 deselected;
+- architecture: 6 passed; zero self-imports, zero forbidden-edge growth, and
+  the existing one bounded runtime SCC unchanged;
+- OpenAPI: 2 passed, 19 deselected;
+- final canonical-profile PostgreSQL run: 50 passed, one documented
+  completed-process-root reader skipped, 1,220 deselected; this includes the
+  explicit 025→027 upgrade and all three C1A--C3 process nodes;
+- controlled fault/static proof: 45 passed plus 11 executed PostgreSQL
+  crash/reclaim proofs, with consecutive standalone lane runs both passing;
+- controlled report equivalent: 62 CLI/contract/audit tests plus one executed
+  production PostgreSQL report reservation/read node. The external
+  independently hosted report E2E remains available by
+  explicit env opt-in and becomes ENV_BLOCKED if explicitly required but not
+  configured; Docker was not used;
+- C1A LIVE→Episode and C1B late closed-Episode revision share the exact
+  Perceptor production PostgreSQL node; C2 uses the SOFT/report-before-HARD
+  reevaluation node; C3 uses the Receipt→governed Memory→next-cycle process
+  node. All executed in the full PostgreSQL marker; the closure lane validates
+  their exact identities and reports `EXECUTED_IN_FULL_POSTGRES_LANE` rather
+  than rerunning their fixed fixtures out of the established suite order;
+- missing PostgreSQL DSNs produced `POSTGRES = ENV_BLOCKED`,
+  `FINAL = NOT_VERIFIED`, and exit 77;
+- compileall/py_compile, shell syntax, manifest import, migration check, and
+  `git diff --check` passed.
+
+### Scope, backlog, and checkpoint state
+
+R1 resolves/reclassifies FSA-PER-001, FSA-PER-002, FSA-COR-005,
+FSA-SEC-001, FSA-SEC-002 (`TRUSTED_OPERATOR`), FSA-OPS-001, FSA-PERF-001
+(`ACCEPTABLE_FOR_PORTFOLIO_SCALE`), and FSA-TEST-001. The four correctness
+closures C1A/C1B/C2/C3 remain green. No external LLM or real Perceptor call,
+delivery channel, Agent, Memory system, frontend, scheduler platform, or
+historical migration edit was introduced.
+
+Remaining audit work is outside R1: the human/legal LICENSE decision
+(FSA-PUB-001), FSA-DOC-001, FSA-PUB-002, and intentionally deferred optional/
+legacy cleanup. After explicit approval, R1 was recorded as five coherent
+local checkpoints in the requested finding groups. `docs/audit/` remains
+pre-existing, untracked, and unstaged; nothing is pushed.

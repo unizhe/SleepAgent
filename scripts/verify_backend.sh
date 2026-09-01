@@ -10,6 +10,10 @@ FAULT_ADMIN_DSN="postgresql://sleepagent_test_migration:test-only-migration-pass
 FAULT_WORKER_DSN="postgresql://sleepagent_test_worker:test-only-worker-password@127.0.0.1:15432/sleepagent_replay_test"
 
 cd "${REPOSITORY_ROOT}"
+if [[ "${SUITE}" == "all" ]]; then
+  exec "${REPOSITORY_ROOT}/scripts/verify_closure.sh" release \
+    --env-file "${SLEEPAGENT_CLOSURE_ENV_FILE:-${REPOSITORY_ROOT}/.env.test.example}"
+fi
 if [[ "${SUITE}" != "fault-static" && "${SUITE}" != "fault-process" ]]; then
   "${PYTHON_BIN}" -m sleepagent.persistence.migrate check
 fi
@@ -53,11 +57,7 @@ run_suite() {
   esac
 }
 
-if [[ "${SUITE}" == "all" ]]; then
-  for item in core read-models delivery-recovery retention fault-static; do
-    run_suite "${item}"
-  done
-elif [[ "${SUITE}" != "fault-process" ]]; then
+if [[ "${SUITE}" != "fault-process" ]]; then
   run_suite "${SUITE}"
   exit
 fi
@@ -176,7 +176,7 @@ assert_first_slice() {
       tests/integration/test_backend_first_slice_postgres.py -m postgres
 }
 
-FULL_QUEUES="ingestion,fast_path,product_agent,sleep_command,product_interaction,demo_advance,replay_journey,reconciliation"
+FULL_QUEUES="ingestion,fast_path,product_agent,care.outcome.evaluate.v1,sleep_command,product_interaction,demo_advance,replay_journey,reconciliation"
 
 start_case clean "${FULL_QUEUES}"
 CLEAN_OUTPUT="${E2E_TMP}/clean.json"
@@ -217,7 +217,7 @@ printf '%s\n' "${PRODUCT_ROOT}" >"${E2E_TMP}/product-root"
 assert_first_slice "${PRODUCT_ROOT}"
 cleanup_process_case
 
-start_case postgres-restart "replay_journey"
+start_case postgres-restart "replay_journey,care.outcome.evaluate.v1"
 SEED_OUTPUT="$(SLEEPAGENT_DEMO_CONTROLLER_TOKEN="${DEMO_TOKEN}" \
   "${PYTHON_BIN}" -m sleepagent.simulation.cli --base-url http://127.0.0.1:18001 \
   seed normal-one-night --artifact-family canonical-replay-fixtures --batch-size 100)"

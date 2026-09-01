@@ -1226,3 +1226,74 @@ Habit/Memory mutation, external effect, generic Movement reconstruction,
 additional action/Agent role, PUBLIC table privilege, or dependency-baseline
 growth. G10 implementation and release proofs pass. The coherent commit remains
 pending the required user approval; nothing is pushed.
+
+## Act 19 — Build: R1 bounded runtime and repository closure
+
+### Round 1 — Durable ceilings, due discovery, and deployment/security authority
+
+Reconfirmed the eight R1 findings against the post-C3 tree and implemented two
+additive migrations. Migration 026 separates expired-execution reclaim count
+from handler attempt count across the four active work kinds, installs
+category-specific terminal routing, corrects operational aggregation, enforces
+jitter below cadence, and bounds overdue schedule advancement. Migration 027
+removes `internal_status` from ten Care base-table policies and strengthens the
+five aggregate-only functions with one exact BFF/database-role guard.
+
+The application adds bounded oldest-first due-Episode discovery with explicit
+current evaluation time, a trusted-operator acknowledgement for Care CLI
+mutations, and a fail-closed outcome-evaluation capability/consumer invariant.
+The first fresh PostgreSQL pass exposed one invalid operations-column update
+in the generic terminal helper and a settings test double lacking the new
+capability field. The invalid column reference was removed and the operational
+adapter retained compatibility with narrow status test doubles without
+weakening real settings validation.
+
+### Round 2 — Observable scheduler progress and adversarial closure review
+
+The initial scheduler correction used `clock_timestamp() + 1 microsecond` as
+the overdue floor. The focused proof correctly showed that this was monotonic
+inside the UPDATE but could already be past by the observing statement. The
+final policy uses one full positive jittered cadence from PostgreSQL time,
+made positive by `jitter < cadence`, while preserving the prior deterministic
+signed offset and one-fire-per-schedule scan bound.
+
+The final review expanded crash exhaustion to all four active work categories,
+ordinary recovery, stale fences, delivery ambiguity, and sanitized aggregate
+health degradation. It tested two missed Episodes with batch size one, direct
+internal-status denial across all ten Care tables, subject/scope isolation,
+outcome startup matrices, fresh and 025-upgrade migrations, and truthful
+ENV_BLOCKED propagation. Benchmark-harness corrections were limited to
+observing the replay journey at its exact Episode boundary and matching
+generation columns to the actual schema; no production Episode policy or
+persistence design changed. No third production fix round was used.
+
+### Codex verification
+
+- PostgreSQL 16.14 fresh 001→027 and isolated 025→027 upgrade: PASS; final
+  schema 027 and manifest checksums are exact.
+- Broad non-PostgreSQL/non-E2E/non-lifespan: 1,215 passed, 56 deselected.
+- Final canonical-profile PostgreSQL marker: 50 passed, one environment-gated
+  completed-process-root reader skipped, 1,220 deselected.
+- Architecture: 6 passed at the frozen 0 self-import / 0 forbidden-growth /
+  one bounded runtime-SCC baseline; OpenAPI: 2 passed.
+- Controlled process-fault: 45 static/foundation plus 11 executed PostgreSQL
+  crash/reclaim proofs, repeatable across consecutive standalone runs.
+  Controlled report CLI/contract/audit equivalent: 62 plus the exact executed
+  production PostgreSQL report reservation/read proof.
+- Authoritative closure verifier: all eight named lanes PASS and `FINAL =
+  PASS`; the C1A--C3 nodes executed in the full PostgreSQL lane are explicitly
+  attested by the closure lane. Absent PostgreSQL DSNs produce `ENV_BLOCKED`,
+  `NOT_VERIFIED`, exit 77.
+- The real 497-observation benchmark measured 495 immutable revisions and
+  memberships, 5,861,786 logical revision-JSON bytes, 7,454,720 physical delta
+  bytes across the three core relations, 103.011-second serial ingest,
+  1,249.396-ms median reconstruction, and 15.834-ms median finalization lookup.
+  Decision: `ACCEPTABLE_FOR_PORTFOLIO_SCALE`; optimization is deferred debt.
+- Compile/import, shell syntax, migration immutability 001–025, protected RLS
+  functions, and `git diff --check`: PASS.
+
+Final diff review found no new Agent, Memory/retrieval system, delivery
+channel, broker, scheduler platform, end-user auth claim, public-doc rewrite,
+legacy cleanup, or historical migration mutation. The five coherent R1
+checkpoints are local and nothing is pushed; the untracked audit snapshots
+remain untouched.
