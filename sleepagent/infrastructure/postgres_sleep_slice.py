@@ -812,15 +812,19 @@ class EpisodeLifecycleProjector:
         """Create one immutable membership-only revision of a closed Episode."""
 
         current = candidate.stored_episode
-        if snapshot.state != "dormant" or snapshot.episode is not None:
-            raise SleepSliceInvariantError(
-                "late association requires dormant lifecycle authority"
-            )
         if observation.subject_id != current.episode.subject_id:
             raise SleepSliceInvariantError("closed Episode subject mismatch")
+        if (
+            snapshot.episode is not None
+            and snapshot.episode.episode.night_episode_id
+            == current.episode.night_episode_id
+        ):
+            raise SleepSliceInvariantError(
+                "late association cannot target the active Episode"
+            )
         historical_snapshot = LifecycleSnapshotRecord(
             monitoring_snapshot_id=snapshot.monitoring_snapshot_id,
-            state=snapshot.state,
+            state="dormant",
             cas_version=snapshot.cas_version,
             created_at=snapshot.created_at,
             updated_at=snapshot.updated_at,
@@ -955,15 +959,27 @@ class EpisodeProjectionBoundary:
                 reconciliation_operation_id=None,
                 persist_required=False,
             )
-        if snapshot.episode is None:
+        active_episode_owns_observation = self._active_episode_owns_observation(
+            snapshot=snapshot,
+            observation=observation,
+            timezone_name=timezone_name,
+        )
+        if not active_episode_owns_observation:
+            closed_candidates = repository.load_closed_episode_candidates(
+                observation=observation,
+                timezone_name=timezone_name,
+            )
             late_association = self.closed_episode_resolver.resolve(
                 observation=observation,
                 timezone_name=timezone_name,
-                candidates=repository.load_closed_episode_candidates(
-                    observation=observation,
-                    timezone_name=timezone_name,
-                ),
+                candidates=closed_candidates,
             )
+            if late_association is None and snapshot.episode is not None:
+                late_association = LateObservationAssociation(
+                    status="no_match",
+                    reason_code="TEMPORAL_OWNERSHIP_NO_MATCH",
+                    candidates=closed_candidates,
+                )
             if late_association is not None:
                 mutation = None
                 if late_association.status == "associated":
@@ -1033,6 +1049,40 @@ class EpisodeProjectionBoundary:
             persist_required=True,
         )
 
+    def _active_episode_owns_observation(
+        self,
+        *,
+        snapshot: LifecycleSnapshotRecord,
+        observation: SleepObservation,
+        timezone_name: str,
+    ) -> bool:
+        """Return whether event time is inside the active Episode authority."""
+
+        current = snapshot.episode
+        if current is None:
+            return False
+        event_at = _observation_time(observation)
+        if event_at is None:
+            raise SleepSliceInvariantError(
+                "canonical observation has no deterministic event time"
+            )
+        episode = current.episode
+        if episode.timezone_name != timezone_name:
+            return False
+        local_sleep_date = self.policy.boundary.derive_local_sleep_date(
+            event_at,
+            timezone_name,
+        )
+        expected_sleep_date = (
+            episode.legacy_local_sleep_date or episode.bed_local_date
+        )
+        return (
+            expected_sleep_date == local_sleep_date
+            and episode.collection_start_at
+            <= event_at
+            <= episode.deterministic_close_deadline_at
+        )
+
 
 def project_authoritative_canonical_observations(
     connection: TransactionBoundConnection,
@@ -1044,6 +1094,7 @@ def project_authoritative_canonical_observations(
     projection_boundary: EpisodeProjectionBoundary,
     id_generator: Callable[[datetime | None], str],
     fault_injector: Callable[[str], None] | None = None,
+    resolve_opening_boundary_first: bool = False,
 ) -> tuple[EpisodeProjectionDecision, ...]:
     """Atomically project reconciler-selected canonical rows for Push or Pull."""
 
@@ -1052,11 +1103,18 @@ def project_authoritative_canonical_observations(
         scope,
         id_generator=id_generator,
     )
-    decisions: list[EpisodeProjectionDecision] = []
-    for observation_id in dict.fromkeys(observation_ids):
-        selected = repository.load_authoritative_canonical_observation(
-            observation_id
+    selected_observations = [
+        repository.load_authoritative_canonical_observation(observation_id)
+        for observation_id in dict.fromkeys(observation_ids)
+    ]
+    if resolve_opening_boundary_first:
+        selected_observations.sort(
+            key=lambda selected: (
+                0 if _is_in_bed_observation(selected.observation) else 1
+            )
         )
+    decisions: list[EpisodeProjectionDecision] = []
+    for selected in selected_observations:
         if fault_injector is not None:
             fault_injector("before_episode_projection")
         decision = projection_boundary.prepare(
@@ -4643,6 +4701,13 @@ def _raw_aad(scope: UowScope, raw_ingress_record_id: str) -> bytes:
 
 def _observation_time(observation: SleepObservation) -> datetime | None:
     return observation.event_occurred_at or observation.measurement_at
+
+
+def _is_in_bed_observation(observation: SleepObservation) -> bool:
+    return (
+        isinstance(observation.payload, BedPresencePayload)
+        and observation.payload.state == BedPresenceState.IN_BED
+    )
 
 
 def _resolve_unique_local_wall_time(

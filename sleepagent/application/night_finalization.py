@@ -338,6 +338,13 @@ class NightFinalizationService:
                 ON member.namespace_id = episode.namespace_id
                AND member.data_mode = episode.data_mode
                AND member.night_episode_id = episode.night_episode_id
+              JOIN public.sleep_domain_observation_acquisitions AS acquisition
+                ON acquisition.namespace_id = member.namespace_id
+               AND acquisition.data_mode = member.data_mode
+               AND acquisition.observation_id = member.observation_id
+               AND acquisition.raw_ingress_record_id =
+                   source.raw_ingress_record_id
+               AND acquisition.acquisition_channel = 'PULL'
               JOIN public.sleep_domain_device_bindings AS binding
                 ON binding.device_binding_id = member.device_binding_id
                AND binding.namespace_id = member.namespace_id
@@ -360,6 +367,31 @@ class NightFinalizationService:
                   ), 'sha256'), 'hex')
                 )
                 AND source.local_report_date = episode.episode_local_date
+                AND revision.revision_json -> 'observation_ids'
+                    ? member.observation_id
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.sleep_domain_observation_acquisitions
+                    AS report_acquisition
+                  WHERE report_acquisition.namespace_id = source.namespace_id
+                    AND report_acquisition.data_mode = source.data_mode
+                    AND report_acquisition.raw_ingress_record_id =
+                        source.raw_ingress_record_id
+                    AND report_acquisition.acquisition_channel = 'PULL'
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM public.sleep_domain_episode_observation_memberships
+                        AS report_member
+                      WHERE report_member.namespace_id = episode.namespace_id
+                        AND report_member.data_mode = episode.data_mode
+                        AND report_member.night_episode_id =
+                            episode.night_episode_id
+                        AND report_member.observation_id =
+                            report_acquisition.observation_id
+                        AND revision.revision_json -> 'observation_ids'
+                            ? report_member.observation_id
+                    )
+                )
               ORDER BY source.report_version DESC
               LIMIT 1
             ) AS report ON TRUE

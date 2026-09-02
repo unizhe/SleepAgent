@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +24,14 @@ from sleepagent.config import (
     ProviderMode,
     SleepBackendSettings,
 )
+from sleepagent.application.acquisition import (
+    AcquisitionJobType,
+    AcquisitionScheduleService,
+    PostgresAcquisitionScheduler,
+)
+from sleepagent.application.device_bindings import ManagedDeviceBinding
 from sleepagent.application.night_finalization import (
+    NightFinalizationPending,
     NightFinalizationService,
     NightFinalizationState,
 )
@@ -79,6 +87,8 @@ from sleepagent.persistence.uow import (
 )
 from sleepagent.process import DatabaseAttestation, SleepBackendRuntime
 from sleepagent.workers.ingestion import NormalizationWorkHandlerAdapter
+from sleepagent.workers.acquisition import build_acquisition_worker_handlers
+from sleepagent.workers.kernel import WorkDisposition
 from sleepagent.workers.runtime import (
     DurableWorkerRuntime,
     PostgresDurableWorkStore,
@@ -226,18 +236,53 @@ def _seed(admin_dsn: str) -> DeviceBinding:
                 "ON CONFLICT DO NOTHING",
                 (NAMESPACE, SUBJECT),
             )
-            for grant_id, principal, purpose, handlers in (
+            cursor.execute(
+                "INSERT INTO backend_actors (actor_id, actor_kind, status) "
+                "VALUES ('p4d2-b2-local-proof', 'human', 'active') "
+                "ON CONFLICT DO NOTHING"
+            )
+            cursor.execute(
+                "INSERT INTO backend_actor_subject_bindings (binding_id, "
+                "namespace_id, data_mode, actor_id, subject_id, role, status, "
+                "purpose_json, scopes_json, authorization_epoch, valid_from) "
+                "VALUES ('actor-binding-p4d2-b2', %s, 'live', "
+                "'p4d2-b2-local-proof', %s, 'elder', 'active', "
+                "'[\"device_binding_management\"]'::jsonb, "
+                "'[\"device:binding:manage\"]'::jsonb, 1, %s) "
+                "ON CONFLICT DO NOTHING",
+                (NAMESPACE, SUBJECT, NOW - timedelta(days=1)),
+            )
+            for grant_id, principal, purpose, scopes, handlers in (
                 (
                     "grant-p4d2-b2-api",
                     _dsn("SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"),
                     "perceptor_ingress",
+                    [],
                     [],
                 ),
                 (
                     "grant-p4d2-b2-worker",
                     _dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"),
                     "worker",
-                    ["normalization"],
+                    [],
+                    [
+                        "normalization",
+                        *[item.value for item in AcquisitionJobType],
+                    ],
+                ),
+                (
+                    "grant-p4d2-b2-worker-acquisition",
+                    _dsn("SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"),
+                    "acquisition_schedule",
+                    [],
+                    [item.value for item in AcquisitionJobType],
+                ),
+                (
+                    "grant-p4d2-b2-api-device",
+                    _dsn("SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"),
+                    "device_binding_management",
+                    ["device:binding:manage"],
+                    [],
                 ),
             ):
                 cursor.execute(
@@ -245,13 +290,14 @@ def _seed(admin_dsn: str) -> DeviceBinding:
                     "principal_id, namespace_id, data_mode, purpose, "
                     "scopes_json, allowed_handlers_json, authorization_epoch, "
                     "status, valid_from) VALUES (%s, %s, %s, 'live', %s, "
-                    "'[]'::jsonb, %s::jsonb, 1, 'active', %s) "
+                    "%s::jsonb, %s::jsonb, 1, 'active', %s) "
                     "ON CONFLICT DO NOTHING",
                     (
                         grant_id,
                         principal,
                         NAMESPACE,
                         purpose,
+                        json.dumps(scopes),
                         json.dumps(handlers),
                         NOW - timedelta(days=1),
                     ),
@@ -453,6 +499,26 @@ def _sleep_no_data() -> dict[str, object]:
     }
 
 
+def _single_fact_sleep_report(measured_at: datetime) -> dict[str, object]:
+    return {
+        "sleep_profile": None,
+        "sleep_stage_list": None,
+        "heart_rate_data": [
+            {
+                "time_long": int(measured_at.timestamp()),
+                "type": None,
+                "value": 67,
+            }
+        ],
+        "heart_rate_avg": None,
+        "breathe_data": None,
+        "breathe_avg": None,
+        "body_shake_data": [],
+        "sum_body_shake_times": None,
+        "getups": [],
+    }
+
+
 def _read(
     endpoint: str,
     data: Any,
@@ -623,8 +689,9 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             max_retry_seconds=0.01,
         )
 
+        first_push_payload = _push_raw(message_id="p4d2-b2-push-1")
         pushed = webhook.accept(
-            _push_raw(message_id="p4d2-b2-push-1"),
+            first_push_payload,
             content_type="application/json",
             request_path=WEBHOOK_PATH,
         )
@@ -655,11 +722,28 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     SUBJECT,
                     "Asia/Shanghai",
                     "collecting",
-                    1,
+                    4,
                     BINDING_ID,
                     1,
-                    1,
+                    4,
                 )
+
+        repeated_push = webhook.accept(
+            first_push_payload,
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert repeated_push.duplicate is True
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s) "
+                "FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (episode_id, episode_id),
+            ).fetchone() == (4, 4)
 
         exact_data = _history_data(local_send_time="2026-08-23T11:00:00")
         exact_coordinates = PullRequestCoordinates(
@@ -1246,6 +1330,30 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                 / "sanitized_recorded_real_pull_get_sleep_report_full.json"
                 ).read_text(encoding="utf-8")
             )
+        full_report_data = full_report_fixture["data"]
+        report_instants = tuple(
+            NOW + timedelta(minutes=minute) for minute in (1, 2, 3, 4)
+        )
+        for item, start_at, end_at in zip(
+            full_report_data["sleep_stage_list"],
+            report_instants[:3],
+            report_instants[1:],
+            strict=True,
+        ):
+            item["start_time"] = int(start_at.timestamp())
+            item["end_time"] = int(end_at.timestamp())
+        for field in ("heart_rate_data", "breathe_data"):
+            for item, measured_at in zip(
+                full_report_data[field],
+                (report_instants[0], report_instants[2], report_instants[3]),
+                strict=True,
+            ):
+                item["time_long"] = int(measured_at.timestamp())
+        full_report_data["body_shake_data"] = [{"hour": "11", "count": 2}]
+        full_report_data["getups"] = [
+            "2026-08-23 11:03:30",
+            "2026-08-23 11:05:00",
+        ]
         with psycopg.connect(admin_dsn) as connection:
             episode_before_sleep_report = connection.execute(
                 "SELECT current_revision_number, "
@@ -1260,7 +1368,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         full_report_ingress = ingress.accept(
             _read(
                 SLEEP_REPORT_ENDPOINT,
-                full_report_fixture["data"],
+                full_report_data,
                 requested_at=NOW + timedelta(minutes=6),
                 received_at=NOW + timedelta(minutes=6, seconds=1),
                 envelope_nonce="sleep-full-v2-1",
@@ -1280,7 +1388,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert full_report_result.quarantined is False
-        assert full_report_result.canonical_created_count == 18
+        assert full_report_result.canonical_created_count == 17
         assert full_report_result.duplicate_count == 0
         assert full_report_result.conflict_created_count == 0
         assert full_report_result.checkpoint_advanced is True
@@ -1302,7 +1410,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     ("deep_sleep_ratio", "percent", "vendor_derived", 1),
                     ("heart_rate", "beats_per_minute", "device_measured", 3),
                     ("heart_rate_mean", "beats_per_minute", "vendor_derived", 1),
-                    ("movement_event_count", "count", "vendor_derived", 2),
+                    ("movement_event_count", "count", "vendor_derived", 1),
                     ("movement_event_total", "count", "vendor_derived", 1),
                     (
                         "respiratory_rate",
@@ -1339,8 +1447,8 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     (episode_id, episode_id),
                 )
                 assert cursor.fetchone() == (
-                    int(episode_before_sleep_report[0]) + 18,
-                    int(episode_before_sleep_report[1]) + 18,
+                    int(episode_before_sleep_report[0]) + 17,
+                    int(episode_before_sleep_report[1]) + 17,
                 )
 
         closing_push = webhook.accept(
@@ -1752,6 +1860,527 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         ]
         assert unchanged_after_quarantine == (episode_after_late[0], 1)
 
+        # M1/M3 composed authority proof. Night B is active while an old Night-A
+        # batch (including OUT_OF_BED) arrives far beyond A's lateness window.
+        # It must be quarantined without changing B. Then one inside-window
+        # report may complete B, while an outside-window report for Night C may
+        # persist source metadata but cannot claim complete coverage.
+        night_b_open_at = NOW + timedelta(days=4, hours=10)
+        night_b_close_at = night_b_open_at + timedelta(hours=1)
+        night_b_webhook = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_b_open_at,
+        )
+        night_b_open = night_b_webhook.accept(
+            _push_raw(
+                message_id="fsa-night-b-open",
+                report_at=night_b_open_at,
+                signed_at=night_b_open_at,
+                local_datetime="2026-08-27T21:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_b_open.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-b-open-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            night_b_before_late = connection.execute(
+                "SELECT episode.night_episode_id, "
+                "episode.current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.night_episode_id = episode.night_episode_id) "
+                "FROM backend_monitoring_snapshots_v2 AS snapshot "
+                "JOIN sleep_domain_night_episodes AS episode "
+                "ON episode.night_episode_id = snapshot.active_night_episode_id "
+                "WHERE snapshot.namespace_id = %s "
+                "AND snapshot.subject_id = %s "
+                "AND snapshot.namespace_generation = 1",
+                (NAMESPACE, SUBJECT),
+            ).fetchone()
+        assert night_b_before_late is not None
+        assert night_b_before_late[1:] == (4, 4)
+        night_b_episode_id = str(night_b_before_late[0])
+
+        delayed_night_a_received_at = night_b_open_at + timedelta(minutes=10)
+        delayed_night_a = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: delayed_night_a_received_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-a-delayed-while-b-active",
+                heart_rate=73,
+                on_bed=0,
+                report_at=NOW + timedelta(minutes=5, seconds=30),
+                signed_at=delayed_night_a_received_at,
+                local_datetime="2026-08-23T11:05:30.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert delayed_night_a.disposition == "accepted"
+        delayed_night_a_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-a-delayed-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert delayed_night_a_result.canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT episode.state, episode.current_revision_number, "
+                "(SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.night_episode_id = episode.night_episode_id), "
+                "snapshot.state, snapshot.active_night_episode_id "
+                "FROM sleep_domain_night_episodes AS episode "
+                "JOIN backend_monitoring_snapshots_v2 AS snapshot "
+                "ON snapshot.active_night_episode_id = episode.night_episode_id "
+                "WHERE episode.night_episode_id = %s",
+                (night_b_episode_id,),
+            ).fetchone() == (
+                "collecting",
+                night_b_before_late[1],
+                night_b_before_late[2],
+                "active",
+                night_b_episode_id,
+            )
+            assert connection.execute(
+                "SELECT count(*), "
+                "bool_and(status = 'quarantined'), "
+                "bool_and(reason_code = 'LATE_ASSOCIATION_OUT_OF_WINDOW') "
+                "FROM sleep_domain_pending_episode_associations "
+                "WHERE namespace_id = %s AND source_resource_id = ANY(%s)",
+                (
+                    NAMESPACE,
+                    list(delayed_night_a_result.canonical_observation_ids),
+                ),
+            ).fetchone() == (4, True, True)
+            assert connection.execute(
+                "SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE observation_id = ANY(%s)",
+                (list(delayed_night_a_result.canonical_observation_ids),),
+            ).fetchone() == (0,)
+
+        night_b_close = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_b_close_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-b-close",
+                on_bed=0,
+                report_at=night_b_close_at,
+                signed_at=night_b_close_at,
+                local_datetime="2026-08-27T22:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_b_close.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-b-close-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+
+        inside_report_received_at = night_b_close_at + timedelta(hours=1)
+        inside_report = ingress.accept(
+            _read(
+                SLEEP_REPORT_ENDPOINT,
+                _single_fact_sleep_report(
+                    night_b_open_at + timedelta(minutes=30)
+                ),
+                requested_at=inside_report_received_at - timedelta(seconds=1),
+                received_at=inside_report_received_at,
+                envelope_nonce="fsa-report-inside-lateness",
+            ),
+            binding=binding,
+            coordinates=PullRequestCoordinates(
+                endpoint=SLEEP_REPORT_ENDPOINT,
+                report_date=date(2026, 8, 27),
+            ),
+        )
+        assert inside_report.disposition == "accepted"
+        inside_report_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-report-inside-lateness-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert inside_report_result.canonical_created_count == 1
+        inside_finalization = NightFinalizationService(worker_uow).finalize(
+            final_scope,
+            night_episode_id=night_b_episode_id,
+            evaluated_at=inside_report_received_at + timedelta(seconds=1),
+        )
+        assert inside_finalization.state is NightFinalizationState.HARD_FINALIZED
+        assert inside_finalization.coverage_status == "complete"
+        assert inside_finalization.source_report_version_id is not None
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT revision.revision_json -> 'observation_ids' ? %s, "
+                "EXISTS (SELECT 1 FROM "
+                "sleep_domain_episode_observation_memberships AS member "
+                "WHERE member.night_episode_id = %s "
+                "AND member.observation_id = %s) "
+                "FROM sleep_domain_night_episode_revisions AS revision "
+                "WHERE revision.night_episode_revision_id = %s",
+                (
+                    inside_report_result.canonical_observation_ids[0],
+                    night_b_episode_id,
+                    inside_report_result.canonical_observation_ids[0],
+                    inside_finalization.source_night_episode_revision_id,
+                ),
+            ).fetchone() == (True, True)
+
+        night_c_open_at = night_b_open_at + timedelta(days=1)
+        night_c_close_at = night_c_open_at + timedelta(hours=1)
+        night_c_open = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_c_open_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-c-open",
+                report_at=night_c_open_at,
+                signed_at=night_c_open_at,
+                local_datetime="2026-08-28T21:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_c_open.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-c-open-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            night_c_episode_id = str(
+                connection.execute(
+                    "SELECT active_night_episode_id FROM "
+                    "backend_monitoring_snapshots_v2 "
+                    "WHERE namespace_id = %s AND subject_id = %s "
+                    "AND namespace_generation = 1",
+                    (NAMESPACE, SUBJECT),
+                ).fetchone()[0]
+            )
+        night_c_close = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_c_close_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-c-close",
+                on_bed=0,
+                report_at=night_c_close_at,
+                signed_at=night_c_close_at,
+                local_datetime="2026-08-28T22:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_c_close.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-c-close-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+
+        outside_report_received_at = (
+            night_c_close_at
+            + timedelta(
+                seconds=(
+                    default_sleep_slice_policy().boundary.allowed_lateness_seconds
+                    + 1
+                )
+            )
+        )
+        outside_report = ingress.accept(
+            _read(
+                SLEEP_REPORT_ENDPOINT,
+                _single_fact_sleep_report(
+                    night_c_open_at + timedelta(minutes=30)
+                ),
+                requested_at=outside_report_received_at - timedelta(seconds=1),
+                received_at=outside_report_received_at,
+                envelope_nonce="fsa-report-outside-lateness",
+            ),
+            binding=binding,
+            coordinates=PullRequestCoordinates(
+                endpoint=SLEEP_REPORT_ENDPOINT,
+                report_date=date(2026, 8, 28),
+            ),
+        )
+        assert outside_report.disposition == "accepted"
+        outside_report_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-report-outside-lateness-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert outside_report_result.canonical_created_count == 1
+        with pytest.raises(NightFinalizationPending):
+            NightFinalizationService(worker_uow).finalize(
+                final_scope,
+                night_episode_id=night_c_episode_id,
+                evaluated_at=outside_report_received_at,
+            )
+        with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM sleep_domain_source_reports "
+                "WHERE namespace_id = %s AND raw_ingress_record_id = %s",
+                (NAMESPACE, outside_report.raw_ingress_record_id),
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT count(*) FROM "
+                "sleep_domain_episode_observation_memberships "
+                "WHERE night_episode_id = %s AND observation_id = %s",
+                (
+                    night_c_episode_id,
+                    outside_report_result.canonical_observation_ids[0],
+                ),
+            ).fetchone() == (0,)
+            assert connection.execute(
+                "SELECT status, reason_code FROM "
+                "sleep_domain_pending_episode_associations "
+                "WHERE namespace_id = %s AND source_resource_id = %s",
+                (
+                    NAMESPACE,
+                    outside_report_result.canonical_observation_ids[0],
+                ),
+            ).fetchone() == (
+                "quarantined",
+                "LATE_ASSOCIATION_OUT_OF_WINDOW",
+            )
+
+        night_d_open_at = night_c_open_at + timedelta(days=1)
+        night_d_close_at = night_d_open_at + timedelta(hours=1)
+        night_d_open = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_d_open_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-d-open",
+                report_at=night_d_open_at,
+                signed_at=night_d_open_at,
+                local_datetime="2026-08-29T21:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_d_open.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-d-open-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+        with psycopg.connect(admin_dsn) as connection:
+            night_d_episode_id = str(
+                connection.execute(
+                    "SELECT active_night_episode_id FROM "
+                    "backend_monitoring_snapshots_v2 "
+                    "WHERE namespace_id = %s AND subject_id = %s "
+                    "AND namespace_generation = 1",
+                    (NAMESPACE, SUBJECT),
+                ).fetchone()[0]
+            )
+        night_d_close = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: night_d_close_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-d-close",
+                on_bed=0,
+                report_at=night_d_close_at,
+                signed_at=night_d_close_at,
+                local_datetime="2026-08-29T22:00:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert night_d_close.disposition == "accepted"
+        assert _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-d-close-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        ).canonical_created_count == 4
+
+        schedule_scope = UowScope(
+            namespace_id=NAMESPACE,
+            namespace_generation=1,
+            data_mode="live",
+            process_role="api",
+            purpose="device_binding_management",
+            service_principal_id=_dsn(
+                "SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"
+            ),
+            subject_id=SUBJECT,
+            actor_id="p4d2-b2-local-proof",
+            actor_role="elder",
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+        )
+        schedule_service = AcquisitionScheduleService(api_uow)
+        finalization_schedule = schedule_service.create(
+            schedule_scope,
+            binding=ManagedDeviceBinding(binding=binding, cas_version=0),
+            job_type=AcquisitionJobType.NIGHT_FINALIZATION_SCAN,
+            next_run_at=datetime.now(tz=UTC) - timedelta(minutes=5),
+            cadence_seconds=300,
+            jitter_seconds=0,
+        )
+        scheduler = PostgresAcquisitionScheduler(
+            worker_uow,
+            data_mode="live",
+            service_principal_id=_dsn(
+                "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
+            ),
+            worker_instance="fsa-combined-scheduler",
+            enabled=True,
+        )
+        first_combined_fire = next(
+            item
+            for item in scheduler.fire_due(limit=10)
+            if item.schedule_id == finalization_schedule.schedule_id
+        )
+        combined_claim = store.claim(
+            queue=AcquisitionJobType.NIGHT_FINALIZATION_SCAN.value,
+            worker_instance="fsa-combined-finalization-worker",
+            lease_seconds=60,
+        )
+        assert combined_claim is not None
+        combined_settings = SimpleNamespace(
+            process_role=ProcessRole.WORKER,
+            data_mode=DataMode.LIVE,
+            provider_mode=ProviderMode.LIVE,
+            acquisition_scheduler_enabled=True,
+            worker_queues=tuple(item.value for item in AcquisitionJobType),
+        )
+        combined_handlers = build_acquisition_worker_handlers(combined_settings)
+        finalization_handler = combined_handlers[
+            AcquisitionJobType.NIGHT_FINALIZATION_SCAN.value
+        ]
+        combined_result = finalization_handler(
+            WorkContext(combined_claim, store, threading.Event())
+        )
+        assert combined_result.disposition is WorkDisposition.SUCCEEDED
+        assert combined_result.result["night_episode_ids"] == [
+            night_c_episode_id,
+            night_d_episode_id,
+        ]
+        assert combined_result.result["processed_count"] == 2
+        assert datetime.fromisoformat(
+            str(combined_result.result["evaluated_at"])
+        ) > first_combined_fire.scheduled_for
+        assert store.finalize(combined_claim, combined_result) is True
+
+        # A material late revision makes the already HARD Night C due again.
+        # Re-fire the same production schedule and prove the combined handler
+        # follows the revision-mismatch recovery path with current time.
+        late_night_c_received_at = night_c_close_at + timedelta(hours=1)
+        late_night_c = PerceptorWebhookService(
+            _api_settings(),
+            api_uow,
+            client_secret=SECRET,
+            cipher=cipher,
+            now_factory=lambda: late_night_c_received_at,
+        ).accept(
+            _push_raw(
+                message_id="fsa-night-c-late-revision",
+                heart_rate=74,
+                report_at=night_c_open_at + timedelta(minutes=45),
+                signed_at=late_night_c_received_at,
+                local_datetime="2026-08-28T21:45:00.000",
+            ),
+            content_type="application/json",
+            request_path=WEBHOOK_PATH,
+        )
+        assert late_night_c.disposition == "accepted"
+        late_night_c_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="fsa-night-c-late-revision-worker",
+            observation_semantics_version=ObservationSemanticsVersion.V2,
+        )
+        assert late_night_c_result.canonical_created_count == 4
+        current_schedule = schedule_service.show(
+            schedule_scope,
+            schedule_id=finalization_schedule.schedule_id,
+        )
+        paused_schedule = schedule_service.pause(
+            schedule_scope,
+            schedule_id=current_schedule.schedule_id,
+            expected_cas=current_schedule.cas_version,
+        )
+        resumed_schedule = schedule_service.resume(
+            schedule_scope,
+            schedule_id=paused_schedule.schedule_id,
+            expected_cas=paused_schedule.cas_version,
+            next_run_at=datetime.now(tz=UTC) - timedelta(minutes=1),
+        )
+        second_combined_fire = next(
+            item
+            for item in scheduler.fire_due(limit=10)
+            if item.schedule_id == resumed_schedule.schedule_id
+        )
+        retry_claim = store.claim(
+            queue=AcquisitionJobType.NIGHT_FINALIZATION_SCAN.value,
+            worker_instance="fsa-combined-finalization-retry-worker",
+            lease_seconds=60,
+        )
+        assert retry_claim is not None
+        retry_result = finalization_handler(
+            WorkContext(retry_claim, store, threading.Event())
+        )
+        assert retry_result.disposition is WorkDisposition.SUCCEEDED
+        assert retry_result.result["night_episode_ids"] == [night_c_episode_id]
+        assert datetime.fromisoformat(
+            str(retry_result.result["evaluated_at"])
+        ) > second_combined_fire.scheduled_for
+        assert store.finalize(retry_claim, retry_result) is True
+
         # Persist a schema-valid adversarial overlap that the ordinary Episode
         # lifecycle cannot create: a second closed Episode with a different
         # canonical wake date, the same pinned binding, and an overlapping
@@ -1988,14 +2617,16 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             _read(
                 SLEEP_REPORT_ENDPOINT,
                 _sleep_no_data(),
-                requested_at=NOW + timedelta(days=1, minutes=7),
-                received_at=NOW + timedelta(days=1, minutes=7, seconds=1),
+                requested_at=night_d_close_at + timedelta(minutes=7),
+                received_at=night_d_close_at + timedelta(
+                    minutes=7, seconds=1
+                ),
                 envelope_nonce="sleep-no-data-1",
             ),
             binding=binding,
             coordinates=PullRequestCoordinates(
                 endpoint=SLEEP_REPORT_ENDPOINT,
-                report_date=date(2026, 8, 24),
+                report_date=date(2026, 8, 29),
             ),
         )
         assert no_data_ingress.disposition == "accepted"
@@ -2007,8 +2638,8 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         assert no_data_result.checkpoint_advanced is True
         assert _count(admin_dsn, "sleep_domain_canonical_observations") == before_no_data
         # The empty report adds neither canonical evidence nor another Episode;
-        # the second row is the controlled ambiguity sentinel above.
-        assert _count(admin_dsn, "sleep_domain_night_episodes") == 2
+        # the five rows are Nights A/B/C/D plus the controlled ambiguity sentinel.
+        assert _count(admin_dsn, "sleep_domain_night_episodes") == 5
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -2016,7 +2647,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     "sleep_domain_source_reports WHERE namespace_id = %s",
                     (NAMESPACE,),
                 )
-                assert cursor.fetchone() == (2, False)
+                assert cursor.fetchone() == (4, False)
                 cursor.execute(
                     "SELECT count(*) FROM sleep_domain_processing_receipts "
                     "WHERE namespace_id = %s AND stage = 'normalization' "
@@ -2247,7 +2878,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                     "FROM sleep_domain_source_reports WHERE namespace_id = %s",
                     (NAMESPACE,),
                 )
-                assert cursor.fetchone() == (3, 2, 3)
+                assert cursor.fetchone() == (5, 2, 5)
 
                 cursor.execute(
                     "SELECT count(*) FROM sleep_domain_raw_inbox "
@@ -2256,15 +2887,20 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
                 )
                 raw_before_binding_period_rejections = int(cursor.fetchone()[0])
 
+        reassignment_at = night_d_close_at + timedelta(hours=3)
+        pre_binding_event_at = reassignment_at - timedelta(seconds=30)
+        pre_binding_local_text = pre_binding_event_at.astimezone(
+            timezone(timedelta(hours=8))
+        ).strftime("%Y-%m-%dT%H:%M:%S")
         reassigned_binding = _reassign_binding(
             admin_dsn,
             binding,
-            effective_at=NOW + timedelta(minutes=10, seconds=30),
+            effective_at=reassignment_at,
         )
         pre_binding_coordinates = PullRequestCoordinates(
             endpoint=HISTORY_ENDPOINT,
-            window_start_at=NOW + timedelta(minutes=9),
-            window_end_at=NOW + timedelta(minutes=11),
+            window_start_at=reassignment_at - timedelta(minutes=1),
+            window_end_at=reassignment_at + timedelta(minutes=1),
         )
         with pytest.raises(
             ValueError,
@@ -2273,9 +2909,9 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             generation_two_ingress.accept(
                 _read(
                     HISTORY_ENDPOINT,
-                    _history_data(local_send_time="2026-08-23T11:10:00"),
-                    requested_at=NOW + timedelta(minutes=30),
-                    received_at=NOW + timedelta(minutes=30, seconds=1),
+                    _history_data(local_send_time=pre_binding_local_text),
+                    requested_at=reassignment_at + timedelta(minutes=30),
+                    received_at=reassignment_at + timedelta(minutes=30, seconds=1),
                     envelope_nonce="pre-binding-period",
                 ),
                 binding=reassigned_binding,
@@ -2289,9 +2925,9 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             generation_two_ingress.accept(
                 _read(
                     HISTORY_ENDPOINT,
-                    _history_data(local_send_time="2026-08-23T11:10:00"),
-                    requested_at=NOW + timedelta(minutes=10),
-                    received_at=NOW + timedelta(minutes=10, seconds=1),
+                    _history_data(local_send_time=pre_binding_local_text),
+                    requested_at=reassignment_at - timedelta(seconds=20),
+                    received_at=reassignment_at - timedelta(seconds=19),
                     envelope_nonce="reassignment-crossing-period",
                 ),
                 binding=binding,

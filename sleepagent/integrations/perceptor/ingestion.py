@@ -580,6 +580,7 @@ class PerceptorNormalizationProcessor:
                 projection_boundary=self.projection_boundary,
                 id_generator=self.id_generator,
                 fault_injector=self.projection_fault_injector,
+                resolve_opening_boundary_first=True,
             )
             receipt_id = self.id_generator(committed_at)
             cursor.execute(

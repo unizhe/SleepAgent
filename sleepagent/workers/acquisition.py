@@ -159,28 +159,31 @@ def build_acquisition_worker_handlers(
     ):
         raise ValueError("Perceptor scheduled Pull requires live provider mode")
 
-    handler: ScheduledAcquisitionWorkHandler | None = None
+    def handler_factory(queue: str) -> WorkHandler:
+        handler: ScheduledAcquisitionWorkHandler | None = None
 
-    def factory(context: WorkContext) -> WorkResult:
-        nonlocal handler
-        if handler is None:
-            uow_factory = worker_uow_factory(context)
-            if selected.intersection(pull_queues):
-                module = importlib.import_module(
-                    "sleepagent.integrations.perceptor.scheduled"
+        def factory(context: WorkContext) -> WorkResult:
+            nonlocal handler
+            if handler is None:
+                uow_factory = worker_uow_factory(context)
+                if queue in pull_queues:
+                    module = importlib.import_module(
+                        "sleepagent.integrations.perceptor.scheduled"
+                    )
+                    executor: AcquisitionExecutor = (
+                        module.PerceptorAcquisitionExecutor(settings, uow_factory)
+                    )
+                else:
+                    executor = _NightFinalizationExecutor(uow_factory)
+                handler = ScheduledAcquisitionWorkHandler(
+                    uow_factory,
+                    executor,
                 )
-                executor: AcquisitionExecutor = module.PerceptorAcquisitionExecutor(
-                    settings, uow_factory
-                )
-            else:
-                executor = _NightFinalizationExecutor(uow_factory)
-            handler = ScheduledAcquisitionWorkHandler(
-                uow_factory,
-                executor,
-            )
-        return handler(context)
+            return handler(context)
 
-    return {queue: factory for queue in selected}
+        return factory
+
+    return {queue: handler_factory(queue) for queue in selected}
 
 
 class _NightFinalizationExecutor:
