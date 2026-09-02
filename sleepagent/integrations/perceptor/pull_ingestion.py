@@ -1482,7 +1482,7 @@ class PerceptorPullNormalizationProcessor:
                     ) VALUES (
                       %s, %s, 'live', %s, 'malformed_payload', %s, %s,
                       %s::jsonb, %s
-                    ) ON CONFLICT (quarantine_id) DO NOTHING
+                    )
                     """,
                     (
                         quarantine_id,
