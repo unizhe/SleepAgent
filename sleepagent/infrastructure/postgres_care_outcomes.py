@@ -499,6 +499,7 @@ class PostgresCareOutcomeEvaluator:
                 _register_personalization_governance(
                     cursor,
                     scope=self.scope,
+                    receipt=receipt,
                     governance=governance,
                     registered_at=receipt.created_at,
                 )
@@ -537,13 +538,12 @@ def _register_personalization_governance(
     cursor: Any,
     *,
     scope: UowScope,
+    receipt: PersonalizationEffectReceipt,
     governance: OutcomePersonalizationGovernance | None,
     registered_at: datetime,
 ) -> None:
-    if governance is None:
-        return
     supersedes_governance_id = None
-    if governance.supersedes_receipt_id is not None:
+    if receipt.supersedes_receipt_id is not None:
         cursor.execute(
             """
             SELECT governance_id
@@ -551,7 +551,7 @@ def _register_personalization_governance(
             WHERE receipt_id = %s
             FOR UPDATE
             """,
-            (governance.supersedes_receipt_id,),
+            (receipt.supersedes_receipt_id,),
         )
         prior = cursor.fetchone()
         if prior is not None:
@@ -571,6 +571,8 @@ def _register_personalization_governance(
             )
             if cursor.rowcount == 1:
                 log_event("personalization_candidate_superseded")
+    if governance is None:
+        return
     candidate = governance.memory_candidate
     cursor.execute(
         """

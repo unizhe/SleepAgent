@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -316,6 +317,144 @@ def _evaluate_next_outcome(
     assert "evaluated" in states
 
 
+def _revise_night_assignment_basis(
+    connection: object,
+    *,
+    namespace_id: str,
+    subject_id: str,
+    episode_id: str,
+    assignment_basis: str,
+) -> str:
+    suffix = uuid4().hex
+    episode_revision_id = f"c3-episode-revision-{suffix}"
+    finalization_revision_id = f"c3-finalization-revision-{suffix}"
+    cursor = connection.cursor()  # type: ignore[attr-defined]
+    try:
+        cursor.execute(
+            """
+            SELECT finalization.night_finalization_id,
+              finalization.current_finalization_revision_id,
+              finalization.current_revision_number,
+              episode.current_revision_id, episode.current_revision_number,
+              episode.wake_at, episode.bed_at, episode.timezone_name,
+              episode.episode_local_date, episode.run_id, episode.arm_id
+            FROM public.sleep_domain_night_finalizations AS finalization
+            JOIN public.sleep_domain_night_episodes AS episode
+              ON episode.night_episode_id = finalization.night_episode_id
+             AND episode.namespace_id = finalization.namespace_id
+             AND episode.data_mode = finalization.data_mode
+            WHERE finalization.namespace_id = %s
+              AND finalization.data_mode = 'replay'
+              AND finalization.subject_id = %s
+              AND finalization.night_episode_id = %s
+            """,
+            (namespace_id, subject_id, episode_id),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        wake_at, bed_at = row[5], row[6]
+        episode_payload = {
+            "episode": {
+                "wake_at": wake_at.isoformat(),
+                "bed_at": bed_at.isoformat(),
+                "timezone_name": str(row[7]),
+                "assignment_basis": assignment_basis,
+            }
+        }
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_night_episode_revisions (
+              night_episode_revision_id, namespace_id, data_mode,
+              night_episode_id, subject_id, revision_number,
+              parent_revision_id, revision_json, created_at,
+              namespace_generation, timezone_name, episode_local_date,
+              assignment_basis, date_confidence, assignment_estimated,
+              date_state, date_conflict, episode_schema_version, run_id, arm_id
+            ) VALUES (%s,%s,'replay',%s,%s,%s,%s,%s::jsonb,%s,1,%s,%s,%s,
+              'observed',FALSE,'finalized',FALSE,'night_episode.v2',%s,%s)
+            """,
+            (
+                episode_revision_id,
+                namespace_id,
+                episode_id,
+                subject_id,
+                int(row[4]) + 1,
+                str(row[3]),
+                json.dumps(episode_payload),
+                wake_at,
+                str(row[7]),
+                row[8],
+                assignment_basis,
+                row[9],
+                row[10],
+            ),
+        )
+        cursor.execute(
+            """
+            UPDATE public.sleep_domain_night_episodes
+            SET current_revision_id=%s, current_revision_number=%s,
+                cas_version=cas_version+1, episode_json=%s::jsonb,
+                updated_at=%s
+            WHERE night_episode_id=%s AND namespace_id=%s
+              AND data_mode='replay'
+            """,
+            (
+                episode_revision_id,
+                int(row[4]) + 1,
+                json.dumps(episode_payload["episode"]),
+                wake_at,
+                episode_id,
+                namespace_id,
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_night_finalization_revisions (
+              night_finalization_revision_id, night_finalization_id,
+              namespace_id, data_mode, namespace_generation, subject_id,
+              night_episode_id, finalization_revision_number,
+              parent_finalization_revision_id,
+              source_night_episode_revision_id, state, provisional,
+              coverage_status, revision_cause, material_sha256,
+              finalization_json, created_at, run_id, arm_id
+            ) VALUES (%s,%s,%s,'replay',1,%s,%s,%s,%s,%s,'hard_finalized',
+              FALSE,'complete','late_material_evidence',%s,'{}'::jsonb,%s,%s,%s)
+            """,
+            (
+                finalization_revision_id,
+                str(row[0]),
+                namespace_id,
+                subject_id,
+                episode_id,
+                int(row[2]) + 1,
+                str(row[1]),
+                episode_revision_id,
+                hashlib.sha256(finalization_revision_id.encode()).hexdigest(),
+                wake_at,
+                row[9],
+                row[10],
+            ),
+        )
+        cursor.execute(
+            """
+            UPDATE public.sleep_domain_night_finalizations
+            SET current_finalization_revision_id=%s,
+                current_revision_number=%s, cas_version=cas_version+1,
+                updated_at=%s
+            WHERE night_finalization_id=%s
+            """,
+            (
+                finalization_revision_id,
+                int(row[2]) + 1,
+                wake_at,
+                str(row[0]),
+            ),
+        )
+    finally:
+        cursor.close()
+    return finalization_revision_id
+
+
 def test_c3_receipt_governance_and_next_shared_analysis_process_proof() -> None:
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = _required("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN")
@@ -463,7 +602,7 @@ def test_c3_receipt_governance_and_next_shared_analysis_process_proof() -> None:
 
         base_wake = now
         with psycopg.connect(admin_dsn) as admin:
-            _insert_night(
+            follow_a_episode_id, _follow_a_finalization_id = _insert_night(
                 admin,
                 namespace_id=case.seed.namespace_id,
                 subject_id=case.seed.subject_id,
@@ -758,6 +897,100 @@ def test_c3_receipt_governance_and_next_shared_analysis_process_proof() -> None:
                 (case.seed.namespace_id, case.seed.subject_id),
             ).fetchone() == (0,)
 
+        with psycopg.connect(admin_dsn) as admin:
+            memory_count_before_supersession = admin.execute(
+                "SELECT count(*) FROM public.backend_governed_memory_revisions_v2 "
+                "WHERE namespace_id=%s AND subject_id=%s",
+                (case.seed.namespace_id, case.seed.subject_id),
+            ).fetchone()[0]
+            _revise_night_assignment_basis(
+                admin,
+                namespace_id=case.seed.namespace_id,
+                subject_id=case.seed.subject_id,
+                episode_id=follow_a_episode_id,
+                assignment_basis="inferred_wake",
+            )
+            admin.commit()
+        assert _run_one(restarted_store) == "not_comparable"
+
+        refreshed = _outcome_items(backend, context)
+        assert next(
+            item for item in refreshed if item.governance_id == fifth.governance_id
+        ).status == "superseded"
+        assert backend.list_outcome_personalization_candidates(
+            context,
+            status="pending",
+            limit=100,
+        ).items == ()
+        with psycopg.connect(admin_dsn) as admin:
+            current_receipt = admin.execute(
+                """
+                SELECT receipt.state, receipt.candidate_type,
+                  receipt.supersedes_receipt_id
+                FROM public.backend_care_outcome_evaluations_v1 AS evaluation
+                JOIN public.backend_personalization_effect_receipts_v1 AS receipt
+                  ON receipt.care_outcome_id = evaluation.current_care_outcome_id
+                WHERE evaluation.care_plan_id = %s
+                """,
+                (plan.care_plan_id,),
+            ).fetchone()
+            assert current_receipt == (
+                "no_personalization_change",
+                None,
+                fifth.receipt_id,
+            )
+            assert admin.execute(
+                "SELECT count(*) FROM public.backend_governed_memory_revisions_v2 "
+                "WHERE namespace_id=%s AND subject_id=%s",
+                (case.seed.namespace_id, case.seed.subject_id),
+            ).fetchone()[0] == memory_count_before_supersession
+
+        for choice in ("accept", "reject"):
+            with pytest.raises(ProductApiError) as stale_none_candidate:
+                backend.decide_outcome_personalization_candidate(
+                    context,
+                    governance_id=fifth.governance_id,
+                    choice=choice,  # type: ignore[arg-type]
+                    request=_decision_request(
+                        fifth,
+                        f"c3-stale-after-none-{choice}",
+                    ),
+                )
+            assert stale_none_candidate.value.code == "candidate_superseded"
+        refreshed = _outcome_items(backend, context)
+        assert next(
+            item for item in refreshed if item.governance_id == first.governance_id
+        ).status == "accepted"
+        assert next(
+            item for item in refreshed if item.governance_id == second.governance_id
+        ).status == "rejected"
+        with psycopg.connect(admin_dsn) as admin:
+            assert admin.execute(
+                "SELECT count(*) FROM public.backend_governed_memory_revisions_v2 "
+                "WHERE namespace_id=%s AND subject_id=%s",
+                (case.seed.namespace_id, case.seed.subject_id),
+            ).fetchone()[0] == memory_count_before_supersession
+            assert admin.execute(
+                "SELECT count(*) FROM "
+                "public.backend_personalization_governance_decisions_v1 "
+                "WHERE governance_id=%s",
+                (fifth.governance_id,),
+            ).fetchone() == (0,)
+
+            _revise_night_assignment_basis(
+                admin,
+                namespace_id=case.seed.namespace_id,
+                subject_id=case.seed.subject_id,
+                episode_id=follow_a_episode_id,
+                assignment_basis="observed_wake",
+            )
+            admin.commit()
+        assert _run_one(restarted_store) == "evaluated"
+        race_candidate = next(
+            item for item in _outcome_items(backend, context)
+            if item.status == "pending"
+        )
+
         barrier = threading.Barrier(2)
 
         def decide(choice: str, key: str):  # type: ignore[no-untyped-def]
@@ -774,9 +1007,9 @@ def test_c3_receipt_governance_and_next_shared_analysis_process_proof() -> None:
                 barrier.wait()
                 return local_backend.decide_outcome_personalization_candidate(
                     context,
-                    governance_id=fifth.governance_id,
+                    governance_id=race_candidate.governance_id,
                     choice=choice,  # type: ignore[arg-type]
-                    request=_decision_request(fifth, key),
+                    request=_decision_request(race_candidate, key),
                 )
             except ProductApiError as exc:
                 return exc
@@ -796,7 +1029,7 @@ def test_c3_receipt_governance_and_next_shared_analysis_process_proof() -> None:
                 "SELECT count(*) FROM "
                 "public.backend_personalization_governance_decisions_v1 "
                 "WHERE governance_id=%s",
-                (fifth.governance_id,),
+                (race_candidate.governance_id,),
             ).fetchone() == (1,)
             assert admin.execute(
                 "SELECT count(*) FROM public.backend_governed_memory_revisions_v2 "
