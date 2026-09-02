@@ -91,11 +91,13 @@ The demo uses controlled fixtures and deterministic model boundaries; it needs n
 `scripts/verify_closure.sh` is the authoritative release verifier. It reports these explicit lanes:
 
 - `STATIC`, `ARCHITECTURE`, `OPENAPI`, and `UNIT_CONTRACT`
-- `POSTGRES` and `PROCESS_FAULT`
-- `REPORT_E2E`
+- `POSTGRES`, `REAL_ASGI`, and `DATABASE_RECLAIM_FOUNDATION`
+- `REPORT_CONTRACT`
 - `CLOSURE_C1A_C1B_C2_C3`
 
-Each lane reports `PASS`, `FAIL`, `ENV_BLOCKED`, or `SKIPPED_EXPLICIT`. `FINAL = PASS` is emitted only when every required release lane passes; unavailable infrastructure never silently passes. The suite contains 1,200+ automated tests across unit/contract and integration-oriented suites, plus the named PostgreSQL, process/fault, report, architecture, OpenAPI, and closure lanes.
+Required pytest lanes reject every unexpected skip. `FINAL = PASS` means the required local release contract above actually passed. `PROCESS_FAULT` is a separate Docker/Compose capability that invokes the real worker-kill, process-restart, PostgreSQL-restart, fencing, and delivery-ambiguity harness; `REPORT_EXTERNAL_E2E` is a separate opt-in external-service capability. Both report `NOT_RUN` during the default release command and are not counted as required-lane passes. Run them explicitly with `scripts/verify_closure.sh process-fault` and `scripts/verify_closure.sh report-external-e2e` when their environments are available. Setting `SLEEPAGENT_CLOSURE_REQUIRE_PROCESS_FAULT=1` or `SLEEPAGENT_CLOSURE_REQUIRE_EXTERNAL_REPORT_E2E=1` promotes that capability into the selected release contract, where blocked or unexecuted evidence prevents `FINAL = PASS`.
+
+The hosted workflow is configured to execute the required verifier contract on pushes and pull requests. The repository does not treat workflow configuration as a receipt that current unpushed source has passed hosted CI, and public publication remains author-controlled.
 
 ## Known limitations
 

@@ -32,7 +32,7 @@ These are measurements from one controlled benchmark setup, not universal produc
 
 ## Deployment
 
-The acquisition scheduler is feature-gated and disabled by default. Production process supervision, TLS, network policy, secrets management, PostgreSQL role/ACL provisioning, backups, monitoring, and vendor credentials are external operational setup. Hosted CI proves feasible static/contract/PostgreSQL foundations; the full local closure verifier remains release evidence for controlled process/fault lanes.
+The acquisition scheduler is feature-gated and disabled by default. Production process supervision, TLS, network policy, secrets management, PostgreSQL role/ACL provisioning, backups, monitoring, and vendor credentials are external operational setup. Hosted CI is configured to run the required static, contract, PostgreSQL, real-ASGI, reclaim-foundation, and controlled-report verifier contract, but configuration is not evidence that current unpushed source has passed it. Full Docker/Compose process-fault proof and external report E2E remain separately invoked optional capabilities.
 
 External email, SMS, WeChat, notifications, delivery providers, and device control are intentionally not implemented. A retained `live_delivery_enabled` input is deprecated/internal disabled configuration, not a feature.
 

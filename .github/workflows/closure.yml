@@ -63,29 +63,10 @@ jobs:
           python -m sleepagent.persistence.migrate \
             --database-url-env SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN check
 
-      - name: Static lane
-        run: scripts/verify_closure.sh static --env-file .env.test.example
-
-      - name: Architecture lane
-        run: scripts/verify_closure.sh architecture --env-file .env.test.example
-
-      - name: OpenAPI lane
-        run: scripts/verify_closure.sh openapi --env-file .env.test.example
-
-      - name: Unit and contract lane
-        run: scripts/verify_closure.sh unit-contract --env-file .env.test.example
-
-      - name: PostgreSQL lane
-        run: scripts/verify_closure.sh postgres --env-file .env.test.example
-
-      - name: Process-fault foundation
-        run: |
-          python -m pytest -q \
-            tests/unit/test_backend_process_fault_probe.py \
-            tests/integration/test_backend_postgres_foundation.py \
-            -m "not postgres"
+      - name: Required release verifier
+        run: scripts/verify_closure.sh release --env-file .env.test.example
 
       - name: Explain full release evidence
         run: |
-          echo "Hosted CI runs supported static, architecture, OpenAPI, unit/contract, PostgreSQL, and process-fault foundation lanes."
-          echo "Run scripts/verify_closure.sh release --env-file .env.test locally for the complete controlled release proof."
+          echo "Hosted CI is configured to run the required local release contract, including real ASGI, PostgreSQL, database-reclaim foundation, and controlled report lanes."
+          echo "PROCESS_FAULT and REPORT_EXTERNAL_E2E remain separately configured optional capabilities; this message is not a receipt for unpushed source."

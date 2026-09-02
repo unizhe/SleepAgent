@@ -8,7 +8,8 @@ PostgreSQL 16 is the authority for work, schedule, checkpoint, revision, and gov
 | --- | --- | --- |
 | Migration | `python -m sleepagent.persistence.migrate apply` | schema owner only |
 | API | `uvicorn sleepagent.app:app` | explicitly enabled public/product/demo/internal/Perceptor surfaces |
-| Scheduler | `python -m sleepagent.bootstrap.scheduler run` | scans schedules and creates work; executes no handler |
+| Scheduler probe | `SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=false python -m sleepagent.bootstrap.scheduler once` | bounded disabled-state probe; creates no authoritative acquisition work |
+| Continuous scheduler | `SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=true python -m sleepagent.bootstrap.scheduler run` | scans schedules and creates work; executes no handler |
 | Worker | `python -m sleepagent.workers.runtime run` | claims only explicitly configured queues |
 
 API and worker principals must not be the migration owner. Live Perceptor credentials belong only to profiles that need scheduled Pull.
@@ -19,7 +20,7 @@ Claims use PostgreSQL `SKIP LOCKED`, a lease generation, fencing token, and boun
 
 Idempotency is semantic and persisted. Exact retries converge on existing work/evidence; materially changed input creates a new revision. If ownership changes, the old fence cannot commit. Process memory is disposable and does not decide durable success.
 
-Schedulers can run concurrently: the schedule slot identity is unique, schedule transitions serialize, jitter is strictly less than cadence, and overdue schedules advance rather than burst every missed slot. The scheduler is disabled by default.
+Schedulers can run concurrently: the schedule slot identity is unique, schedule transitions serialize, jitter is strictly less than cadence, and overdue schedules advance rather than burst every missed slot. The scheduler is disabled by default. `run` exits 2 while disabled; use `once` for the disabled safety probe and explicitly enable the setting before continuous operation.
 
 ## Queues and capabilities
 
@@ -44,4 +45,4 @@ No subject/device identifiers, credentials, provider payloads, prompts, report p
 
 Provider timeout retries without changing fact authority. NO_DATA remains explicit. A duplicate finalizer reuses unchanged material; material late evidence creates a superseding immutable revision. Never repair state by editing checkpoints, work rows, or governance tables manually.
 
-The authoritative proof is `scripts/verify_closure.sh release --env-file .env.test`; full process-fault evidence is a local release lane when hosted CI cannot provide equivalent process control.
+The authoritative required local proof is `scripts/verify_closure.sh release --env-file .env.test`. Its `DATABASE_RECLAIM_FOUNDATION` lane is same-process PostgreSQL reclaim/retry evidence, not a process-fault claim. Full Docker/Compose process evidence is the separate optional `scripts/verify_closure.sh process-fault --env-file .env.test` capability. The external report E2E is likewise optional and distinct from the required controlled `REPORT_CONTRACT` lane.

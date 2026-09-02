@@ -6,7 +6,7 @@ import os
 import pytest
 
 
-pytestmark = pytest.mark.postgres
+pytestmark = pytest.mark.process_harness
 
 
 def test_committed_first_slice_has_one_exact_causal_product_chain() -> None:

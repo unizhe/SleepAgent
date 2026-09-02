@@ -173,7 +173,7 @@ assert_first_slice() {
   SLEEPAGENT_FIRST_SLICE_ROOT_OPERATION_ID="$1" \
   SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN="${FAULT_ADMIN_DSN}" \
     "${PYTHON_BIN}" -m pytest -q \
-      tests/integration/test_backend_first_slice_postgres.py -m postgres
+      tests/integration/test_backend_first_slice_postgres.py -m process_harness
 }
 
 FULL_QUEUES="ingestion,fast_path,product_agent,care.outcome.evaluate.v1,sleep_command,product_interaction,demo_advance,replay_journey,reconciliation"

@@ -16,7 +16,9 @@ f0f26d8df89c8069d1b435848982513cb32d198f7bc7a71b9c972c71d1a4e856  EXECUTION_LEDG
 74db71b6a39b4a2818c8c2c6eb28b69433f7ca765c12d063cbe8a6ca5a02e469  POSTGRESQL_VERIFICATION_BASELINE.md
 ```
 
-| Finding | Closure evidence | Current status |
+The following table preserves the status map recorded before the independent Final Source Audit; it is historical, not a claim about current hosted CI or public repository state.
+
+| Finding | Closure evidence | Pre-final-audit status |
 | --- | --- | --- |
 | FSA-COR-001 | `cf936bc` C1A LIVE observations → Episode | RESOLVED |
 | FSA-COR-004 | `2cf2561` C1B closed-Episode late revision | RESOLVED |
@@ -33,5 +35,11 @@ f0f26d8df89c8069d1b435848982513cb32d198f7bc7a71b9c972c71d1a4e856  EXECUTION_LEDG
 | FSA-PUB-001 | Public Closure `LICENSE` | RESOLVED |
 | FSA-DOC-001 | Public Closure canonical current docs | RESOLVED |
 | FSA-PUB-002 | Public Closure demo/CI/public surface | RESOLVED |
+
+## Current remediation boundary
+
+The current local source includes implementation closure for the seven Final Source Audit P0 findings, FSA-COR-105, and the truthful/reproducible release-evidence work for FSA-TEST-101, FSA-TEST-102, and FSA-DOC-101. These are source implementation statements subject to an independent Final Source Audit, not hosted-CI or public-release receipts.
+
+`FSA-PUB-101` remains open and author-controlled. No current-source push, hosted workflow result, tag, or public-release completion is asserted by this index.
 
 Historical engineering evidence is indexed under [`docs/history/`](../history/README.md).

@@ -69,6 +69,7 @@ markers = [
     "unit: deterministic tests without a PostgreSQL or process dependency",
     "postgres: tests against an isolated PostgreSQL database/schema",
     "asgi_lifespan: tests that execute real ASGI startup and shutdown",
+    "process_harness: postconditions that require the external process harness",
     "e2e: tests that require independently running API and worker processes",
 ]
 

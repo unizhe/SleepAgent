@@ -157,10 +157,18 @@ def _seed_subject_and_proposal(
               night_episode_id, namespace_id, data_mode, subject_id, night_key,
               state, current_revision_id, current_revision_number, cas_version,
               episode_json, created_at, updated_at
-            ) VALUES (%s,%s,'live',%s,'2026-08-31','closed',%s,1,1,
+            ) VALUES (%s,%s,'live',%s,%s,'closed',%s,1,1,
               '{}'::jsonb,%s,%s)
             """,
-            (episode_id, namespace_id, subject_id, episode_revision_id, now, now),
+            (
+                episode_id,
+                namespace_id,
+                subject_id,
+                now.date().isoformat(),
+                episode_revision_id,
+                now,
+                now,
+            ),
         )
         cursor.execute(
             """

@@ -12,12 +12,16 @@ while (($#)); do
       ENV_FILE="${2:-}"
       shift 2
       ;;
-    release|all|static|architecture|openapi|unit-contract|postgres|process-fault|report-e2e|closure)
+    release|all|static|architecture|openapi|unit-contract|postgres|real-asgi|database-reclaim|report-contract|process-fault|report-external-e2e|closure)
       REQUESTED="$1"
       shift
       ;;
+    report-e2e)
+      REQUESTED="report-external-e2e"
+      shift
+      ;;
     *)
-      echo "usage: $0 [release|LANE] [--env-file PATH]" >&2
+      echo "usage: $0 [release|all|static|architecture|openapi|unit-contract|postgres|real-asgi|database-reclaim|report-contract|process-fault|report-external-e2e|closure] [--env-file PATH]" >&2
       exit 2
       ;;
   esac
@@ -44,18 +48,53 @@ LANES=(
   OPENAPI
   UNIT_CONTRACT
   POSTGRES
+  REAL_ASGI
+  DATABASE_RECLAIM_FOUNDATION
+  REPORT_CONTRACT
+  CLOSURE_C1A_C1B_C2_C3
   PROCESS_FAULT
-  REPORT_E2E
+  REPORT_EXTERNAL_E2E
+)
+REQUIRED_RELEASE_LANES=(
+  STATIC
+  ARCHITECTURE
+  OPENAPI
+  UNIT_CONTRACT
+  POSTGRES
+  REAL_ASGI
+  DATABASE_RECLAIM_FOUNDATION
+  REPORT_CONTRACT
   CLOSURE_C1A_C1B_C2_C3
 )
 declare -A STATUS
 for lane in "${LANES[@]}"; do
   STATUS["${lane}"]="SKIPPED_EXPLICIT"
 done
+STATUS[PROCESS_FAULT]="NOT_RUN"
+STATUS[REPORT_EXTERNAL_E2E]="NOT_RUN"
 
 selected() {
   local requested_lane="$1"
   [[ "${REQUESTED}" == "release" || "${REQUESTED}" == "all" || "${REQUESTED}" == "${requested_lane}" ]]
+}
+
+selected_optional() {
+  local requested_lane="$1"
+  if [[ "${REQUESTED}" == "all" || "${REQUESTED}" == "${requested_lane}" ]]; then
+    return 0
+  fi
+  if [[ "${REQUESTED}" != "release" ]]; then
+    return 1
+  fi
+  case "${requested_lane}" in
+    process-fault)
+      [[ "${SLEEPAGENT_CLOSURE_REQUIRE_PROCESS_FAULT:-0}" == "1" ]]
+      ;;
+    report-external-e2e)
+      [[ "${SLEEPAGENT_CLOSURE_REQUIRE_EXTERNAL_REPORT_E2E:-0}" == "1" ]]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 record_lane() {
@@ -70,6 +109,10 @@ record_lane() {
     *) STATUS["${lane}"]="FAIL" ;;
   esac
   echo "[${lane}] ${STATUS[${lane}]}"
+}
+
+pytest_no_skips() {
+  SLEEPAGENT_PYTEST_FAIL_ON_SKIP=1 "${PYTHON_BIN}" -m pytest "$@"
 }
 
 postgres_preflight() {
@@ -94,62 +137,72 @@ postgres_prepare() {
 
 postgres_lane() {
   postgres_prepare || return $?
-  "${PYTHON_BIN}" -m pytest -q -m postgres
+  pytest_no_skips -q -m postgres
 }
 
-process_fault_lane() {
-  if [[ "${STATUS[POSTGRES]}" != "PASS" && "${REQUESTED}" != "process-fault" ]]; then
-    echo "controlled PostgreSQL fault proofs require a passing POSTGRES lane" >&2
+real_asgi_lane() {
+  pytest_no_skips -q -m asgi_lifespan \
+    tests/integration/test_backend_app.py
+}
+
+database_reclaim_foundation_lane() {
+  if [[ "${STATUS[POSTGRES]}" != "PASS" && "${REQUESTED}" != "database-reclaim" ]]; then
+    echo "database reclaim foundation requires a passing POSTGRES lane" >&2
     return 1
   fi
   postgres_prepare || return $?
-  "${PYTHON_BIN}" -m pytest -q \
+  pytest_no_skips -q \
     tests/unit/test_backend_process_fault_probe.py \
     tests/integration/test_backend_postgres_foundation.py \
     -m "not postgres" || return $?
-  "${PYTHON_BIN}" -m pytest -q -m postgres \
+  pytest_no_skips -q -m postgres \
     tests/integration/test_worker_postgres_integration.py \
     -k "expired_claim or reserved_invocation or delivery_reclaim or business_retry"
 }
 
-report_e2e_lane() {
-  if [[ "${SLEEPAGENT_E2E_REPORT_ENABLED:-}" == "1" ]]; then
-    local required=(
-      SLEEPAGENT_REPORT_BASE_URL
-      SLEEPAGENT_REPORT_SERVICE_CREDENTIAL
-      SLEEPAGENT_REPORT_ACTOR_PRIVATE_KEY
-      SLEEPAGENT_REPORT_ACTOR_ID
-      SLEEPAGENT_REPORT_SUBJECT_ID
-      SLEEPAGENT_REPORT_ROLE
-      SLEEPAGENT_E2E_REPORT_WAKE_DATE
-    )
-    local name
-    for name in "${required[@]}"; do
-      if [[ -z "${!name:-}" ]]; then
-        echo "missing report E2E variable: ${name}" >&2
-        return 77
-      fi
-    done
-    echo "REPORT_E2E_MODE=EXTERNAL_PROCESS"
-    "${PYTHON_BIN}" -m pytest -q tests/e2e/test_product_report_cli.py
-    return $?
-  fi
-  if [[ "${SLEEPAGENT_CLOSURE_REQUIRE_EXTERNAL_REPORT_E2E:-0}" == "1" ]]; then
-    echo "external report process proof was explicitly required but is not configured" >&2
-    return 77
-  fi
-  if [[ "${STATUS[POSTGRES]}" != "PASS" && "${REQUESTED}" != "report-e2e" ]]; then
-    echo "controlled report proof requires a passing POSTGRES lane" >&2
+process_fault_lane() {
+  SLEEPAGENT_E2E_PYTHON="${PYTHON_BIN}" \
+    "${REPOSITORY_ROOT}/scripts/verify_backend.sh" fault-process
+}
+
+report_contract_lane() {
+  if [[ "${STATUS[POSTGRES]}" != "PASS" && "${REQUESTED}" != "report-contract" ]]; then
+    echo "report contract proof requires a passing POSTGRES lane" >&2
     return 1
   fi
-  echo "REPORT_E2E_MODE=CONTROLLED_EQUIVALENT"
+  echo "REPORT_CONTRACT_MODE=CONTROLLED_REPOSITORY"
   postgres_prepare || return $?
-  "${PYTHON_BIN}" -m pytest -q \
+  pytest_no_skips -q \
     tests/unit/test_report_cli.py \
     tests/unit/test_product_report_contracts.py \
     tests/unit/test_report_consumer_audit.py || return $?
-  "${PYTHON_BIN}" -m pytest -q -m postgres \
+  pytest_no_skips -q -m postgres \
     tests/integration/test_product_postgres_integration.py::test_product_report_exact_reservation_and_stateless_reads_are_postgres_safe
+}
+
+report_external_e2e_lane() {
+  if [[ "${SLEEPAGENT_E2E_REPORT_ENABLED:-}" != "1" ]]; then
+    echo "external report E2E is not configured" >&2
+    return 77
+  fi
+  local required=(
+    SLEEPAGENT_REPORT_BASE_URL
+    SLEEPAGENT_REPORT_SERVICE_CREDENTIAL
+    SLEEPAGENT_REPORT_ACTOR_PRIVATE_KEY
+    SLEEPAGENT_REPORT_ACTOR_ID
+    SLEEPAGENT_REPORT_SUBJECT_ID
+    SLEEPAGENT_REPORT_ROLE
+    SLEEPAGENT_E2E_REPORT_WAKE_DATE
+  )
+  local name
+  for name in "${required[@]}"; do
+    if [[ -z "${!name:-}" ]]; then
+      echo "missing external report E2E variable: ${name}" >&2
+      return 77
+    fi
+  done
+  echo "REPORT_EXTERNAL_E2E_MODE=EXTERNAL_PROCESS"
+  pytest_no_skips -q -m e2e tests/e2e/test_product_report_cli.py
 }
 
 closure_lane() {
@@ -167,7 +220,7 @@ closure_lane() {
     return $?
   fi
   postgres_prepare || return $?
-  "${PYTHON_BIN}" -m pytest -q -m postgres \
+  pytest_no_skips -q -m postgres \
     tests/integration/test_perceptor_pull_postgres.py::test_push_pull_reconciliation_and_crash_replay_postgres \
     tests/integration/test_product_postgres_integration.py::test_soft_report_before_hard_automatically_reevaluates_care \
     tests/integration/test_c3_personalization_governance_postgres.py::test_c3_receipt_governance_and_next_shared_analysis_process_proof
@@ -177,27 +230,37 @@ if selected static; then
   record_lane STATIC "${PYTHON_BIN}" -m compileall -q sleepagent scripts tests
 fi
 if selected architecture; then
-  record_lane ARCHITECTURE "${PYTHON_BIN}" -m pytest -q tests/architecture
+  record_lane ARCHITECTURE pytest_no_skips -q tests/architecture
 fi
 if selected openapi; then
-  record_lane OPENAPI "${PYTHON_BIN}" -m pytest -q \
-    tests/integration/test_backend_app.py -k openapi -m "not postgres"
+  record_lane OPENAPI pytest_no_skips -q \
+    tests/integration/test_backend_app.py -k openapi \
+    -m "not postgres and not asgi_lifespan and not e2e"
 fi
 if selected unit-contract; then
-  record_lane UNIT_CONTRACT "${PYTHON_BIN}" -m pytest -q \
-    -m "not postgres and not e2e and not asgi_lifespan"
+  record_lane UNIT_CONTRACT pytest_no_skips -q \
+    -m "not postgres and not e2e and not asgi_lifespan and not process_harness"
 fi
 if selected postgres; then
   record_lane POSTGRES postgres_lane
 fi
-if selected process-fault; then
-  record_lane PROCESS_FAULT process_fault_lane
+if selected real-asgi; then
+  record_lane REAL_ASGI real_asgi_lane
 fi
-if selected report-e2e; then
-  record_lane REPORT_E2E report_e2e_lane
+if selected database-reclaim; then
+  record_lane DATABASE_RECLAIM_FOUNDATION database_reclaim_foundation_lane
+fi
+if selected report-contract; then
+  record_lane REPORT_CONTRACT report_contract_lane
 fi
 if selected closure; then
   record_lane CLOSURE_C1A_C1B_C2_C3 closure_lane
+fi
+if selected_optional process-fault; then
+  record_lane PROCESS_FAULT process_fault_lane
+fi
+if selected_optional report-external-e2e; then
+  record_lane REPORT_EXTERNAL_E2E report_external_e2e_lane
 fi
 echo
 for lane in "${LANES[@]}"; do
@@ -206,10 +269,21 @@ done
 
 final="PASS"
 if [[ "${REQUESTED}" == "release" || "${REQUESTED}" == "all" ]]; then
-  for lane in "${LANES[@]}"; do
+  verdict_lanes=("${REQUIRED_RELEASE_LANES[@]}")
+  if [[ "${REQUESTED}" == "all" ]]; then
+    verdict_lanes=("${LANES[@]}")
+  else
+    if [[ "${SLEEPAGENT_CLOSURE_REQUIRE_PROCESS_FAULT:-0}" == "1" ]]; then
+      verdict_lanes+=(PROCESS_FAULT)
+    fi
+    if [[ "${SLEEPAGENT_CLOSURE_REQUIRE_EXTERNAL_REPORT_E2E:-0}" == "1" ]]; then
+      verdict_lanes+=(REPORT_EXTERNAL_E2E)
+    fi
+  fi
+  for lane in "${verdict_lanes[@]}"; do
     case "${STATUS[${lane}]}" in
       FAIL) final="FAIL"; break ;;
-      ENV_BLOCKED|SKIPPED_EXPLICIT) final="NOT_VERIFIED" ;;
+      ENV_BLOCKED|SKIPPED_EXPLICIT|NOT_RUN) final="NOT_VERIFIED" ;;
     esac
   done
 else

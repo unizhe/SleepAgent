@@ -5,21 +5,23 @@ SleepAgent supports Python 3.11 and PostgreSQL 16. `compose.yaml` is a developme
 ## Startup and activation
 
 1. Start PostgreSQL 16.
-2. Apply/check schema target 027 with the migration owner.
+2. Apply/check schema target 028 with the migration owner.
 3. Start API profiles and require `/livez`; for the protected internal profile, require authenticated `/internal/readyz`.
 4. Start workers with an explicit queue list and require `python -m sleepagent.workers.runtime healthcheck` under that exact profile.
-5. Start the scheduler with `SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=false`.
+5. With `SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=false`, run one bounded scheduler safety probe.
 6. Inspect protected aggregate operational status, then enable the scheduler only in the controlled live profile that owns the intended Perceptor account/namespace.
 
 ```bash
 python -m sleepagent.persistence.migrate check
 python -m sleepagent.persistence.migrate status
 python -m sleepagent.workers.runtime healthcheck
+export SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=false
 python -m sleepagent.bootstrap.scheduler once
+export SLEEPAGENT_BACKEND_ACQUISITION_SCHEDULER_ENABLED=true
 python -m sleepagent.bootstrap.scheduler run
 ```
 
-The scheduler is disabled by default. Disabled scans report zero fires and perform no authoritative acquisition write. Enabling it is an operator deployment decision.
+The scheduler is disabled by default. `scheduler once` is the bounded disabled-state probe: it reports zero fires and performs no authoritative acquisition write. `scheduler run` requires the setting to be explicitly `true`; running it while disabled exits 2. Enabling continuous scheduling is an operator deployment decision.
 
 ## Required worker queues
 
@@ -65,4 +67,6 @@ See [durable runtime operations](operations/runtime-operations.md) and [Percepto
 scripts/verify_closure.sh release --env-file .env.test
 ```
 
-The command reports `STATIC`, `ARCHITECTURE`, `OPENAPI`, `UNIT_CONTRACT`, `POSTGRES`, `PROCESS_FAULT`, `REPORT_E2E`, and `CLOSURE_C1A_C1B_C2_C3`. Lane states are `PASS`, `FAIL`, `ENV_BLOCKED`, or `SKIPPED_EXPLICIT`; a required blocked/skipped lane cannot produce `FINAL = PASS`.
+The required release contract reports `STATIC`, `ARCHITECTURE`, `OPENAPI`, `UNIT_CONTRACT`, `POSTGRES`, `REAL_ASGI`, `DATABASE_RECLAIM_FOUNDATION`, `REPORT_CONTRACT`, and `CLOSURE_C1A_C1B_C2_C3`. Required pytest lanes fail on any unexpected skip.
+
+`PROCESS_FAULT` and `REPORT_EXTERNAL_E2E` are separate optional capabilities and report `NOT_RUN` in the default release matrix. `PROCESS_FAULT` runs the Docker/Compose worker-kill and process/PostgreSQL restart harness; `REPORT_EXTERNAL_E2E` requires an explicitly configured external report boundary. Neither `NOT_RUN` state is presented as PASS or included in the default required verdict. Set `SLEEPAGENT_CLOSURE_REQUIRE_PROCESS_FAULT=1` or `SLEEPAGENT_CLOSURE_REQUIRE_EXTERNAL_REPORT_E2E=1` to make that capability required for a particular release invocation; an unavailable required capability yields `FINAL = NOT_VERIFIED`.
