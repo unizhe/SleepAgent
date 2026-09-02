@@ -18,10 +18,13 @@ RUNTIME_MIGRATION = ROOT / (
 CARE_MIGRATION = ROOT / (
     "sleepagent/persistence/migrations/027_care_operational_access_closure.sql"
 )
+WORKER_AUTHORITY_MIGRATION = ROOT / (
+    "sleepagent/persistence/migrations/028_worker_authority_boundaries.sql"
+)
 
 
 def test_r1_is_manifest_pinned_as_two_additive_migrations() -> None:
-    assert LATEST_SCHEMA_VERSION == 27
+    assert LATEST_SCHEMA_VERSION >= 27
     assert any(
         identity.startswith("026:026_runtime_reliability_closure:")
         for identity in EXPECTED_MIGRATION_IDENTITIES
@@ -32,6 +35,32 @@ def test_r1_is_manifest_pinned_as_two_additive_migrations() -> None:
     )
     assert RUNTIME_MIGRATION.is_file()
     assert CARE_MIGRATION.is_file()
+
+
+def test_p0b_worker_authority_is_manifest_pinned_as_additive_028() -> None:
+    assert LATEST_SCHEMA_VERSION == 28
+    assert any(
+        identity.startswith("028:028_worker_authority_boundaries:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
+    )
+    body = WORKER_AUTHORITY_MIGRATION.read_text(encoding="utf-8")
+    for claim_name in (
+        "sleepagent_claim_normalization_work",
+        "sleepagent_claim_operation",
+        "sleepagent_claim_delivery",
+        "sleepagent_claim_retention_job",
+    ):
+        assert claim_name in body
+    assert "sleepagent_exhaust_authorized_reclaims_v2" in body
+    assert "sleepagent_worker_claim_authority_v2" in body
+    assert "LIMIT requested_limit" in body
+    assert body.count("FOR UPDATE") >= 5
+    assert "sleepagent_ensure_delivery_reconciliation_v2" in body
+    assert (
+        "ALTER TABLE public.sleep_domain_provider_accounts "
+        "FORCE ROW LEVEL SECURITY"
+    ) in body
+    assert "ALTER TABLE public.sleep_domain_quarantine FORCE ROW LEVEL SECURITY" in body
 
 
 def test_r1_reclaim_budget_is_independent_and_covers_all_claim_kinds() -> None:

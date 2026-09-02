@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 27,
+  "target_version": 28,
   "migrations": [
     {
       "version": 1,
@@ -188,6 +188,13 @@
       "version": 27,
       "filename": "027_care_operational_access_closure.sql",
       "sha256": "5315c005b66acba351ebe3bab0f8f0c015d87841de6d49b9fdbc035485c04339",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 28,
+      "filename": "028_worker_authority_boundaries.sql",
+      "sha256": "4ac13a1b65c0c652d7fd51cacf80f3c22c15c752aac893d1a3246b7bda9f23d1",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

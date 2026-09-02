@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterator
 from uuid import uuid4
 
@@ -25,6 +25,7 @@ from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
     UnitOfWorkFactory,
+    UowScope,
 )
 from sleepagent.workers.runtime import (
     InvocationDispatcher,
@@ -60,6 +61,9 @@ class _AttemptBudgetHarness:
     subject_id: str
     worker_principal: str
     provider_account_id: str
+    foreign_namespace_id: str
+    foreign_subject_id: str
+    foreign_provider_account_id: str
     operation_queue: str
     delivery_destination: str
     delivery_handler: str
@@ -78,6 +82,9 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
     namespace_id = f"live:attempt-budget-{suffix}"
     subject_id = f"subject-{suffix}"
     provider_account_id = f"provider-account-{suffix}"
+    foreign_namespace_id = f"live:attempt-budget-foreign-{suffix}"
+    foreign_subject_id = f"subject-foreign-{suffix}"
+    foreign_provider_account_id = f"provider-account-foreign-{suffix}"
     operation_queue = f"attempt-operation-{suffix}"
     delivery_destination = f"attempt-destination-{suffix}"
     delivery_handler = f"attempt-delivery-{suffix}"
@@ -125,7 +132,7 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
                   configuration_fingerprint, status, account_metadata_json,
                   created_at
                 ) VALUES (
-                  %s, 'live', %s, 'attempt-provider', %s, 'active',
+                  %s, 'live', %s, 'perceptor', %s, 'active',
                   '{}'::jsonb, clock_timestamp()
                 )
                 """,
@@ -156,8 +163,67 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
                             operation_queue,
                             delivery_handler,
                             "retention",
+                            "reconciliation",
+                            "perceptor.history_overlap_pull",
                         ]
                     ),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_namespaces (
+                  namespace_id, data_mode, current_generation, status,
+                  synthetic_non_release
+                ) VALUES (%s, 'live', 1, 'active', FALSE)
+                """,
+                (foreign_namespace_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_namespace_generations (
+                  namespace_id, data_mode, generation, status,
+                  configuration_sha256
+                ) VALUES (%s, 'live', 1, 'active', %s)
+                """,
+                (
+                    foreign_namespace_id,
+                    hashlib.sha256(foreign_namespace_id.encode()).hexdigest(),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_subjects (
+                  namespace_id, data_mode, subject_id, timezone_name, status
+                ) VALUES (%s, 'live', %s, 'Asia/Shanghai', 'active')
+                """,
+                (foreign_namespace_id, foreign_subject_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.backend_subject_epochs (
+                  namespace_id, data_mode, subject_id, authorization_epoch,
+                  privacy_epoch, retrieval_policy_epoch
+                ) VALUES (%s, 'live', %s, 1, 1, 1)
+                """,
+                (foreign_namespace_id, foreign_subject_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO public.sleep_domain_provider_accounts (
+                  namespace_id, data_mode, provider_account_id, provider_id,
+                  configuration_fingerprint, status, account_metadata_json,
+                  created_at
+                ) VALUES (
+                  %s, 'live', %s, 'perceptor', %s, 'active',
+                  '{}'::jsonb, clock_timestamp()
+                )
+                """,
+                (
+                    foreign_namespace_id,
+                    foreign_provider_account_id,
+                    hashlib.sha256(
+                        foreign_provider_account_id.encode()
+                    ).hexdigest(),
                 ),
             )
 
@@ -177,6 +243,7 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
             operation_queue,
             f"delivery:{delivery_destination}",
             "retention",
+            "reconciliation",
         ),
         service_credential_ref="test:worker-service",
         signing_key_ref="test:worker-signing",
@@ -202,6 +269,9 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
             subject_id=subject_id,
             worker_principal=worker_principal,
             provider_account_id=provider_account_id,
+            foreign_namespace_id=foreign_namespace_id,
+            foreign_subject_id=foreign_subject_id,
+            foreign_provider_account_id=foreign_provider_account_id,
             operation_queue=operation_queue,
             delivery_destination=delivery_destination,
             delivery_handler=delivery_handler,
@@ -216,18 +286,18 @@ def attempt_budget_harness() -> Iterator[_AttemptBudgetHarness]:
                 "lease_owner = NULL, worker_instance = NULL, "
                 "fencing_token = NULL, heartbeat_at = NULL, "
                 "lease_expires_at = NULL, updated_at = clock_timestamp() "
-                "WHERE namespace_id = %s "
+                "WHERE namespace_id IN (%s, %s) "
                 "AND status IN ('pending', 'retry', 'running')",
-                (namespace_id,),
+                (namespace_id, foreign_namespace_id),
             )
             admin.execute(
                 "UPDATE public.backend_retention_jobs "
                 "SET status = 'dead_letter', worker_instance = NULL, "
                 "fencing_token = NULL, heartbeat_at = NULL, "
                 "lease_expires_at = NULL, updated_at = clock_timestamp() "
-                "WHERE namespace_id = %s "
+                "WHERE namespace_id IN (%s, %s) "
                 "AND status IN ('pending', 'retry', 'running')",
-                (namespace_id,),
+                (namespace_id, foreign_namespace_id),
             )
             admin.execute(
                 "UPDATE public.backend_principal_grants "
@@ -320,7 +390,7 @@ def _insert_normalization(
                   raw_metadata_json, scope_protocol_version,
                   namespace_generation, subject_id
                 ) VALUES (
-                  %s, %s, 'live', 'attempt-provider', %s, 'attempt.event',
+                  %s, %s, 'live', 'perceptor', %s, 'attempt.event',
                   clock_timestamp(), 'verified', %s, 'v1', %s, %s,
                   'attempt-key', clock_timestamp(), 'application/json', 2,
                   clock_timestamp() + interval '1 day', '{}'::jsonb, 2, 1, %s
@@ -996,6 +1066,252 @@ def test_expired_claim_reclaim_budget_routes_to_governed_terminal_state(
         assert operation_queue["lease_reclaim_count"] >= 2
 
 
+@pytest.mark.parametrize(
+    ("kind", "own_terminal_status"),
+    [
+        ("normalization", "quarantined"),
+        ("operation", "dead_letter"),
+        ("delivery", "dead_letter"),
+        ("retention", "dead_letter"),
+    ],
+)
+def test_reclaim_exhaustion_is_exactly_scoped_to_worker_grants(
+    attempt_budget_harness: _AttemptBudgetHarness,
+    kind: str,
+    own_terminal_status: str,
+) -> None:
+    foreign = replace(
+        attempt_budget_harness,
+        namespace_id=attempt_budget_harness.foreign_namespace_id,
+        subject_id=attempt_budget_harness.foreign_subject_id,
+        provider_account_id=attempt_budget_harness.foreign_provider_account_id,
+    )
+    queue, own_id = _queue_and_work_id(
+        attempt_budget_harness,
+        kind,
+        max_attempts=1,
+    )
+    _, foreign_id = _queue_and_work_id(foreign, kind, max_attempts=1)
+    table, identifier = {
+        "normalization": ("sleep_domain_normalization_work", "work_id"),
+        "operation": ("sleep_domain_operations", "operation_id"),
+        "delivery": ("backend_delivery_intents", "delivery_intent_id"),
+        "retention": ("backend_retention_jobs", "retention_job_id"),
+    }[kind]
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        admin.execute(
+            f"UPDATE public.{table} SET status = 'running', "
+            "attempt_count = 1, lease_generation = 1, "
+            "execution_reclaim_count = 1, max_execution_reclaims = 1, "
+            "worker_instance = 'crashed-worker', "
+            "fencing_token = '00000000-0000-4000-8000-000000000001', "
+            "available_at = clock_timestamp() - interval '2 seconds', "
+            "lease_expires_at = clock_timestamp() - interval '1 second', "
+            "updated_at = clock_timestamp() - interval '1 second' "
+            + (
+                ", lease_owner = 'crashed-worker' "
+                if kind == "normalization"
+                else ""
+            )
+            + f"WHERE {identifier} IN (%s, %s)",
+            (own_id, foreign_id),
+        )
+
+    assert attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance=f"{kind}-scoped-exhaustion",
+        lease_seconds=30,
+    ) is None
+
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        rows = admin.execute(
+            f"SELECT {identifier}, status, execution_reclaim_count, "
+            f"worker_instance, fencing_token FROM public.{table} "
+            f"WHERE {identifier} IN (%s, %s) ORDER BY {identifier}",
+            (own_id, foreign_id),
+        ).fetchall()
+    by_id = {str(row[0]): row[1:] for row in rows}
+    assert by_id[own_id] == (own_terminal_status, 1, None, None)
+    assert by_id[foreign_id] == (
+        "running",
+        1,
+        "crashed-worker",
+        "00000000-0000-4000-8000-000000000001",
+    )
+
+
+def test_worker_provider_and_quarantine_tables_fail_closed_at_postgres_boundary(
+    attempt_budget_harness: _AttemptBudgetHarness,
+) -> None:
+    foreign = replace(
+        attempt_budget_harness,
+        namespace_id=attempt_budget_harness.foreign_namespace_id,
+        subject_id=attempt_budget_harness.foreign_subject_id,
+        provider_account_id=attempt_budget_harness.foreign_provider_account_id,
+    )
+    own_work_id = _insert_normalization(attempt_budget_harness, max_attempts=1)
+    foreign_work_id = _insert_normalization(foreign, max_attempts=1)
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        raw_rows = admin.execute(
+            "SELECT work_id, raw_ingress_record_id "
+            "FROM public.sleep_domain_normalization_work "
+            "WHERE work_id IN (%s, %s)",
+            (own_work_id, foreign_work_id),
+        ).fetchall()
+        raw_by_work = {str(row[0]): str(row[1]) for row in raw_rows}
+        own_raw_id = raw_by_work[own_work_id]
+        foreign_raw_id = raw_by_work[foreign_work_id]
+        own_receipt_id = f"receipt-own-{attempt_budget_harness.suffix}"
+        foreign_receipt_id = f"receipt-foreign-{attempt_budget_harness.suffix}"
+        admin.execute(
+            """
+            INSERT INTO public.sleep_domain_processing_receipts (
+              receipt_id, namespace_id, data_mode, raw_ingress_record_id,
+              stage, outcome, receipt_json, occurred_at
+            ) VALUES
+              (%s, %s, 'live', %s, 'normalization', 'quarantined',
+               '{}'::jsonb, clock_timestamp()),
+              (%s, %s, 'live', %s, 'normalization', 'quarantined',
+               '{}'::jsonb, clock_timestamp())
+            """,
+            (
+                own_receipt_id,
+                attempt_budget_harness.namespace_id,
+                own_raw_id,
+                foreign_receipt_id,
+                foreign.namespace_id,
+                foreign_raw_id,
+            ),
+        )
+        device_binding_id = f"binding-own-{attempt_budget_harness.suffix}"
+        admin.execute(
+            """
+            INSERT INTO public.sleep_domain_device_bindings (
+              device_binding_id, namespace_id, data_mode, binding_version,
+              device_id, provider_id, provider_account_id, subject_id,
+              timezone_name, effective_from, status, binding_json, recorded_at
+            ) VALUES (
+              %s, %s, 'live', 1, %s, 'perceptor', %s, %s,
+              'Asia/Shanghai', clock_timestamp() - interval '2 hours',
+              'active', '{}'::jsonb, clock_timestamp() - interval '2 hours'
+            )
+            """,
+            (
+                device_binding_id,
+                attempt_budget_harness.namespace_id,
+                f"device-own-{attempt_budget_harness.suffix}",
+                attempt_budget_harness.provider_account_id,
+                attempt_budget_harness.subject_id,
+            ),
+        )
+
+    scope = UowScope(
+        namespace_id=attempt_budget_harness.namespace_id,
+        namespace_generation=1,
+        data_mode="live",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id=attempt_budget_harness.worker_principal,
+        subject_id=attempt_budget_harness.subject_id,
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-authority-matrix",
+    )
+    for table in (
+        "sleep_domain_provider_accounts",
+        "sleep_domain_quarantine",
+    ):
+        with pytest.raises(
+            attempt_budget_harness.psycopg.errors.InsufficientPrivilege
+        ):
+            with attempt_budget_harness.store.uow_factory.begin(scope) as uow:
+                uow.connection.execute(f"SELECT count(*) FROM public.{table}")
+
+    with attempt_budget_harness.store.uow_factory.begin(scope) as uow:
+        provider_path = uow.connection.execute(
+            """
+            SELECT * FROM public.sleepagent_plan_perceptor_history(
+              %s, 1, %s, %s, 1, %s,
+              date_trunc('second', clock_timestamp()) - interval '30 minutes',
+              date_trunc('second', clock_timestamp())
+            )
+            """,
+            (
+                attempt_budget_harness.namespace_id,
+                attempt_budget_harness.provider_account_id,
+                device_binding_id,
+                attempt_budget_harness.subject_id,
+            ),
+        ).fetchone()
+        assert provider_path is not None
+        uow.commit()
+
+    own_quarantine_id = f"quarantine-own-{attempt_budget_harness.suffix}"
+    with attempt_budget_harness.store.uow_factory.begin(scope) as uow:
+        uow.connection.execute(
+            """
+            INSERT INTO public.sleep_domain_quarantine (
+              quarantine_id, namespace_id, data_mode, raw_ingress_record_id,
+              reason, detail_code, receipt_id, quarantine_json, quarantined_at
+            ) VALUES (
+              %s, %s, 'live', %s, 'malformed_payload', 'test-own', %s,
+              '{}'::jsonb, clock_timestamp()
+            )
+            """,
+            (
+                own_quarantine_id,
+                attempt_budget_harness.namespace_id,
+                own_raw_id,
+                own_receipt_id,
+            ),
+        )
+        uow.commit()
+
+    with pytest.raises(
+        attempt_budget_harness.psycopg.errors.InsufficientPrivilege
+    ):
+        with attempt_budget_harness.store.uow_factory.begin(scope) as uow:
+            uow.connection.execute(
+                """
+                INSERT INTO public.sleep_domain_quarantine (
+                  quarantine_id, namespace_id, data_mode,
+                  raw_ingress_record_id, reason, detail_code, receipt_id,
+                  quarantine_json, quarantined_at
+                ) VALUES (
+                  %s, %s, 'live', %s, 'malformed_payload', 'test-forged', %s,
+                  '{}'::jsonb, clock_timestamp()
+                )
+                """,
+                (
+                    f"quarantine-forged-{attempt_budget_harness.suffix}",
+                    foreign.namespace_id,
+                    foreign_raw_id,
+                    foreign_receipt_id,
+                ),
+            )
+
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        assert admin.execute(
+            "SELECT count(*) FROM public.sleep_domain_quarantine "
+            "WHERE quarantine_id = %s",
+            (own_quarantine_id,),
+        ).fetchone() == (1,)
+        assert admin.execute(
+            "SELECT count(*) FROM public.sleep_domain_quarantine "
+            "WHERE quarantine_id = %s",
+            (f"quarantine-forged-{attempt_budget_harness.suffix}",),
+        ).fetchone() == (0,)
+
+
 def test_reserved_invocation_rebinds_once_and_old_generation_stays_fenced(
     attempt_budget_harness: _AttemptBudgetHarness,
 ) -> None:
@@ -1226,6 +1542,224 @@ def test_delivery_reclaim_preserves_send_started_reconciliation_boundary(
                 "send_started",
                 ["reserved", "send_started"],
             )
+
+
+def test_delivery_exhaustion_preserves_ambiguity_and_creates_one_reconciliation(
+    attempt_budget_harness: _AttemptBudgetHarness,
+) -> None:
+    queue, work_id = _queue_and_work_id(
+        attempt_budget_harness,
+        "delivery",
+        max_attempts=1,
+    )
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        admin.execute(
+            "UPDATE public.backend_delivery_intents "
+            "SET max_execution_reclaims = 1 "
+            "WHERE delivery_intent_id = %s",
+            (work_id,),
+        )
+
+    first = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-ambiguous-crash-1",
+        lease_seconds=30,
+    )
+    assert first is not None
+    invocation_key = (
+        "replay-delivery:"
+        + str(first.metadata["semantic_effect_key"])
+        + ":v1"
+    )
+    request = {"payload_sha256": "b" * 64}
+    send_calls = 0
+
+    def crash_after_external_send_begins():
+        nonlocal send_calls
+        send_calls += 1
+        raise _SimulatedProcessCrash
+
+    with pytest.raises(_SimulatedProcessCrash):
+        InvocationDispatcher(
+            store=attempt_budget_harness.store,
+            claim=first,
+            lease_lost=threading.Event(),
+        ).dispatch(
+            invocation_key=invocation_key,
+            request=request,
+            sender=crash_after_external_send_begins,
+        )
+    assert send_calls == 1
+
+    _expire_work(attempt_budget_harness, kind="delivery", work_id=work_id)
+    second = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-ambiguous-crash-2",
+        lease_seconds=30,
+    )
+    assert second is not None
+    assert second.lease_generation == 2
+
+    def forbidden_blind_resend():
+        nonlocal send_calls
+        send_calls += 1
+        return {"delivered": True}, None
+
+    with pytest.raises(
+        OutcomeUnknownError,
+        match="prior_send_requires_reconciliation",
+    ):
+        InvocationDispatcher(
+            store=attempt_budget_harness.store,
+            claim=second,
+            lease_lost=threading.Event(),
+        ).dispatch(
+            invocation_key=invocation_key,
+            request=request,
+            sender=forbidden_blind_resend,
+        )
+    assert send_calls == 1
+
+    _expire_work(attempt_budget_harness, kind="delivery", work_id=work_id)
+    assert attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-ambiguity-exhaustion",
+        lease_seconds=30,
+    ) is None
+    assert attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-idempotent-recheck",
+        lease_seconds=30,
+    ) is None
+
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        row = admin.execute(
+            """
+            SELECT intent.status, invocation.current_state,
+                   count(reconciliation.operation_id),
+                   min(reconciliation.operation_id)
+            FROM public.backend_delivery_intents AS intent
+            JOIN public.sleep_domain_domain_outbox AS event
+              ON event.event_id = intent.source_event_id
+            JOIN public.backend_invocations AS invocation
+              ON invocation.operation_id = event.operation_id
+             AND invocation.invocation_kind = 'external_sink'
+            LEFT JOIN public.sleep_domain_operations AS reconciliation
+              ON reconciliation.namespace_id = intent.namespace_id
+             AND reconciliation.data_mode = intent.data_mode
+             AND reconciliation.namespace_generation =
+                 intent.namespace_generation
+             AND reconciliation.operation_type = 'delivery_reconciliation'
+             AND reconciliation.target_resource_id = intent.delivery_intent_id
+            WHERE intent.delivery_intent_id = %s
+            GROUP BY intent.status, invocation.current_state
+            """,
+            (work_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[:3] == ("outcome_unknown", "send_started", 1)
+    reconciliation = attempt_budget_harness.store.claim(
+        queue="reconciliation",
+        worker_instance="delivery-reconciliation-worker",
+        lease_seconds=30,
+    )
+    assert reconciliation is not None
+    assert reconciliation.work_id == row[3]
+    assert attempt_budget_harness.store.finalize(
+        reconciliation,
+        WorkResult(disposition=WorkDisposition.SUCCEEDED),
+    ) is True
+    assert send_calls == 1
+
+
+def test_delivery_exhaustion_preserves_known_completed_outcome(
+    attempt_budget_harness: _AttemptBudgetHarness,
+) -> None:
+    queue, work_id = _queue_and_work_id(
+        attempt_budget_harness,
+        "delivery",
+        max_attempts=1,
+    )
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        admin.execute(
+            "UPDATE public.backend_delivery_intents "
+            "SET max_execution_reclaims = 1 "
+            "WHERE delivery_intent_id = %s",
+            (work_id,),
+        )
+    first = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-known-crash-1",
+        lease_seconds=30,
+    )
+    assert first is not None
+    invocation_key = (
+        "replay-delivery:"
+        + str(first.metadata["semantic_effect_key"])
+        + ":v1"
+    )
+    request = {"payload_sha256": "c" * 64}
+    send_calls = 0
+
+    def completed_sender():
+        nonlocal send_calls
+        send_calls += 1
+        return {"delivered": True}, "provider-request-id"
+
+    assert InvocationDispatcher(
+        store=attempt_budget_harness.store,
+        claim=first,
+        lease_lost=threading.Event(),
+    ).dispatch(
+        invocation_key=invocation_key,
+        request=request,
+        sender=completed_sender,
+    ) == {"delivered": True}
+
+    _expire_work(attempt_budget_harness, kind="delivery", work_id=work_id)
+    second = attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-known-crash-2",
+        lease_seconds=30,
+    )
+    assert second is not None
+    assert InvocationDispatcher(
+        store=attempt_budget_harness.store,
+        claim=second,
+        lease_lost=threading.Event(),
+    ).dispatch(
+        invocation_key=invocation_key,
+        request=request,
+        sender=completed_sender,
+    ) == {"delivered": True}
+    assert send_calls == 1
+
+    _expire_work(attempt_budget_harness, kind="delivery", work_id=work_id)
+    assert attempt_budget_harness.store.claim(
+        queue=queue,
+        worker_instance="delivery-known-exhaustion",
+        lease_seconds=30,
+    ) is None
+    with attempt_budget_harness.psycopg.connect(
+        attempt_budget_harness.admin_dsn
+    ) as admin:
+        assert admin.execute(
+            "SELECT status FROM public.backend_delivery_intents "
+            "WHERE delivery_intent_id = %s",
+            (work_id,),
+        ).fetchone() == ("delivered",)
+        assert admin.execute(
+            "SELECT count(*) FROM public.sleep_domain_operations "
+            "WHERE operation_type = 'delivery_reconciliation' "
+            "AND target_resource_id = %s",
+            (work_id,),
+        ).fetchone() == (0,)
 
 
 def test_business_retry_advances_attempt_and_last_attempt_can_be_reclaimed(

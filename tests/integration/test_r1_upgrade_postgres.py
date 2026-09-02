@@ -16,7 +16,7 @@ from tests.integration.test_observation_semantics_v2_postgres import (
 pytestmark = pytest.mark.postgres
 
 
-def test_r1_upgrade_025_to_027_is_additive_and_security_complete() -> None:
+def test_r1_upgrade_025_to_latest_is_additive_and_security_complete() -> None:
     psycopg = pytest.importorskip("psycopg")
     admin_dsn = os.environ.get("SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN", "").strip()
     if not admin_dsn:
@@ -32,8 +32,8 @@ def test_r1_upgrade_025_to_027_is_additive_and_security_complete() -> None:
                 "SELECT max(version) FROM public.sleepagent_schema_migrations"
             ).fetchone() == (25,)
             runner = PostgresMigrationRunner(admin, applied_by="r1-upgrade-proof")
-            assert runner.apply() == LATEST_SCHEMA_VERSION == 27
-            assert runner.check() == 27
+            assert runner.apply() == LATEST_SCHEMA_VERSION == 28
+            assert runner.check() == 28
             assert admin.execute(
                 "SELECT count(*) FROM information_schema.columns "
                 "WHERE table_schema='public' "
