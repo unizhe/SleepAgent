@@ -1,0 +1,72 @@
+name: Closure CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  supported-foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sleepagent_replay_test
+          POSTGRES_USER: sleepagent_test_migration
+          POSTGRES_PASSWORD: test-only-migration-password
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U sleepagent_test_migration -d sleepagent_replay_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements/dev.lock
+
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements/dev.lock
+
+      - name: Prepare isolated PostgreSQL schema and roles
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env.test.example
+          set +a
+          export SLEEPAGENT_BACKEND_SIGNING_KEY_REF="file:$PWD/tests/fixtures/keys/replay_actor_public.pem"
+          export SLEEPAGENT_BOOTSTRAP_API_DATABASE_ROLE="$SLEEPAGENT_TEST_POSTGRES_API_USER"
+          export SLEEPAGENT_BOOTSTRAP_API_DATABASE_PASSWORD="$SLEEPAGENT_TEST_POSTGRES_API_PASSWORD"
+          export SLEEPAGENT_BOOTSTRAP_DEMO_DATABASE_ROLE="$SLEEPAGENT_TEST_POSTGRES_DEMO_USER"
+          export SLEEPAGENT_BOOTSTRAP_DEMO_DATABASE_PASSWORD="$SLEEPAGENT_TEST_POSTGRES_DEMO_PASSWORD"
+          export SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_ROLE="$SLEEPAGENT_TEST_POSTGRES_WORKER_USER"
+          export SLEEPAGENT_BOOTSTRAP_WORKER_DATABASE_PASSWORD="$SLEEPAGENT_TEST_POSTGRES_WORKER_PASSWORD"
+          export SLEEPAGENT_BOOTSTRAP_API_SERVICE_PRINCIPAL_ID="$SLEEPAGENT_TEST_POSTGRES_API_PRINCIPAL"
+          export SLEEPAGENT_BOOTSTRAP_DEMO_SERVICE_PRINCIPAL_ID="$SLEEPAGENT_TEST_POSTGRES_DEMO_PRINCIPAL"
+          export SLEEPAGENT_BOOTSTRAP_WORKER_SERVICE_PRINCIPAL_ID="$SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
+          export SLEEPAGENT_BOOTSTRAP_ACTOR_VERIFICATION_KEY_SHA256="$SLEEPAGENT_TEST_ACTOR_PUBLIC_KEY_SHA256"
+          python -m sleepagent.persistence.migrate \
+            --database-url-env SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN apply
+          SLEEPAGENT_BACKEND_DATABASE_DSN="$SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN" \
+            python -m sleepagent.persistence.test_bootstrap
+          python -m sleepagent.persistence.migrate \
+            --database-url-env SLEEPAGENT_TEST_POSTGRES_ADMIN_DSN check
+
+      - name: Required release verifier
+        run: scripts/verify_closure.sh release --env-file .env.test.example
+
+      - name: Explain full release evidence
+        run: |
+          echo "Hosted CI is configured to run the required local release contract, including real ASGI, PostgreSQL, database-reclaim foundation, and controlled report lanes."
+          echo "PROCESS_FAULT and REPORT_EXTERNAL_E2E remain separately configured optional capabilities; this message is not a receipt for unpushed source."

@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 7,
+  "target_version": 31,
   "migrations": [
     {
       "version": 1,
@@ -48,6 +48,174 @@
       "version": 7,
       "filename": "007_stage6_system_hardening.sql",
       "sha256": "08bd381723afd3c533d27d6a01596619f7ecf33619f2a76c03b6ecdfba1be0dc",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 8,
+      "filename": "008_durable_claim_attempt_ownership.sql",
+      "sha256": "1dd45914508f628bed4632d6a4da5a86697bf5a69ef8783f14e46b26e7fe3b45",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 9,
+      "filename": "009_l2_habit_and_governed_memory.sql",
+      "sha256": "5b088c2e5f9ef13da8f63961820367fb8ee54f5aaa4e31b37a70238a51905cff",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 10,
+      "filename": "010_terminal_demo_technical_trace.sql",
+      "sha256": "e4c227d4fea8e9616c146739e8ab57d5a744c1236fcb09bb1802c77ea93bbe85",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 11,
+      "filename": "011_perceptor_push_ingress.sql",
+      "sha256": "dd031b1058ba8d793b504da66c6e2124409238437cce2c50407837c410d25cbd",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 12,
+      "filename": "012_perceptor_pull_reconciliation.sql",
+      "sha256": "a29569521274a1e2bc823b24433249d2f94f91810a7f3c6a781eceed8b373b29",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 13,
+      "filename": "013_perceptor_pull_retry_noop.sql",
+      "sha256": "0809507f81dc2aa7a105d324338a26016fcbd3b84e5a08ff68dd9bf4c04822c1",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 14,
+      "filename": "014_observation_semantics_v2.sql",
+      "sha256": "96756b31a3515b82756ef2ab0c30b432a6b259a185000993002bfacbc661a368",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 15,
+      "filename": "015_device_binding_authority.sql",
+      "sha256": "0fe864b19425b79abc38a61161891d555efe7c2c38d04b0fd7b4a65716fa725f",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 16,
+      "filename": "016_acquisition_scheduler.sql",
+      "sha256": "3ab3af991e644cca3d89153081e48dad3f59bfd18defdbfd31a93753535bffcd",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 17,
+      "filename": "017_night_finalization.sql",
+      "sha256": "669f46e71972c146b793afa5b4ececfd106a0b24fea53e2d2f36f00b59712d37",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 18,
+      "filename": "018_scheduled_perceptor_pull_authority.sql",
+      "sha256": "a799b10d7f9ea773e1ca457cc66c1a68beb6799d86df2f045983658dbe656875",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 19,
+      "filename": "019_runtime_operational_snapshot.sql",
+      "sha256": "42049164386ba6d7933dc1f1b7a577814361465fbefd9ea708849904e528565d",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 20,
+      "filename": "020_care_action_governance.sql",
+      "sha256": "c08627937dc0f4096038dc095af18da418469a507eb4667b04ce44a52922c846",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 21,
+      "filename": "021_terminal_care_execution.sql",
+      "sha256": "123c9b09dd6d22b2371d7a58608527a59c50d9dfd4f9f1bb49c174c684ee8e73",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 22,
+      "filename": "022_care_outcome_feedback.sql",
+      "sha256": "168818d849c061e17d1e22110c16cf8914408d201b60c888309d37b33c911c0f",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 23,
+      "filename": "023_late_episode_association_authority.sql",
+      "sha256": "e545e0dc9ee6ebba0851bab181918367ec1f2cce0d8091fb523cccec3105196f",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 24,
+      "filename": "024_care_evaluation_operational_metrics.sql",
+      "sha256": "209f609be8c857143f7109429f6d4ea878995ae832d6870d32c06a5676762530",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 25,
+      "filename": "025_outcome_personalization_governance.sql",
+      "sha256": "ea7f75abbd327bba725b15b57715e143785703037e598d1c32b4d13e437803c8",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 26,
+      "filename": "026_runtime_reliability_closure.sql",
+      "sha256": "510da0debf2df545bb39a73ee86688d79055d82596fa059e197a0f8875c5e27a",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 27,
+      "filename": "027_care_operational_access_closure.sql",
+      "sha256": "5315c005b66acba351ebe3bab0f8f0c015d87841de6d49b9fdbc035485c04339",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 28,
+      "filename": "028_worker_authority_boundaries.sql",
+      "sha256": "4ac13a1b65c0c652d7fd51cacf80f3c22c15c752aac893d1a3246b7bda9f23d1",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 29,
+      "filename": "029_realtime_normalization_isolation.sql",
+      "sha256": "d4da925c37c65d20655912d8af51b35984e52ff723cefbca93b352cfc90ac11b",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 30,
+      "filename": "030_perceptor_pull_quarantine_reprocess.sql",
+      "sha256": "509843194cbea260a10e4b7a63588ac2a9f4e2731869e1f7b9bb1dc3bf25152a",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 31,
+      "filename": "031_perceptor_pull_quarantine_reprocess_grant.sql",
+      "sha256": "60069ef4a9420615445f4b42e00bbc47fa90b63aede69ec2ee1334888373d004",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

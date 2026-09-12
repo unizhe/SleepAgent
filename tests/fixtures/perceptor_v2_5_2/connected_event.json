@@ -1,0 +1,17 @@
+{
+  "client_id": "documented-client-placeholder",
+  "version": "2.0",
+  "timestamp": "2024-08-09T16:54:00.132",
+  "sign": "AAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "sign_version": "2.0",
+  "sign_nonce": "documented-nonce-placeholder-connected",
+  "sign_method": "HMAC-SHA1",
+  "message_id": "documented-message-placeholder-connected",
+  "product_id": 1000000000000000001,
+  "device_id": 1000000000000000002,
+  "device_name": "DOCUMENTED-DEVICE-PLACEHOLDER",
+  "home_id": 1000000000000000003,
+  "type": "ConnectedEvent",
+  "data": ""
+}
+

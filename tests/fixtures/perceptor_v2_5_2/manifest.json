@@ -1,0 +1,21 @@
+{
+  "schema_version": "perceptor_v2_5_2_fixture_manifest.v1",
+  "source": "YunYun / Perceptor OpenAPI V2.5.2 documented Push examples, one sanitized recorded-real Push derivative, and sanitized recorded-real Pull structural derivatives",
+  "fixtures": {
+    "alarm_event.json": "DOCUMENTED_FIXTURE",
+    "alarm_stop_event.json": "DOCUMENTED_FIXTURE",
+    "connected_event.json": "DOCUMENTED_FIXTURE",
+    "disconnected_event.json": "DOCUMENTED_FIXTURE",
+    "vital_signs_data_event.json": "DOCUMENTED_FIXTURE",
+    "sanitized_recorded_real_vital.json": "SANITIZED_RECORDED_REAL_FIXTURE",
+    "sanitized_recorded_real_pull_get_current.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_start.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_get_real_times.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_get_history_data.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_get_sleep_report.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_get_sleep_report_provenance.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE",
+    "sanitized_recorded_real_pull_get_sleep_report_full.json": "SANITIZED_RECORDED_REAL_PULL_FIXTURE"
+  },
+  "identity_policy": "All identifiers are synthetic placeholders; no real device or credential data is present.",
+  "signature_policy": "Document examples and sanitized recorded-real derivatives are structural fixtures only; cryptographic and byte-integrity proof remains in private exact bytes."
+}

@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sleepagent.backend_app import create_sleep_backend_app
-from sleepagent.backend_runtime import RuntimeServices
-from sleepagent.backend_settings import ApiSurface, DataMode, ProcessRole
-from sleepagent.product_api.service import (
+from sleepagent.app import create_sleep_backend_app
+from sleepagent.process import RuntimeServices
+from sleepagent.config import ApiSurface, DataMode, ProcessRole
+from sleepagent.api.product import (
     FailClosedProductIdentityResolver,
     ProductApiService,
 )

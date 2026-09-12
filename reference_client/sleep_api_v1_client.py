@@ -9,13 +9,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
+import stat
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
@@ -25,6 +27,16 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 
 UTC = timezone.utc
+REPORT_TERMINAL_STATES = frozenset(
+    {
+        "ready",
+        "failed",
+        "stale",
+        "policy_blocked",
+        "unusable_blocked",
+        "urgent_handled",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,15 @@ class HttpTransport(Protocol):
 
 
 class HttpsJsonTransport:
+    def __init__(self, *, timeout_seconds: float = 30.0) -> None:
+        if (
+            not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > 120
+        ):
+            raise ValueError("HTTPS timeout must be between 0 and 120 seconds")
+        self.timeout_seconds = timeout_seconds
+
     def request(
         self,
         *,
@@ -63,7 +84,10 @@ class HttpsJsonTransport:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
                 return HttpResponse(
                     status_code=response.status,
                     headers=dict(response.headers.items()),
@@ -114,6 +138,32 @@ class Ed25519ActorSigner:
             raise ValueError("the reference signer requires an Ed25519 private key")
         return cls(private_key=key, **kwargs)
 
+    @classmethod
+    def from_private_key_file(
+        cls,
+        *,
+        private_key_path: str | Path,
+        **kwargs: Any,
+    ) -> "Ed25519ActorSigner":
+        key_path = Path(private_key_path)
+        if not key_path.is_absolute() or key_path.is_symlink():
+            raise ValueError(
+                "actor private-key path must be absolute and not a symlink"
+            )
+        try:
+            metadata = key_path.stat()
+        except OSError as exc:
+            raise ValueError("actor private key is unavailable") from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("actor private key must be a regular file")
+        if stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise ValueError("actor private key must have mode 0600")
+        try:
+            private_key_pem = key_path.read_bytes()
+        except OSError as exc:
+            raise ValueError("actor private key is unavailable") from exc
+        return cls.from_pem(private_key_pem=private_key_pem, **kwargs)
+
     def sign(
         self,
         *,
@@ -161,9 +211,11 @@ class FileEventStateStore:
         if not self.path.exists():
             return {"schema_version": "sleep_client_state.v1", "subjects": {}}
         value = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("reference-client state must be an object")
         if value.get("schema_version") != "sleep_client_state.v1":
             raise ValueError("unsupported reference-client state schema")
-        return value
+        return dict(value)
 
     def save(self, state: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,7 +234,7 @@ class SleepApiV1Client:
         base_url: str,
         service_credential: str,
         signer: Ed25519ActorSigner,
-        event_state_store: FileEventStateStore,
+        event_state_store: FileEventStateStore | None = None,
         transport: HttpTransport | None = None,
         now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
@@ -297,7 +349,86 @@ class SleepApiV1Client:
             f"{night_episode_id}/view",
         )
 
+    def run_report(
+        self,
+        *,
+        wake_date: date | str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self._command(
+            "/product/sleep/reports/run",
+            {
+                "schema_version": "product_sleep_report_run.v1",
+                "wake_date": _report_wake_date(wake_date),
+            },
+            idempotency_key,
+        )
+
+    def get_report(
+        self,
+        *,
+        wake_date: date | str,
+        include_trace: bool = False,
+    ) -> dict[str, Any]:
+        wire_date = _report_wake_date(wake_date)
+        return self._request(
+            "GET",
+            f"/product/sleep/reports/{wire_date}",
+            query={"trace": "true"} if include_trace else None,
+        )
+
+    def list_reports(
+        self,
+        *,
+        limit: int = 20,
+        cursor: str | None = None,
+        include_trace: bool = False,
+    ) -> dict[str, Any]:
+        if limit < 1 or limit > 100:
+            raise ValueError("report list limit must be between 1 and 100")
+        if cursor is not None and (not cursor or len(cursor) > 2_000):
+            raise ValueError("report list cursor is invalid")
+        query = {"limit": str(limit)}
+        if cursor is not None:
+            query["cursor"] = cursor
+        if include_trace:
+            query["trace"] = "true"
+        return self._request("GET", "/product/sleep/reports", query=query)
+
+    def await_report(
+        self,
+        *,
+        wake_date: date | str,
+        timeout_seconds: float = 180.0,
+        interval_seconds: float = 0.5,
+        include_trace: bool = False,
+    ) -> dict[str, Any]:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("report wait timeout must be positive")
+        if not math.isfinite(interval_seconds) or interval_seconds <= 0:
+            raise ValueError("report poll interval must be positive")
+        wire_date = _report_wake_date(wake_date)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            report = self.get_report(
+                wake_date=wire_date,
+                include_trace=include_trace,
+            )
+            state = report.get("state")
+            if state in REPORT_TERMINAL_STATES:
+                return report
+            if state not in {"not_run", "pending"}:
+                raise ValueError("report response has an unsupported state")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"report for {wire_date} did not reach a terminal state"
+                )
+            time.sleep(min(interval_seconds, remaining))
+
     def poll_events(self, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
+        if self.event_state_store is None:
+            raise ValueError("poll_events requires an event state store")
         state = self.event_state_store.load()
         subject_state = state["subjects"].setdefault(
             self.signer.subject_id,
@@ -427,6 +558,26 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _report_wake_date(value: date | str) -> str:
+    if isinstance(value, datetime):
+        raise ValueError("report wake_date must be a date, not a datetime")
+    wire_value = value.isoformat() if isinstance(value, date) else value
+    if (
+        not isinstance(wire_value, str)
+        or len(wire_value) != 10
+        or wire_value[4] != "-"
+        or wire_value[7] != "-"
+    ):
+        raise ValueError("report wake_date must use YYYY-MM-DD")
+    try:
+        parsed = date.fromisoformat(wire_value)
+    except ValueError as exc:
+        raise ValueError("report wake_date must use YYYY-MM-DD") from exc
+    if parsed.isoformat() != wire_value:
+        raise ValueError("report wake_date must use YYYY-MM-DD")
+    return wire_value
 
 
 def _b64url(value: bytes) -> str:

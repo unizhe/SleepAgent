@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sleepagent.product_runtime.agents import (
+from sleepagent.runtime.agents import (
     AGENT_IMPLEMENTATIONS,
     CareStrategyAgent,
     EvidenceReasoningAgent,
@@ -17,30 +17,35 @@ from sleepagent.product_runtime.agents import (
     concrete_agent_manifest,
     validate_concrete_agent_manifest,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentId,
     PRODUCT_AGENT_CONTRACT_VERSION,
     PRODUCT_AGENT_ROSTER,
     stable_hash,
 )
-from sleepagent.product_runtime.acceptance import (
-    current_acceptance_release_identity,
+from sleepagent.config import (
+    DataMode,
+    DeploymentMode,
+    ModelMode,
+    ProcessRole,
+    SleepBackendSettings,
 )
-from sleepagent.product_runtime.agent_invocation_coordinator import (
+from sleepagent.runtime.agent_invocation_coordinator import (
     AgentInvocationCoordinator,
 )
-from sleepagent.product_runtime.registry import product_agent_manifest
-from sleepagent.product_runtime.runner import ProductEpisodeRunner
-from sleepagent.product_runtime.skills import (
+from sleepagent.runtime.registry import product_agent_manifest
+from sleepagent.runtime.runner import ProductEpisodeRunner
+from sleepagent.runtime.registry import (
     SkillRegistry,
     default_skill_packages,
 )
-import sleepagent.product_runtime.runtime_factory as runtime_factory
-from sleepagent.product_runtime.runtime_factory import (
+import sleepagent.runtime.factory as runtime_factory
+from sleepagent.runtime.factory import (
     build_product_episode_runner_from_env,
     build_product_runtime_bundle,
     product_episode_runner_is_configured,
 )
+from sleepagent.workers.product import build_product_agent_worker_handlers
 
 
 class NeverCalledModel:
@@ -80,6 +85,76 @@ def test_factory_constructs_exact_immutable_four_role_roster() -> None:
         roster.sleepcare = roster.sleepcare  # type: ignore[misc]
 
 
+def test_evidence_skills_compile_semantic_contract_instructions() -> None:
+    package = SkillRegistry(default_skill_packages()).champion(
+        "interpret_scoped_evidence",
+        AgentId.EVIDENCE_REASONING,
+    )
+
+    instructions = " ".join(package.instructions)
+    assert package.version == "3.0.0"
+    assert "alternative_explanation" in instructions
+    assert "If Context contains none, omit" in instructions
+    assert "never invent a decision" in instructions
+    assert "claim_strength" in instructions
+    assert "readiness_decision_ref" in instructions
+    assert "source_kind confirmed_habit" in instructions
+    assert "exact fact_ref" in instructions
+    assert "source_kind confirmed_memory" in instructions
+    assert "exact retrieval_handle" in instructions
+    assert "vendor-derived" in instructions
+    assert "reconstructed cadence timestamps" in instructions
+    assert "deterministic quality is partial" in instructions
+
+
+def test_communication_and_safety_skills_compile_contract_instructions() -> None:
+    registry = SkillRegistry(default_skill_packages())
+    communication = registry.champion(
+        "explain_for_elder",
+        AgentId.SLEEP_CARE,
+    )
+    safety = registry.champion(
+        "review_claim_and_boundary",
+        AgentId.SAFETY_REVIEW,
+    )
+
+    communication_instructions = " ".join(communication.instructions)
+    assert communication.version == "4.0.0"
+    assert communication.output_schema_id == "CommunicationDraft"
+    assert "Return only a SleepCareContentPlan" in communication_instructions
+    assert "source_type and source_ref" in communication_instructions
+    assert "do not generate the final Communication text" in (
+        communication_instructions
+    )
+    assert "rendered_text" in communication_instructions
+    assert "Never guess" in communication_instructions
+    assert "empty selected_segments" in communication_instructions
+    assert "approve is never an envelope status" in " ".join(safety.instructions)
+    assert "9999-12-31T23:59:59Z" in " ".join(safety.instructions)
+
+
+@pytest.mark.parametrize(
+    "skill_id",
+    [
+        "answer_grounded_question",
+        "explain_for_elder",
+        "draft_user_material",
+        "draft_doctor_material",
+    ],
+)
+def test_every_sleepcare_communication_skill_uses_versioned_content_plan_contract(
+    skill_id: str,
+) -> None:
+    package = SkillRegistry(default_skill_packages()).champion(
+        skill_id,
+        AgentId.SLEEP_CARE,
+    )
+
+    assert package.version == "4.0.0"
+    assert package.output_schema_id == "CommunicationDraft"
+    assert "SleepCareContentPlan" in " ".join(package.instructions)
+
+
 def test_factory_rejects_missing_extra_and_plain_string_role_bindings() -> None:
     model = NeverCalledModel()
     missing = {
@@ -108,12 +183,41 @@ def test_concrete_manifest_matches_contract_registry_without_changing_identity()
         item.value for item in PRODUCT_AGENT_ROSTER
     )
     assert stable_hash(product_agent_manifest()) == (
-        "2d1ad2b886feb2d61d74e1566127ff2eb3feb511ab428c9810eef6f15edb6dc3"
+        "8a618d48b1e5938d1e5fdca41172a0e7a9ba2c4e63b80bb1a4c73baa50e4505e"
     )
-    assert current_acceptance_release_identity().identity_hash == (
-        "5cb705abde1478feb8fe84d40fbca7c98c5f5da18490261ebce50c3864ae18d0"
+    assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v15"
+
+
+def test_live_product_worker_accepts_live_canonical_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-structural-test-only")
+    monkeypatch.setenv("SLEEPAGENT_PRODUCT_LLM_MODEL", "structural-model")
+    monkeypatch.setenv(
+        "SLEEPAGENT_PRODUCT_LLM_BASE_URL",
+        "https://provider.invalid/v1",
     )
-    assert PRODUCT_AGENT_CONTRACT_VERSION == "sleepagent-product-agent.v14"
+    settings = SleepBackendSettings(
+        profile="p4e2-live-agent-structure",
+        deployment_mode=DeploymentMode.DEVELOPMENT,
+        process_role=ProcessRole.WORKER,
+        data_mode=DataMode.LIVE,
+        database_dsn="postgresql://worker@127.0.0.1/p4e2",
+        database_identity="p4e2",
+        database_role="worker",
+        service_principal_id="p4e2-worker",
+        database_scope=DataMode.LIVE,
+        namespace_prefixes=("live:p4e2",),
+        worker_queues=("product_agent",),
+        model_mode=ModelMode.LIVE,
+        service_credential_ref="env:P4E2_SERVICE_CREDENTIAL",
+        signing_key_ref="env:P4E2_SIGNING_KEY",
+        encryption_key_ref="env:P4E2_ENCRYPTION_KEY",
+    )
+
+    handlers = build_product_agent_worker_handlers(settings)
+
+    assert tuple(handlers) == ("product_agent",)
 
 
 def test_concrete_roles_declare_distinct_context_and_permission_boundaries() -> None:

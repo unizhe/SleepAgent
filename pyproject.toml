@@ -8,9 +8,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sleepagent"
 version = "0.1.0"
-description = "MVP skeleton for an intelligent sleep health analysis system."
+description = "Research backend for governed sleep analysis and human-attested care follow-up."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
+license = "MIT"
+authors = [
+    {name = "Zhe Wang"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "cryptography>=42,<47",
     "fastapi>=0.115,<=0.136.1",
@@ -33,19 +42,20 @@ dev = [
 ]
 
 [project.scripts]
-real-perceptor-acceptance = "sleepagent.integrations.perceptor.acceptance_cli:main"
-sleepagent-demo = "sleepagent.demo_cli:main"
+sleepagent-demo = "sleepagent.simulation.cli:main"
 sleepagent-migrate = "sleepagent.persistence.migrate:main"
+sleepagent-report = "sleepagent.report_cli:main"
+sleepagent-care = "sleepagent.care_cli:main"
+sleepagent-device = "sleepagent.device_cli:main"
 
 [tool.setuptools.packages.find]
-include = ["backend*", "sleepagent*", "reference_client*"]
+include = ["sleepagent*", "reference_client*"]
 
 [tool.setuptools.package-data]
 "sleepagent.simulation" = ["replay_seed_registry.json"]
 "sleepagent.persistence" = [
     "migration_manifest.json",
     "migrations/*.sql",
-    "sqlite_schema.sql",
 ]
 "sleepagent.simulation.fixtures" = [
     "README.md",
@@ -60,6 +70,7 @@ markers = [
     "unit: deterministic tests without a PostgreSQL or process dependency",
     "postgres: tests against an isolated PostgreSQL database/schema",
     "asgi_lifespan: tests that execute real ASGI startup and shutdown",
+    "process_harness: postconditions that require the external process harness",
     "e2e: tests that require independently running API and worker processes",
 ]
 

@@ -1,0 +1,65 @@
+{
+  "request_id": "SANITIZED-PULL-CURRENT-REQUEST",
+  "success": true,
+  "code": "200",
+  "message": "SANITIZED",
+  "timestamp": 1787472000,
+  "data": {
+    "device_state": "online",
+    "guard_days": 24,
+    "prob_status": 6,
+    "prob_data": [
+      {
+        "abnormal_behavior_vo_list": [],
+        "status": "0",
+        "time": "16",
+        "time_range": "16-17",
+        "value": 0.0
+      },
+      {
+        "abnormal_behavior_vo_list": [],
+        "status": "1",
+        "time": "17",
+        "time_range": "17-18",
+        "value": 1.0
+      }
+    ],
+    "alarm_log": {
+      "addr": null,
+      "channel_name": null,
+      "charge_person": null,
+      "content": "SANITIZED",
+      "delay_status": false,
+      "description": null,
+      "device_id": "SANITIZED-DEVICE-ID",
+      "family_addr": "SANITIZED-ADDRESS",
+      "family_id": 9000000000000000001,
+      "family_name": null,
+      "family_owner_phone": null,
+      "id": 9000000000000000002,
+      "identifier": "SANITIZED-IDENTIFIER",
+      "mac_addr": "SANITIZED-MAC",
+      "message": "SANITIZED",
+      "message_id": "SANITIZED-MESSAGE-ID",
+      "nickname": "SANITIZED-NICKNAME",
+      "normal_alarm_status": false,
+      "old_product": false,
+      "process_minutes": null,
+      "process_state": "SANITIZED",
+      "process_time": null,
+      "product_key": "SANITIZED-PRODUCT-KEY",
+      "product_model": null,
+      "product_name": null,
+      "project_name": null,
+      "project_type": null,
+      "run_mode_status": 0,
+      "soft_version": null,
+      "time": "2026-01-15 16:00:00",
+      "type": null,
+      "value": "SANITIZED"
+    },
+    "keep_time": "120",
+    "show_sleep": 1,
+    "smbd_flag": "2"
+  }
+}

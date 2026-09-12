@@ -1,3 +1,4 @@
+# 本模块集中定义运行指标与结构化日志，不决定业务流程。
 from __future__ import annotations
 
 import hashlib
@@ -25,6 +26,7 @@ BACKEND_SIGNAL_CATEGORIES = frozenset(
         "lease",
         "product",
         "provider",
+        "pull",
         "reconciliation",
         "retention",
         "safety",
@@ -35,10 +37,21 @@ BACKEND_SIGNAL_OUTCOMES = frozenset(
         "allowed",
         "denied",
         "dead_letter",
+        "backfill_created",
+        "checkpoint_advanced",
+        "checkpoint_held",
+        "conflict",
+        "duplicate",
+        "failed",
+        "no_data",
+        "normalization_failed",
         "outcome_unknown",
+        "overlap",
+        "raw_committed",
         "reclaimable",
         "reconciliation_required",
         "retry",
+        "started",
         "succeeded",
         "terminal",
         "timeout",

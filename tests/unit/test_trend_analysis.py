@@ -2,23 +2,23 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AuthenticatedBinding,
     FactSnapshot,
     SourceScope,
     SourceScopeKind,
 )
-from sleepagent.product_runtime.tools.trend_analysis import (
+from sleepagent.runtime.tools import (
     TrendAnalysisTool,
     TrendDirection,
     TrendMetricStatus,
 )
-from sleepagent.product_runtime.tooling import (
+from sleepagent.runtime.tooling import (
     CoreProductToolService,
     ProductToolExecutionContext,
     ProductToolExecutor,
 )
-from sleepagent.product_runtime.schemas import (
+from sleepagent.runtime.schemas import (
     RadarDataQualityStatus,
     RadarNightSummary,
 )

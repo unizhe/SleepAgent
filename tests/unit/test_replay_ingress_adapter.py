@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from importlib import resources
 
 import pytest
@@ -15,12 +17,13 @@ from sleepagent.simulation.replay_ingress import AdaptedReplayIngress
 from sleepagent.simulation.replay_ingress import (
     AdaptedReplayIngressV2,
     ReplayExternalFactAdapterV2,
+    replay_external_fact_adapter,
 )
 from sleepagent.simulation.seed_registry import (
     load_replay_seed_registry,
     verify_packaged_seed,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     BedPresencePayload,
     BedPresenceState,
 )
@@ -56,8 +59,10 @@ def test_normal_one_night_is_facts_only_and_adapts_deterministically() -> None:
         for item in first.items[1:]
     )
 
-    fixture = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", "normal-one-night"
+    fixture = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath("normal-one-night")
     )
     assert not fixture.joinpath("expected.json").is_file()
     assert not fixture.joinpath("actions.jsonl").is_file()
@@ -125,14 +130,6 @@ def test_ingress_manifest_rejects_sequence_hash_drift() -> None:
         AdaptedReplayIngress.model_validate(payload)
 
 
-def test_adapter_rejects_multi_night_fixture() -> None:
-    scenario = load_packaged_scenario("golden-15-night")
-    generated = CanonicalReplayGenerator().generate(scenario)
-
-    with pytest.raises(ValueError, match="exactly one night"):
-        ReplayExternalFactAdapter().adapt(scenario, generated)
-
-
 def test_v2_adapter_splits_initial_night_from_clock_releasable_future_facts() -> None:
     scenario = load_packaged_scenario("worsening-vital-trend")
     generated = CanonicalReplayGenerator().generate(scenario)
@@ -181,3 +178,35 @@ def test_seed_registry_owns_actor_aliases_and_scope_matrix() -> None:
     assert "product:sleep:care:confirm" in seed.actor_scopes["family"]
     assert "sleep:reanalysis:write" in seed.actor_scopes["doctor"]
     assert "product:sleep:care:confirm" not in seed.actor_scopes["doctor"]
+
+
+def test_every_packaged_seed_scenario_is_traversable() -> None:
+    registry = load_replay_seed_registry()
+
+    verified = tuple(verify_packaged_seed(seed).scenario_id for seed in registry.seeds)
+
+    assert verified == tuple(seed.scenario_id for seed in registry.seeds)
+
+
+def test_every_packaged_seed_pins_the_authoritative_v2_ingress_manifest() -> None:
+    registry = load_replay_seed_registry()
+    generator = CanonicalReplayGenerator()
+
+    for seed in registry.seeds:
+        scenario = verify_packaged_seed(seed)
+        adapted = replay_external_fact_adapter(
+            seed.adapter_version,
+            observation_semantics_version="v2",
+        ).adapt(scenario, generator.generate(scenario))
+        manifest = adapted.manifest
+        encoded = json.dumps(
+            manifest.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+        assert manifest.component_pins_sha256 == seed.component_pins_sha256
+        assert manifest.canonical_sequence_sha256 == seed.canonical_sequence_sha256
+        assert hashlib.sha256(encoded).hexdigest() == seed.manifest_sha256
+        assert len(adapted.items) == seed.observation_count

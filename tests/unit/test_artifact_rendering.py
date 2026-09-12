@@ -4,12 +4,12 @@ from datetime import date
 
 import pytest
 
-from sleepagent.product_runtime.contracts import AgentId
-from sleepagent.product_runtime.tools.artifact_rendering import (
+from sleepagent.runtime.contracts import AgentId
+from sleepagent.runtime.tools import (
     ArtifactRenderRequest,
     ArtifactRenderingTool,
 )
-from sleepagent.product_runtime.schemas import (
+from sleepagent.runtime.schemas import (
     ContextPacket,
     EvidenceClaim,
     EvidenceLedger,

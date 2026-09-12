@@ -1,0 +1,25 @@
+{
+  "request_id": "SANITIZED-PULL-HISTORY-REQUEST",
+  "success": true,
+  "code": "200",
+  "message": "SANITIZED",
+  "timestamp": 1787472000,
+  "data": [
+    {
+      "device_id": "SYNTHETIC-DEVICE",
+      "heart_rate": "70,71,72,73,74",
+      "body_shake": "0,1,0,2,0",
+      "breath_rate": "15,15,16,16,16",
+      "create_time": "2026-08-23T16:00:00",
+      "send_time": "2026-08-23T16:00:00"
+    },
+    {
+      "device_id": "SYNTHETIC-DEVICE",
+      "heart_rate": "-1,70,71,72,73",
+      "body_shake": "-1,0,1,0,2",
+      "breath_rate": "-1,15,15,16,16",
+      "create_time": "2026-08-23T16:05:00",
+      "send_time": "2026-08-23T16:05:00"
+    }
+  ]
+}

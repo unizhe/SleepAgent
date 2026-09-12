@@ -1,655 +1,2717 @@
-"""Bounded Perceptor pull and reconciliation into the unified Raw Inbox."""
+"""Durable YunYun Pull intake and reconciliation on the existing Worker.
+
+The bounded caller performs a read-only Platform request, then this module
+commits the exact encrypted response and one deterministic normalization item.
+The existing ingestion queue owns normalization, semantic reconciliation, and
+checkpoint movement.  No Product, Episode, Agent, or model path is imported.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import threading
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from itertools import islice
-from typing import Any, Mapping, Protocol, Sequence
+import math
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Callable, Mapping, cast
+from zoneinfo import ZoneInfo
 
-from sleepagent.integrations.perceptor.pull_adapter import (
-    HISTORY_EVENT,
-    PULL_ENVELOPE_SCHEMA,
-    REALTIME_FALLBACK_EVENT,
-    SLEEP_REPORT_EVENT,
-    canonical_content_sha256,
+from sleepagent.config import (
+    BackendKeyProvider,
+    ObservationSemanticsVersion,
+    ProcessRole,
+    SleepBackendSettings,
 )
-from sleepagent.sleep_domain import (
-    AdapterCapability,
-    ControlledAdapterRegistry,
-    DomainNamespace,
-    ProviderDeviceIdentity,
-    RawIngressRecord,
-    SignatureVerificationState,
-    SleepDomainRepository,
-    namespaced_provider_device_key,
+from sleepagent.domain.contracts import (
+    DataMode,
+    DeviceBinding,
+    QuarantineReprocessAudit,
+    bind_adapter_candidate,
 )
-from sleepagent.sleep_domain.repository import (
-    IntakeResult,
-    PullCheckpoint,
-    SourceReportVersion,
+from sleepagent.domain.episodes import UUID7Generator
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    EpisodeProjectionBoundary,
+    NormalizationLease,
+    RawPayloadCipher,
+    SleepSlicePolicy,
+    SleepSliceInvariantError,
+    SleepSliceLeaseLost,
+    default_sleep_slice_policy,
+    project_authoritative_canonical_observations,
+)
+from sleepagent.integrations.perceptor.client import (
+    GET_CURRENT_ENDPOINT,
+    HISTORY_ENDPOINT,
+    REALTIME_READ_ENDPOINT,
+    SLEEP_REPORT_ENDPOINT,
+    PerceptorPlatformClient,
+    PlatformApiError,
+    PlatformEvidencedRead,
+)
+from sleepagent.integrations.perceptor.pull import (
+    NORMALIZER_VERSION,
+    PullContractError,
+    assert_requested_device_matches_binding,
+    canonicalize_pull_result_v2,
+    normalize_current,
+    normalize_history,
+    normalize_realtime,
+    normalize_sleep_report,
+    sleep_report_is_no_data,
+    with_durable_raw_reference,
+)
+from sleepagent.integrations.perceptor.reconciliation import (
+    PerceptorObservationReconciler,
+    PerceptorReconciliationResult,
+    namespace_generation_scoped_candidate,
+    semantic_surface_for_pull,
+)
+from sleepagent.observability import (
+    log_event,
+    record_backend_signal,
+    record_pull,
+)
+from sleepagent.persistence.uow import (
+    ExternalIngressScope,
+    UnitOfWorkFactory,
+    UowScope,
 )
 
 
-class PerceptorPullError(RuntimeError):
-    pass
+UTC = timezone.utc
+PULL_RESPONSE_PROFILE = "perceptor-platform-read-response.v1"
+PULL_NORMALIZER = "perceptor_pull"
+PULL_HISTORY_OVERLAP = timedelta(seconds=3)
+PULL_HISTORY_RECONCILIATION_CHUNK_SIZE = 8
+PULL_ENDPOINTS = frozenset(
+    {
+        GET_CURRENT_ENDPOINT,
+        REALTIME_READ_ENDPOINT,
+        HISTORY_ENDPOINT,
+        SLEEP_REPORT_ENDPOINT,
+    }
+)
+
+_SAFE_PULL_INGRESS_ERRORS = {
+    "invalid or untrusted Perceptor Pull ingress context": "ingress_context_rejected",
+    "Perceptor Pull safe metadata contract mismatch": "metadata_contract_mismatch",
+    "Perceptor Pull safe metadata time contract mismatch": "metadata_time_mismatch",
+    "Perceptor Pull safe metadata coordinates mismatch": "metadata_coordinates_mismatch",
+    "Perceptor Pull endpoint is outside the durable read allowlist": "endpoint_rejected",
+    "scheduled Perceptor Pull worker authority mismatch": "worker_authority_mismatch",
+    "invalid bounded Perceptor history window": "history_window_rejected",
+    "invalid Perceptor sleep-report request scope": "sleep_report_scope_rejected",
+    "current Perceptor Pull surface has no history window": "current_window_rejected",
+    "Perceptor Pull namespace generation is not active": "namespace_generation_inactive",
+    "Perceptor Pull safe metadata value mismatch": "metadata_value_mismatch",
+    "Perceptor Pull safe checkpoint time mismatch": "checkpoint_time_mismatch",
+    "Perceptor Pull safe checkpoint contract mismatch": "checkpoint_contract_mismatch",
+    "Perceptor provider account binding mismatch": "provider_account_mismatch",
+    "Perceptor Pull safe device key mismatch": "device_key_mismatch",
+    "bound Perceptor subject has no governance epochs": "governance_epochs_missing",
+    "Perceptor normalization requires one exact worker grant": "normalization_grant_mismatch",
+    "Perceptor history continuation exceeds one hour": "historical_backfill_required",
+}
 
 
-class PerceptorPullConfigurationError(PerceptorPullError):
-    pass
+def _safe_pull_error_code(exc: Exception) -> str:
+    """Classify known invariant failures without emitting exception content."""
+
+    current: BaseException | None = exc
+    while current is not None:
+        diagnostic = getattr(current, "diag", None)
+        primary = getattr(diagnostic, "message_primary", None)
+        if isinstance(primary, str) and primary in _SAFE_PULL_INGRESS_ERRORS:
+            return _SAFE_PULL_INGRESS_ERRORS[primary]
+        current = current.__cause__
+    return "unclassified"
 
 
-class PerceptorPullClient(Protocol):
-    def get_sleep_report(
-        self,
-        *,
-        report_date: date | str,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]: ...
-
-    def get_history_data(
-        self,
-        *,
-        device_names: list[str] | tuple[str, ...],
-        start_at: datetime,
-        end_at: datetime,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]: ...
-
-    def start_realtime(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]: ...
-
-    def get_realtime(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]: ...
+def _error_chain_has_primary(exc: Exception, message: str) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        diagnostic = getattr(current, "diag", None)
+        if getattr(diagnostic, "message_primary", None) == message:
+            return True
+        current = current.__cause__
+    return False
 
 
-@dataclass(frozen=True)
-class PerceptorPullCompatibilityProfile:
-    profile_id: str
-    provider_account_id: str
-    environment: str
-    history_window: timedelta = timedelta(hours=1)
-    history_device_batch_size: int = 20
-    history_cadence: timedelta = timedelta(seconds=3)
-    overlap_window: timedelta = timedelta(minutes=10)
-    lateness: timedelta = timedelta(minutes=15)
-    realtime_fallback_enabled: bool = False
-    capability_status: str = "pending"
+def _safe_pull_error_fields(exc: Exception) -> dict[str, object]:
+    """Return only bounded provider failure metadata suitable for logs."""
+
+    if not isinstance(exc, PlatformApiError):
+        return {"error_code": _safe_pull_error_code(exc)}
+    fields: dict[str, object] = {
+        "error_code": "platform_api_error",
+        "provider_category": exc.category,
+    }
+    if exc.http_status is not None:
+        fields["http_status"] = exc.http_status
+    if exc.vendor_code is not None:
+        fields["vendor_code"] = exc.vendor_code
+    if exc.vendor_message is not None:
+        fields["vendor_message"] = exc.vendor_message
+    return fields
+
+
+class PerceptorPullIngressError(RuntimeError):
+    """A response could not safely enter the durable Pull boundary."""
+
+
+class PerceptorHistoryBackfillRequired(PerceptorPullIngressError):
+    """The rolling checkpoint is too stale for one scheduled vendor request."""
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestCoordinates:
+    endpoint: str
+    window_start_at: datetime | None = None
+    window_end_at: datetime | None = None
+    report_date: date | None = None
+    historical_backfill: bool = False
 
     def __post_init__(self) -> None:
-        if not self.profile_id or not self.provider_account_id or not self.environment:
-            raise PerceptorPullConfigurationError(
-                "pull profile, provider account, and environment are required"
-            )
-        if not timedelta(0) < self.history_window <= timedelta(hours=1):
-            raise PerceptorPullConfigurationError(
-                "history window must be positive and no longer than one hour"
-            )
-        if not 1 <= self.history_device_batch_size <= 20:
-            raise PerceptorPullConfigurationError(
-                "history device batch size must be between 1 and 20"
-            )
-        if self.history_cadence <= timedelta(0):
-            raise PerceptorPullConfigurationError(
-                "history cadence must be positive"
-            )
-        if self.overlap_window < timedelta(0) or self.lateness < timedelta(0):
-            raise PerceptorPullConfigurationError(
-                "overlap and lateness cannot be negative"
-            )
-        if self.capability_status != "pending":
-            raise PerceptorPullConfigurationError(
-                "unconfirmed pull profiles must remain PENDING"
-            )
-
-
-@dataclass(frozen=True)
-class PerceptorPullDevice:
-    device_name: str
-    home_id: str | int
-    provider_device_id: str | None = None
-    product_id: str | None = None
-    project_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if (
-            not self.device_name.strip()
-            or self.home_id is None
-            or str(self.home_id) == ""
+        if self.endpoint not in PULL_ENDPOINTS:
+            raise ValueError("endpoint is outside the durable Pull allowlist")
+        if self.endpoint == HISTORY_ENDPOINT:
+            if self.window_start_at is None or self.window_end_at is None:
+                raise ValueError("history requires an exact request window")
+            _require_aware(self.window_start_at, "window_start_at")
+            _require_aware(self.window_end_at, "window_end_at")
+            if self.window_start_at.microsecond or self.window_end_at.microsecond:
+                raise ValueError("history window must use the vendor's whole-second precision")
+            start_utc = self.window_start_at.astimezone(UTC)
+            end_utc = self.window_end_at.astimezone(UTC)
+            if (
+                end_utc <= start_utc
+                or end_utc - start_utc > timedelta(hours=1)
+            ):
+                raise ValueError("history window must be positive and at most one hour")
+            if self.report_date is not None:
+                raise ValueError("history cannot carry a report date")
+        elif self.endpoint == SLEEP_REPORT_ENDPOINT:
+            if self.report_date is None:
+                raise ValueError("sleep report requires a local report date")
+            if self.window_start_at is not None or self.window_end_at is not None:
+                raise ValueError("sleep report cannot carry a history window")
+        elif any(
+            value is not None
+            for value in (self.window_start_at, self.window_end_at, self.report_date)
         ):
-            raise PerceptorPullConfigurationError(
-                "pull device requires device_name and home_id"
-            )
-
-    def identity_payload(self) -> dict[str, str]:
-        return {
-            key: value
-            for key, value in {
-                "device_name": self.device_name,
-                "home_id": str(self.home_id),
-                "device_id": self.provider_device_id,
-                "product_id": self.product_id,
-                "project_id": self.project_id,
-            }.items()
-            if value is not None
-        }
+            raise ValueError("snapshot Pull cannot carry a window or report date")
+        if self.historical_backfill and self.endpoint != HISTORY_ENDPOINT:
+            raise ValueError("historical backfill is valid only for History")
 
 
-@dataclass(frozen=True)
-class PulledSourceReport:
-    intake: IntakeResult
-    source_report: SourceReportVersion
+@dataclass(frozen=True, slots=True)
+class PerceptorPullIngressResult:
+    disposition: str
+    raw_ingress_record_id: str | None
+    normalization_work_id: str | None
+    subject_id: str | None
+    device_binding_id: str | None
+    duplicate: bool
+    batch_identity: str
+    response_semantic_sha256: str | None
+    normalization_not_before: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PullHistoryPlan:
+    """One database-authorized history window with optional resume evidence."""
+
+    window_start_at: datetime
+    window_end_at: datetime
+    checkpoint_cursor_at: datetime | None
+    lateness_watermark_at: datetime | None
+    resumed_from_checkpoint: bool
+
+    def __post_init__(self) -> None:
+        PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=self.window_start_at,
+            window_end_at=self.window_end_at,
+        )
+        if self.resumed_from_checkpoint:
+            if self.checkpoint_cursor_at is None or self.lateness_watermark_at is None:
+                raise ValueError("resumed history plan requires checkpoint coordinates")
+            _require_aware(self.checkpoint_cursor_at, "checkpoint_cursor_at")
+            _require_aware(self.lateness_watermark_at, "lateness_watermark_at")
+            if (
+                self.lateness_watermark_at
+                != self.checkpoint_cursor_at - PULL_HISTORY_OVERLAP
+                or self.window_start_at != self.lateness_watermark_at
+            ):
+                raise ValueError("history resume must use the exact three-second watermark")
+            if self.window_end_at < self.checkpoint_cursor_at:
+                raise ValueError("history plan cannot end before its checkpoint cursor")
+        elif any(
+            value is not None
+            for value in (self.checkpoint_cursor_at, self.lateness_watermark_at)
+        ):
+            raise ValueError("initial history plan cannot carry checkpoint coordinates")
 
     @property
-    def changed(self) -> bool:
-        return self.source_report.created
+    def already_processed(self) -> bool:
+        """Whether the requested schedule is already covered by the checkpoint."""
+
+        return bool(
+            self.resumed_from_checkpoint
+            and self.checkpoint_cursor_at is not None
+            and self.window_end_at == self.checkpoint_cursor_at
+        )
 
 
-@dataclass(frozen=True)
-class HistoryReconciliationResult:
-    intake_results: tuple[IntakeResult, ...]
-    checkpoint: PullCheckpoint | None
-    window_count: int
-    batch_count: int
+@dataclass(frozen=True, slots=True)
+class PerceptorPullNormalizationResult:
+    work_id: str
+    raw_ingress_record_id: str
+    canonical_observation_ids: tuple[str, ...]
+    canonical_created_count: int
+    push_pull_overlap_count: int
+    conflict_created_count: int
+    duplicate_count: int
+    checkpoint_advanced: bool
+    no_data: bool
+    quarantined: bool = False
 
 
-class PerceptorPullService:
-    """Transport orchestrator. Normalization remains in the allowlisted Adapter."""
+@dataclass(frozen=True, slots=True)
+class PerceptorPullQuarantineReprocessResult:
+    request_id: str
+    quarantine_id: str
+    work_id: str
+    raw_ingress_record_id: str
+    status: str
+    attempt_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PerceptorHistoryBackfillChunkResult:
+    window_start_at: datetime
+    window_end_at: datetime
+    status: str
+    vendor_record_count: int
+    raw_series_sample_count: int
+    ingress: PerceptorPullIngressResult | None
+    error_code: str | None = None
+
+
+class DurablePerceptorPullIngress:
+    """Commit one successful/failed read response to provider-neutral ingress."""
 
     def __init__(
         self,
+        settings: SleepBackendSettings,
+        uow_factory: UnitOfWorkFactory[Any],
         *,
-        namespace: DomainNamespace,
-        repository: SleepDomainRepository,
-        registry: ControlledAdapterRegistry,
-        client: PerceptorPullClient,
-        profile: PerceptorPullCompatibilityProfile,
+        client_id_sha256: str,
+        cipher: RawPayloadCipher | None = None,
+        operation_scope: UowScope | None = None,
     ) -> None:
-        self.namespace = namespace
-        self.repository = repository
-        self.registry = registry
-        self.client = client
-        self.profile = profile
-        self._adapter_resolution_lock = threading.Lock()
-
-    def pull_sleep_report(
-        self,
-        device: PerceptorPullDevice,
-        *,
-        report_date: date,
-        fetched_at: datetime,
-    ) -> PulledSourceReport:
-        if not isinstance(report_date, date) or isinstance(report_date, datetime):
-            raise PerceptorPullConfigurationError(
-                "sleep report requires a local date, not datetime"
+        if settings.perceptor_namespace_id is None:
+            raise ValueError("Perceptor namespace is not configured")
+        if settings.perceptor_provider_account_id is None:
+            raise ValueError("Perceptor provider account is not configured")
+        if not _is_sha256(client_id_sha256):
+            raise ValueError("client_id_sha256 must be lowercase SHA-256")
+        if cipher is None:
+            key = BackendKeyProvider(settings.deployment_mode).encryption_key(
+                settings.encryption_key_ref
             )
-        response = self.client.get_sleep_report(
-            device_name=device.device_name,
-            home_id=device.home_id,
-            report_date=report_date,
+            cipher = RawPayloadCipher(key, key_id=settings.encryption_key_ref)
+        self.settings = settings
+        self.uow_factory = uow_factory
+        self.client_id_sha256 = client_id_sha256
+        self.cipher = cipher
+        self.operation_scope = operation_scope
+
+    def _ingress_scope(
+        self, binding: DeviceBinding
+    ) -> ExternalIngressScope | UowScope:
+        if self.operation_scope is None:
+            return ExternalIngressScope(
+                namespace_id=cast(str, self.settings.perceptor_namespace_id),
+                namespace_generation=self.settings.perceptor_namespace_generation,
+                service_principal_id=self.settings.service_principal_id,
+                authorization_epoch=self.settings.perceptor_authorization_epoch,
+            )
+        scope = self.operation_scope
+        if (
+            self.settings.process_role is not ProcessRole.WORKER
+            or scope.process_role != "worker"
+            or scope.purpose != "worker"
+            or scope.data_mode != "live"
+            or scope.namespace_id != self.settings.perceptor_namespace_id
+            or scope.namespace_generation
+            != self.settings.perceptor_namespace_generation
+            or scope.subject_id != binding.subject_id
+            or scope.authorization_epoch
+            != self.settings.perceptor_authorization_epoch
+            or scope.service_principal_id != self.settings.service_principal_id
+        ):
+            raise PerceptorPullIngressError(
+                "scheduled Pull scope does not match binding authority"
+            )
+        return scope
+
+    def plan_history_window(
+        self,
+        *,
+        binding: DeviceBinding,
+        requested_start_at: datetime,
+        requested_end_at: datetime,
+    ) -> PullHistoryPlan:
+        """Resolve the next bounded window from the durable Worker checkpoint.
+
+        The API role cannot read the checkpoint table.  A narrowly granted
+        SECURITY DEFINER function validates the exact namespace generation,
+        provider account, subject, and binding before returning timestamps
+        only.  Once a checkpoint exists, caller-supplied starts are never
+        trusted: the database returns ``cursor_at - 3 seconds``.
+        """
+
+        PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=requested_start_at,
+            window_end_at=requested_end_at,
         )
-        _require_success(response, "getSleepReport")
-        content_hash = canonical_content_sha256(response.get("data"))
-        envelope = {
-            "schema": PULL_ENVELOPE_SCHEMA,
-            "event_type": SLEEP_REPORT_EVENT,
-            "compatibility_profile_id": self.profile.profile_id,
-            "request": {
-                **device.identity_payload(),
-                "local_report_date": report_date.isoformat(),
-            },
-            "response": response,
-        }
-        identity = (
-            f"perceptor-source-report.v1:{device.device_name}:"
-            f"{device.home_id}:{report_date.isoformat()}:{content_hash}"
+        if binding.data_mode != DataMode.LIVE:
+            raise ValueError("durable Perceptor Pull requires a live binding")
+        if binding.provider_id != "perceptor":
+            raise ValueError("durable Perceptor Pull requires a Perceptor binding")
+        if binding.provider_account_id != self.settings.perceptor_provider_account_id:
+            raise ValueError("binding and configured provider account disagree")
+        namespace = cast(str, self.settings.perceptor_namespace_id)
+        account = cast(str, self.settings.perceptor_provider_account_id)
+        scope = self._ingress_scope(binding)
+        try:
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    cursor.execute(
+                        "SELECT * FROM public.sleepagent_plan_perceptor_history("
+                        + ",".join(["%s"] * 8)
+                        + ")",
+                        (
+                            namespace,
+                            self.settings.perceptor_namespace_generation,
+                            account,
+                            binding.device_binding_id,
+                            binding.binding_version,
+                            binding.subject_id,
+                            requested_start_at,
+                            requested_end_at,
+                        ),
+                    )
+                    row = cursor.fetchone()
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            if _error_chain_has_primary(
+                exc, "Perceptor history continuation exceeds one hour"
+            ):
+                raise PerceptorHistoryBackfillRequired(
+                    "scheduled History checkpoint requires explicit historical backfill"
+                ) from exc
+            raise
+        if row is None or len(row) != 5:
+            raise PerceptorPullIngressError(
+                "Perceptor history planner returned a malformed result"
+            )
+        if not isinstance(row[4], bool):
+            raise PerceptorPullIngressError(
+                "Perceptor history planner returned an invalid resume flag"
+            )
+        plan = PullHistoryPlan(
+            window_start_at=_aware_datetime(row[0], "window_start_at"),
+            window_end_at=_aware_datetime(row[1], "window_end_at"),
+            checkpoint_cursor_at=(
+                None
+                if row[2] is None
+                else _aware_datetime(row[2], "checkpoint_cursor_at")
+            ),
+            lateness_watermark_at=(
+                None
+                if row[3] is None
+                else _aware_datetime(row[3], "lateness_watermark_at")
+            ),
+            resumed_from_checkpoint=row[4],
         )
-        intake = self._intake(
-            envelope,
-            identity=identity,
-            event_type=SLEEP_REPORT_EVENT,
-            capability=AdapterCapability.SLEEP_REPORT,
-            received_at=fetched_at,
+        requested_end_utc = requested_end_at.astimezone(UTC)
+        if plan.already_processed:
+            if (
+                plan.checkpoint_cursor_at is None
+                or requested_end_utc > plan.checkpoint_cursor_at
+            ):
+                raise PerceptorPullIngressError(
+                    "Perceptor history planner returned an invalid no-op"
+                )
+        elif plan.window_end_at != requested_end_utc:
+            raise PerceptorPullIngressError(
+                "Perceptor history planner changed the requested end"
+            )
+        if not plan.resumed_from_checkpoint and (
+            plan.window_start_at != requested_start_at.astimezone(UTC)
+        ):
+            raise PerceptorPullIngressError(
+                "Perceptor history planner changed an initial start"
+            )
+        return plan
+
+    def accept(
+        self,
+        read: PlatformEvidencedRead[Any],
+        *,
+        binding: DeviceBinding,
+        coordinates: PullRequestCoordinates,
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
+        if not 0 <= normalization_delay_seconds <= 3_600:
+            raise ValueError(
+                "normalization_delay_seconds must be between 0 and 3600"
+            )
+        if read.endpoint != coordinates.endpoint:
+            raise ValueError("read evidence and request coordinates disagree")
+        if binding.data_mode != DataMode.LIVE:
+            raise ValueError("durable Perceptor Pull requires a live binding")
+        if binding.provider_id != "perceptor":
+            raise ValueError("durable Perceptor Pull requires a Perceptor binding")
+        if binding.provider_account_id != self.settings.perceptor_provider_account_id:
+            raise ValueError("binding and configured provider account disagree")
+        requested_name = binding.provider_device.provider_device_name or ""
+        assert_requested_device_matches_binding(requested_name, binding.provider_device)
+        evidence = read.evidence
+        _require_aware(evidence.requested_at, "requested_at")
+        _require_aware(evidence.received_at, "received_at")
+        if evidence.received_at < evidence.requested_at:
+            raise ValueError("response receipt precedes request")
+        _assert_pull_coordinates_within_binding(
+            binding,
+            coordinates,
+            requested_at=evidence.requested_at,
         )
-        provider_device_key = namespaced_provider_device_key(
-            provider_id="perceptor",
-            provider_account_id=self.profile.provider_account_id,
-            provider_device=ProviderDeviceIdentity(
-                provider_device_id=device.provider_device_id,
-                provider_device_name=device.device_name,
-                product_id=device.product_id,
-                home_id=str(device.home_id),
-                project_id=device.project_id,
+        exact_sha256 = evidence.raw_sha256
+        response_valid = evidence.http_status == 200
+        response_data: object | None = None
+        try:
+            response_data = parse_platform_success_response(evidence.raw_body)
+            if _semantic_json(response_data) != _semantic_json(read.data):
+                raise PerceptorPullIngressError(
+                    "parsed read differs from exact response evidence"
+                )
+        except (PerceptorPullIngressError, TypeError, ValueError):
+            response_valid = False
+        response_semantic_sha256 = (
+            hashlib.sha256(_semantic_json(response_data)).hexdigest()
+            if response_valid
+            else exact_sha256
+        )
+        response_has_data = False
+        response_device_id: str | None = None
+        response_device_name: str | None = None
+        if response_valid:
+            try:
+                response_has_data = _response_has_data(
+                    coordinates.endpoint,
+                    cast(object, response_data),
+                )
+                response_device_id, response_device_name = _response_device_identity(
+                    coordinates.endpoint,
+                    cast(object, response_data),
+                    binding,
+                )
+            except (PullContractError, TypeError, ValueError):
+                response_valid = False
+                response_has_data = False
+
+        namespace = cast(str, self.settings.perceptor_namespace_id)
+        account = cast(str, self.settings.perceptor_provider_account_id)
+        descriptor = _request_descriptor(
+            namespace,
+            self.settings.perceptor_namespace_generation,
+            account,
+            binding,
+            coordinates,
+        )
+        raw_identity = _stable_digest(
+            "perceptor-pull-raw.v1",
+            descriptor,
+            exact_sha256,
+        )
+        batch_identity = _stable_digest(
+            "perceptor-pull-batch.v1",
+            descriptor,
+            response_semantic_sha256,
+            NORMALIZER_VERSION,
+        )
+        raw_id = f"perceptor:pull:raw:{raw_identity}"
+        work_id = f"perceptor:pull:work:{batch_identity}"
+        stream_key = _stream_key(
+            binding,
+            coordinates.endpoint,
+            namespace_generation=self.settings.perceptor_namespace_generation,
+            historical_backfill=coordinates.historical_backfill,
+        )
+        checkpoint_cursor_at, lateness_watermark_at = _checkpoint_coordinates(
+            binding,
+            coordinates,
+            evidence.received_at,
+        )
+        encrypted = self.cipher.encrypt(
+            evidence.raw_body,
+            aad=perceptor_pull_raw_aad(
+                namespace,
+                self.settings.perceptor_namespace_generation,
+                raw_id,
             ),
         )
-        version_id = "source-report:" + hashlib.sha256(
-            (
-                f"{self.namespace.namespace_id}|{provider_device_key}|"
-                f"{report_date.isoformat()}|{content_hash}"
-            ).encode("utf-8")
-        ).hexdigest()
-        source_report = self.repository.register_source_report_version(
-            self.namespace,
-            source_report_version_id=version_id,
-            provider_id="perceptor",
-            provider_account_id=self.profile.provider_account_id,
-            provider_device_key=provider_device_key,
-            local_report_date=report_date,
-            content_sha256=content_hash,
-            raw_ingress_record_id=intake.raw_ingress_record_id,
-            is_empty=response.get("data") in (None, {}, []),
-            fetched_at=fetched_at,
+        safe_metadata = {
+            "schema_version": "perceptor_pull_raw_metadata.v1",
+            "source_channel": "PULL",
+            "endpoint": coordinates.endpoint,
+            "raw_sha256": exact_sha256,
+            "response_semantic_sha256": response_semantic_sha256,
+            "normalizer_version": NORMALIZER_VERSION,
+            "batch_identity": batch_identity,
+            "stream_key": stream_key,
+            "checkpoint_cursor_at": checkpoint_cursor_at.isoformat(),
+            "lateness_watermark_at": lateness_watermark_at.isoformat(),
+            "requested_window_start": _iso_or_none(coordinates.window_start_at),
+            "requested_window_end": _iso_or_none(coordinates.window_end_at),
+            "requested_report_date": (
+                None if coordinates.report_date is None else coordinates.report_date.isoformat()
+            ),
+            "response_valid": response_valid,
+            "response_has_data": response_has_data,
+            "provider_device_key": _provider_device_key(
+                binding,
+                namespace_generation=self.settings.perceptor_namespace_generation,
+            ),
+        }
+        ids = {
+            name: f"perceptor:pull:{name}:{_stable_digest(raw_identity, name)}"
+            for name in ("intake", "quarantine-receipt", "quarantine")
+        }
+        scope = self._ingress_scope(binding)
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT * FROM public.sleepagent_ingest_perceptor_pull("
+                    + ",".join(["%s"] * 30)
+                    + ")",
+                    (
+                        namespace,
+                        self.settings.perceptor_namespace_generation,
+                        account,
+                        self.client_id_sha256,
+                        binding.provider_device.provider_device_id,
+                        binding.provider_device.provider_device_name,
+                        response_device_id,
+                        response_device_name,
+                        coordinates.endpoint,
+                        coordinates.window_start_at,
+                        coordinates.window_end_at,
+                        coordinates.report_date,
+                        evidence.requested_at,
+                        evidence.received_at,
+                        raw_identity,
+                        batch_identity,
+                        exact_sha256,
+                        encrypted,
+                        self.cipher.key_id,
+                        "application/json",
+                        len(evidence.raw_body),
+                        evidence.received_at
+                        + timedelta(seconds=self.settings.raw_retention_seconds),
+                        response_valid,
+                        response_has_data,
+                        raw_id,
+                        work_id,
+                        ids["intake"],
+                        ids["quarantine-receipt"],
+                        ids["quarantine"],
+                        json.dumps(safe_metadata, sort_keys=True, separators=(",", ":")),
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            if row is None:
+                raise PerceptorPullIngressError(
+                    "Perceptor Pull ingress function returned no result"
+                )
+            if len(row) != 6:
+                raise PerceptorPullIngressError(
+                    "Perceptor Pull ingress function returned a malformed result"
+                )
+            if row[3] is not None and str(row[3]) != binding.subject_id:
+                raise PerceptorPullIngressError(
+                    "durable Pull subject does not match the asserted DeviceBinding"
+                )
+            if row[4] is not None and str(row[4]) != binding.device_binding_id:
+                raise PerceptorPullIngressError(
+                    "durable Pull resolution does not match the asserted DeviceBinding"
+                )
+            normalization_not_before = None
+            if (
+                normalization_delay_seconds
+                and row[2] is not None
+                and not bool(row[5])
+            ):
+                normalization_not_before = evidence.received_at + timedelta(
+                    seconds=normalization_delay_seconds
+                )
+                defer_cursor = uow.connection.cursor()
+                try:
+                    defer_cursor.execute(
+                        """
+                        UPDATE public.sleep_domain_normalization_work
+                        SET available_at = GREATEST(available_at, %s),
+                            updated_at = %s
+                        WHERE work_id = %s AND namespace_id = %s
+                          AND data_mode = 'live' AND namespace_generation = %s
+                          AND subject_id = %s AND status = 'pending'
+                        """,
+                        (
+                            normalization_not_before,
+                            evidence.received_at,
+                            str(row[2]),
+                            namespace,
+                            self.settings.perceptor_namespace_generation,
+                            binding.subject_id,
+                        ),
+                    )
+                    if defer_cursor.rowcount != 1:
+                        raise PerceptorPullIngressError(
+                            "Perceptor recovery normalization deferral was rejected"
+                        )
+                finally:
+                    defer_cursor.close()
+            uow.commit()
+        result = PerceptorPullIngressResult(
+            disposition=str(row[0]),
+            raw_ingress_record_id=None if row[1] is None else str(row[1]),
+            normalization_work_id=None if row[2] is None else str(row[2]),
+            subject_id=None if row[3] is None else str(row[3]),
+            device_binding_id=None if row[4] is None else str(row[4]),
+            duplicate=bool(row[5]),
+            batch_identity=batch_identity,
+            response_semantic_sha256=response_semantic_sha256,
+            normalization_not_before=normalization_not_before,
         )
-        return PulledSourceReport(intake=intake, source_report=source_report)
+        record_backend_signal(category="pull", outcome="raw_committed")
+        log_event(
+            "pull_raw_committed",
+            endpoint=coordinates.endpoint,
+            disposition=result.disposition,
+            duplicate=result.duplicate,
+            raw_ingress_record_id=result.raw_ingress_record_id,
+            normalization_work_id=result.normalization_work_id,
+            batch_identity=batch_identity,
+        )
+        if result.duplicate:
+            record_backend_signal(category="pull", outcome="duplicate")
+            log_event("pull_duplicate", endpoint=coordinates.endpoint, batch_identity=batch_identity)
+        return result
 
-    def reconcile_history(
+
+class PerceptorPullQuarantineReprocessor:
+    """Append an actor audit and requeue one exact eligible Pull quarantine."""
+
+    def __init__(
         self,
-        devices: Sequence[PerceptorPullDevice],
+        uow_factory: UnitOfWorkFactory[Any],
+        *,
+        now_factory: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.uow_factory = uow_factory
+        self.now_factory = now_factory or (lambda: datetime.now(UTC))
+
+    def requeue(
+        self,
+        scope: UowScope,
+        *,
+        quarantine_id: str,
+        expected_work_id: str,
+        request_id: str,
+        actor_id: str,
+        authorization_id: str,
+        reason: str,
+    ) -> PerceptorPullQuarantineReprocessResult:
+        if scope.process_role != "api" or scope.data_mode != "live":
+            raise ValueError("Pull quarantine reprocessing requires live API authority")
+        if scope.actor_id != actor_id:
+            raise ValueError("Pull quarantine reprocessing actor scope disagrees")
+        requested_at = self.now_factory()
+        _require_aware(requested_at, "requested_at")
+        audit = QuarantineReprocessAudit(
+            request_id=request_id,
+            data_mode=DataMode.LIVE,
+            quarantine_ids=(quarantine_id,),
+            actor_id=actor_id,
+            authorization_id=authorization_id,
+            requested_at=requested_at,
+            reason=reason,
+        )
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT * FROM public."
+                    "sleepagent_requeue_perceptor_pull_quarantine("
+                    + ",".join(["%s"] * 7)
+                    + ")",
+                    (
+                        quarantine_id,
+                        expected_work_id,
+                        request_id,
+                        actor_id,
+                        authorization_id,
+                        reason,
+                        audit.requested_at,
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            if row is None or len(row) != 4:
+                raise PerceptorPullIngressError(
+                    "Pull quarantine reprocess authority returned a malformed result"
+                )
+            if str(row[0]) != expected_work_id:
+                raise PerceptorPullIngressError(
+                    "Pull quarantine reprocess authority returned another work item"
+                )
+            uow.commit()
+        result = PerceptorPullQuarantineReprocessResult(
+            request_id=request_id,
+            quarantine_id=quarantine_id,
+            work_id=str(row[0]),
+            raw_ingress_record_id=str(row[1]),
+            status=str(row[2]),
+            attempt_count=int(row[3]),
+        )
+        log_event(
+            (
+                "pull_quarantine_reprocess_enqueued"
+                if result.status == "pending"
+                else "pull_quarantine_reprocess_replayed"
+            ),
+            quarantine_id=quarantine_id,
+            work_id=result.work_id,
+            status=result.status,
+        )
+        return result
+
+
+class PerceptorPullBackfillRunner:
+    """Bounded read-only Platform calls followed by durable response intake."""
+
+    def __init__(
+        self,
+        client: PerceptorPlatformClient,
+        ingress: DurablePerceptorPullIngress,
+        binding: DeviceBinding,
+    ) -> None:
+        self.client = client
+        self.ingress = ingress
+        self.binding = binding
+        if binding.data_mode != DataMode.LIVE or binding.status.value != "active":
+            raise ValueError("Perceptor Pull requires an active live DeviceBinding")
+        if binding.provider_id != "perceptor":
+            raise ValueError("Perceptor Pull requires a Perceptor DeviceBinding")
+        self.device_name = binding.provider_device.provider_device_name or ""
+        self.home_id = binding.provider_device.home_id or ""
+        assert_requested_device_matches_binding(self.device_name, binding.provider_device)
+
+    def pull_history(
+        self,
         *,
         start_at: datetime,
         end_at: datetime,
-        stream_key: str,
-        reconciled_at: datetime,
-    ) -> HistoryReconciliationResult:
-        if not devices:
-            raise PerceptorPullConfigurationError(
-                "history reconciliation requires at least one device"
-            )
-        if not stream_key.strip():
-            raise PerceptorPullConfigurationError(
-                "history reconciliation requires a non-empty stream_key"
-            )
-        _require_aware_interval(start_at, end_at)
-        home_ids = {str(device.home_id) for device in devices}
-        if len(home_ids) != 1:
-            raise PerceptorPullConfigurationError(
-                "one history reconciliation stream must use one home_id"
-            )
-        if len({device.device_name for device in devices}) != len(devices):
-            raise PerceptorPullConfigurationError(
-                "history devices must be unique"
-            )
-        checkpoint = self.repository.get_pull_checkpoint(
-            self.namespace,
-            provider_id="perceptor",
-            provider_account_id=self.profile.provider_account_id,
-            stream_key=stream_key,
+    ) -> PerceptorPullIngressResult:
+        plan = self.ingress.plan_history_window(
+            binding=self.binding,
+            requested_start_at=start_at,
+            requested_end_at=end_at,
         )
-        effective_start = start_at
-        if checkpoint is not None:
-            replay_from = checkpoint.lateness_watermark_at - self.profile.overlap_window
-            effective_start = max(start_at, replay_from)
-        intakes: list[IntakeResult] = []
-        window_count = 0
-        batch_count = 0
-        current_checkpoint = checkpoint
-        for window_start, window_end in partition_history_windows(
-            effective_start,
-            end_at,
-            max_window=self.profile.history_window,
-        ):
-            window_count += 1
-            for batch in partition_device_batches(
-                devices,
-                max_devices=self.profile.history_device_batch_size,
-            ):
-                batch_count += 1
-                response = self.client.get_history_data(
-                    device_names=[device.device_name for device in batch],
-                    home_id=batch[0].home_id,
-                    start_at=window_start,
-                    end_at=window_end,
+        if plan.already_processed:
+            return self._history_checkpoint_noop(start_at=start_at, end_at=end_at)
+        coordinates = PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=plan.window_start_at,
+            window_end_at=plan.window_end_at,
+        )
+        return self._run(
+            coordinates,
+            lambda: self.client.get_history_evidenced(
+                device_names=(self.device_name,),
+                start_at=plan.window_start_at,
+                end_at=plan.window_end_at,
+            ),
+        )
+
+    def backfill_history(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        normalization_delay_seconds: int = 0,
+    ) -> tuple[PerceptorHistoryBackfillChunkResult, ...]:
+        """Fetch deterministic <=1-hour chunks without moving rolling state."""
+
+        chunks = split_history_backfill_range(start_at=start_at, end_at=end_at)
+        results: list[PerceptorHistoryBackfillChunkResult] = []
+        for chunk_start, chunk_end in chunks:
+            coordinates = PullRequestCoordinates(
+                endpoint=HISTORY_ENDPOINT,
+                window_start_at=chunk_start,
+                window_end_at=chunk_end,
+                historical_backfill=True,
+            )
+            _assert_pull_coordinates_within_binding(
+                self.binding,
+                coordinates,
+                requested_at=chunk_end,
+            )
+            record_pull(source="perceptor", endpoint=coordinates.endpoint)
+            record_backend_signal(category="pull", outcome="started")
+            log_event(
+                "pull_started",
+                endpoint=coordinates.endpoint,
+                recovery_mode="historical_backfill",
+            )
+            try:
+                read = self.client.get_history_evidenced(
+                    device_names=(self.device_name,),
+                    start_at=chunk_start,
+                    end_at=chunk_end,
                 )
-                _require_success(response, "getHistoryData")
-                content_hash = canonical_content_sha256(response.get("data"))
-                envelope = {
-                    "schema": PULL_ENVELOPE_SCHEMA,
-                    "event_type": HISTORY_EVENT,
-                    "compatibility_profile_id": self.profile.profile_id,
-                    "cadence_seconds": self.profile.history_cadence.total_seconds(),
-                    "request": {
-                        "device_names": [
-                            device.device_name for device in batch
-                        ],
-                        "devices": [
-                            device.identity_payload() for device in batch
-                        ],
-                        "home_id": str(batch[0].home_id),
-                        "start_at": window_start.isoformat(),
-                        "end_at": window_end.isoformat(),
-                    },
-                    "response": response,
-                }
-                identity = (
-                    f"perceptor-history.v1:{stream_key}:"
-                    f"{window_start.isoformat()}:{window_end.isoformat()}:"
-                    f"{','.join(device.device_name for device in batch)}:"
-                    f"{content_hash}"
+                ingress = self._accept_read(
+                    coordinates,
+                    read,
+                    normalization_delay_seconds=normalization_delay_seconds,
                 )
-                intakes.append(
-                    self._intake(
-                        envelope,
-                        identity=identity,
-                        event_type=HISTORY_EVENT,
-                        capability=AdapterCapability.HISTORICAL_RATE_SAMPLES,
-                        received_at=reconciled_at,
+            except Exception as exc:
+                fields = _safe_pull_error_fields(exc)
+                record_backend_signal(category="pull", outcome="failed")
+                log_event(
+                    "pull_failed",
+                    endpoint=coordinates.endpoint,
+                    recovery_mode="historical_backfill",
+                    error_type=type(exc).__name__,
+                    **fields,
+                )
+                results.append(
+                    PerceptorHistoryBackfillChunkResult(
+                        window_start_at=chunk_start,
+                        window_end_at=chunk_end,
+                        status="failed",
+                        vendor_record_count=0,
+                        raw_series_sample_count=0,
+                        ingress=None,
+                        error_code=str(fields["error_code"]),
                     )
                 )
-                _validate_history_series_lengths(response)
-            previous_cursor = (
-                current_checkpoint.cursor_at
-                if current_checkpoint is not None
-                else window_start
+                continue
+            record_backend_signal(category="pull", outcome="succeeded")
+            log_event(
+                "pull_succeeded",
+                endpoint=coordinates.endpoint,
+                recovery_mode="historical_backfill",
+                disposition=ingress.disposition,
             )
-            next_cursor = max(previous_cursor, window_end)
-            checkpoint_id = "pull-checkpoint:" + hashlib.sha256(
-                (
-                    f"{self.namespace.namespace_id}|perceptor|"
-                    f"{self.profile.provider_account_id}|{stream_key}"
-                ).encode("utf-8")
-            ).hexdigest()
-            current_checkpoint = self.repository.advance_pull_checkpoint(
-                self.namespace,
-                checkpoint_id=checkpoint_id,
-                provider_id="perceptor",
-                provider_account_id=self.profile.provider_account_id,
-                stream_key=stream_key,
-                cursor_at=next_cursor,
-                lateness_watermark_at=next_cursor - self.profile.lateness,
-                expected_cas_version=(
-                    None
-                    if current_checkpoint is None
-                    else current_checkpoint.cas_version
-                ),
-                updated_at=reconciled_at,
+            results.append(
+                PerceptorHistoryBackfillChunkResult(
+                    window_start_at=chunk_start,
+                    window_end_at=chunk_end,
+                    status="succeeded",
+                    vendor_record_count=len(read.data),
+                    raw_series_sample_count=_history_raw_series_sample_count(
+                        read.data
+                    ),
+                    ingress=ingress,
+                )
             )
-        return HistoryReconciliationResult(
-            intake_results=tuple(intakes),
-            checkpoint=current_checkpoint,
-            window_count=window_count,
-            batch_count=batch_count,
+        return tuple(results)
+
+    def _history_checkpoint_noop(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> PerceptorPullIngressResult:
+        coordinates = PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=start_at,
+            window_end_at=end_at,
+        )
+        namespace = cast(str, self.ingress.settings.perceptor_namespace_id)
+        batch_identity = _stable_digest(
+            "perceptor-pull-checkpoint-noop.v1",
+            _request_descriptor(
+                namespace,
+                self.ingress.settings.perceptor_namespace_generation,
+                cast(str, self.ingress.settings.perceptor_provider_account_id),
+                self.binding,
+                coordinates,
+            ),
+        )
+        result = PerceptorPullIngressResult(
+            disposition="checkpoint_already_advanced",
+            raw_ingress_record_id=None,
+            normalization_work_id=None,
+            subject_id=self.binding.subject_id,
+            device_binding_id=self.binding.device_binding_id,
+            duplicate=True,
+            batch_identity=batch_identity,
+            response_semantic_sha256=None,
+        )
+        record_backend_signal(category="pull", outcome="duplicate")
+        record_backend_signal(category="pull", outcome="checkpoint_held")
+        log_event(
+            "pull_duplicate",
+            endpoint=HISTORY_ENDPOINT,
+            disposition=result.disposition,
+            batch_identity=batch_identity,
+        )
+        log_event(
+            "pull_checkpoint_held",
+            endpoint=HISTORY_ENDPOINT,
+            reason="already_advanced",
+        )
+        return result
+
+    def pull_current(self) -> PerceptorPullIngressResult:
+        coordinates = PullRequestCoordinates(endpoint=GET_CURRENT_ENDPOINT)
+        return self._run(
+            coordinates,
+            lambda: self.client.get_current_evidenced(
+                device_name=self.device_name, home_id=self.home_id
+            ),
         )
 
-    def run_realtime_fallback(
+    def pull_realtime_once(self) -> PerceptorPullIngressResult:
+        coordinates = PullRequestCoordinates(endpoint=REALTIME_READ_ENDPOINT)
+        return self._run(
+            coordinates,
+            lambda: self.client.get_realtime_evidenced(
+                device_name=self.device_name, home_id=self.home_id
+            ),
+        )
+
+    def pull_sleep_report(
         self,
-        device: PerceptorPullDevice,
+        report_date: date,
         *,
-        gap_key: str,
-        fetched_at: datetime,
-    ) -> IntakeResult:
-        if not self.profile.realtime_fallback_enabled:
-            raise PerceptorPullConfigurationError(
-                "realtime fallback is disabled for this profile"
-            )
-        if not gap_key.strip():
-            raise PerceptorPullConfigurationError(
-                "realtime fallback requires a non-empty gap_key"
-            )
-        start_response = self.client.start_realtime(
-            device_name=device.device_name,
-            home_id=device.home_id,
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
+        coordinates = PullRequestCoordinates(
+            endpoint=SLEEP_REPORT_ENDPOINT, report_date=report_date
         )
-        _require_success(start_response, "start")
-        response = self.client.get_realtime(
-            device_name=device.device_name,
-            home_id=device.home_id,
+        return self._run(
+            coordinates,
+            lambda: self.client.get_sleep_report_evidenced(
+                device_name=self.device_name,
+                home_id=self.home_id,
+                report_date=report_date,
+            ),
+            normalization_delay_seconds=normalization_delay_seconds,
         )
-        _require_success(response, "getRealTimes")
-        content_hash = canonical_content_sha256(response.get("data"))
-        envelope = {
-            "schema": PULL_ENVELOPE_SCHEMA,
-            "event_type": REALTIME_FALLBACK_EVENT,
-            "compatibility_profile_id": self.profile.profile_id,
-            "request": {
-                **device.identity_payload(),
-                "gap_key": gap_key,
-            },
-            "response": response,
+
+    def _run(
+        self,
+        coordinates: PullRequestCoordinates,
+        call: Callable[[], PlatformEvidencedRead[Any]],
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
+        _assert_pull_coordinates_within_binding(
+            self.binding,
+            coordinates,
+            requested_at=datetime.now(tz=UTC),
+        )
+        record_pull(source="perceptor", endpoint=coordinates.endpoint)
+        record_backend_signal(category="pull", outcome="started")
+        log_event("pull_started", endpoint=coordinates.endpoint)
+        try:
+            result = self._accept_read(
+                coordinates,
+                call(),
+                normalization_delay_seconds=normalization_delay_seconds,
+            )
+        except Exception as exc:
+            record_backend_signal(category="pull", outcome="failed")
+            log_event(
+                "pull_failed",
+                endpoint=coordinates.endpoint,
+                error_type=type(exc).__name__,
+                **_safe_pull_error_fields(exc),
+            )
+            raise
+        record_backend_signal(category="pull", outcome="succeeded")
+        log_event("pull_succeeded", endpoint=coordinates.endpoint, disposition=result.disposition)
+        return result
+
+    def _accept_read(
+        self,
+        coordinates: PullRequestCoordinates,
+        read: PlatformEvidencedRead[Any],
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
+        if normalization_delay_seconds:
+            return self.ingress.accept(
+                read,
+                binding=self.binding,
+                coordinates=coordinates,
+                normalization_delay_seconds=normalization_delay_seconds,
+            )
+        return self.ingress.accept(read, binding=self.binding, coordinates=coordinates)
+
+
+class PerceptorPullNormalizationProcessor:
+    """Two-phase Pull reconciliation with a crash-safe durable checkpoint."""
+
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory[Any],
+        *,
+        cipher: RawPayloadCipher,
+        now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+        fault_injector: Callable[[str], None] | None = None,
+        id_generator: Callable[[datetime | None], str] | None = None,
+        policy: SleepSlicePolicy | None = None,
+        projection_fault_injector: Callable[[str], None] | None = None,
+        observation_semantics_version: ObservationSemanticsVersion = (
+            ObservationSemanticsVersion.V1
+        ),
+    ) -> None:
+        self.uow_factory = uow_factory
+        self.cipher = cipher
+        self.now_factory = now_factory
+        self.fault_injector = fault_injector
+        self.policy = policy or default_sleep_slice_policy()
+        self.projection_boundary = EpisodeProjectionBoundary(
+            self.policy,
+            id_generator=id_generator or UUID7Generator(),
+        )
+        self.id_generator = self.projection_boundary.id_generator
+        self.projection_fault_injector = projection_fault_injector
+        self.observation_semantics_version = observation_semantics_version
+        self.reconciler = PerceptorObservationReconciler()
+
+    def process(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+    ) -> PerceptorPullNormalizationResult:
+        if scope.data_mode != "live" or scope.subject_id is None:
+            raise SleepSliceInvariantError(
+                "Perceptor Pull normalization requires exact live subject scope"
+            )
+        committed_at = self.now_factory()
+        _require_aware(committed_at, "committed_at")
+        loaded = self._load(scope, lease)
+        try:
+            normalized = self._normalize_loaded(loaded)
+        except (
+            PerceptorPullIngressError,
+            PullContractError,
+            ValueError,
+            SleepSliceInvariantError,
+        ) as exc:
+            self._quarantine(
+                scope,
+                lease,
+                raw_ingress_record_id=loaded["raw_ingress_record_id"],
+                detail_code=type(exc).__name__,
+                committed_at=committed_at,
+            )
+            record_backend_signal(category="pull", outcome="normalization_failed")
+            log_event(
+                "normalization_failed",
+                endpoint=loaded["work_json"].get("endpoint"),
+                raw_ingress_record_id=loaded["raw_ingress_record_id"],
+                error_type=type(exc).__name__,
+            )
+            return PerceptorPullNormalizationResult(
+                work_id=lease.work_id,
+                raw_ingress_record_id=loaded["raw_ingress_record_id"],
+                canonical_observation_ids=(),
+                canonical_created_count=0,
+                push_pull_overlap_count=0,
+                conflict_created_count=0,
+                duplicate_count=0,
+                checkpoint_advanced=False,
+                no_data=False,
+                quarantined=True,
+            )
+
+        summary = self._commit_reconciliation(
+            scope,
+            lease,
+            loaded=loaded,
+            normalized=normalized,
+            committed_at=committed_at,
+        )
+        if self.fault_injector is not None:
+            self.fault_injector("after_reconciliation_commit")
+        checkpoint_advanced = self._advance_checkpoint_and_finalize(
+            scope,
+            lease,
+            loaded=loaded,
+            reconciliation_summary=summary,
+            committed_at=committed_at,
+        )
+        _emit_reconciliation_observability(loaded["work_json"], summary, checkpoint_advanced)
+        return PerceptorPullNormalizationResult(
+            work_id=lease.work_id,
+            raw_ingress_record_id=loaded["raw_ingress_record_id"],
+            canonical_observation_ids=tuple(summary["canonical_observation_ids"]),
+            canonical_created_count=int(summary["canonical_created_count"]),
+            push_pull_overlap_count=int(summary["push_pull_overlap_count"]),
+            conflict_created_count=int(summary["conflict_created_count"]),
+            duplicate_count=int(summary["duplicate_count"]),
+            checkpoint_advanced=checkpoint_advanced,
+            no_data=bool(summary["no_data"]),
+        )
+
+    def _load(self, scope: UowScope, lease: NormalizationLease) -> dict[str, Any]:
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT raw.raw_ingress_record_id, raw.encrypted_payload,
+                           raw.encryption_key_id,
+                           raw.pre_normalization_payload_sha256,
+                           raw.provider_account_id, raw.request_signed_at,
+                           raw.received_at, work.work_json, binding.binding_json
+                    FROM public.sleep_domain_normalization_work AS work
+                    JOIN public.sleep_domain_raw_inbox AS raw
+                      ON raw.raw_ingress_record_id = work.raw_ingress_record_id
+                     AND raw.namespace_id = work.namespace_id
+                     AND raw.data_mode = work.data_mode
+                     AND raw.subject_id = work.subject_id
+                    JOIN public.sleep_domain_device_bindings AS binding
+                      ON binding.device_binding_id = work.work_json ->> 'device_binding_id'
+                     AND binding.namespace_id = work.namespace_id
+                     AND binding.data_mode = work.data_mode
+                     AND binding.subject_id = work.subject_id
+                    WHERE work.work_id = %s AND work.namespace_id = %s
+                      AND work.data_mode = 'live'
+                      AND work.namespace_generation = %s AND work.subject_id = %s
+                      AND work.work_json ->> 'normalizer' = %s
+                      AND raw.signature_verification = 'not_provided'
+                      AND raw.signature_profile = %s
+                      AND raw.encryption_protocol_version = 1
+                      AND work.status = 'running' AND work.lease_generation = %s
+                      AND work.fencing_token = %s AND work.worker_instance = %s
+                      AND work.lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        PULL_NORMALIZER,
+                        PULL_RESPONSE_PROFILE,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        if row is None:
+            raise SleepSliceLeaseLost("Perceptor Pull normalization fence was rejected")
+        if str(row[2]) != self.cipher.key_id:
+            raise SleepSliceInvariantError("raw payload encryption key is unavailable")
+        return {
+            "namespace_id": scope.namespace_id,
+            "namespace_generation": scope.namespace_generation,
+            "raw_ingress_record_id": str(row[0]),
+            "encrypted_payload": bytes(row[1]),
+            "payload_sha256": str(row[3]),
+            "provider_account_id": str(row[4]),
+            "requested_at": row[5],
+            "received_at": row[6],
+            "work_json": _json_mapping(row[7]),
+            "binding_json": _json_mapping(row[8]),
         }
-        return self._intake(
-            envelope,
-            identity=(
-                f"perceptor-realtime-fallback.v1:{gap_key}:"
-                f"{device.device_name}:{content_hash}"
-            ),
-            event_type=REALTIME_FALLBACK_EVENT,
-            capability=AdapterCapability.REALTIME_VITALS,
-            received_at=fetched_at,
-        )
 
-    def _intake(
+    def _normalize_loaded(self, loaded: Mapping[str, Any]) -> dict[str, Any]:
+        raw_id = str(loaded["raw_ingress_record_id"])
+        work = cast(dict[str, Any], loaded["work_json"])
+        raw = self.cipher.decrypt(
+            cast(bytes, loaded["encrypted_payload"]),
+            aad=perceptor_pull_raw_aad(
+                str(loaded["namespace_id"]),
+                int(loaded["namespace_generation"]),
+                raw_id,
+            ),
+        )
+        if not raw:  # pragma: no cover - RawPayloadCipher already authenticates
+            raise SleepSliceInvariantError("decrypted Pull response is empty")
+        if hashlib.sha256(raw).hexdigest() != loaded["payload_sha256"]:
+            raise SleepSliceInvariantError("raw Pull response hash mismatch")
+        data = parse_platform_success_response(raw)
+        if hashlib.sha256(_semantic_json(data)).hexdigest() != work.get(
+            "response_semantic_sha256"
+        ):
+            raise SleepSliceInvariantError("Pull response semantic hash mismatch")
+        binding = DeviceBinding.model_validate(loaded["binding_json"])
+        common = {
+            "provider_account_id": str(loaded["provider_account_id"]),
+            "provider_device": binding.provider_device,
+            "raw_sha256": str(loaded["payload_sha256"]),
+            "requested_at": loaded["requested_at"],
+            "received_at": loaded["received_at"],
+        }
+        endpoint = str(work.get("endpoint"))
+        no_data = False
+        if endpoint == HISTORY_ENDPOINT:
+            if not isinstance(data, list) or any(not isinstance(item, Mapping) for item in data):
+                raise PullContractError("history response data must be a list of objects")
+            if not data:
+                no_data = True
+                result = None
+            else:
+                requested_window_start = _aware_from_text(
+                    work.get("requested_window_start"),
+                    "requested_window_start",
+                )
+                requested_window_end = _aware_from_text(
+                    work.get("requested_window_end"),
+                    "requested_window_end",
+                )
+                result = normalize_history(
+                    data,
+                    binding_timezone_name=binding.timezone_name,
+                    requested_window_start=requested_window_start,
+                    requested_window_end=requested_window_end,
+                    **common,
+                )
+        elif endpoint == GET_CURRENT_ENDPOINT:
+            if not isinstance(data, Mapping):
+                raise PullContractError("current response data must be an object")
+            no_data = not data
+            result = None if no_data else normalize_current(data, **common)
+        elif endpoint == REALTIME_READ_ENDPOINT:
+            if not isinstance(data, Mapping):
+                raise PullContractError("realtime response data must be an object")
+            no_data = not data
+            result = (
+                None
+                if no_data
+                else normalize_realtime(
+                    data,
+                    binding_timezone_name=binding.timezone_name,
+                    **common,
+                )
+            )
+        elif endpoint == SLEEP_REPORT_ENDPOINT:
+            if not isinstance(data, Mapping):
+                raise PullContractError("sleep report response data must be an object")
+            report_date = date.fromisoformat(
+                _required_text(
+                    work.get("requested_report_date"),
+                    "requested_report_date",
+                )
+            )
+            no_data = sleep_report_is_no_data(data)
+            result = (
+                None
+                if no_data
+                else normalize_sleep_report(
+                    data,
+                    report_date=report_date,
+                    binding_timezone_name=binding.timezone_name,
+                    **common,
+                )
+            )
+        else:
+            raise PullContractError("unsupported durable Pull endpoint")
+        response_has_data = work.get("response_has_data")
+        if not isinstance(response_has_data, bool):
+            raise SleepSliceInvariantError(
+                "persisted Pull response_has_data must be a strict boolean"
+            )
+        if response_has_data != (not no_data):
+            raise SleepSliceInvariantError(
+                "persisted Pull response_has_data contradicts normalization"
+            )
+        if (
+            result is not None
+            and not result.candidates
+            and not result.intentionally_unsupported_fields
+            and not result.intentionally_ignored_fields
+        ):
+            raise PullContractError(
+                "non-empty Pull response produced no canonical candidates"
+            )
+        candidates = (
+            ()
+            if result is None
+            else tuple(
+                namespace_generation_scoped_candidate(
+                    candidate,
+                    namespace_id=str(loaded["namespace_id"]),
+                    namespace_generation=int(loaded["namespace_generation"]),
+                )
+                for candidate in with_durable_raw_reference(
+                    result, raw_id
+                ).candidates
+            )
+        )
+        canonical_semantics: tuple[Any | None, ...] = tuple(
+            None for _ in candidates
+        )
+        if (
+            result is not None
+            and self.observation_semantics_version is ObservationSemanticsVersion.V2
+        ):
+            canonical_semantics = canonicalize_pull_result_v2(
+                replace(result, candidates=candidates)
+            )
+            candidates = tuple(
+                item.compatibility_candidate for item in canonical_semantics
+            )
+        observations = tuple(
+            bind_adapter_candidate(candidate, binding) for candidate in candidates
+        )
+        history_classification = (
+            None if result is None else result.history_window_classification
+        )
+        return {
+            "endpoint": endpoint,
+            "binding": binding,
+            "candidates": candidates,
+            "observations": observations,
+            "canonical_semantics": canonical_semantics,
+            "no_data": no_data,
+            "unknown_fields": () if result is None else result.unknown_fields,
+            "intentionally_unsupported_fields": (
+                () if result is None else result.intentionally_unsupported_fields
+            ),
+            "intentionally_ignored_fields": (
+                () if result is None else result.intentionally_ignored_fields
+            ),
+            "history_window_classification": (
+                None
+                if history_classification is None
+                else {
+                    "requested_start_at": (
+                        history_classification.requested_start_at.isoformat()
+                    ),
+                    "requested_end_at": (
+                        history_classification.requested_end_at.isoformat()
+                    ),
+                    "earliest_reconstructed_at": (
+                        history_classification.earliest_reconstructed_at.isoformat()
+                    ),
+                    "latest_reconstructed_at": (
+                        history_classification.latest_reconstructed_at.isoformat()
+                    ),
+                    "before_window_candidate_count": (
+                        history_classification.before_window_candidate_count
+                    ),
+                    "in_window_candidate_count": (
+                        history_classification.in_window_candidate_count
+                    ),
+                    "after_window_candidate_count": (
+                        history_classification.after_window_candidate_count
+                    ),
+                }
+            ),
+        }
+
+    def _commit_reconciliation(
         self,
-        envelope: Mapping[str, Any],
+        scope: UowScope,
+        lease: NormalizationLease,
         *,
-        identity: str,
-        event_type: str,
-        capability: AdapterCapability,
-        received_at: datetime,
-    ) -> IntakeResult:
-        if received_at.tzinfo is None or received_at.utcoffset() is None:
-            raise PerceptorPullConfigurationError("received_at must be aware")
-        raw_payload = json.dumps(
-            envelope,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        payload_hash = hashlib.sha256(raw_payload).hexdigest()
-        raw_id = "perceptor-pull:" + hashlib.sha256(
+        loaded: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        committed_at: datetime,
+    ) -> dict[str, Any]:
+        if (
+            len(normalized["candidates"])
+            > PULL_HISTORY_RECONCILIATION_CHUNK_SIZE
+        ):
+            return self._commit_bounded_pull_reconciliation(
+                scope,
+                lease,
+                loaded=loaded,
+                normalized=normalized,
+                committed_at=committed_at,
+            )
+        receipt_id = _phase_receipt_id(lease.work_id)
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                self._lock_fence(cursor, scope, lease)
+                cursor.execute(
+                    """
+                    SELECT receipt_json
+                    FROM public.sleep_domain_processing_receipts
+                    WHERE receipt_id = %s AND namespace_id = %s AND data_mode = 'live'
+                    """,
+                    (receipt_id, scope.namespace_id),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    summary = _json_mapping(existing[0])["reconciliation_summary"]
+                    if not isinstance(summary, Mapping):
+                        raise SleepSliceInvariantError("Pull reconciliation receipt is malformed")
+                    uow.commit()
+                    return dict(summary)
+                reconciliations: list[PerceptorReconciliationResult] = []
+                for candidate, observation, semantics in zip(
+                    normalized["candidates"],
+                    normalized["observations"],
+                    normalized["canonical_semantics"],
+                    strict=True,
+                ):
+                    reconciliations.append(
+                        self.reconciler.reconcile(
+                            cursor,
+                            scope,
+                            raw_ingress_record_id=str(loaded["raw_ingress_record_id"]),
+                            candidate=candidate,
+                            observation=observation,
+                            canonical_semantics=semantics,
+                            semantic_surface=semantic_surface_for_pull(
+                                str(normalized["endpoint"]), observation
+                            ),
+                            committed_at=committed_at,
+                        )
+                    )
+                if normalized["endpoint"] == SLEEP_REPORT_ENDPOINT:
+                    self._insert_source_report(
+                        cursor,
+                        scope,
+                        loaded=loaded,
+                        normalized=normalized,
+                        committed_at=committed_at,
+                    )
+                project_authoritative_canonical_observations(
+                    uow.connection,
+                    scope,
+                    tuple(
+                        item.canonical_observation_id
+                        for item in reconciliations
+                    ),
+                    committed_at=committed_at,
+                    policy=self.policy,
+                    projection_boundary=self.projection_boundary,
+                    id_generator=self.id_generator,
+                    fault_injector=self.projection_fault_injector,
+                )
+                summary = {
+                    "canonical_observation_ids": [
+                        item.canonical_observation_id for item in reconciliations
+                    ],
+                    "canonical_created_count": sum(
+                        item.canonical_created for item in reconciliations
+                    ),
+                    "push_pull_overlap_count": sum(
+                        item.push_pull_overlap for item in reconciliations
+                    ),
+                    "conflict_created_count": sum(
+                        item.conflict_created_count for item in reconciliations
+                    ),
+                    "duplicate_count": sum(item.duplicate for item in reconciliations),
+                    "last_canonical_observation_id": (
+                        None
+                        if not reconciliations
+                        else sorted(
+                            item.canonical_observation_id for item in reconciliations
+                        )[-1]
+                    ),
+                    "no_data": bool(normalized["no_data"]),
+                }
+                if normalized.get("history_window_classification") is not None:
+                    summary["history_window_classification"] = normalized[
+                        "history_window_classification"
+                    ]
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_processing_receipts (
+                      receipt_id, namespace_id, data_mode, raw_ingress_record_id,
+                      stage, outcome, receipt_json, occurred_at
+                    ) VALUES (%s, %s, 'live', %s, 'normalization', 'succeeded', %s::jsonb, %s)
+                    """,
+                    (
+                        receipt_id,
+                        scope.namespace_id,
+                        loaded["raw_ingress_record_id"],
+                        json.dumps(
+                            {
+                                "schema_version": "perceptor_pull_reconciliation_receipt.v1",
+                                "raw_ingress_record_id": loaded["raw_ingress_record_id"],
+                                "reconciliation_summary": summary,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_normalization_work
+                    SET work_json = work_json || %s::jsonb, updated_at = %s
+                    WHERE work_id = %s AND namespace_id = %s AND data_mode = 'live'
+                      AND namespace_generation = %s AND subject_id = %s
+                      AND status = 'running' AND lease_generation = %s
+                      AND fencing_token = %s AND worker_instance = %s
+                      AND lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        json.dumps(
+                            {"reconciliation_committed": True},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SleepSliceLeaseLost("Pull fence expired before reconciliation commit")
+            finally:
+                cursor.close()
+            uow.commit()
+        return summary
+
+    def _commit_bounded_pull_reconciliation(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+        *,
+        loaded: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        committed_at: datetime,
+    ) -> dict[str, Any]:
+        """Commit large Pull responses in fenced, restart-safe chunks.
+
+        Each chunk releases the subject lifecycle lock before the next chunk,
+        preserving realtime Push opportunity.  The work row carries only
+        deterministic progress and aggregate reconciliation evidence; final
+        checkpoint advancement still occurs after one complete phase receipt.
+        """
+
+        candidates = tuple(normalized["candidates"])
+        observations = tuple(normalized["observations"])
+        semantics = tuple(normalized["canonical_semantics"])
+        total = len(candidates)
+        if len(observations) != total or len(semantics) != total:
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation inputs disagree"
+            )
+        work = cast(Mapping[str, Any], loaded["work_json"])
+        progress_value = work.get("bounded_reconciliation")
+        if progress_value is None:
+            next_index = 0
+            summary: dict[str, Any] = {
+                "canonical_observation_ids": [],
+                "canonical_created_count": 0,
+                "push_pull_overlap_count": 0,
+                "conflict_created_count": 0,
+                "duplicate_count": 0,
+                "last_canonical_observation_id": None,
+                "no_data": bool(normalized["no_data"]),
+            }
+        else:
+            progress = _json_mapping(progress_value)
+            next_index = int(progress.get("next_index", -1))
+            summary_value = progress.get("summary")
+            if not isinstance(summary_value, Mapping):
+                raise SleepSliceInvariantError(
+                    "bounded History reconciliation progress is malformed"
+                )
+            summary = dict(summary_value)
+        if not 0 <= next_index <= total:
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation offset is invalid"
+            )
+        canonical_ids = summary.get("canonical_observation_ids")
+        if not isinstance(canonical_ids, list) or any(
+            not isinstance(item, str) for item in canonical_ids
+        ):
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation identity evidence is malformed"
+            )
+
+        receipt_id = _phase_receipt_id(lease.work_id)
+        while next_index < total:
+            chunk_end = min(
+                total,
+                next_index + PULL_HISTORY_RECONCILIATION_CHUNK_SIZE,
+            )
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    self._lock_fence(cursor, scope, lease)
+                    cursor.execute(
+                        "SELECT receipt_json FROM "
+                        "public.sleep_domain_processing_receipts "
+                        "WHERE receipt_id = %s AND namespace_id = %s "
+                        "AND data_mode = 'live'",
+                        (receipt_id, scope.namespace_id),
+                    )
+                    existing = cursor.fetchone()
+                    if existing is not None:
+                        completed = _json_mapping(existing[0]).get(
+                            "reconciliation_summary"
+                        )
+                        if not isinstance(completed, Mapping):
+                            raise SleepSliceInvariantError(
+                                "Pull reconciliation receipt is malformed"
+                            )
+                        uow.commit()
+                        return dict(completed)
+                    reconciliations: list[PerceptorReconciliationResult] = []
+                    for index in range(next_index, chunk_end):
+                        observation = observations[index]
+                        reconciliations.append(
+                            self.reconciler.reconcile(
+                                cursor,
+                                scope,
+                                raw_ingress_record_id=str(
+                                    loaded["raw_ingress_record_id"]
+                                ),
+                                candidate=candidates[index],
+                                observation=observation,
+                                canonical_semantics=semantics[index],
+                                semantic_surface=semantic_surface_for_pull(
+                                    str(normalized["endpoint"]), observation
+                                ),
+                                committed_at=committed_at,
+                            )
+                        )
+                    chunk_ids = tuple(
+                        item.canonical_observation_id
+                        for item in reconciliations
+                    )
+                    project_authoritative_canonical_observations(
+                        uow.connection,
+                        scope,
+                        chunk_ids,
+                        committed_at=committed_at,
+                        policy=self.policy,
+                        projection_boundary=self.projection_boundary,
+                        id_generator=self.id_generator,
+                        fault_injector=self.projection_fault_injector,
+                    )
+                    canonical_ids.extend(chunk_ids)
+                    for field, attribute in (
+                        ("canonical_created_count", "canonical_created"),
+                        ("push_pull_overlap_count", "push_pull_overlap"),
+                        ("conflict_created_count", "conflict_created_count"),
+                        ("duplicate_count", "duplicate"),
+                    ):
+                        summary[field] = int(summary.get(field, 0)) + sum(
+                            int(getattr(item, attribute))
+                            for item in reconciliations
+                        )
+                    summary["last_canonical_observation_id"] = (
+                        None if not canonical_ids else sorted(canonical_ids)[-1]
+                    )
+                    next_index = chunk_end
+                    cursor.execute(
+                        """
+                        UPDATE public.sleep_domain_normalization_work
+                        SET work_json = work_json || %s::jsonb,
+                            updated_at = clock_timestamp()
+                        WHERE work_id = %s AND namespace_id = %s
+                          AND data_mode = 'live' AND namespace_generation = %s
+                          AND subject_id = %s AND status = 'running'
+                          AND lease_generation = %s AND fencing_token = %s
+                          AND worker_instance = %s
+                          AND lease_expires_at > clock_timestamp()
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "bounded_reconciliation": {
+                                        "next_index": next_index,
+                                        "total": total,
+                                        "chunk_size": (
+                                            PULL_HISTORY_RECONCILIATION_CHUNK_SIZE
+                                        ),
+                                        "summary": summary,
+                                    }
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            lease.work_id,
+                            scope.namespace_id,
+                            scope.namespace_generation,
+                            scope.subject_id,
+                            lease.lease_generation,
+                            lease.fencing_token,
+                            lease.worker_instance,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise SleepSliceLeaseLost(
+                            "Pull fence expired during bounded reconciliation"
+                        )
+                finally:
+                    cursor.close()
+                uow.commit()
+
+        classification = normalized.get("history_window_classification")
+        if classification is not None:
+            summary["history_window_classification"] = classification
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                self._lock_fence(cursor, scope, lease)
+                if normalized["endpoint"] == SLEEP_REPORT_ENDPOINT:
+                    self._insert_source_report(
+                        cursor,
+                        scope,
+                        loaded=loaded,
+                        normalized=normalized,
+                        committed_at=committed_at,
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_processing_receipts (
+                      receipt_id, namespace_id, data_mode, raw_ingress_record_id,
+                      stage, outcome, receipt_json, occurred_at
+                    ) VALUES (%s, %s, 'live', %s, 'normalization',
+                              'succeeded', %s::jsonb, %s)
+                    ON CONFLICT (receipt_id) DO NOTHING
+                    """,
+                    (
+                        receipt_id,
+                        scope.namespace_id,
+                        loaded["raw_ingress_record_id"],
+                        json.dumps(
+                            {
+                                "schema_version": (
+                                    "perceptor_pull_reconciliation_receipt.v1"
+                                ),
+                                "raw_ingress_record_id": loaded[
+                                    "raw_ingress_record_id"
+                                ],
+                                "reconciliation_summary": summary,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_normalization_work
+                    SET work_json = (work_json - 'bounded_reconciliation')
+                                    || '{"reconciliation_committed":true}'::jsonb,
+                        updated_at = clock_timestamp()
+                    WHERE work_id = %s AND namespace_id = %s
+                      AND data_mode = 'live' AND namespace_generation = %s
+                      AND subject_id = %s AND status = 'running'
+                      AND lease_generation = %s AND fencing_token = %s
+                      AND worker_instance = %s
+                      AND lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SleepSliceLeaseLost(
+                        "Pull fence expired before bounded reconciliation commit"
+                    )
+            finally:
+                cursor.close()
+            uow.commit()
+        return summary
+
+    def _advance_checkpoint_and_finalize(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+        *,
+        loaded: Mapping[str, Any],
+        reconciliation_summary: Mapping[str, Any],
+        committed_at: datetime,
+    ) -> bool:
+        work = cast(Mapping[str, Any], loaded["work_json"])
+        cursor_at = _aware_from_text(work.get("checkpoint_cursor_at"), "checkpoint_cursor_at")
+        watermark = _aware_from_text(work.get("lateness_watermark_at"), "lateness_watermark_at")
+        stream_key = _required_text(work.get("stream_key"), "stream_key")
+        data_surface = _required_text(work.get("data_surface"), "data_surface")
+        binding_payload = loaded.get("binding_json")
+        backfill_stream_key: str | None = None
+        if binding_payload is not None:
+            binding = DeviceBinding.model_validate(binding_payload)
+            rolling_stream_key = _stream_key(
+                binding,
+                str(work.get("endpoint")),
+                namespace_generation=scope.namespace_generation,
+            )
+            backfill_stream_key = (
+                _stream_key(
+                    binding,
+                    HISTORY_ENDPOINT,
+                    namespace_generation=scope.namespace_generation,
+                    historical_backfill=True,
+                )
+                if str(work.get("endpoint")) == HISTORY_ENDPOINT
+                else None
+            )
+            if stream_key not in {rolling_stream_key, backfill_stream_key}:
+                raise SleepSliceInvariantError(
+                    "Pull checkpoint stream identity is invalid"
+                )
+        binding_id = _required_text(work.get("device_binding_id"), "device_binding_id")
+        binding_version = int(work.get("binding_version", 0))
+        if binding_version < 1:
+            raise SleepSliceInvariantError("binding_version is invalid")
+        overlap_seconds = int(work.get("overlap_seconds", 0))
+        canonical_ids = tuple(
+            sorted(
+                _required_text(value, "canonical_observation_ids[]")
+                for value in reconciliation_summary.get(
+                    "canonical_observation_ids", ()
+                )
+            )
+        )
+        no_data_value = reconciliation_summary.get("no_data")
+        if not isinstance(no_data_value, bool):
+            raise SleepSliceInvariantError(
+                "checkpoint reconciliation no_data must be a strict boolean"
+            )
+        no_data = no_data_value
+        if canonical_ids and no_data:
+            raise SleepSliceInvariantError(
+                "checkpoint evidence cannot be both canonical and no-data"
+            )
+        if not canonical_ids and not no_data:
+            raise SleepSliceInvariantError(
+                "checkpoint requires canonical evidence or an exact no-data receipt"
+            )
+        last_canonical_observation_id = (
+            canonical_ids[-1] if canonical_ids else None
+        )
+        if backfill_stream_key is not None and stream_key == backfill_stream_key:
+            if str(work.get("endpoint")) != HISTORY_ENDPOINT:
+                raise SleepSliceInvariantError(
+                    "isolated checkpoint policy is valid only for History"
+                )
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    self._lock_fence(cursor, scope, lease)
+                    self._finalize_work(
+                        cursor, scope, lease, committed_at=committed_at
+                    )
+                finally:
+                    cursor.close()
+                uow.commit()
+            return False
+        checkpoint_id = "perceptor:pull:checkpoint:" + _stable_digest(
+            scope.namespace_id, scope.data_mode, str(work.get("provider_account_id")), stream_key
+        )
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                self._lock_fence(cursor, scope, lease)
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_pull_checkpoints (
+                      checkpoint_id, namespace_id, data_mode, provider_id,
+                      provider_account_id, stream_key, cursor_at,
+                      lateness_watermark_at, cas_version, updated_at,
+                      protocol_version, namespace_generation, run_id, arm_id,
+                      subject_id, device_binding_id, binding_version, data_surface,
+                      overlap_seconds, last_raw_ingress_record_id,
+                      last_normalization_work_id,
+                      last_canonical_observation_id, last_canonical_commit_at
+                    ) VALUES (
+                      %s, %s, 'live', 'perceptor', %s, %s, %s, %s, 0, %s,
+                      2, %s, NULL, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (
+                      namespace_id, data_mode, provider_id,
+                      provider_account_id, stream_key
+                    ) DO UPDATE SET
+                      cursor_at = EXCLUDED.cursor_at,
+                      lateness_watermark_at = EXCLUDED.lateness_watermark_at,
+                      cas_version = sleep_domain_pull_checkpoints.cas_version + 1,
+                      updated_at = EXCLUDED.updated_at,
+                      last_raw_ingress_record_id = EXCLUDED.last_raw_ingress_record_id,
+                      last_normalization_work_id = EXCLUDED.last_normalization_work_id,
+                      last_canonical_observation_id =
+                        EXCLUDED.last_canonical_observation_id,
+                      last_canonical_commit_at = EXCLUDED.last_canonical_commit_at
+                    WHERE sleep_domain_pull_checkpoints.cursor_at < EXCLUDED.cursor_at
+                    RETURNING checkpoint_id
+                    """,
+                    (
+                        checkpoint_id,
+                        scope.namespace_id,
+                        work.get("provider_account_id"),
+                        stream_key,
+                        cursor_at,
+                        watermark,
+                        committed_at,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        binding_id,
+                        binding_version,
+                        data_surface,
+                        overlap_seconds,
+                        loaded["raw_ingress_record_id"],
+                        lease.work_id,
+                        last_canonical_observation_id,
+                        committed_at,
+                    ),
+                )
+                advanced = cursor.fetchone() is not None
+                self._finalize_work(cursor, scope, lease, committed_at=committed_at)
+            finally:
+                cursor.close()
+            uow.commit()
+        return advanced
+
+    @staticmethod
+    def _lock_fence(cursor: Any, scope: UowScope, lease: NormalizationLease) -> None:
+        cursor.execute(
+            """
+            SELECT work_id
+            FROM public.sleep_domain_normalization_work
+            WHERE work_id = %s AND namespace_id = %s AND data_mode = 'live'
+              AND namespace_generation = %s AND subject_id = %s
+              AND work_json ->> 'normalizer' = %s
+              AND status = 'running' AND lease_generation = %s
+              AND fencing_token = %s AND worker_instance = %s
+              AND lease_expires_at > clock_timestamp()
+            FOR UPDATE
+            """,
             (
-                f"{self.namespace.namespace_id}|"
-                f"{self.profile.provider_account_id}|{identity}"
-            ).encode("utf-8")
-        ).hexdigest()
-        lock = self._resolve_adapter_lock(capability, received_at=received_at)
-        record = RawIngressRecord(
-            raw_ingress_record_id=raw_id,
-            data_mode=self.namespace.data_mode,
-            provider_id="perceptor",
-            provider_account_id=self.profile.provider_account_id,
-            event_type=event_type,
-            message_id=f"pull:{payload_hash}",
-            request_signed_at=None,
-            measurement_at=None,
-            event_occurred_at=None,
-            received_at=received_at,
-            signature_profile=None,
-            signature_verification=SignatureVerificationState.NOT_PROVIDED,
-            idempotency_identity=identity,
-            idempotency_version="perceptor_pull.v1",
-            pre_normalization_payload_sha256=payload_hash,
-            encrypted_payload_reference=f"db:sleep_domain_raw_inbox:{raw_id}",
-            content_type="application/json",
-            payload_size_bytes=len(raw_payload),
-            retention_deadline=(
-                received_at + self.repository.raw_payload_policy.retention_period
+                lease.work_id,
+                scope.namespace_id,
+                scope.namespace_generation,
+                scope.subject_id,
+                PULL_NORMALIZER,
+                lease.lease_generation,
+                lease.fencing_token,
+                lease.worker_instance,
             ),
         )
-        return self.repository.intake_raw(
-            self.namespace,
-            record,
-            raw_payload=raw_payload,
-            work_id=f"normalize:{raw_id}",
-            work_generation=1,
-            work_json={
-                "adapter_resolution_lock_id": lock.adapter_resolution_lock_id,
-                "compatibility_profile_id": self.profile.profile_id,
-                "environment": self.profile.environment,
-                "ingress_channel": (
-                    "realtime_fallback"
-                    if event_type == REALTIME_FALLBACK_EVENT
-                    else "pull"
-                ),
-            },
-            processing_intent_id=f"processing-intent:{raw_id}",
-            processing_intent_json={
-                "event_type": "RAW_ACCEPTED",
-                "source_event_type": event_type,
-            },
-            created_at=received_at,
-        )
+        if cursor.fetchone() is None:
+            raise SleepSliceLeaseLost("Perceptor Pull work fence was rejected")
 
-    def _resolve_adapter_lock(
-        self,
-        capability: AdapterCapability,
+    @staticmethod
+    def _finalize_work(
+        cursor: Any,
+        scope: UowScope,
+        lease: NormalizationLease,
         *,
-        received_at: datetime,
-    ) -> Any:
-        capability_key = capability.value
-        lock_id = (
-            f"perceptor-pull-lock:{self.profile.profile_id}:{capability_key}"
+        committed_at: datetime,
+    ) -> None:
+        cursor.execute(
+            """
+            UPDATE public.sleep_domain_normalization_work
+            SET status = 'succeeded', updated_at = %s, last_error_code = NULL,
+                lease_owner = NULL, lease_expires_at = NULL,
+                fencing_token = NULL, worker_instance = NULL, heartbeat_at = NULL
+            WHERE work_id = %s AND namespace_id = %s AND data_mode = 'live'
+              AND namespace_generation = %s AND subject_id = %s
+              AND status = 'running' AND lease_generation = %s
+              AND fencing_token = %s AND worker_instance = %s
+              AND lease_expires_at > clock_timestamp()
+            """,
+            (
+                committed_at,
+                lease.work_id,
+                scope.namespace_id,
+                scope.namespace_generation,
+                scope.subject_id,
+                lease.lease_generation,
+                lease.fencing_token,
+                lease.worker_instance,
+            ),
         )
-        with self._adapter_resolution_lock:
-            retained = self.repository.load_adapter_resolution_lock(
-                self.namespace,
-                adapter_resolution_lock_id=lock_id,
-            )
-            if retained is not None:
-                return retained
-            return self.registry.resolve(
-                provider_id="perceptor",
-                provider_account_id=self.profile.provider_account_id,
-                environment=self.profile.environment,
-                required_capabilities=(capability,),
-                adapter_resolution_lock_id=lock_id,
-                resolution_request_id=(
-                    f"perceptor-pull-resolution:{self.profile.profile_id}:"
-                    f"{capability_key}"
-                ),
-                resolved_at=received_at,
-                adapter_id="perceptor-v1",
-                version="1.0.0",
-                require_verified=False,
-            )
+        if cursor.rowcount != 1:
+            raise SleepSliceLeaseLost("Pull fence expired before checkpoint finalization")
+
+    def _quarantine(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+        *,
+        raw_ingress_record_id: str,
+        detail_code: str,
+        committed_at: datetime,
+    ) -> None:
+        receipt_id, quarantine_id = _quarantine_evidence_ids(
+            lease.work_id, lease.lease_generation
+        )
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                self._lock_fence(cursor, scope, lease)
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_processing_receipts (
+                      receipt_id, namespace_id, data_mode, raw_ingress_record_id,
+                      stage, outcome, quarantine_reason, receipt_json, occurred_at
+                    ) VALUES (
+                      %s, %s, 'live', %s, 'normalization', 'quarantined',
+                      'malformed_payload', %s::jsonb, %s
+                    ) ON CONFLICT (receipt_id) DO NOTHING
+                    """,
+                    (
+                        receipt_id,
+                        scope.namespace_id,
+                        raw_ingress_record_id,
+                        json.dumps(
+                            {
+                                "schema_version": "perceptor_pull_quarantine.v1",
+                                "reason": "malformed_payload",
+                                "detail_code": detail_code,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_quarantine (
+                      quarantine_id, namespace_id, data_mode,
+                      raw_ingress_record_id, reason, detail_code, receipt_id,
+                      quarantine_json, quarantined_at
+                    ) VALUES (
+                      %s, %s, 'live', %s, 'malformed_payload', %s, %s,
+                      %s::jsonb, %s
+                    )
+                    """,
+                    (
+                        quarantine_id,
+                        scope.namespace_id,
+                        raw_ingress_record_id,
+                        detail_code,
+                        receipt_id,
+                        json.dumps(
+                            {
+                                "schema_version": "perceptor_pull_quarantine.v1",
+                                "reason": "malformed_payload",
+                                "detail_code": detail_code,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_normalization_work
+                    SET status = 'quarantined', updated_at = %s,
+                        last_error_code = 'perceptor_pull_normalization_quarantined',
+                        lease_owner = NULL, lease_expires_at = NULL,
+                        fencing_token = NULL, worker_instance = NULL, heartbeat_at = NULL
+                    WHERE work_id = %s AND namespace_id = %s AND data_mode = 'live'
+                      AND namespace_generation = %s AND subject_id = %s
+                      AND status = 'running' AND lease_generation = %s
+                      AND fencing_token = %s AND worker_instance = %s
+                      AND lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        committed_at,
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SleepSliceLeaseLost("Pull fence expired before quarantine")
+            finally:
+                cursor.close()
+            uow.commit()
+
+    @staticmethod
+    def _insert_source_report(
+        cursor: Any,
+        scope: UowScope,
+        *,
+        loaded: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        committed_at: datetime,
+    ) -> None:
+        work = cast(Mapping[str, Any], loaded["work_json"])
+        report_date_text = _required_text(work.get("requested_report_date"), "requested_report_date")
+        report_date = date.fromisoformat(report_date_text)
+        content_sha256 = _required_text(
+            work.get("response_semantic_sha256"), "response_semantic_sha256"
+        )
+        provider_device_key = _required_text(
+            work.get("provider_device_key"), "provider_device_key"
+        )
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (
+                f"{scope.namespace_id}\x1f{scope.namespace_generation}\x1f"
+                f"{provider_device_key}\x1f{report_date}",
+            ),
+        )
+        source_report_id = _stable_prefixed_id(
+            "source-report",
+            scope.namespace_id,
+            scope.namespace_generation,
+            provider_device_key,
+            report_date,
+            content_sha256,
+        )
+        cursor.execute(
+            """
+            INSERT INTO public.sleep_domain_source_reports (
+              source_report_version_id, namespace_id, data_mode, provider_id,
+              provider_account_id, provider_device_key, local_report_date,
+              report_version, content_sha256, raw_ingress_record_id,
+              is_empty, fetched_at
+            ) SELECT %s, %s, 'live', 'perceptor', %s, %s, %s,
+                     COALESCE(MAX(report_version), 0) + 1, %s, %s, %s, %s
+              FROM public.sleep_domain_source_reports
+             WHERE namespace_id = %s AND data_mode = 'live'
+               AND provider_id = 'perceptor' AND provider_account_id = %s
+               AND provider_device_key = %s AND local_report_date = %s
+            ON CONFLICT (
+              namespace_id, data_mode, provider_id, provider_account_id,
+              provider_device_key, local_report_date, content_sha256
+            ) DO NOTHING
+            """,
+            (
+                source_report_id,
+                scope.namespace_id,
+                work.get("provider_account_id"),
+                provider_device_key,
+                report_date,
+                content_sha256,
+                loaded["raw_ingress_record_id"],
+                bool(normalized["no_data"]),
+                loaded["received_at"],
+                scope.namespace_id,
+                work.get("provider_account_id"),
+                provider_device_key,
+                report_date,
+            ),
+        )
 
 
-def partition_history_windows(
+class PerceptorLiveNormalizationDispatcher:
+    """Route live claims by durable work metadata on the existing queue."""
+
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory[Any],
+        *,
+        cipher: RawPayloadCipher,
+        observation_semantics_version: ObservationSemanticsVersion = (
+            ObservationSemanticsVersion.V1
+        ),
+    ) -> None:
+        self.uow_factory = uow_factory
+        self.cipher = cipher
+        self.observation_semantics_version = observation_semantics_version
+        self._push: Any | None = None
+        self._pull: PerceptorPullNormalizationProcessor | None = None
+
+    def process(self, scope: UowScope, lease: NormalizationLease) -> Any:
+        normalizer = self._normalizer(scope, lease)
+        if normalizer == "perceptor_push":
+            if self._push is None:
+                from sleepagent.integrations.perceptor.ingestion import (
+                    PerceptorNormalizationProcessor,
+                )
+
+                self._push = PerceptorNormalizationProcessor(
+                    self.uow_factory,
+                    cipher=self.cipher,
+                    observation_semantics_version=self.observation_semantics_version,
+                )
+            return self._push.process(scope, lease)
+        if normalizer == PULL_NORMALIZER:
+            if self._pull is None:
+                self._pull = PerceptorPullNormalizationProcessor(
+                    self.uow_factory,
+                    cipher=self.cipher,
+                    observation_semantics_version=self.observation_semantics_version,
+                )
+            return self._pull.process(scope, lease)
+        raise SleepSliceInvariantError("unsupported live normalization work kind")
+
+    def _normalizer(self, scope: UowScope, lease: NormalizationLease) -> str:
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT work_json ->> 'normalizer'
+                    FROM public.sleep_domain_normalization_work
+                    WHERE work_id = %s AND namespace_id = %s AND data_mode = 'live'
+                      AND namespace_generation = %s AND subject_id = %s
+                      AND status = 'running' AND lease_generation = %s
+                      AND fencing_token = %s AND worker_instance = %s
+                      AND lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+        if row is None:
+            raise SleepSliceLeaseLost("live normalization dispatch fence was rejected")
+        return str(row[0])
+
+
+def parse_platform_success_response(raw_body: bytes) -> object:
+    """Strictly parse the exact successful Platform envelope."""
+
+    try:
+        text = raw_body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise PerceptorPullIngressError("Platform response is not UTF-8") from exc
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise PerceptorPullIngressError("Platform response has duplicate JSON keys")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> object:
+        raise PerceptorPullIngressError("Platform response has non-finite JSON")
+
+    try:
+        envelope = json.loads(
+            text,
+            object_pairs_hook=object_pairs,
+            parse_constant=reject_constant,
+        )
+    except json.JSONDecodeError as exc:
+        raise PerceptorPullIngressError("Platform response is malformed JSON") from exc
+    if not isinstance(envelope, Mapping):
+        raise PerceptorPullIngressError("Platform response envelope must be an object")
+    _reject_non_finite_json(envelope)
+    if envelope.get("success") is not True or str(envelope.get("code")) != "200":
+        raise PerceptorPullIngressError("Platform response is not successful")
+    if "data" not in envelope or envelope["data"] is None:
+        raise PerceptorPullIngressError("Platform response data is missing")
+    return envelope["data"]
+
+
+def perceptor_pull_raw_aad(
+    namespace_id: str,
+    namespace_generation: int,
+    raw_ingress_record_id: str,
+) -> bytes:
+    if (
+        not namespace_id
+        or namespace_generation < 1
+        or not raw_ingress_record_id
+        or "\0" in namespace_id
+        or "\0" in raw_ingress_record_id
+    ):
+        raise ValueError("Pull raw AAD requires exact durable scope")
+    return "\0".join(
+        (
+            "perceptor-pull-raw.v1",
+            namespace_id,
+            str(namespace_generation),
+            raw_ingress_record_id,
+        )
+    ).encode("utf-8")
+
+
+def _response_has_data(endpoint: str, data: object) -> bool:
+    if endpoint == HISTORY_ENDPOINT:
+        if not isinstance(data, list):
+            raise PullContractError("history data must be a list")
+        return bool(data)
+    if not isinstance(data, Mapping):
+        raise PullContractError("snapshot/report data must be an object")
+    if endpoint == SLEEP_REPORT_ENDPOINT:
+        return not sleep_report_is_no_data(data)
+    return bool(data)
+
+
+def _response_device_identity(
+    endpoint: str,
+    data: object,
+    binding: DeviceBinding,
+) -> tuple[str | None, str | None]:
+    if endpoint != HISTORY_ENDPOINT:
+        return None, None
+    if not isinstance(data, list):
+        raise PullContractError("history data must be a list")
+    if not data:
+        return None, None
+    if any(
+        not isinstance(item, Mapping)
+        or item.get("device_id") in (None, "")
+        or not str(item.get("device_id")).strip()
+        for item in data
+    ):
+        return "__response_device_mismatch__", None
+    identifiers = {str(item["device_id"]).strip() for item in data}
+    if len(identifiers) != 1:
+        return "__response_device_mismatch__", None
+    identifier = identifiers.pop()
+    if identifier == binding.provider_device.provider_device_id:
+        return identifier, None
+    if identifier == binding.provider_device.provider_device_name:
+        return None, identifier
+    return "__response_device_mismatch__", None
+
+
+def _checkpoint_coordinates(
+    binding: DeviceBinding,
+    coordinates: PullRequestCoordinates,
+    received_at: datetime,
+) -> tuple[datetime, datetime]:
+    if coordinates.endpoint == HISTORY_ENDPOINT:
+        assert coordinates.window_end_at is not None
+        cursor = coordinates.window_end_at
+        return cursor, cursor - PULL_HISTORY_OVERLAP
+    if coordinates.endpoint == SLEEP_REPORT_ENDPOINT:
+        assert coordinates.report_date is not None
+        next_local_midnight = datetime.combine(
+            coordinates.report_date + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(binding.timezone_name),
+        )
+        cursor = next_local_midnight.astimezone(UTC)
+        return cursor, cursor
+    return received_at, received_at
+
+
+def _assert_pull_coordinates_within_binding(
+    binding: DeviceBinding,
+    coordinates: PullRequestCoordinates,
+    *,
+    requested_at: datetime,
+) -> None:
+    """Reject subject attribution unless the complete requested period is bound."""
+
+    if coordinates.endpoint == HISTORY_ENDPOINT:
+        assert coordinates.window_start_at is not None
+        assert coordinates.window_end_at is not None
+        period_start = coordinates.window_start_at
+        period_end = coordinates.window_end_at
+        end_is_inclusive = True
+    elif coordinates.endpoint == SLEEP_REPORT_ENDPOINT:
+        assert coordinates.report_date is not None
+        zone = ZoneInfo(binding.timezone_name)
+        period_start = datetime.combine(
+            coordinates.report_date,
+            time.min,
+            tzinfo=zone,
+        )
+        period_end = datetime.combine(
+            coordinates.report_date + timedelta(days=1),
+            time.min,
+            tzinfo=zone,
+        )
+        end_is_inclusive = False
+    else:
+        period_start = requested_at
+        period_end = requested_at
+        end_is_inclusive = True
+
+    if period_start < binding.effective_from:
+        raise ValueError("Pull data period precedes DeviceBinding effective interval")
+    if binding.effective_until is None:
+        return
+    if period_end > binding.effective_until or (
+        end_is_inclusive and period_end == binding.effective_until
+    ):
+        raise ValueError("Pull data period exceeds DeviceBinding effective interval")
+
+
+def _request_descriptor(
+    namespace: str,
+    namespace_generation: int,
+    account: str,
+    binding: DeviceBinding,
+    coordinates: PullRequestCoordinates,
+) -> str:
+    parts = [
+            namespace,
+            str(namespace_generation),
+            account,
+            binding.device_binding_id,
+            str(binding.binding_version),
+            coordinates.endpoint,
+            _iso_or_none(coordinates.window_start_at) or "",
+            _iso_or_none(coordinates.window_end_at) or "",
+            "" if coordinates.report_date is None else coordinates.report_date.isoformat(),
+        ]
+    if coordinates.historical_backfill:
+        parts.append("historical_backfill.v1")
+    return json.dumps(
+        parts,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _stream_key(
+    binding: DeviceBinding,
+    endpoint: str,
+    *,
+    namespace_generation: int,
+    historical_backfill: bool = False,
+) -> str:
+    surface = {
+        HISTORY_ENDPOINT: "history.v1",
+        REALTIME_READ_ENDPOINT: "realtime.v1",
+        GET_CURRENT_ENDPOINT: "current.v1",
+        SLEEP_REPORT_ENDPOINT: "sleep_report.v1",
+    }[endpoint]
+    if historical_backfill:
+        if endpoint != HISTORY_ENDPOINT:
+            raise ValueError("historical backfill stream is valid only for History")
+        surface = "history_backfill.v1"
+    return "perceptor:pull:stream:" + _stable_digest(
+        binding.provider_account_id,
+        binding.device_binding_id,
+        str(binding.binding_version),
+        str(namespace_generation),
+        surface,
+    )
+
+
+def split_history_backfill_range(
+    *,
     start_at: datetime,
     end_at: datetime,
-    *,
-    max_window: timedelta = timedelta(hours=1),
 ) -> tuple[tuple[datetime, datetime], ...]:
-    _require_aware_interval(start_at, end_at)
-    if not timedelta(0) < max_window <= timedelta(hours=1):
-        raise ValueError("history max window must be positive and <= 1 hour")
-    result: list[tuple[datetime, datetime]] = []
-    cursor = start_at
-    while cursor < end_at:
-        next_cursor = min(cursor + max_window, end_at)
-        result.append((cursor, next_cursor))
-        cursor = next_cursor
-    return tuple(result)
+    """Normalize and split one explicit historical range deterministically."""
+
+    _require_aware(start_at, "start_at")
+    _require_aware(end_at, "end_at")
+    start = start_at.replace(microsecond=0)
+    end = end_at.replace(microsecond=0)
+    if end <= start:
+        raise ValueError("history backfill range must be positive")
+    chunks: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        chunk_end = min(cursor + timedelta(hours=1), end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    return tuple(chunks)
 
 
-def partition_device_batches(
-    devices: Sequence[PerceptorPullDevice],
-    *,
-    max_devices: int = 20,
-) -> tuple[tuple[PerceptorPullDevice, ...], ...]:
-    if not 1 <= max_devices <= 20:
-        raise ValueError("history max device batch must be between 1 and 20")
-    iterator = iter(devices)
-    batches: list[tuple[PerceptorPullDevice, ...]] = []
-    while batch := tuple(islice(iterator, max_devices)):
-        batches.append(batch)
-    return tuple(batches)
-
-
-def _require_aware_interval(start_at: datetime, end_at: datetime) -> None:
-    if (
-        start_at.tzinfo is None
-        or start_at.utcoffset() is None
-        or end_at.tzinfo is None
-        or end_at.utcoffset() is None
-    ):
-        raise PerceptorPullConfigurationError(
-            "history bounds must be timezone-aware"
-        )
-    if end_at <= start_at:
-        raise PerceptorPullConfigurationError(
-            "history end must be after start"
-        )
-
-
-def _require_success(response: Mapping[str, Any], endpoint: str) -> None:
-    if not isinstance(response, Mapping):
-        raise PerceptorPullError(f"{endpoint} response must be an object")
-    if str(response.get("code")) != "200" or response.get("success") is not True:
-        raise PerceptorPullError(f"{endpoint} failed")
-
-
-def _validate_history_series_lengths(response: Mapping[str, Any]) -> None:
-    data = response.get("data")
-    if data in (None, {}, []):
-        return
-    if isinstance(data, list):
-        records = data
-    elif isinstance(data, Mapping):
-        nested = next(
-            (
-                data[key]
-                for key in ("records", "list", "items", "history")
-                if key in data
-            ),
-            None,
-        )
-        records = nested if isinstance(nested, list) else [data]
-    else:
-        raise PerceptorPullError("getHistoryData data must contain records")
+def _history_raw_series_sample_count(
+    records: tuple[Mapping[str, Any], ...],
+) -> int:
+    count = 0
     for record in records:
-        if not isinstance(record, Mapping):
-            raise PerceptorPullError("getHistoryData record must be an object")
-        lengths: list[int] = []
-        for aliases in (
-            ("heart_rate", "heartRate", "heart_rates"),
-            (
-                "respiratory_rate",
-                "respiratoryRate",
-                "breath_rate",
-                "breathRate",
-            ),
-            ("movement", "body_movement", "bodyMovement"),
-        ):
-            value = next(
-                (record[key] for key in aliases if key in record),
-                None,
-            )
-            if value is None or value == "":
-                lengths.append(0)
-            elif isinstance(value, str):
-                lengths.append(len(value.split(",")))
-            elif isinstance(value, list):
-                lengths.append(len(value))
-            else:
-                raise PerceptorPullError(
-                    "getHistoryData series must be list or comma-separated text"
-                )
-        if len(set(lengths)) != 1:
-            raise PerceptorPullError(
-                "getHistoryData series lengths must be equal"
-            )
+        for field in ("heart_rate", "breath_rate", "body_shake"):
+            value = record.get(field)
+            if isinstance(value, str) and value:
+                count += len(value.split(","))
+    return count
+
+
+def _provider_device_key(
+    binding: DeviceBinding,
+    *,
+    namespace_generation: int,
+) -> str:
+    value = (
+        binding.provider_device.provider_device_id
+        or binding.provider_device.provider_device_name
+        or ""
+    )
+    material = f"{namespace_generation}\x1f{value}".encode("utf-8")
+    return "sha256:" + hashlib.sha256(material).hexdigest()
+
+
+def _emit_reconciliation_observability(
+    work: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    checkpoint_advanced: bool,
+) -> None:
+    endpoint = work.get("endpoint")
+    if summary.get("no_data"):
+        record_backend_signal(category="pull", outcome="no_data")
+        log_event("pull_no_data", endpoint=endpoint)
+    for event, key, outcome in (
+        ("pull_backfill_created", "canonical_created_count", "backfill_created"),
+        ("push_pull_overlap", "push_pull_overlap_count", "overlap"),
+        ("push_pull_conflict", "conflict_created_count", "conflict"),
+    ):
+        count = int(summary.get(key, 0))
+        if count:
+            record_backend_signal(category="reconciliation", outcome=outcome)
+            log_event(event, endpoint=endpoint, count=count)
+    duplicate_count = int(summary.get("duplicate_count", 0))
+    if duplicate_count:
+        record_backend_signal(category="pull", outcome="duplicate")
+        log_event("pull_duplicate", endpoint=endpoint, count=duplicate_count)
+    checkpoint_outcome = "checkpoint_advanced" if checkpoint_advanced else "checkpoint_held"
+    record_backend_signal(category="pull", outcome=checkpoint_outcome)
+    log_event(f"pull_{checkpoint_outcome}", endpoint=endpoint)
+
+
+def _quarantine_evidence_ids(
+    work_id: str, lease_generation: int
+) -> tuple[str, str]:
+    if lease_generation < 1:
+        raise ValueError("lease_generation must be positive")
+    generation = () if lease_generation == 1 else (str(lease_generation),)
+    return (
+        _stable_prefixed_id("receipt", work_id, "quarantine", *generation),
+        _stable_prefixed_id("quarantine", work_id, *generation),
+    )
+
+
+def _phase_receipt_id(work_id: str) -> str:
+    return _stable_prefixed_id("receipt", work_id, "reconciled")
+
+
+def _stable_prefixed_id(prefix: str, *parts: object) -> str:
+    return f"perceptor:pull:{prefix}:" + _stable_digest(*parts)
+
+
+def _stable_digest(*parts: object) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        encoded = str(part).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, byteorder="big", signed=False))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _semantic_json(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return None if value is None else value.astimezone(UTC).isoformat()
+
+
+def _reject_non_finite_json(value: object) -> None:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise PerceptorPullIngressError("Platform response has non-finite JSON")
+        return
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _reject_non_finite_json(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _reject_non_finite_json(nested)
+
+
+def _aware_from_text(value: object, name: str) -> datetime:
+    text = _required_text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise SleepSliceInvariantError(f"{name} is invalid") from exc
+    _require_aware(parsed, name)
+    return parsed
+
+
+def _aware_datetime(value: object, name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise PerceptorPullIngressError(f"{name} is not a timestamp")
+    _require_aware(value, name)
+    return value.astimezone(UTC)
+
+
+def _required_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SleepSliceInvariantError(f"{name} is required")
+    return value
+
+
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+
+
+def _json_mapping(value: object) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, Mapping):
+        raise SleepSliceInvariantError("persisted JSON value is not an object")
+    return dict(value)
 
 
 __all__ = [
-    "HistoryReconciliationResult",
-    "PerceptorPullCompatibilityProfile",
-    "PerceptorPullConfigurationError",
-    "PerceptorPullDevice",
-    "PerceptorPullError",
-    "PerceptorPullService",
-    "PulledSourceReport",
-    "partition_device_batches",
-    "partition_history_windows",
+    "DurablePerceptorPullIngress",
+    "PULL_ENDPOINTS",
+    "PULL_HISTORY_OVERLAP",
+    "PULL_NORMALIZER",
+    "PULL_RESPONSE_PROFILE",
+    "PerceptorLiveNormalizationDispatcher",
+    "PerceptorHistoryBackfillChunkResult",
+    "PerceptorHistoryBackfillRequired",
+    "PerceptorPullBackfillRunner",
+    "PerceptorPullIngressError",
+    "PerceptorPullIngressResult",
+    "PerceptorPullNormalizationProcessor",
+    "PerceptorPullNormalizationResult",
+    "PerceptorPullQuarantineReprocessResult",
+    "PerceptorPullQuarantineReprocessor",
+    "PullHistoryPlan",
+    "PullRequestCoordinates",
+    "parse_platform_success_response",
+    "perceptor_pull_raw_aad",
+    "split_history_backfill_range",
 ]

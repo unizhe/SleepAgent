@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -8,21 +9,24 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
-from sleepagent.backend_persistence import ResolvedActorAuthority
-from sleepagent.product_api.contracts import ProductRole
+from sleepagent.api.postgres import ResolvedActorAuthority
+from sleepagent.api.product_contracts import ProductRole
 from sleepagent.persistence.uow import UowScope
-from sleepagent.sleep_api.auth import (
+from sleepagent.api.public_auth import (
     ActorAssertionClaims,
     AuthoritativeRoleBinding,
     ServicePrincipal,
 )
-from sleepagent.sleep_api.contracts import PublicActorRole, PublicErrorCode
-from sleepagent.sleep_api.postgres_runtime import (
+from sleepagent.api.public_contracts import (
+    PublicActorRole,
+    PublicErrorCode,
+    SleepApiApplicationError,
+)
+from sleepagent.api.public_runtime import (
     PostgresAuthenticatedActorContext,
     PostgresSleepApiRuntime,
 )
-from sleepagent.sleep_api.service import SleepApiApplicationError
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlertLifecycleState,
     AlgorithmVersionValue,
     AvailabilityState,
@@ -34,32 +38,41 @@ from sleepagent.sleep_domain.contracts import (
     CurrentRisk,
     DataMode,
     DataSufficiency,
+    DeterministicQualityAssessment,
     DeterministicQualityPolicy,
     DeterministicRiskPolicy,
+    DeterministicSourceScope,
     DeviceBindingReference,
     DomainRuleReviewStatus,
     EpisodeBoundaryPolicy,
     FastPathEventPolicy,
     MissingState,
+    MissingnessState,
     NightEpisode,
     NightEpisodeState,
     ObservationProvenance,
     ObservationQuality,
     ObservationType,
+    QualityState,
     ReviewedVendorAlertRule,
     RiskState,
     SleepObservation,
     SourceKind,
+    CurrentRevisionPointer,
+    SubjectLifecycleLease,
     TimezoneStatus,
     VendorAlertPayload,
 )
-from sleepagent.sleep_domain.episode_v2 import (
+from sleepagent.domain.episodes import (
     EpisodeAssignmentBasis,
     EpisodePublicationStatus,
     uuid7_from_parts,
 )
-from sleepagent.sleep_domain.postgres_slice import (
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    ClosedEpisodeAssociationResolver,
+    ClosedEpisodeCandidate,
     EpisodeLifecycleProjector,
+    EpisodeProjectionBoundary,
     FastPathHandler,
     FastPathLease,
     IngressResult,
@@ -74,10 +87,6 @@ from sleepagent.sleep_domain.postgres_slice import (
     SleepSlicePolicy,
     SleepSliceStaleRevision,
     StoredEpisode,
-)
-from sleepagent.sleep_domain.repository import (
-    CurrentRevisionPointer,
-    SubjectLifecycleLease,
 )
 
 
@@ -231,7 +240,277 @@ def _policy(*, urgent: bool = False) -> SleepSlicePolicy:
     )
 
 
-def test_episode_projector_finalizes_on_observed_wake_date() -> None:
+def _closed_candidate(ids: Ids) -> tuple[ClosedEpisodeCandidate, datetime, datetime]:
+    projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
+    zone = ZoneInfo("Asia/Shanghai")
+    bed_at = datetime(2026, 8, 7, 23, 30, tzinfo=zone)
+    wake_at = datetime(2026, 8, 8, 7, 5, tzinfo=zone)
+    opened = projector.project(
+        scope=_scope(),
+        snapshot=LifecycleSnapshotRecord(None, "dormant", 0, None, None),
+        observation=_observation(
+            _input(state=BedPresenceState.IN_BED, at=bed_at, identity="open"),
+            observation_id=ids(bed_at),
+        ),
+        opening_identity="open",
+        timezone_name="Asia/Shanghai",
+        committed_at=bed_at + timedelta(seconds=2),
+        conflicting_episode=lambda _value: None,
+    )
+    assert opened is not None
+    candidate = projector.project(
+        scope=_scope(),
+        snapshot=LifecycleSnapshotRecord(
+            ids(bed_at),
+            "active",
+            1,
+            bed_at,
+            bed_at,
+            StoredEpisode(
+                opened.episode,
+                "collecting",
+                opened.revision_id,
+                opened.observation_ids,
+                1,
+            ),
+        ),
+        observation=_observation(
+            _input(state=BedPresenceState.OUT_OF_BED, at=wake_at, identity="close"),
+            observation_id=ids(wake_at),
+        ),
+        opening_identity="close",
+        timezone_name="Asia/Shanghai",
+        committed_at=wake_at + timedelta(seconds=2),
+        conflicting_episode=lambda _value: None,
+    )
+    assert candidate is not None
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            ids(wake_at),
+            "active",
+            2,
+            bed_at,
+            wake_at,
+            StoredEpisode(
+                candidate.episode,
+                "collecting",
+                candidate.revision_id,
+                candidate.observation_ids,
+                2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: None,
+    )
+    return (
+        ClosedEpisodeCandidate(
+            stored_episode=StoredEpisode(
+                closed.episode,
+                "awaiting_report",
+                closed.revision_id,
+                closed.observation_ids,
+                2,
+            ),
+            window_end_at=wake_at,
+            contains_observation_time=True,
+        ),
+        bed_at,
+        wake_at,
+    )
+
+
+def test_closed_episode_resolver_classifies_unique_window_and_ambiguity() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    resolver = ClosedEpisodeAssociationResolver(_policy().boundary)
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="late-in-bed",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+
+    unique = resolver.resolve(
+        observation=late,
+        timezone_name="Asia/Shanghai",
+        candidates=(candidate,),
+    )
+    assert unique is not None
+    assert unique.status == "associated"
+    assert unique.selected == candidate
+    assert unique.lateness_watermark_at == wake_at + timedelta(hours=2)
+
+    second_episode = candidate.stored_episode.episode.model_copy(
+        update={"night_episode_id": ids(wake_at)}
+    )
+    ambiguous = resolver.resolve(
+        observation=late,
+        timezone_name="Asia/Shanghai",
+        candidates=(
+            candidate,
+            replace(
+                candidate,
+                stored_episode=replace(
+                    candidate.stored_episode,
+                    episode=second_episode,
+                ),
+            ),
+        ),
+    )
+    assert ambiguous is not None
+    assert ambiguous.status == "ambiguous"
+    assert ambiguous.selected is None
+
+
+def test_closed_episode_resolver_bounds_lateness_and_protects_current_in_bed() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    resolver = ClosedEpisodeAssociationResolver(_policy().boundary)
+    in_window_time = bed_at + timedelta(hours=2)
+    out_of_window = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=in_window_time,
+            identity="too-late",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=2, seconds=1)}),
+        observation_id=ids(wake_at),
+    )
+    decision = resolver.resolve(
+        observation=out_of_window,
+        timezone_name="Asia/Shanghai",
+        candidates=(candidate,),
+    )
+    assert decision is not None
+    assert decision.status == "out_of_window"
+    assert decision.selected is None
+
+    historical_no_match = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at - timedelta(days=2),
+            identity="historical-no-match",
+        ).model_copy(update={"received_at": wake_at}),
+        observation_id=ids(wake_at),
+    )
+    no_match = resolver.resolve(
+        observation=historical_no_match,
+        timezone_name="Asia/Shanghai",
+        candidates=(),
+    )
+    assert no_match is not None
+    assert no_match.status == "no_match"
+
+    current = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=wake_at + timedelta(days=1),
+            identity="current-in-bed",
+        ),
+        observation_id=ids(wake_at),
+    )
+    assert (
+        resolver.resolve(
+            observation=current,
+            timezone_name="Asia/Shanghai",
+            candidates=(),
+        )
+        is None
+    )
+
+
+def test_late_projection_creates_membership_only_immutable_revision() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="late-membership",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+    watermark = wake_at + timedelta(hours=2)
+    mutation = projector.project_late_observation(
+        snapshot=LifecycleSnapshotRecord(ids(wake_at), "dormant", 3, bed_at, wake_at),
+        observation=late,
+        candidate=candidate,
+        committed_at=wake_at + timedelta(hours=1, seconds=1),
+        lateness_watermark_at=watermark,
+    )
+    assert mutation.parent_revision_id == candidate.stored_episode.current_revision_id
+    assert mutation.episode.current_revision == (
+        candidate.stored_episode.episode.current_revision + 1
+    )
+    assert mutation.episode.wake_at == candidate.stored_episode.episode.wake_at
+    assert mutation.new_membership_observation_ids == (late.observation_id,)
+    assert mutation.late_association_watermark_at == watermark
+    assert mutation.revision_cause == "late_observation_associated"
+
+
+def test_projection_boundary_never_guesses_between_closed_episodes() -> None:
+    ids = Ids()
+    candidate, bed_at, wake_at = _closed_candidate(ids)
+    second = replace(
+        candidate,
+        stored_episode=replace(
+            candidate.stored_episode,
+            episode=candidate.stored_episode.episode.model_copy(
+                update={"night_episode_id": ids(wake_at)}
+            ),
+        ),
+    )
+    late = _observation(
+        _input(
+            state=BedPresenceState.IN_BED,
+            at=bed_at + timedelta(hours=2),
+            identity="ambiguous-historical-in-bed",
+        ).model_copy(update={"received_at": wake_at + timedelta(hours=1)}),
+        observation_id=ids(wake_at),
+    )
+
+    class Repository:
+        def lock_subject_lifecycle(self) -> None:
+            return None
+
+        def load_lifecycle(self) -> LifecycleSnapshotRecord:
+            return LifecycleSnapshotRecord(
+                ids(wake_at), "dormant", 3, bed_at, wake_at
+            )
+
+        def load_closed_episode_candidates(
+            self, **_kwargs: object
+        ) -> tuple[ClosedEpisodeCandidate, ...]:
+            return candidate, second
+
+    decision = EpisodeProjectionBoundary(_policy(), id_generator=ids).prepare(
+        scope=_scope(),
+        repository=Repository(),  # type: ignore[arg-type]
+        observation=late,
+        opening_identity=late.idempotency_key,
+        timezone_name="Asia/Shanghai",
+        committed_at=wake_at + timedelta(hours=1, seconds=1),
+    )
+    assert decision.mutation is None
+    assert decision.late_association is not None
+    assert decision.late_association.status == "ambiguous"
+    assert decision.late_association.selected is None
+
+
+def test_episode_projector_finalizes_only_after_confirmed_observed_wake() -> None:
     ids = Ids()
     projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
     zone = ZoneInfo("Asia/Shanghai")
@@ -260,7 +539,7 @@ def test_episode_projector_finalizes_on_observed_wake_date() -> None:
     assert opened.episode.episode_local_date is None
     assert opened.episode.legacy_local_sleep_date == date(2026, 8, 7)
 
-    closed = projector.project(
+    candidate = projector.project(
         scope=_scope(),
         snapshot=LifecycleSnapshotRecord(
             monitoring_snapshot_id=ids(bed_at),
@@ -285,10 +564,45 @@ def test_episode_projector_finalizes_on_observed_wake_date() -> None:
         committed_at=wake_at + timedelta(seconds=2),
         conflicting_episode=lambda _value: None,
     )
+    assert candidate is not None
+    assert candidate.episode.wake_at is None
+    assert candidate.episode.candidate_wake_at == wake_at
+    assert candidate.closes_episode is False
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            monitoring_snapshot_id=ids(wake_at),
+            state="active",
+            cas_version=2,
+            created_at=bed_at,
+            updated_at=wake_at,
+            episode=StoredEpisode(
+                episode=candidate.episode,
+                database_state="collecting",
+                current_revision_id=candidate.revision_id,
+                observation_ids=candidate.observation_ids,
+                cas_version=2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: None,
+    )
     assert closed is not None
     assert closed.episode.episode_local_date == date(2026, 8, 8)
     assert closed.episode.assignment_basis == EpisodeAssignmentBasis.OBSERVED_WAKE
-    assert closed.episode.current_revision == 2
+    assert closed.episode.current_revision == 3
+    assert closed.episode.wake_at == wake_at
+    assert closed.revision_cause == "confirmed_observed_wake"
     assert closed.enqueues_fast_path is True
     assert closed.promotes_revision is True
     assert closed.domain_event_type == "NIGHT_EPISODE_REVISION_COMMITTED"
@@ -313,7 +627,7 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     )
     assert opened is not None
     wake_at = datetime(2026, 8, 8, 7, 5, tzinfo=zone)
-    closed = projector.project(
+    candidate = projector.project(
         scope=_scope(),
         snapshot=LifecycleSnapshotRecord(
             ids(bed_at),
@@ -338,6 +652,36 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
         committed_at=wake_at + timedelta(seconds=2),
         conflicting_episode=lambda _value: "existing-episode",
     )
+    assert candidate is not None
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            ids(wake_at),
+            "active",
+            2,
+            bed_at,
+            wake_at,
+            StoredEpisode(
+                candidate.episode,
+                "collecting",
+                candidate.revision_id,
+                candidate.observation_ids,
+                2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: "existing-episode",
+    )
     assert closed is not None
     assert closed.episode.publication_status == (
         EpisodePublicationStatus.RECONCILIATION_REQUIRED
@@ -345,7 +689,9 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert closed.conflicting_episode_id == "existing-episode"
     assert closed.enqueues_fast_path is False
     assert closed.promotes_revision is False
-    assert closed.revision_cause == "observed_wake_date_conflict"
+    assert closed.revision_cause == "confirmed_observed_wake_date_conflict"
+    assert len(closed.observation_ids) == 2
+    assert closed.new_membership_observation_ids == ()
     assert (
         closed.domain_event_type
         == "NIGHT_EPISODE_DATE_RECONCILIATION_REQUIRED"
@@ -360,7 +706,7 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
 
         def execute(self, query: str, params: Any = None) -> None:
             self.statements.append((query, params))
-            if "array_agg(membership.observation_id" in query:
+            if "count(*) = cardinality" in query:
                 self._row = (True,)
 
         def fetchone(self) -> tuple[bool] | None:
@@ -387,21 +733,38 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert "date_conflict" not in set_clause
     assert "current_revision_id = %s" in aggregate_update
     assert "current_revision_number = %s" in aggregate_update
-    membership_insert = next(
-        statement
+    assert not any(
+        "INSERT INTO public.sleep_domain_episode_observation_memberships"
+        in statement
         for statement, _params in cursor.statements
+    )
+    assert all(
+        "array_agg(membership.observation_id" not in statement
+        for statement, _params in cursor.statements
+    )
+
+    batched_cursor = RecordingCursor()
+    batched_ids = tuple(f"observation-{index:03d}" for index in range(257))
+    repository._write_episode_mutation(
+        batched_cursor,
+        replace(closed, observation_ids=batched_ids),
+        _policy(),
+        wake_at + timedelta(seconds=2),
+    )
+    inserts = [
+        params[-1]
+        for statement, params in batched_cursor.statements
         if "INSERT INTO public.sleep_domain_episode_observation_memberships"
         in statement
-    )
-    assert "'episode-membership:'" in membership_insert
-    assert "decode('00', 'hex')" in membership_insert
-    assert "ON CONFLICT (namespace_id, data_mode, observation_id) DO NOTHING" in (
-        membership_insert
-    )
-    assert any(
-        "array_agg(membership.observation_id" in statement
-        for statement, _params in cursor.statements
-    )
+    ]
+    checks = [
+        params[0]
+        for statement, params in batched_cursor.statements
+        if "count(*) = cardinality" in statement
+    ]
+    assert [len(batch) for batch in inserts] == [128, 128, 1]
+    assert checks == inserts
+    assert tuple(item for batch in inserts for item in batch) == batched_ids
 
 
 def test_episode_without_wake_closes_on_estimated_deadline_date() -> None:
@@ -452,6 +815,36 @@ def test_episode_without_wake_closes_on_estimated_deadline_date() -> None:
     assert closed.episode.publication_status == EpisodePublicationStatus.COMMITTED
     assert closed.revision_cause == "deadline_fallback"
     assert closed.enqueues_fast_path is True
+    assert closed.new_membership_observation_ids == ()
+
+    class RecordingCursor:
+        rowcount = 1
+
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, query: str, _params: Any = None) -> None:
+            self.statements.append(query)
+
+    cursor = RecordingCursor()
+    PostgresSleepSliceRepository(
+        object(),  # type: ignore[arg-type]
+        _scope(),
+        id_generator=ids,
+    )._write_episode_mutation(
+        cursor,
+        closed,
+        _policy(),
+        deadline,
+    )
+    assert any(
+        "INSERT INTO public.sleep_domain_night_episode_revisions" in statement
+        for statement in cursor.statements
+    )
+    assert all(
+        "sleep_domain_episode_observation_memberships" not in statement
+        for statement in cursor.statements
+    )
 
     with pytest.raises(
         SleepSliceInvariantError,
@@ -596,6 +989,7 @@ class _FastRepository:
         )
         self.observations = {item.observation_id: item for item in observations}
         self.quality = None
+        self.current_quality = None
         self.risk = None
         self.persisted: dict[str, Any] | None = None
 
@@ -627,6 +1021,10 @@ class _FastRepository:
     def get_quality_assessment(self, _namespace: Any, *, assessment_id: str) -> Any:
         del assessment_id
         return self.quality
+
+    def get_current_quality(self, _namespace: Any, *, night_episode_id: str) -> Any:
+        del night_episode_id
+        return self.current_quality
 
     def get_current_risk(self, _namespace: Any, *, night_episode_id: str) -> Any:
         del night_episode_id
@@ -676,14 +1074,23 @@ class _FastRepository:
         *,
         quality: Any,
         risk: Any,
+        persist_quality: bool = True,
         **_kwargs: Any,
     ) -> bool:
-        self.quality = quality
+        if persist_quality:
+            self.quality = quality
+            self.current_quality = quality
         self.risk = risk
         return True
 
-    def persist_fast_path_handoff(self, **kwargs: Any) -> None:
+    def persist_fast_path_handoff(
+        self, **kwargs: Any
+    ) -> tuple[str | None, str | None]:
         self.persisted = kwargs
+        return (
+            kwargs["product_agent_operation_id"],
+            kwargs["report_operation_id"],
+        )
 
 
 def _fast_observation(
@@ -724,7 +1131,15 @@ def _fast_observation(
     )
 
 
-def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
+@pytest.mark.parametrize(
+    ("urgent", "emit_compatibility", "expect_compatibility"),
+    ((True, False, False), (False, False, False), (False, True, True)),
+)
+def test_fast_path_report_child_and_compatibility_cutover(
+    urgent: bool,
+    emit_compatibility: bool,
+    expect_compatibility: bool,
+) -> None:
     start = datetime(2026, 8, 7, 22, 0, tzinfo=UTC)
     end = start + timedelta(hours=1)
     observations = (
@@ -776,10 +1191,44 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
         updated_at=end,
     )
     repository = _FastRepository(episode, observations)
+    frozen_quality = DeterministicQualityAssessment(
+        assessment_id="acquisition-quality-1",
+        data_mode=DataMode.REPLAY,
+        subject_id=episode.subject_id,
+        night_episode_id=episode.night_episode_id,
+        quality_state=QualityState.SUFFICIENT,
+        data_sufficiency=DataSufficiency.SUFFICIENT,
+        missingness_state=MissingnessState.COMPLETE,
+        coverage_ratio=1.0,
+        expected_bin_count=20,
+        covered_bin_count=20,
+        explicit_missing_interval_count=0,
+        invalid_observation_count=0,
+        stale=False,
+        offline=False,
+        clock_invalid=False,
+        latest_observed_at=end - timedelta(seconds=30),
+        source_scope=DeterministicSourceScope(
+            night_episode_id=episode.night_episode_id,
+            night_episode_revision_id="revision-1",
+            observation_ids=tuple(item.observation_id for item in observations),
+            observation_types=tuple(
+                dict.fromkeys(item.observation_type for item in observations)
+            ),
+            device_binding_ids=("binding-1",),
+            window_start_at=start,
+            window_end_at=end,
+        ),
+        policy_version="quality-v1",
+        reason_codes=("quality_sufficient",),
+        assessed_at=end,
+    )
+    repository.current_quality = frozen_quality
     uow = _FakeUow()
     handler = FastPathHandler(
         _FakeUowFactory(uow),  # type: ignore[arg-type]
-        policy=_policy(urgent=True),
+        policy=_policy(urgent=urgent),
+        emit_legacy_report_compatibility=emit_compatibility,
         id_generator=Ids(),
         now_factory=lambda: end + timedelta(seconds=1),
         repository_factory=lambda _connection, _scope: repository,  # type: ignore[arg-type]
@@ -797,13 +1246,23 @@ def test_urgent_fast_path_commits_zero_model_and_no_product_operation() -> None:
         ),
     )
 
-    assert result.urgent is True
+    assert result.urgent is urgent
     assert result.model_invocation_count == 0
-    assert result.product_agent_operation_id is None
-    assert repository.risk.risk_state == RiskState.REVIEWED_SIGNAL
+    assert (result.product_agent_operation_id is not None) is expect_compatibility
+    assert (result.report_operation_id is not None) is (not urgent)
+    assert repository.risk.risk_state == (
+        RiskState.REVIEWED_SIGNAL if urgent else RiskState.OPERATIONAL_REVIEW
+    )
+    assert repository.current_quality is frozen_quality
+    assert repository.quality is None
     assert repository.persisted is not None
     assert repository.persisted["decision"].model_invocation_count == 0
-    assert repository.persisted["product_agent_operation_id"] is None
+    assert (
+        repository.persisted["product_agent_operation_id"] is not None
+    ) is expect_compatibility
+    assert (repository.persisted["report_operation_id"] is not None) is (
+        not urgent
+    )
     assert uow.commits == 1
 
 

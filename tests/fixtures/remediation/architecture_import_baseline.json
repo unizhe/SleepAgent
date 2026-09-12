@@ -1,0 +1,18 @@
+{
+  "schema_version": "architecture_import_baseline.g6.v1",
+  "captured_entry_head": "b8c382d",
+  "known_sccs": [
+    [
+      "sleepagent.runtime.cold_start",
+      "sleepagent.runtime.contracts",
+      "sleepagent.runtime.governance",
+      "sleepagent.runtime.hitl",
+      "sleepagent.runtime.invocation",
+      "sleepagent.runtime.memory",
+      "sleepagent.runtime.registry",
+      "sleepagent.runtime.results"
+    ]
+  ],
+  "self_imports": [],
+  "forbidden_edges": []
+}

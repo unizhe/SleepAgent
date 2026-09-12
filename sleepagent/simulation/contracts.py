@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Strict contracts for provider-neutral replay world fixtures.
 
 Only external-world facts belong here.  Derived quality/risk decisions, Agent
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlertLifecycleState,
     AlertSeverity,
     ObservationType,

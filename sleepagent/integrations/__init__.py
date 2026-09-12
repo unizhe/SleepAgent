@@ -1,1 +1,2 @@
-"""External product integrations for SleepAgent."""
+"""Leaf integrations that translate external contracts into domain candidates."""
+

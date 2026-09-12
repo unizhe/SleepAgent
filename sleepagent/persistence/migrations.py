@@ -1,22 +1,43 @@
+# 本模块固定迁移清单、校验和及不可变数据库标识。
 from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA_VERSION = "001_initial_schema"
+# 这些名称已经写入 003--005 迁移和持久化审计记录；运行时代码只引用语义常量，
+# 避免把早期施工阶段命名继续扩散到业务模块。
+COMMAND_AUTHORITY_FUNCTION = "sleepagent_stage2_authority_allows"
+SCENARIO_CLOCK_AUTHORITY_FUNCTION = "sleepagent_stage3_advance_authority_allows"
+DELIVERY_AUTHORITY_FUNCTION = "sleepagent_stage4_delivery_authority_allows"
+COMMAND_AUTHORITY_FUNCTION_SIGNATURE = (
+    f"public.{COMMAND_AUTHORITY_FUNCTION}(text,text,text)"
+)
+SCENARIO_CLOCK_AUTHORITY_FUNCTION_SIGNATURE = (
+    f"public.{SCENARIO_CLOCK_AUTHORITY_FUNCTION}(text)"
+)
+DELIVERY_AUTHORITY_FUNCTION_SIGNATURE = (
+    f"public.{DELIVERY_AUTHORITY_FUNCTION}(text)"
+)
+COMMAND_REGISTRY_VERSION = "stage2-command-registry.v1"
+DETERMINISTIC_INTERACTION_MODEL_VERSION = "deterministic-stage2-interaction.v1"
+COMMAND_COMMITTED_EVENT_TYPE = "STAGE2_COMMAND_COMMITTED"
+COMMAND_COMMITTED_AUDIT_REASON = "stage2_command_committed"
+MODEL_REQUEST_SCHEMA_VERSION = "stage2_model_request.v1"
+COMMAND_INVOCATION_NAMESPACE = "stage2"
+COMMAND_AUTHORIZATION_REVOKED_ERROR = "stage2_authorization_revoked"
+COMMAND_STATE_CONFLICT_ERROR = "stage2_state_conflict"
+COMMAND_INVARIANT_ERROR = "stage2_invariant_violation"
+COMMAND_LEASE_LOST_ERROR = "stage2_lease_lost_reconciliation_required"
 _PERSISTENCE_ROOT = Path(__file__).parent
 MIGRATION_MANIFEST_PATH = _PERSISTENCE_ROOT / "migration_manifest.json"
 POSTGRES_BASELINE_SQL = (
     _PERSISTENCE_ROOT / "migrations" / f"{SCHEMA_VERSION}.sql"
 ).read_text(encoding="utf-8")
-SQLITE_SCHEMA_SQL = (_PERSISTENCE_ROOT / "sqlite_schema.sql").read_text(
-    encoding="utf-8"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,70 +240,6 @@ def split_sql_statements(sql: str = POSTGRES_BASELINE_SQL) -> list[str]:
     return statements
 
 
-def apply_sqlite_schema(connection: sqlite3.Connection) -> None:
-    if SCHEMA_VERSION in _sqlite_applied_versions(connection):
-        return
-    for statement in split_sql_statements(SQLITE_SCHEMA_SQL):
-        sqlite_statement = _postgres_statement_to_sqlite(statement)
-        if sqlite_statement:
-            connection.execute(sqlite_statement)
-    connection.commit()
-
-
-def _sqlite_applied_versions(connection: sqlite3.Connection) -> set[str]:
-    exists = connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-        "AND name = 'sleepagent_schema_migrations'"
-    ).fetchone()
-    if exists is None:
-        return set()
-    return {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT version FROM sleepagent_schema_migrations"
-        ).fetchall()
-    }
-
-
-def _postgres_statement_to_sqlite(statement: str) -> str:
-    normalized = " ".join(statement.split())
-    if normalized.startswith(
-        "CREATE OR REPLACE FUNCTION sleep_domain_reject_raw_mutation"
-    ):
-        return ""
-    if normalized.startswith(
-        "CREATE TRIGGER sleep_domain_raw_inbox_immutable_update"
-    ):
-        return (
-            "CREATE TRIGGER IF NOT EXISTS "
-            "sleep_domain_raw_inbox_immutable_update "
-            "BEFORE UPDATE ON sleep_domain_raw_inbox "
-            "BEGIN SELECT RAISE(ABORT, 'sleep_domain_raw_inbox is immutable'); END"
-        )
-    if normalized.startswith(
-        "CREATE TRIGGER sleep_domain_raw_inbox_immutable_delete"
-    ):
-        return (
-            "CREATE TRIGGER IF NOT EXISTS "
-            "sleep_domain_raw_inbox_immutable_delete "
-            "BEFORE DELETE ON sleep_domain_raw_inbox "
-            "BEGIN SELECT RAISE(ABORT, 'sleep_domain_raw_inbox is immutable'); END"
-        )
-    converted = statement
-    replacements = {
-        "BIGSERIAL": "INTEGER",
-        "JSONB": "TEXT",
-        "TIMESTAMPTZ": "TEXT",
-        "DOUBLE PRECISION": "REAL",
-        "BOOLEAN": "INTEGER",
-        "DATE": "TEXT",
-        " DEFAULT NOW()": "",
-    }
-    for old, new in replacements.items():
-        converted = converted.replace(old, new)
-    return converted
-
-
 __all__ = [
     "EXPECTED_MIGRATION_IDENTITIES",
     "LATEST_SCHEMA_VERSION",
@@ -293,8 +250,6 @@ __all__ = [
     "MigrationReleaseManifest",
     "POSTGRES_BASELINE_SQL",
     "SCHEMA_VERSION",
-    "SQLITE_SCHEMA_SQL",
-    "apply_sqlite_schema",
     "load_migration_manifest",
     "migration_identity",
     "split_sql_statements",

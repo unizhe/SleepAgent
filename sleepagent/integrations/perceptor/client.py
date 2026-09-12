@@ -1,789 +1,736 @@
+"""Read-only YunYun Platform API client frozen by the P4-D2-A golden.
+
+This client is intentionally narrower than the historical diagnostic. It owns
+only token acquisition and read-only product/device discovery. The outbound
+Platform contract is fixed to ``/v2`` plus ``ClientSecret + "&"`` and never
+tries an alternative. Incoming Push verification remains a separate module.
+"""
+
 from __future__ import annotations
 
-import os
-import time
+import threading
 import uuid
-import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Protocol
+import hashlib
+import json
+import re
+from typing import Any, Generic, TypeVar
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from sleepagent.domain.contracts import ProviderDeviceIdentity
 from sleepagent.integrations.perceptor.signing import (
-    DEFAULT_SIGNING_PATH,
-    DEFAULT_SIGNATURE_METHOD,
+    PLATFORM_SIGNING_KEY_MODE,
+    PLATFORM_SIGNING_PATH,
     sign_parameters,
 )
-from sleepagent.observability import log_event, record_error, record_pull
 
 
-PERCEPTOR_PROVIDER_MODE_ENV = "PERCEPTOR_PROVIDER_MODE"
-PERCEPTOR_BASE_URL_ENV = "PERCEPTOR_BASE_URL"
-PERCEPTOR_CLIENT_ID_ENV = "PERCEPTOR_CLIENT_ID"
-PERCEPTOR_CLIENT_SECRET_ENV = "PERCEPTOR_CLIENT_SECRET"
-PERCEPTOR_DEFAULT_DEVICE_NAME_ENV = "PERCEPTOR_DEFAULT_DEVICE_NAME"
-PERCEPTOR_DEFAULT_HOME_ID_ENV = "PERCEPTOR_DEFAULT_HOME_ID"
-PERCEPTOR_TIMEOUT_SECONDS_ENV = "PERCEPTOR_TIMEOUT_SECONDS"
-PERCEPTOR_TOKEN_REFRESH_MARGIN_SECONDS_ENV = "PERCEPTOR_TOKEN_REFRESH_MARGIN_SECONDS"
-PERCEPTOR_TOKEN_DEFAULT_TTL_SECONDS_ENV = "PERCEPTOR_TOKEN_DEFAULT_TTL_SECONDS"
-PERCEPTOR_REALTIME_SESSION_TTL_SECONDS_ENV = "PERCEPTOR_REALTIME_SESSION_TTL_SECONDS"
-PERCEPTOR_MAX_RETRIES_ENV = "PERCEPTOR_MAX_RETRIES"
-PERCEPTOR_RETRY_BACKOFF_SECONDS_ENV = "PERCEPTOR_RETRY_BACKOFF_SECONDS"
-PERCEPTOR_SIGNING_PATH_ENV = "PERCEPTOR_SIGNING_PATH"
-PERCEPTOR_SIGN_SECRET_APPEND_AMPERSAND_ENV = "PERCEPTOR_SIGN_SECRET_APPEND_AMPERSAND"
-
-PERCEPTOR_DATA_NAMESPACE_ENV = "SLEEPAGENT_PERCEPTOR_DATA_NAMESPACE"
-DEFAULT_TIMEOUT_SECONDS = 10.0
-DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS = 60.0
-DEFAULT_TOKEN_TTL_SECONDS = 3600.0
-DEFAULT_REALTIME_SESSION_TTL_SECONDS = 300.0
-DEFAULT_MAX_RETRIES = 1
-DEFAULT_RETRY_BACKOFF_SECONDS = 0.25
-
-
-class PerceptorConfigurationError(ValueError):
-    """Raised when live Perceptor configuration is incomplete."""
+UTC = timezone.utc
+DEFAULT_PLATFORM_BASE_URL = "https://openapi.perceptor.cn/v2"
+TOKEN_ENDPOINT = "/token/get"
+PRODUCT_LIST_ENDPOINT = "/product/getList"
+DEVICE_LIST_ENDPOINT = "/device/getList"
+DEVICE_DETAIL_ENDPOINT = "/device/detail"
+GET_CURRENT_ENDPOINT = "/vitalSigns/getCurrent"
+REALTIME_START_ENDPOINT = "/vitalSigns/start"
+REALTIME_READ_ENDPOINT = "/vitalSigns/getRealTimes"
+HISTORY_ENDPOINT = "/vitalSigns/getHistoryData"
+SLEEP_REPORT_ENDPOINT = "/vitalSigns/getSleepReport"
+READ_ONLY_ENDPOINTS = frozenset(
+    {
+        PRODUCT_LIST_ENDPOINT,
+        DEVICE_LIST_ENDPOINT,
+        DEVICE_DETAIL_ENDPOINT,
+        GET_CURRENT_ENDPOINT,
+        REALTIME_START_ENDPOINT,
+        REALTIME_READ_ENDPOINT,
+        HISTORY_ENDPOINT,
+        SLEEP_REPORT_ENDPOINT,
+    }
+)
 
 
-class PerceptorAPIError(RuntimeError):
-    """Raised when the Perceptor API boundary returns an unusable response."""
+class PlatformApiError(RuntimeError):
+    """A deliberately redacted Platform API failure."""
 
-
-class PerceptorRealtimeSessionError(PerceptorAPIError):
-    """Raised when realtime polling is attempted without an active session."""
-
-
-class PerceptorHTTPClient(Protocol):
-    def post(
+    def __init__(
         self,
-        url: str,
+        category: str,
         *,
-        json: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
-        ...
+        endpoint: str,
+        http_status: int | None = None,
+        vendor_code: str | None = None,
+        vendor_message: str | None = None,
+    ) -> None:
+        super().__init__(category)
+        self.category = category
+        self.endpoint = endpoint
+        self.http_status = http_status
+        self.vendor_code = vendor_code
+        self.vendor_message = vendor_message
 
-    def close(self) -> None:
-        ...
+
+@dataclass(frozen=True, slots=True)
+class PlatformAccessToken:
+    access_token: str = field(repr=False)
+    token_type: str
+    expiry_selector: int | None
+    issued_at: datetime
+    expires_at: datetime | None
+
+    def is_usable(self, now: datetime, *, refresh_margin: timedelta) -> bool:
+        _require_aware(now, "now")
+        return self.expires_at is not None and now + refresh_margin < self.expires_at
 
 
-@dataclass(frozen=True)
-class PerceptorToken:
-    access_token: str
-    expires_at: float
+@dataclass(frozen=True, slots=True)
+class PlatformRawResponseEvidence:
+    endpoint: str
+    requested_at: datetime
+    received_at: datetime
+    http_status: int
+    raw_body: bytes = field(repr=False)
 
     @property
-    def expires_at_epoch_seconds(self) -> float:
-        return self.expires_at
-
-    def is_valid(
-        self,
-        *,
-        now_epoch_seconds: float,
-        refresh_margin_seconds: float,
-    ) -> bool:
-        return now_epoch_seconds < self.expires_at - refresh_margin_seconds
+    def raw_sha256(self) -> str:
+        return hashlib.sha256(self.raw_body).hexdigest()
 
 
-@dataclass(frozen=True)
-class PerceptorRealtimeSession:
-    device_name: str
-    home_id: str | int
-    started_at: float
-    expires_at: float
-
-    def is_valid(self, *, now_epoch_seconds: float) -> bool:
-        return now_epoch_seconds < self.expires_at
-
-    def matches(self, *, device_name: str, home_id: str | int) -> bool:
-        return self.device_name == device_name and str(self.home_id) == str(home_id)
+ReadDataT = TypeVar("ReadDataT")
 
 
-@dataclass(frozen=True)
-class PerceptorConfig:
-    base_url: str
-    client_id: str
-    client_secret: str
-    default_device_name: str | None = None
-    default_home_id: str | int | None = None
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    token_refresh_margin_seconds: float = DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS
-    token_default_ttl_seconds: float = DEFAULT_TOKEN_TTL_SECONDS
-    realtime_session_ttl_seconds: float = DEFAULT_REALTIME_SESSION_TTL_SECONDS
-    max_retries: int = DEFAULT_MAX_RETRIES
-    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
-    signing_path: str = DEFAULT_SIGNING_PATH
-    append_ampersand_to_signing_secret: bool = True
+@dataclass(frozen=True, slots=True)
+class PlatformEvidencedRead(Generic[ReadDataT]):
+    """One parsed read and the exact raw response that produced it."""
 
+    endpoint: str
+    data: ReadDataT
+    evidence: PlatformRawResponseEvidence
+
+    def __post_init__(self) -> None:
+        if self.endpoint == TOKEN_ENDPOINT:
+            raise ValueError("token response cannot be represented as a data read")
+        if self.endpoint not in READ_ONLY_ENDPOINTS:
+            raise ValueError("endpoint is outside the read-only allowlist")
+        if self.endpoint != self.evidence.endpoint:
+            raise ValueError("read endpoint does not match raw response evidence")
+
+
+class PlatformProductRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    product_id: str
+    product_name: str | None = None
+    product_model: str | None = None
+    device_amount: int | None = Field(default=None, ge=0)
+
+    @field_validator("product_id", mode="before")
     @classmethod
-    def from_env(
-        cls,
-        env: Mapping[str, str] | None = None,
-    ) -> "PerceptorConfig":
-        values = env or os.environ
-        return cls(
-            base_url=_require_env(values, PERCEPTOR_BASE_URL_ENV).rstrip("/"),
-            client_id=_require_env(values, PERCEPTOR_CLIENT_ID_ENV),
-            client_secret=_require_env(values, PERCEPTOR_CLIENT_SECRET_ENV),
-            default_device_name=_optional_env(values, PERCEPTOR_DEFAULT_DEVICE_NAME_ENV),
-            default_home_id=_optional_env(values, PERCEPTOR_DEFAULT_HOME_ID_ENV),
-            timeout_seconds=_float_env(
-                values,
-                PERCEPTOR_TIMEOUT_SECONDS_ENV,
-                DEFAULT_TIMEOUT_SECONDS,
-            ),
-            token_refresh_margin_seconds=_float_env(
-                values,
-                PERCEPTOR_TOKEN_REFRESH_MARGIN_SECONDS_ENV,
-                DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS,
-            ),
-            token_default_ttl_seconds=_float_env(
-                values,
-                PERCEPTOR_TOKEN_DEFAULT_TTL_SECONDS_ENV,
-                DEFAULT_TOKEN_TTL_SECONDS,
-            ),
-            realtime_session_ttl_seconds=_float_env(
-                values,
-                PERCEPTOR_REALTIME_SESSION_TTL_SECONDS_ENV,
-                DEFAULT_REALTIME_SESSION_TTL_SECONDS,
-            ),
-            max_retries=max(
-                _int_env(
-                    values,
-                    PERCEPTOR_MAX_RETRIES_ENV,
-                    DEFAULT_MAX_RETRIES,
-                ),
-                0,
-            ),
-            retry_backoff_seconds=max(
-                _float_env(
-                    values,
-                    PERCEPTOR_RETRY_BACKOFF_SECONDS_ENV,
-                    DEFAULT_RETRY_BACKOFF_SECONDS,
-                ),
-                0.0,
-            ),
-            signing_path=values.get(PERCEPTOR_SIGNING_PATH_ENV, DEFAULT_SIGNING_PATH),
-            append_ampersand_to_signing_secret=_bool_env(
-                values,
-                PERCEPTOR_SIGN_SECRET_APPEND_AMPERSAND_ENV,
-                True,
-            ),
+    def stringify_product_id(cls, value: object) -> str:
+        return _identifier_text(value, "product_id")
+
+
+class PlatformDeviceRecord(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    device_id: str | None = None
+    device_name: str
+    product_id: str | None = None
+    home_id: str | None = None
+    project_id: str | None = None
+    device_status: str | None = None
+    firmware_version: str | None = None
+    hardware_version: str | None = None
+    device_imei: str | None = None
+    device_imsi: str | None = None
+    device_iccid: str | None = None
+
+    @field_validator(
+        "device_id",
+        "device_name",
+        "product_id",
+        "home_id",
+        "project_id",
+        mode="before",
+    )
+    @classmethod
+    def stringify_identity(cls, value: object, info: Any) -> str | None:
+        if value is None:
+            return None
+        return _identifier_text(value, info.field_name)
+
+    def provider_identity(self) -> ProviderDeviceIdentity:
+        native_keys = {
+            key: value
+            for key, value in (
+                ("device_imei", self.device_imei),
+                ("device_imsi", self.device_imsi),
+                ("device_iccid", self.device_iccid),
+            )
+            if value
+        }
+        return ProviderDeviceIdentity(
+            provider_device_id=self.device_id,
+            provider_device_name=self.device_name,
+            product_id=self.product_id,
+            home_id=self.home_id,
+            project_id=self.project_id,
+            native_keys=native_keys,
         )
 
 
-class PerceptorClient:
+class PlatformDevicePage(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
+
+    page_count: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=50)
+    current_page: int = Field(ge=1)
+    total: int = Field(ge=0)
+    total_records: int = Field(ge=0)
+    devices: tuple[PlatformDeviceRecord, ...] = Field(alias="list")
+
+
+class PerceptorPlatformClient:
+    """Synchronous bounded client for authenticated read-only API calls."""
+
     def __init__(
         self,
-        config: PerceptorConfig,
         *,
-        http_client: PerceptorHTTPClient | None = None,
-        time_provider: Callable[[], float] | None = None,
-        nonce_factory: Callable[[], str] | None = None,
-        sleep_provider: Callable[[float], None] | None = None,
+        client_id: str,
+        client_secret: str,
+        base_url: str = DEFAULT_PLATFORM_BASE_URL,
+        http_client: httpx.Client | None = None,
+        now_factory: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+        nonce_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+        refresh_margin: timedelta = timedelta(minutes=5),
+        response_observer: Callable[[PlatformRawResponseEvidence], None] | None = None,
     ) -> None:
-        self.config = config
-        self._http_client = http_client or httpx.Client(timeout=config.timeout_seconds)
+        if not client_id.strip() or not client_secret:
+            raise ValueError("Platform API credentials are required")
+        normalized_base = base_url.rstrip("/")
+        if not normalized_base.startswith("https://"):
+            raise ValueError("Platform API base URL must use HTTPS")
+        if refresh_margin < timedelta(0):
+            raise ValueError("token refresh margin must be non-negative")
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._base_url = normalized_base
+        self._http = http_client or httpx.Client(
+            timeout=httpx.Timeout(15.0), follow_redirects=False
+        )
         self._owns_http_client = http_client is None
-        self._time_provider = time_provider or time.time
-        self._nonce_factory = nonce_factory or (lambda: uuid.uuid4().hex)
-        self._sleep_provider = sleep_provider or time.sleep
-        self._cached_token: PerceptorToken | None = None
-        self._realtime_session: PerceptorRealtimeSession | None = None
+        self._now_factory = now_factory
+        self._nonce_factory = nonce_factory
+        self._refresh_margin = refresh_margin
+        self._response_observer = response_observer
+        self._token: PlatformAccessToken | None = None
+        self._token_lock = threading.Lock()
 
     def close(self) -> None:
         if self._owns_http_client:
-            self._http_client.close()
+            self._http.close()
 
-    def get_access_token(self) -> str:
-        now = self._time_provider()
-        if self._cached_token and self._cached_token.is_valid(
-            now_epoch_seconds=now,
-            refresh_margin_seconds=self.config.token_refresh_margin_seconds,
+    def __enter__(self) -> "PerceptorPlatformClient":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def token(self, *, force_refresh: bool = False) -> PlatformAccessToken:
+        now = self._now()
+        if (
+            not force_refresh
+            and self._token is not None
+            and self._token.is_usable(now, refresh_margin=self._refresh_margin)
         ):
-            return self._cached_token.access_token
+            return self._token
+        with self._token_lock:
+            now = self._now()
+            if (
+                not force_refresh
+                and self._token is not None
+                and self._token.is_usable(
+                    now, refresh_margin=self._refresh_margin
+                )
+            ):
+                return self._token
+            envelope, _evidence = self._post_json(
+                TOKEN_ENDPOINT,
+                {"client_id": self._client_id, "client_secret": self._client_secret},
+                access_token=None,
+            )
+            data = _response_data(envelope, endpoint=TOKEN_ENDPOINT)
+            token = data.get("access_token")
+            token_type = data.get("token_type")
+            if not isinstance(token, str) or not token:
+                raise PlatformApiError("TOKEN_SHAPE_INVALID", endpoint=TOKEN_ENDPOINT)
+            if token_type != "Bearer":
+                raise PlatformApiError("TOKEN_TYPE_UNSUPPORTED", endpoint=TOKEN_ENDPOINT)
+            selector = _expiry_selector(data)
+            expires_at = (
+                now + timedelta(days=1 if selector == 1 else 30)
+                if selector is not None
+                else None
+            )
+            self._token = PlatformAccessToken(
+                access_token=token,
+                token_type=token_type,
+                expiry_selector=selector,
+                issued_at=now,
+                expires_at=expires_at,
+            )
+            return self._token
 
-        response = self._post(
-            "/token/get",
-            {
-                "client_id": self.config.client_id,
-                "client_secret": self.config.client_secret,
-            },
-            headers={"Content-Type": "application/json"},
+    def product_list(self) -> tuple[PlatformProductRecord, ...]:
+        data = self._signed_read(PRODUCT_LIST_ENDPOINT, {})
+        return tuple(
+            PlatformProductRecord.model_validate(item)
+            for item in _object_list(data, "list", endpoint=PRODUCT_LIST_ENDPOINT)
         )
-        payload = _response_json(response)
-        if str(payload.get("code")) != "200" or payload.get("success") is not True:
-            raise PerceptorAPIError("Perceptor token request failed.")
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise PerceptorAPIError("Perceptor token response missing data object.")
-        access_token = data.get("access_token") or data.get("accessToken")
-        if not access_token:
-            raise PerceptorAPIError("Perceptor token response missing access token.")
-        expires_at = _extract_token_expires_at(
-            data,
-            now_epoch_seconds=self._time_provider(),
-            default_ttl_seconds=self.config.token_default_ttl_seconds,
-        )
-        self._cached_token = PerceptorToken(
-            access_token=str(access_token),
-            expires_at=expires_at,
-        )
-        return self._cached_token.access_token
 
-    def build_signed_payload(
+    def device_list(
         self,
-        biz_params: Mapping[str, Any],
         *,
-        timestamp: str | int | None = None,
-        nonce: str | None = None,
-    ) -> dict[str, Any]:
-        public_params: dict[str, Any] = {
-            "client_id": self.config.client_id,
-            "version": "2.0",
-            "timestamp": str(timestamp or int(self._time_provider())),
-            "sign_version": "2.0",
-            "sign_nonce": nonce or self._nonce_factory(),
-            "sign_method": DEFAULT_SIGNATURE_METHOD,
-        }
-        signed_payload = {**public_params, **dict(biz_params)}
-        signed_payload["sign"] = sign_parameters(
-            signed_payload,
-            client_secret=self.config.client_secret,
-            append_ampersand=self.config.append_ampersand_to_signing_secret,
-            signing_path=self.config.signing_path,
-        )
-        return signed_payload
+        page_current: int = 1,
+        page_size: int = 50,
+        product_id: str | int | None = None,
+        device_name: str | None = None,
+    ) -> tuple[PlatformDeviceRecord, ...]:
+        return self.device_page(
+            page_current=page_current,
+            page_size=page_size,
+            product_id=product_id,
+            device_name=device_name,
+        ).devices
 
-    def request_api(
+    def device_page(
         self,
-        endpoint: str,
-        biz_params: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        access_token = self.get_access_token()
-        payload = self.build_signed_payload(biz_params)
-        response = self._post(
-            endpoint,
-            payload,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
+        *,
+        page_current: int = 1,
+        page_size: int = 50,
+        product_id: str | int | None = None,
+        device_name: str | None = None,
+    ) -> PlatformDevicePage:
+        if page_current < 1:
+            raise ValueError("page_current must be positive")
+        if not 1 <= page_size <= 50:
+            raise ValueError("page_size must be between 1 and 50")
+        params: dict[str, str | int] = {
+            "page_current": page_current,
+            "page_size": page_size,
+        }
+        if product_id is not None:
+            params["product_id"] = _identifier_text(product_id, "product_id")
+        if device_name is not None:
+            params["device_name"] = _identifier_text(device_name, "device_name")
+        data = self._signed_read(DEVICE_LIST_ENDPOINT, params)
+        try:
+            return PlatformDevicePage.model_validate(data)
+        except ValueError as exc:
+            raise PlatformApiError(
+                "DEVICE_PAGE_SHAPE_INVALID", endpoint=DEVICE_LIST_ENDPOINT
+            ) from exc
+
+    def device_detail(self, *, device_name: str) -> PlatformDeviceRecord:
+        normalized_name = _identifier_text(device_name, "device_name")
+        data = self._signed_read(
+            DEVICE_DETAIL_ENDPOINT,
+            {"device_name": normalized_name},
+        )
+        return PlatformDeviceRecord.model_validate(data)
+
+    def get_current(
+        self, *, device_name: str, home_id: str | int
+    ) -> Mapping[str, Any]:
+        return self.get_current_evidenced(
+            device_name=device_name,
+            home_id=home_id,
+        ).data
+
+    def get_current_evidenced(
+        self, *, device_name: str, home_id: str | int
+    ) -> PlatformEvidencedRead[Mapping[str, Any]]:
+        return self._signed_read_evidenced(
+            GET_CURRENT_ENDPOINT,
+            {
+                "device_name": _identifier_text(device_name, "device_name"),
+                "home_id": _long_identifier(home_id, "home_id"),
             },
         )
-        return _response_json(response)
 
     def start_realtime(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        params = self._device_params(device_name=device_name, home_id=home_id)
-        response = self.request_api("/vitalSigns/start", params)
-        if _response_successful(response):
-            now = self._time_provider()
-            self._realtime_session = PerceptorRealtimeSession(
-                device_name=str(params["device_name"]),
-                home_id=params["home_id"],
-                started_at=now,
-                expires_at=_extract_realtime_session_expires_at(
-                    response,
-                    now_epoch_seconds=now,
-                    default_ttl_seconds=self.config.realtime_session_ttl_seconds,
-                ),
-            )
-        else:
-            self._realtime_session = None
-        return response
+        self, *, device_name: str, home_id: str | int
+    ) -> Mapping[str, Any]:
+        return self.start_realtime_evidenced(
+            device_name=device_name,
+            home_id=home_id,
+        ).data
+
+    def start_realtime_evidenced(
+        self, *, device_name: str, home_id: str | int
+    ) -> PlatformEvidencedRead[Mapping[str, Any]]:
+        return self._signed_read_evidenced(
+            REALTIME_START_ENDPOINT,
+            {
+                "device_name": _identifier_text(device_name, "device_name"),
+                "home_id": _long_identifier(home_id, "home_id"),
+            },
+        )
 
     def get_realtime(
+        self, *, device_name: str, home_id: str | int
+    ) -> Mapping[str, Any]:
+        return self.get_realtime_evidenced(
+            device_name=device_name,
+            home_id=home_id,
+        ).data
+
+    def get_realtime_evidenced(
+        self, *, device_name: str, home_id: str | int
+    ) -> PlatformEvidencedRead[Mapping[str, Any]]:
+        return self._signed_read_evidenced(
+            REALTIME_READ_ENDPOINT,
+            {
+                "device_name": _identifier_text(device_name, "device_name"),
+                "home_id": _long_identifier(home_id, "home_id"),
+            },
+        )
+
+    def get_history(
         self,
         *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        params = self._device_params(device_name=device_name, home_id=home_id)
-        self._require_realtime_session(params)
-        return self.request_api("/vitalSigns/getRealTimes", params)
+        device_names: tuple[str, ...],
+        start_at: datetime,
+        end_at: datetime,
+    ) -> tuple[Mapping[str, Any], ...]:
+        return self.get_history_evidenced(
+            device_names=device_names,
+            start_at=start_at,
+            end_at=end_at,
+        ).data
+
+    def get_history_evidenced(
+        self,
+        *,
+        device_names: tuple[str, ...],
+        start_at: datetime,
+        end_at: datetime,
+    ) -> PlatformEvidencedRead[tuple[Mapping[str, Any], ...]]:
+        if not 1 <= len(device_names) <= 20:
+            raise ValueError("history requires between 1 and 20 devices")
+        _require_aware(start_at, "start_at")
+        _require_aware(end_at, "end_at")
+        if end_at <= start_at or end_at - start_at > timedelta(hours=1):
+            raise ValueError("history window must be positive and at most one hour")
+        devices = tuple(
+            _identifier_text(value, "device_name") for value in device_names
+        )
+        compact_devices = json.dumps(
+            devices, ensure_ascii=False, separators=(",", ":")
+        )
+        read = self._signed_read_payload_evidenced(
+            HISTORY_ENDPOINT,
+            {
+                "devices": list(devices),
+                "start_time": int(start_at.timestamp()),
+                "end_time": int(end_at.timestamp()),
+            },
+            signing_overrides={"devices": compact_devices},
+        )
+        payload = read.data
+        if not isinstance(payload, list) or any(
+            not isinstance(item, Mapping) for item in payload
+        ):
+            raise PlatformApiError("HISTORY_SHAPE_INVALID", endpoint=HISTORY_ENDPOINT)
+        return PlatformEvidencedRead(
+            endpoint=read.endpoint,
+            data=tuple(payload),
+            evidence=read.evidence,
+        )
 
     def get_sleep_report(
         self,
         *,
-        report_date: date | str,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        params = self._device_params(device_name=device_name, home_id=home_id)
-        params["date"] = _local_report_date_text(report_date)
-        return self.request_api("/vitalSigns/getSleepReport", params)
+        device_name: str,
+        home_id: str | int,
+        report_date: date,
+    ) -> Mapping[str, Any]:
+        return self.get_sleep_report_evidenced(
+            device_name=device_name,
+            home_id=home_id,
+            report_date=report_date,
+        ).data
 
-    def get_history_data(
+    def get_sleep_report_evidenced(
         self,
         *,
-        device_names: list[str] | tuple[str, ...],
-        start_at: datetime,
-        end_at: datetime,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        names = tuple(str(item).strip() for item in device_names)
-        if not names or any(not item for item in names):
-            raise PerceptorConfigurationError(
-                "getHistoryData requires non-empty device names."
-            )
-        if len(names) > 20:
-            raise PerceptorConfigurationError(
-                "getHistoryData accepts at most 20 devices per request."
-            )
-        if start_at.tzinfo is None or end_at.tzinfo is None:
-            raise PerceptorConfigurationError(
-                "getHistoryData requires timezone-aware bounds."
-            )
-        if end_at <= start_at or end_at - start_at > timedelta(hours=1):
-            raise PerceptorConfigurationError(
-                "getHistoryData window must be positive and no longer than one hour."
-            )
-        resolved_home_id = (
-            home_id if home_id is not None else self.config.default_home_id
-        )
-        if resolved_home_id is None or resolved_home_id == "":
-            raise PerceptorConfigurationError("Perceptor home_id is not configured.")
-        return self.request_api(
-            "/vitalSigns/getHistoryData",
+        device_name: str,
+        home_id: str | int,
+        report_date: date,
+    ) -> PlatformEvidencedRead[Mapping[str, Any]]:
+        if not isinstance(report_date, date) or isinstance(report_date, datetime):
+            raise ValueError("report_date must be a date")
+        return self._signed_read_evidenced(
+            SLEEP_REPORT_ENDPOINT,
             {
-                "device_names": ",".join(names),
-                "home_id": resolved_home_id,
-                "start_time": start_at.isoformat(),
-                "end_time": end_at.isoformat(),
+                "device_name": _identifier_text(device_name, "device_name"),
+                "home_id": _long_identifier(home_id, "home_id"),
+                "date": report_date.isoformat(),
             },
         )
 
-    def get_alarm_list(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        return self.request_api(
-            "/alarm/getList",
-            self._device_params(device_name=device_name, home_id=home_id),
-        )
-
-    def get_device_detail(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        return self.request_api(
-            "/device/detail",
-            self._device_params(device_name=device_name, home_id=home_id),
-        )
-
-    def _device_params(
-        self,
-        *,
-        device_name: str | None = None,
-        home_id: str | int | None = None,
-    ) -> dict[str, Any]:
-        resolved_device_name = device_name or self.config.default_device_name
-        resolved_home_id = home_id if home_id is not None else self.config.default_home_id
-        if not resolved_device_name:
-            raise PerceptorConfigurationError("Perceptor device_name is not configured.")
-        if resolved_home_id is None or resolved_home_id == "":
-            raise PerceptorConfigurationError("Perceptor home_id is not configured.")
-        return {
-            "device_name": resolved_device_name,
-            "home_id": resolved_home_id,
-        }
-
-    def _require_realtime_session(self, params: Mapping[str, Any]) -> None:
-        session = self._realtime_session
-        if session is None:
-            raise PerceptorRealtimeSessionError(
-                "Perceptor realtime session has not been started. "
-                "Call start_realtime() before get_realtime()."
-            )
-        device_name = str(params["device_name"])
-        home_id = params["home_id"]
-        if not session.matches(device_name=device_name, home_id=home_id):
-            raise PerceptorRealtimeSessionError(
-                "Perceptor realtime session was started for a different device. "
-                "Call start_realtime() for this configured device before polling."
-            )
-        if not session.is_valid(now_epoch_seconds=self._time_provider()):
-            self._realtime_session = None
-            raise PerceptorRealtimeSessionError(
-                "Perceptor realtime session has expired. "
-                "Call start_realtime() again before polling."
-            )
-
-    def _post(
+    def _signed_read(
         self,
         endpoint: str,
-        payload: dict[str, Any],
+        business_parameters: Mapping[str, object],
+    ) -> Mapping[str, Any]:
+        return self._signed_read_evidenced(endpoint, business_parameters).data
+
+    def _signed_read_evidenced(
+        self,
+        endpoint: str,
+        business_parameters: Mapping[str, object],
+    ) -> PlatformEvidencedRead[Mapping[str, Any]]:
+        read = self._signed_read_payload_evidenced(endpoint, business_parameters)
+        payload = read.data
+        if not isinstance(payload, Mapping):
+            raise PlatformApiError("DATA_SHAPE_INVALID", endpoint=endpoint)
+        return PlatformEvidencedRead(
+            endpoint=read.endpoint,
+            data=payload,
+            evidence=read.evidence,
+        )
+
+    def _signed_read_payload(
+        self,
+        endpoint: str,
+        business_parameters: Mapping[str, object],
         *,
-        headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
-        if not endpoint.startswith("/"):
-            raise ValueError("Perceptor endpoint must start with '/'.")
-        total_attempts = 1 + max(self.config.max_retries, 0)
-        for attempt in range(1, total_attempts + 1):
-            started_at = time.perf_counter()
-            log_event(
-                "vendor_call_start",
-                source="perceptor",
-                provider_mode="live",
-                endpoint=endpoint,
-                attempt=attempt,
-                total_attempts=total_attempts,
-                payload_keys=sorted(payload.keys()),
-                header_names=sorted((headers or {}).keys()),
-                auth_header_present=bool((headers or {}).get("Authorization")),
-            )
-            try:
-                response = self._http_client.post(
-                    f"{self.config.base_url}{endpoint}",
-                    json=payload,
-                    headers=headers,
-                )
-                response.raise_for_status()
-                record_pull(source="perceptor", endpoint=endpoint)
-                log_event(
-                    "vendor_call_success",
-                    source="perceptor",
-                    provider_mode="live",
-                    endpoint=endpoint,
-                    attempt=attempt,
-                    status_code=response.status_code,
-                    duration_ms=_elapsed_ms(started_at),
-                )
-                return response
-            except httpx.HTTPStatusError as exc:
-                retryable = _retryable_status_code(exc.response.status_code)
-                log_event(
-                    "vendor_call_failure",
-                    level=logging.WARNING,
-                    source="perceptor",
-                    provider_mode="live",
-                    endpoint=endpoint,
-                    attempt=attempt,
-                    status_code=exc.response.status_code,
-                    retryable=retryable and attempt < total_attempts,
-                    duration_ms=_elapsed_ms(started_at),
-                    error_type=exc.__class__.__name__,
-                )
-                if (
-                    attempt >= total_attempts
-                    or not retryable
-                ):
-                    error = PerceptorAPIError(
-                        "Perceptor HTTP request failed with "
-                        f"status {exc.response.status_code}."
-                    )
-                    record_error(
-                        event="vendor_call_failure",
-                        error=error,
-                        source="perceptor",
-                        context={
-                            "endpoint": endpoint,
-                            "status_code": exc.response.status_code,
-                        },
-                    )
-                    raise error from exc
-            except httpx.RequestError as exc:
-                log_event(
-                    "vendor_call_failure",
-                    level=logging.WARNING,
-                    source="perceptor",
-                    provider_mode="live",
-                    endpoint=endpoint,
-                    attempt=attempt,
-                    retryable=attempt < total_attempts,
-                    duration_ms=_elapsed_ms(started_at),
-                    error_type=exc.__class__.__name__,
-                )
-                if attempt >= total_attempts:
-                    error = PerceptorAPIError("Perceptor HTTP request failed.")
-                    record_error(
-                        event="vendor_call_failure",
-                        error=error,
-                        source="perceptor",
-                        context={"endpoint": endpoint},
-                    )
-                    raise error from exc
-            if self.config.retry_backoff_seconds > 0:
-                self._sleep_provider(self.config.retry_backoff_seconds * attempt)
-        raise PerceptorAPIError("Perceptor HTTP request failed.")
+        signing_overrides: Mapping[str, str | int | float] | None = None,
+    ) -> object:
+        return self._signed_read_payload_evidenced(
+            endpoint,
+            business_parameters,
+            signing_overrides=signing_overrides,
+        ).data
 
-
-def build_perceptor_client_from_env(
-    env: Mapping[str, str] | None = None,
-) -> object:
-    values = env or os.environ
-    mode = values.get(PERCEPTOR_PROVIDER_MODE_ENV, "").strip().lower()
-    if not mode:
-        raise PerceptorConfigurationError(
-            f"{PERCEPTOR_PROVIDER_MODE_ENV} must be explicitly configured"
+    def _signed_read_payload_evidenced(
+        self,
+        endpoint: str,
+        business_parameters: Mapping[str, object],
+        *,
+        signing_overrides: Mapping[str, str | int | float] | None = None,
+    ) -> PlatformEvidencedRead[object]:
+        if endpoint not in READ_ONLY_ENDPOINTS:
+            raise ValueError("endpoint is outside the read-only allowlist")
+        lease = self.token()
+        now = self._now()
+        parameters: dict[str, object] = {
+            "client_id": self._client_id,
+            "version": "2.0",
+            "timestamp": str(int(now.timestamp())),
+            "sign_version": "2.0",
+            "sign_nonce": self._nonce_factory(),
+            "sign_method": "HMAC-SHA1",
+            **business_parameters,
+        }
+        signing_parameters = {**parameters, **(signing_overrides or {})}
+        parameters["sign"] = sign_parameters(
+            signing_parameters,
+            client_secret=self._client_secret,
+            signing_path=PLATFORM_SIGNING_PATH,
+            key_mode=PLATFORM_SIGNING_KEY_MODE,
         )
-    if mode == "fake":
-        deployment = values.get("SLEEPAGENT_DEPLOYMENT_MODE", "").strip().lower()
-        namespace = values.get(PERCEPTOR_DATA_NAMESPACE_ENV, "").strip()
-        if (
-            deployment not in {"development", "test"}
-            or not namespace.startswith("replay:")
-        ):
-            raise PerceptorConfigurationError(
-                "fake Perceptor requires explicit development/test mode and "
-                f"a replay namespace in {PERCEPTOR_DATA_NAMESPACE_ENV}"
-            )
-        from sleepagent.integrations.perceptor.fake_client import FakePerceptorClient
-
-        return FakePerceptorClient()
-    if mode == "live":
-        if (
-            values.get("SLEEPAGENT_DEPLOYMENT_MODE", "").strip().lower()
-            == "production"
-            and not values.get(PERCEPTOR_DATA_NAMESPACE_ENV, "")
-            .strip()
-            .startswith("live:")
-        ):
-            raise PerceptorConfigurationError(
-                "production live Perceptor requires an explicit live data "
-                f"namespace in {PERCEPTOR_DATA_NAMESPACE_ENV}"
-            )
-        return PerceptorClient(PerceptorConfig.from_env(values))
-    raise PerceptorConfigurationError(
-        f"{PERCEPTOR_PROVIDER_MODE_ENV} must be 'fake' or 'live'."
-    )
-
-
-def _response_json(response: httpx.Response) -> dict[str, Any]:
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise PerceptorAPIError("Perceptor response was not valid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise PerceptorAPIError("Perceptor response JSON must be an object.")
-    return payload
-
-
-def _local_report_date_text(value: date | str) -> str:
-    if isinstance(value, datetime):
-        raise PerceptorConfigurationError(
-            "report_date must be an explicit local date, not a datetime."
+        envelope, evidence = self._post_json(
+            endpoint,
+            parameters,
+            access_token=lease.access_token,
         )
-    if isinstance(value, date):
-        return value.isoformat()
-    try:
-        parsed = date.fromisoformat(str(value))
-    except ValueError as exc:
-        raise PerceptorConfigurationError(
-            "report_date must use ISO YYYY-MM-DD."
-        ) from exc
-    if str(value) != parsed.isoformat():
-        raise PerceptorConfigurationError(
-            "report_date must use canonical ISO YYYY-MM-DD."
+        return PlatformEvidencedRead(
+            endpoint=endpoint,
+            data=_response_payload(envelope, endpoint=endpoint),
+            evidence=evidence,
         )
-    return parsed.isoformat()
 
-
-def _response_successful(response: Mapping[str, Any]) -> bool:
-    return str(response.get("code")) == "200" and response.get("success") is True
-
-
-def _extract_token_expires_at(
-    data: Mapping[str, Any],
-    *,
-    now_epoch_seconds: float,
-    default_ttl_seconds: float,
-) -> float:
-    expires_at = _extract_epoch_seconds(
-        data,
-        keys=(
-            "expires_at",
-            "expiresAt",
-            "expire_at",
-            "expireAt",
-            "expiration_time",
-            "expirationTime",
-        ),
-    )
-    if expires_at is not None:
-        return expires_at
-    value = data.get("expires_in") or data.get("expiresIn") or data.get("expire_in")
-    if value is None:
-        return now_epoch_seconds + max(default_ttl_seconds, 0.0)
-    try:
-        ttl = float(value)
-    except (TypeError, ValueError) as exc:
-        raise PerceptorAPIError("Perceptor token expiry is not numeric.") from exc
-    return now_epoch_seconds + max(ttl, 0.0)
-
-
-def _extract_realtime_session_expires_at(
-    response: Mapping[str, Any],
-    *,
-    now_epoch_seconds: float,
-    default_ttl_seconds: float,
-) -> float:
-    data = response.get("data")
-    if not isinstance(data, Mapping):
-        return now_epoch_seconds + max(default_ttl_seconds, 0.0)
-    expires_at = _extract_epoch_seconds(
-        data,
-        keys=(
-            "expires_at",
-            "expiresAt",
-            "expire_at",
-            "expireAt",
-            "expire_time",
-            "expireTime",
-            "end_at",
-            "endAt",
-            "end_time",
-            "endTime",
-            "valid_until",
-            "validUntil",
-            "session_expires_at",
-            "sessionExpiresAt",
-        ),
-    )
-    if expires_at is not None:
-        return expires_at
-    ttl = _extract_duration_seconds(
-        data,
-        keys=(
-            "expires_in",
-            "expiresIn",
-            "expire_in",
-            "duration",
-            "duration_seconds",
-            "durationSeconds",
-            "ttl",
-            "ttl_seconds",
-            "ttlSeconds",
-            "valid_seconds",
-            "validSeconds",
-        ),
-    )
-    if ttl is None:
-        ttl = default_ttl_seconds
-    return now_epoch_seconds + max(ttl, 0.0)
-
-
-def _extract_epoch_seconds(
-    values: Mapping[str, Any],
-    *,
-    keys: tuple[str, ...],
-) -> float | None:
-    for key in keys:
-        if key not in values:
-            continue
-        parsed = _parse_epoch_seconds(values[key])
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def _extract_duration_seconds(
-    values: Mapping[str, Any],
-    *,
-    keys: tuple[str, ...],
-) -> float | None:
-    for key in keys:
-        if key not in values:
-            continue
+    def _post_json(
+        self,
+        endpoint: str,
+        payload: Mapping[str, object],
+        *,
+        access_token: str | None,
+    ) -> tuple[Mapping[str, Any], PlatformRawResponseEvidence]:
+        headers = (
+            {"Authorization": f"Bearer {access_token}"}
+            if access_token is not None
+            else {}
+        )
+        requested_at = self._now()
         try:
-            return float(values[key])
-        except (TypeError, ValueError) as exc:
-            raise PerceptorAPIError(
-                "Perceptor realtime session duration is not numeric."
-            ) from exc
+            response = self._http.post(
+                f"{self._base_url}{endpoint}", json=payload, headers=headers
+            )
+        except httpx.TimeoutException as exc:
+            raise PlatformApiError("TIMEOUT", endpoint=endpoint) from exc
+        except httpx.HTTPError as exc:
+            raise PlatformApiError("TRANSPORT_ERROR", endpoint=endpoint) from exc
+        received_at = self._now()
+        evidence = PlatformRawResponseEvidence(
+            endpoint=endpoint,
+            requested_at=requested_at,
+            received_at=received_at,
+            http_status=response.status_code,
+            raw_body=response.content,
+        )
+        if self._response_observer is not None:
+            try:
+                self._response_observer(evidence)
+            except Exception as exc:
+                raise PlatformApiError(
+                    "EVIDENCE_CAPTURE_FAILED", endpoint=endpoint
+                ) from exc
+        if response.status_code != 200:
+            raise PlatformApiError(
+                "HTTP_ERROR", endpoint=endpoint, http_status=response.status_code
+            )
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise PlatformApiError("INVALID_JSON", endpoint=endpoint) from exc
+        if not isinstance(value, Mapping):
+            raise PlatformApiError("INVALID_ENVELOPE", endpoint=endpoint)
+        return value, evidence
+
+    def _now(self) -> datetime:
+        value = self._now_factory()
+        _require_aware(value, "now_factory result")
+        return value
+
+
+def _response_data(
+    envelope: Mapping[str, Any], *, endpoint: str
+) -> Mapping[str, Any]:
+    data = _response_payload(envelope, endpoint=endpoint)
+    if not isinstance(data, Mapping):
+        raise PlatformApiError("DATA_SHAPE_INVALID", endpoint=endpoint)
+    return data
+
+
+def _response_payload(envelope: Mapping[str, Any], *, endpoint: str) -> object:
+    code = str(envelope.get("code", "MISSING"))
+    if envelope.get("success") is not True or code != "200":
+        raise PlatformApiError(
+            _vendor_error_category(code),
+            endpoint=endpoint,
+            vendor_code=code,
+            vendor_message=_safe_vendor_message(
+                envelope.get("message", envelope.get("msg"))
+            ),
+        )
+    data = envelope.get("data")
+    if data is None:
+        raise PlatformApiError("DATA_MISSING", endpoint=endpoint)
+    return data
+
+
+def _object_list(
+    data: Mapping[str, Any], key: str, *, endpoint: str
+) -> list[Mapping[str, Any]]:
+    value = data.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
+        raise PlatformApiError("LIST_SHAPE_INVALID", endpoint=endpoint)
+    return list(value)
+
+
+def _expiry_selector(data: Mapping[str, Any]) -> int | None:
+    for key in ("expires_time", "expires_in"):
+        value = data.get(key)
+        if value in (1, "1"):
+            return 1
+        if value in (2, "2"):
+            return 2
     return None
 
 
-def _parse_epoch_seconds(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        return _normalize_numeric_epoch_seconds(float(value))
+def _vendor_error_category(code: str) -> str:
+    return {
+        "400": "BAD_REQUEST",
+        "401": "ILLEGAL_REQUEST",
+        "403": "UNAUTHORIZED",
+        "404": "ENDPOINT_NOT_FOUND",
+        "405": "METHOD_NOT_ALLOWED",
+        "500": "SERVER_ERROR",
+        "1000": "CLIENT_ID_NOT_FOUND",
+        "1001": "CLIENT_ID_DISABLED",
+        "1002": "CLIENT_SECRET_INCORRECT",
+        "1003": "SIGNATURE_ERROR",
+        "2000": "CHANNEL_NOT_FOUND",
+        "2001": "CHANNEL_PRODUCT_NOT_FOUND",
+        "2002": "CHANNEL_DEVICE_NOT_FOUND",
+        "4000": "PRODUCT_NOT_FOUND",
+        "6000": "DEVICE_NOT_FOUND",
+        "6001": "DEVICE_OFFLINE",
+    }.get(code, "VENDOR_ERROR")
+
+
+def _safe_vendor_message(value: object) -> str | None:
+    """Keep a short diagnostic phrase while rejecting secret-like content."""
+
     if not isinstance(value, str):
         return None
-    stripped = value.strip()
-    if not stripped:
+    message = " ".join(value.split())
+    if not message or len(message) > 160:
         return None
-    try:
-        return _normalize_numeric_epoch_seconds(float(stripped))
-    except ValueError:
-        pass
-    try:
-        normalized = stripped.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise PerceptorAPIError(
-            "Perceptor realtime session expiry is not a recognized timestamp."
-        ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
-
-
-def _normalize_numeric_epoch_seconds(value: float) -> float:
-    if value > 10_000_000_000:
-        return value / 1000.0
-    return value
-
-
-def _retryable_status_code(status_code: int) -> bool:
-    return status_code in {408, 429} or status_code >= 500
-
-
-def _elapsed_ms(started_at: float) -> float:
-    return round((time.perf_counter() - started_at) * 1000.0, 3)
-
-
-def _require_env(values: Mapping[str, str], key: str) -> str:
-    value = values.get(key)
-    if value is None or not value.strip():
-        raise PerceptorConfigurationError(f"{key} is required for live Perceptor mode.")
-    return value.strip()
-
-
-def _optional_env(values: Mapping[str, str], key: str) -> str | None:
-    value = values.get(key)
-    if value is None:
+    if re.search(
+        r"(?i)(authorization|bearer|client[_ -]?secret|access[_ -]?token|signature)",
+        message,
+    ):
         return None
-    stripped = value.strip()
-    return stripped or None
+    return message
 
 
-def _float_env(values: Mapping[str, str], key: str, default: float) -> float:
-    value = values.get(key)
-    if value is None or not value.strip():
-        return default
-    try:
-        return float(value)
-    except ValueError as exc:
-        raise PerceptorConfigurationError(f"{key} must be numeric.") from exc
+def _identifier_text(value: object, name: str) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"{name} must be a string or integer")
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{name} must be non-empty")
+    return text
 
 
-def _int_env(values: Mapping[str, str], key: str, default: int) -> int:
-    value = values.get(key)
-    if value is None or not value.strip():
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise PerceptorConfigurationError(f"{key} must be an integer.") from exc
+def _long_identifier(value: object, name: str) -> int:
+    text = _identifier_text(value, name)
+    if not text.isascii() or not text.isdigit():
+        raise ValueError(f"{name} must use the documented integer representation")
+    return int(text)
 
 
-def _bool_env(values: Mapping[str, str], key: str, default: bool) -> bool:
-    value = values.get(key)
-    if value is None or not value.strip():
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "n", "off"}:
-        return False
-    raise PerceptorConfigurationError(f"{key} must be a boolean value.")
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+
+
+__all__ = [
+    "DEFAULT_PLATFORM_BASE_URL",
+    "DEVICE_DETAIL_ENDPOINT",
+    "DEVICE_LIST_ENDPOINT",
+    "GET_CURRENT_ENDPOINT",
+    "HISTORY_ENDPOINT",
+    "PRODUCT_LIST_ENDPOINT",
+    "REALTIME_READ_ENDPOINT",
+    "REALTIME_START_ENDPOINT",
+    "SLEEP_REPORT_ENDPOINT",
+    "PlatformAccessToken",
+    "PlatformApiError",
+    "PlatformDevicePage",
+    "PlatformDeviceRecord",
+    "PlatformEvidencedRead",
+    "PlatformProductRecord",
+    "PlatformRawResponseEvidence",
+    "PerceptorPlatformClient",
+    "READ_ONLY_ENDPOINTS",
+    "TOKEN_ENDPOINT",
+]

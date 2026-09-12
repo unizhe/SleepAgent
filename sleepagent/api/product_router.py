@@ -1,0 +1,583 @@
+# 本模块负责唯一 ASGI 服务的接口契约或请求编排，不承载领域状态。
+"""Synchronous FastAPI transport for the product sleep surface."""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Annotated, Callable, Literal, cast
+
+from fastapi import APIRouter, Header, Query, Request
+
+from sleepagent.api.product_contracts import (
+    AcceptedOperationResponse,
+    CareProposalDecisionRequest,
+    CareProposalDetailResponse,
+    CareProposalListResponse,
+    CareProposalMutationResponse,
+    ErrorResponse,
+    FeedbackRequest,
+    HabitChangeRequest,
+    HabitChangeResponse,
+    HabitProfileResponse,
+    HabitQuestionSelectionRequest,
+    HabitQuestionSelectionResponse,
+    InteractionAnswerRequest,
+    InteractionAskRequest,
+    InteractionDecisionRequest,
+    InteractionStartRequest,
+    InteractionStatusResponse,
+    L2ConfirmationRequest,
+    L2ConfirmationResponse,
+    MemoryChangeRequest,
+    MemoryQueryRequest,
+    MemoryQueryResponse,
+    OutcomePersonalizationCandidate,
+    OutcomePersonalizationCandidateList,
+    OutcomePersonalizationDecisionRequest,
+    OutcomePersonalizationDecisionResponse,
+    PendingL2Change,
+    ProductCareResponse,
+    ProductReportRunAccepted,
+    ProductReportRunRequest,
+    ProductRecordsResponse,
+    ProductSleepReportListResponse,
+    ProductSleepReportResponse,
+    ProductSleepTodayResponse,
+    ProductTrendsResponse,
+)
+from sleepagent.api.product import ProductApiService
+
+
+ProductServiceProvider = Callable[[], ProductApiService]
+
+
+def create_product_router(provider: ProductServiceProvider) -> APIRouter:
+    router = APIRouter(
+        prefix="/product/sleep",
+        tags=["Product sleep"],
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            413: {
+                "model": ErrorResponse,
+                "description": "Content Too Large",
+            },
+            422: {
+                "model": ErrorResponse,
+                "description": "Unprocessable Content",
+            },
+            501: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+    )
+
+    @router.get("/today", response_model=ProductSleepTodayResponse)
+    def today(
+        request: Request,
+    ) -> ProductSleepTodayResponse:
+        return provider().today(request)
+
+    @router.get("/trends", response_model=ProductTrendsResponse)
+    def trends(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=90)] = 30,
+        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
+    ) -> ProductTrendsResponse:
+        return cast(ProductTrendsResponse, provider().query(
+            request,
+            kind="trends",
+            limit=limit,
+            cursor=cursor,
+        ))
+
+    @router.get("/care", response_model=ProductCareResponse)
+    def care(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
+    ) -> ProductCareResponse:
+        return cast(ProductCareResponse, provider().query(
+            request,
+            kind="care",
+            limit=limit,
+            cursor=cursor,
+        ))
+
+    @router.get(
+        "/care/proposals",
+        response_model=CareProposalListResponse,
+    )
+    def list_care_proposals(
+        request: Request,
+        state: Annotated[
+            Literal[
+                "awaiting_approval", "approved", "rejected", "expired", "revoked"
+            ]
+            | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> CareProposalListResponse:
+        return provider().list_care_proposals(
+            request,
+            state=state,
+            limit=limit,
+        )
+
+    @router.get(
+        "/care/proposals/{proposal_id}",
+        response_model=CareProposalDetailResponse,
+    )
+    def get_care_proposal(
+        proposal_id: str,
+        request: Request,
+    ) -> CareProposalDetailResponse:
+        return provider().get_care_proposal(
+            request,
+            proposal_id=proposal_id,
+        )
+
+    def _mutate_care_proposal(
+        *,
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: str,
+        action: Literal["approve", "reject", "revoke"],
+        request_body: bytes,
+    ) -> CareProposalMutationResponse:
+        return provider().mutate_care_proposal(
+            request,
+            payload,
+            proposal_id=proposal_id,
+            action=action,
+            idempotency_key=idempotency_key,
+            request_body=request_body,
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/approve",
+        response_model=CareProposalMutationResponse,
+    )
+    async def approve_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="approve",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/reject",
+        response_model=CareProposalMutationResponse,
+    )
+    async def reject_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="reject",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/care/proposals/{proposal_id}/revoke",
+        response_model=CareProposalMutationResponse,
+    )
+    async def revoke_care_proposal(
+        proposal_id: str,
+        payload: CareProposalDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> CareProposalMutationResponse:
+        return _mutate_care_proposal(
+            proposal_id=proposal_id,
+            payload=payload,
+            request=request,
+            idempotency_key=idempotency_key,
+            action="revoke",
+            request_body=await request.body(),
+        )
+
+    @router.get("/records", response_model=ProductRecordsResponse)
+    def records(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
+    ) -> ProductRecordsResponse:
+        return cast(ProductRecordsResponse, provider().query(
+            request,
+            kind="records",
+            limit=limit,
+            cursor=cursor,
+        ))
+
+    @router.post(
+        "/reports/run",
+        response_model=ProductReportRunAccepted,
+        status_code=202,
+    )
+    async def run_report(
+        payload: ProductReportRunRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> ProductReportRunAccepted:
+        return provider().run_report(
+            request,
+            payload,
+            idempotency_key=idempotency_key,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/reports",
+        response_model=ProductSleepReportListResponse,
+    )
+    async def list_reports(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=100)] = 20,
+        cursor: Annotated[str | None, Query(max_length=2_000)] = None,
+        trace: bool = False,
+    ) -> ProductSleepReportListResponse:
+        return provider().list_reports(
+            request,
+            limit=limit,
+            cursor=cursor,
+            trace=trace,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/reports/{wake_date}",
+        response_model=ProductSleepReportResponse,
+    )
+    async def show_report(
+        wake_date: date,
+        request: Request,
+        trace: bool = False,
+    ) -> ProductSleepReportResponse:
+        return provider().show_report(
+            request,
+            wake_date=wake_date,
+            trace=trace,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/interactions/start",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def start(
+        payload: InteractionStartRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template="/product/sleep/interactions/start",
+            command_type="interaction.start",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=payload.episode_revision_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/interactions/{interaction_id}/ask",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def ask(
+        interaction_id: str,
+        payload: InteractionAskRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template="/product/sleep/interactions/{interaction_id}/ask",
+            command_type="interaction.ask",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=interaction_id,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/interactions/status/{operation_id}",
+        response_model=InteractionStatusResponse,
+    )
+    def status(
+        operation_id: str,
+        request: Request,
+    ) -> InteractionStatusResponse:
+        return provider().status(request, operation_id=operation_id)
+
+    @router.post(
+        "/interactions/{interaction_id}/answer",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def answer(
+        interaction_id: str,
+        payload: InteractionAnswerRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template=(
+                "/product/sleep/interactions/{interaction_id}/answer"
+            ),
+            command_type="interaction.answer",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=interaction_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/interactions/{interaction_id}/confirm",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def confirm(
+        interaction_id: str,
+        payload: InteractionDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template=(
+                "/product/sleep/interactions/{interaction_id}/confirm"
+            ),
+            command_type="interaction.confirm",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=interaction_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/interactions/{interaction_id}/decline",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def decline(
+        interaction_id: str,
+        payload: InteractionDecisionRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template=(
+                "/product/sleep/interactions/{interaction_id}/decline"
+            ),
+            command_type="interaction.decline",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=interaction_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/interactions/feedback",
+        response_model=AcceptedOperationResponse,
+        status_code=202,
+    )
+    async def feedback(
+        payload: FeedbackRequest,
+        request: Request,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> AcceptedOperationResponse:
+        return provider().submit(
+            request,
+            route_template="/product/sleep/interactions/feedback",
+            command_type="interaction.feedback",
+            idempotency_key=idempotency_key,
+            payload=payload.model_dump(mode="json"),
+            target_id=payload.interaction_id or payload.episode_revision_id,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/questions",
+        response_model=HabitQuestionSelectionResponse,
+    )
+    async def habit_questions(
+        payload: HabitQuestionSelectionRequest,
+        request: Request,
+    ) -> HabitQuestionSelectionResponse:
+        return provider().habit_questions(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/changes",
+        response_model=HabitChangeResponse,
+    )
+    async def habit_change(
+        payload: HabitChangeRequest,
+        request: Request,
+    ) -> HabitChangeResponse:
+        return provider().habit_change(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/habit/confirm",
+        response_model=L2ConfirmationResponse,
+    )
+    async def habit_confirm(
+        payload: L2ConfirmationRequest,
+        request: Request,
+    ) -> L2ConfirmationResponse:
+        return provider().confirm_personalization(
+            request,
+            payload,
+            capability="habit",
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/personalization/habit",
+        response_model=HabitProfileResponse,
+    )
+    def habit_profile(request: Request) -> HabitProfileResponse:
+        return provider().habit_profile(request)
+
+    @router.post(
+        "/personalization/memory/changes",
+        response_model=PendingL2Change,
+    )
+    async def memory_change(
+        payload: MemoryChangeRequest,
+        request: Request,
+    ) -> PendingL2Change:
+        return provider().memory_change(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/memory/confirm",
+        response_model=L2ConfirmationResponse,
+    )
+    async def memory_confirm(
+        payload: L2ConfirmationRequest,
+        request: Request,
+    ) -> L2ConfirmationResponse:
+        return provider().confirm_personalization(
+            request,
+            payload,
+            capability="memory",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/memory/query",
+        response_model=MemoryQueryResponse,
+    )
+    async def memory_query(
+        payload: MemoryQueryRequest,
+        request: Request,
+    ) -> MemoryQueryResponse:
+        return provider().memory_query(
+            request,
+            payload,
+            request_body=await request.body(),
+        )
+
+    @router.get(
+        "/personalization/outcome-candidates",
+        response_model=OutcomePersonalizationCandidateList,
+    )
+    def outcome_personalization_candidates(
+        request: Request,
+        status: Annotated[
+            Literal["pending", "accepted", "rejected", "superseded"] | None,
+            Query(),
+        ] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> OutcomePersonalizationCandidateList:
+        return provider().list_outcome_personalization_candidates(
+            request,
+            status=status,
+            limit=limit,
+        )
+
+    @router.get(
+        "/personalization/outcome-candidates/{governance_id}",
+        response_model=OutcomePersonalizationCandidate,
+    )
+    def outcome_personalization_candidate(
+        governance_id: str,
+        request: Request,
+    ) -> OutcomePersonalizationCandidate:
+        return provider().get_outcome_personalization_candidate(
+            request,
+            governance_id=governance_id,
+        )
+
+    @router.post(
+        "/personalization/outcome-candidates/{governance_id}/accept",
+        response_model=OutcomePersonalizationDecisionResponse,
+    )
+    async def accept_outcome_personalization_candidate(
+        governance_id: str,
+        payload: OutcomePersonalizationDecisionRequest,
+        request: Request,
+    ) -> OutcomePersonalizationDecisionResponse:
+        return provider().decide_outcome_personalization_candidate(
+            request,
+            payload,
+            governance_id=governance_id,
+            choice="accept",
+            request_body=await request.body(),
+        )
+
+    @router.post(
+        "/personalization/outcome-candidates/{governance_id}/reject",
+        response_model=OutcomePersonalizationDecisionResponse,
+    )
+    async def reject_outcome_personalization_candidate(
+        governance_id: str,
+        payload: OutcomePersonalizationDecisionRequest,
+        request: Request,
+    ) -> OutcomePersonalizationDecisionResponse:
+        return provider().decide_outcome_personalization_candidate(
+            request,
+            payload,
+            governance_id=governance_id,
+            choice="reject",
+            request_body=await request.body(),
+        )
+
+    return router
+
+
+__all__ = ["ProductServiceProvider", "create_product_router"]

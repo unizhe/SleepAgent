@@ -4,12 +4,11 @@ import secrets
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping, cast
 
 import pytest
 
-from sleepagent.backend_runtime import DatabaseAttestation, SleepBackendRuntime
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     DataMode,
     DeploymentMode,
     ModelMode,
@@ -17,12 +16,24 @@ from sleepagent.backend_settings import (
     ProviderMode,
     SleepBackendSettings,
 )
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    NormalizationLease,
+    NormalizationResult,
+    SleepSliceConflict,
+    SleepSliceInvariantError,
+    SleepSliceLeaseLost,
+    SleepSliceStaleRevision,
+)
 from sleepagent.persistence.migrations import (
     EXPECTED_MIGRATION_IDENTITIES,
     LATEST_SCHEMA_VERSION,
     MIGRATION_MANIFEST_SHA256,
 )
-from sleepagent.worker_runtime import (
+from sleepagent.persistence.uow import UowScope
+from sleepagent.process import DatabaseAttestation, SleepBackendRuntime
+from sleepagent.workers.ingestion import NormalizationWorkHandlerAdapter
+from sleepagent.workers.runtime import (
+    DEFAULT_QUEUE_ORDER,
     DurableWorkerRuntime,
     InvocationDispatcher,
     InvocationKind,
@@ -31,15 +42,54 @@ from sleepagent.worker_runtime import (
     LeaseClaim,
     OutcomeUnknownError,
     RetryableWorkError,
+    WorkContext,
     WorkDisposition,
+    WorkFinalizationMode,
     WorkKind,
     WorkResult,
+    _Heartbeat,
     _final_status,
+    _queue_target,
+    _required_function_signatures,
 )
 
 
 pytestmark = pytest.mark.unit
 UTC = timezone.utc
+
+
+def test_realtime_normalization_queue_has_a_filtered_claim_contract() -> None:
+    target = _queue_target("ingestion_realtime")
+
+    assert target.kind is WorkKind.NORMALIZATION
+    assert target.selector == "perceptor_push"
+    assert DEFAULT_QUEUE_ORDER.index("ingestion_realtime") < (
+        DEFAULT_QUEUE_ORDER.index("perceptor.history_overlap_pull")
+    )
+    signatures = _required_function_signatures(("ingestion_realtime",))
+    assert signatures[0] == (
+        "public.sleepagent_claim_normalization_work_by_normalizer"
+        "(text,text,integer)"
+    )
+    assert "public.sleepagent_claim_normalization_work(text,integer)" not in (
+        signatures
+    )
+
+
+def test_realtime_normalization_queue_rejects_pull_payload() -> None:
+    store = Store()
+    claim = _normalization_claim(normalizer="perceptor_pull").model_copy(
+        update={"queue": "ingestion_realtime"}
+    )
+    context = WorkContext(claim, store, threading.Event())
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(RuntimeError("must not run"))
+    )
+
+    result = adapter(context)
+
+    assert result.disposition is WorkDisposition.TERMINAL
+    assert result.error_code == "invalid_normalization_claim_scope"
 
 
 class Pool:
@@ -93,6 +143,24 @@ class Store:
         self.finalized.append((claim, result))
         self.current_fence.pop(claim.work_id)
         return True
+
+    def uow_scope_for_claim(self, claim: LeaseClaim) -> UowScope:
+        snapshot = claim.authorization_snapshot
+        return UowScope(
+            namespace_id=claim.namespace_id,
+            data_mode=cast(Literal["live", "replay"], claim.data_mode),
+            process_role="worker",
+            purpose=str(snapshot["purpose"]),
+            service_principal_id=str(snapshot["workload_principal_id"]),
+            namespace_generation=claim.namespace_generation,
+            subject_id=claim.subject_id,
+            run_id=claim.run_id,
+            arm_id=claim.arm_id,
+            authorization_epoch=int(snapshot["authorization_epoch"]),
+            privacy_epoch=int(snapshot["privacy_epoch"]),
+            retrieval_policy_epoch=int(snapshot["retrieval_policy_epoch"]),
+            worker_instance=claim.worker_instance,
+        )
 
     def reserve_invocation(
         self,
@@ -213,6 +281,164 @@ def _runtime(queues: tuple[str, ...]) -> SleepBackendRuntime:
         ),
         worker_handlers={queue: object() for queue in queues},
     )
+
+
+def _normalization_claim(
+    *,
+    generation: int = 1,
+    normalizer: str = "perceptor_pull",
+) -> LeaseClaim:
+    claim = _claim("ingestion", generation=generation)
+    return claim.model_copy(
+        update={
+            "operation_id": None,
+            "payload": {"normalizer": normalizer},
+            "metadata": {"work_kind": "normalization"},
+            "authorization_snapshot": {
+                "schema_version": "workload_authorization_snapshot.v1",
+                "workload_principal_id": "sleepagent-worker-test",
+                "namespace_id": claim.namespace_id,
+                "namespace_generation": claim.namespace_generation,
+                "data_mode": claim.data_mode,
+                "run_id": claim.run_id,
+                "arm_id": claim.arm_id,
+                "subject_id": claim.subject_id,
+                "purpose": "worker",
+                "allowed_handler": "normalization",
+                "authorization_epoch": 1,
+                "privacy_epoch": 1,
+                "retrieval_policy_epoch": 1,
+            },
+        }
+    )
+
+
+class _RaisingNormalizationProcessor:
+    def __init__(self, exception: Exception) -> None:
+        self.exception = exception
+
+    def process(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+    ) -> NormalizationResult:
+        del scope, lease
+        raise self.exception
+
+
+def test_normalization_adapter_classifies_unhandled_processor_error_retryable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = Store()
+    claim = _normalization_claim()
+    context = WorkContext(claim, store, threading.Event())
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(RuntimeError("crash after commit"))
+    )
+
+    result = adapter(context)
+
+    assert result.disposition == WorkDisposition.RETRYABLE
+    assert result.error_code == "unclassified_normalization_processor_failure"
+    assert result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
+    assert context.lease_is_valid is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '"error_type": "RuntimeError"' in message
+        and '"event": "normalization_processor_failed"' in message
+        for message in messages
+    )
+    assert all("crash after commit" not in message for message in messages)
+
+
+def test_normalization_adapter_classifies_live_push_projection_error_retryable() -> None:
+    store = Store()
+    claim = _normalization_claim(normalizer="perceptor_push")
+    context = WorkContext(claim, store, threading.Event())
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(RuntimeError("push failure"))
+    )
+
+    result = adapter(context)
+
+    assert result.disposition == WorkDisposition.RETRYABLE
+    assert result.error_code == "unclassified_normalization_processor_failure"
+    assert result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
+    assert context.lease_is_valid is True
+
+
+@pytest.mark.parametrize(
+    ("exception", "disposition", "error_code", "lease_is_valid"),
+    (
+        (
+            SleepSliceStaleRevision("stale"),
+            WorkDisposition.TERMINAL,
+            "sleep_slice_stale_revision",
+            True,
+        ),
+        (
+            SleepSliceLeaseLost("lost"),
+            WorkDisposition.OUTCOME_UNKNOWN,
+            "sleep_slice_lease_lost_reconciliation_required",
+            False,
+        ),
+        (
+            SleepSliceInvariantError("invalid"),
+            WorkDisposition.TERMINAL,
+            "sleep_slice_invariant_violation",
+            True,
+        ),
+        (
+            SleepSliceConflict("conflict"),
+            WorkDisposition.RETRYABLE,
+            "sleep_slice_conflict",
+            True,
+        ),
+    ),
+)
+def test_normalization_adapter_preserves_domain_specific_classification(
+    exception: Exception,
+    disposition: WorkDisposition,
+    error_code: str,
+    lease_is_valid: bool,
+) -> None:
+    store = Store()
+    claim = _normalization_claim()
+    context = WorkContext(claim, store, threading.Event())
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(exception)
+    )
+
+    result = adapter(context)
+
+    assert result.disposition == disposition
+    assert result.error_code == error_code
+    assert context.lease_is_valid is lease_is_valid
+
+
+def test_durable_runtime_finalizes_unhandled_normalization_error_as_retryable() -> None:
+    store = Store()
+    claim = _normalization_claim()
+    store.add(claim)
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(RuntimeError("crash after commit"))
+    )
+    worker = DurableWorkerRuntime(
+        _runtime(("ingestion",)),
+        store=store,
+        handlers={"ingestion": adapter},
+        lease_seconds=3,
+        heartbeat_interval_seconds=0.5,
+    )
+
+    assert worker.run_once() is True
+
+    assert len(store.finalized) == 1
+    finalized_claim, result = store.finalized[0]
+    assert finalized_claim == claim
+    assert result.disposition == WorkDisposition.RETRYABLE
+    assert result.error_code == "unclassified_normalization_processor_failure"
+    assert result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
 
 
 def test_journey_retry_budget_exhaustion_uses_supported_terminal_state() -> None:
@@ -337,6 +563,118 @@ def test_heartbeat_loss_prevents_final_commit() -> None:
     worker.run_once()
 
     assert store.finalized == []
+
+
+def test_transient_heartbeat_failure_does_not_poison_same_generation_dispatch() -> None:
+    class TransientHeartbeatStore(Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heartbeat_calls = 0
+            self.same_generation_renewed = threading.Event()
+
+        def heartbeat(self, claim: LeaseClaim, *, lease_seconds: int) -> bool:
+            self.heartbeat_calls += 1
+            if self.heartbeat_calls == 1:
+                raise TimeoutError("simulated database lock timeout")
+            renewed = super().heartbeat(claim, lease_seconds=lease_seconds)
+            if renewed:
+                self.same_generation_renewed.set()
+            return renewed
+
+    store = TransientHeartbeatStore()
+    claim = _claim("product_agent")
+    store.add(claim)
+    lease_lost = threading.Event()
+    heartbeat = _Heartbeat(
+        store=store,
+        claim=claim,
+        lease_seconds=3,
+        interval_seconds=0.01,
+        lease_lost=lease_lost,
+    )
+    heartbeat.start()
+    try:
+        assert store.same_generation_renewed.wait(timeout=1)
+    finally:
+        heartbeat.stop()
+
+    sender_calls = 0
+
+    def fake_sender():
+        nonlocal sender_calls
+        sender_calls += 1
+        return {"local": True}, None
+
+    response = InvocationDispatcher(
+        store=store,
+        claim=claim,
+        lease_lost=lease_lost,
+    ).dispatch(
+        invocation_key="product-agent:same-generation",
+        request={"frozen_source": "large"},
+        sender=fake_sender,
+        invocation_kind=InvocationKind.MODEL,
+    )
+
+    assert lease_lost.is_set() is False
+    assert response == {"local": True}
+    assert sender_calls == 1
+    assert store.send_started == 1
+
+
+def test_authoritative_reclaim_fences_stale_heartbeat_dispatch_and_completion() -> None:
+    store = Store()
+    stale = _claim("product_agent", generation=1)
+    current = stale.model_copy(
+        update={
+            "lease_generation": 2,
+            "fencing_token": secrets.token_hex(32),
+            "worker_instance": "worker-current",
+        }
+    )
+    store.add(stale)
+    store.current_fence[stale.work_id] = (
+        current.lease_generation,
+        current.fencing_token,
+    )
+    lease_lost = threading.Event()
+    heartbeat = _Heartbeat(
+        store=store,
+        claim=stale,
+        lease_seconds=3,
+        interval_seconds=0.01,
+        lease_lost=lease_lost,
+    )
+    heartbeat.start()
+    try:
+        assert lease_lost.wait(timeout=1)
+    finally:
+        heartbeat.stop()
+
+    sender_calls = 0
+
+    def forbidden_sender():
+        nonlocal sender_calls
+        sender_calls += 1
+        return {"must_not_send": True}, None
+
+    with pytest.raises(OutcomeUnknownError, match="dispatch_permit_rejected"):
+        InvocationDispatcher(
+            store=store,
+            claim=stale,
+            lease_lost=lease_lost,
+        ).dispatch(
+            invocation_key="product-agent:stale-generation",
+            request={"frozen_source": "large"},
+            sender=forbidden_sender,
+            invocation_kind=InvocationKind.MODEL,
+        )
+
+    assert sender_calls == 0
+    assert store.finalize(
+        stale,
+        WorkResult(disposition=WorkDisposition.SUCCEEDED),
+    ) is False
 
 
 def test_send_started_unknown_is_never_blindly_resent() -> None:

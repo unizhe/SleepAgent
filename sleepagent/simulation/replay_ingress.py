@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Versioned boundary from generated replay facts to PostgreSQL intake.
 
 The canonical generator is design input, not database authority.  This module
@@ -21,18 +22,27 @@ from sleepagent.simulation.contracts import (
     ReplayScenario,
     SimulationContract,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AvailabilityState,
     CalibrationValue,
     ConfidenceValue,
     MissingIntervalPayload,
     MissingState,
+    MovementPayload,
     ObservationQuality,
     ObservationType,
     SourceKind,
 )
-from sleepagent.sleep_domain.postgres_slice import ReplayObservationInput
+from sleepagent.domain.observation_semantics import (
+    MovementMetricId,
+    MovementPayloadV2,
+)
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    ReplayObservationContract,
+    ReplayObservationInput,
+    ReplayObservationInputV2,
+)
 
 
 ADAPTER_VERSION: Final = "replay_external_fact_adapter.v1"
@@ -61,7 +71,7 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def _event_at(value: ReplayObservationInput) -> datetime:
+def _event_at(value: ReplayObservationContract) -> datetime:
     event = value.measurement_at or value.event_occurred_at
     if event is None:  # defended by ReplayObservationInput itself
         raise ValueError("adapted replay fact has no event time")
@@ -86,7 +96,7 @@ class ReplayIngressItem(SimulationContract):
     stream_key: str = Field(min_length=1, max_length=200)
     sequence: int = Field(ge=1)
     predecessor_sequence: int | None = Field(default=None, ge=1)
-    observation: ReplayObservationInput
+    observation: ReplayObservationContract
 
     @model_validator(mode="after")
     def validate_predecessor(self) -> "ReplayIngressItem":
@@ -226,6 +236,10 @@ class ReplayExternalFactAdapter:
 
     version = ADAPTER_VERSION
 
+    def __init__(self, *, observation_semantics_version: str = "v1") -> None:
+        _validate_semantics_version(observation_semantics_version)
+        self.observation_semantics_version = observation_semantics_version
+
     def adapt(
         self,
         scenario: ReplayScenario,
@@ -280,29 +294,14 @@ class ReplayExternalFactAdapter:
                 "source_record_id": source.provenance.source_record_id,
             }
             fact_sha256 = _sha256(external_fact)
-            observation = ReplayObservationInput(
-                provider_id=scenario.identity.provider_id,
-                provider_account_id=scenario.identity.provider_account_id,
-                provider_device_id=scenario.identity.provider_device_id,
-                subject_id=scenario.identity.subject_id,
-                device_id=scenario.identity.device_id,
-                device_binding_id=scenario.identity.device_binding_id,
-                binding_version=scenario.identity.binding_version,
-                timezone_name=scenario.environment.timezone_name,
-                observation_type=source.observation_type,
-                payload=source.payload,
-                source_kind=_source_kind(source.observation_type),
-                quality=_server_quality(scenario, source.observation_type, source.payload),
-                measurement_at=source.measurement_at,
-                event_occurred_at=source.event_occurred_at,
-                received_at=source.received_at,
-                timezone_status=source.timezone_status,
-                source_key=f"external-fact:{fact_sha256}",
-                idempotency_identity=(
-                    f"replay:{generated.manifest.scenario_sha256}:"
-                    f"{sequence}:{fact_sha256}"
-                ),
-                source_record_id=source.provenance.source_record_id,
+            observation = _replay_observation_input(
+                observation_semantics_version=self.observation_semantics_version,
+                scenario=scenario,
+                generated=generated,
+                source=source,
+                sequence=sequence,
+                fact_sha256=fact_sha256,
+                processing_step=self.version,
             )
             items.append(
                 ReplayIngressItem(
@@ -344,6 +343,10 @@ class ReplayExternalFactAdapterV2:
     version = ADAPTER_VERSION_V2
     source_adapter_version = "1.0.0"
 
+    def __init__(self, *, observation_semantics_version: str = "v1") -> None:
+        _validate_semantics_version(observation_semantics_version)
+        self.observation_semantics_version = observation_semantics_version
+
     def adapt(
         self,
         scenario: ReplayScenario,
@@ -367,6 +370,7 @@ class ReplayExternalFactAdapterV2:
             scenario,
             generated,
             processing_step=self.version,
+            observation_semantics_version=self.observation_semantics_version,
         )
         if len(scenario.nights) == 1:
             initial_count = len(items)
@@ -406,11 +410,17 @@ class ReplayExternalFactAdapterV2:
 
 def replay_external_fact_adapter(
     version: str,
+    *,
+    observation_semantics_version: str = "v1",
 ) -> ReplayExternalFactAdapter | ReplayExternalFactAdapterV2:
     if version == ADAPTER_VERSION:
-        return ReplayExternalFactAdapter()
+        return ReplayExternalFactAdapter(
+            observation_semantics_version=observation_semantics_version
+        )
     if version == ADAPTER_VERSION_V2:
-        return ReplayExternalFactAdapterV2()
+        return ReplayExternalFactAdapterV2(
+            observation_semantics_version=observation_semantics_version
+        )
     raise ValueError("unsupported replay external-fact adapter version")
 
 
@@ -419,6 +429,7 @@ def _adapt_items(
     generated: GeneratedReplay,
     *,
     processing_step: str,
+    observation_semantics_version: str,
 ) -> tuple[ReplayIngressItem, ...]:
     ordered = sorted(
         generated.observations,
@@ -457,34 +468,14 @@ def _adapt_items(
             "source_record_id": source.provenance.source_record_id,
         }
         fact_sha256 = _sha256(external_fact)
-        observation = ReplayObservationInput(
-            provider_id=scenario.identity.provider_id,
-            provider_account_id=scenario.identity.provider_account_id,
-            provider_device_id=scenario.identity.provider_device_id,
-            subject_id=scenario.identity.subject_id,
-            device_id=scenario.identity.device_id,
-            device_binding_id=scenario.identity.device_binding_id,
-            binding_version=scenario.identity.binding_version,
-            timezone_name=scenario.environment.timezone_name,
-            observation_type=source.observation_type,
-            payload=source.payload,
-            source_kind=_source_kind(source.observation_type),
-            quality=_server_quality(
-                scenario,
-                source.observation_type,
-                source.payload,
-                processing_step=processing_step,
-            ),
-            measurement_at=source.measurement_at,
-            event_occurred_at=source.event_occurred_at,
-            received_at=source.received_at,
-            timezone_status=source.timezone_status,
-            source_key=f"external-fact:{fact_sha256}",
-            idempotency_identity=(
-                f"replay:{generated.manifest.scenario_sha256}:"
-                f"{sequence}:{fact_sha256}"
-            ),
-            source_record_id=source.provenance.source_record_id,
+        observation = _replay_observation_input(
+            observation_semantics_version=observation_semantics_version,
+            scenario=scenario,
+            generated=generated,
+            source=source,
+            sequence=sequence,
+            fact_sha256=fact_sha256,
+            processing_step=processing_step,
         )
         items.append(
             ReplayIngressItem(
@@ -520,6 +511,69 @@ def _source_kind(observation_type: ObservationType) -> SourceKind:
     }:
         return SourceKind.VENDOR_DERIVED
     return SourceKind.DEVICE_MEASURED
+
+
+def _validate_semantics_version(value: str) -> None:
+    if value not in {"v1", "v2"}:
+        raise ValueError("unsupported observation semantics version")
+
+
+def _replay_observation_input(
+    *,
+    observation_semantics_version: str,
+    scenario: ReplayScenario,
+    generated: GeneratedReplay,
+    source: Any,
+    sequence: int,
+    fact_sha256: str,
+    processing_step: str,
+) -> ReplayObservationContract:
+    _validate_semantics_version(observation_semantics_version)
+    common = {
+        "provider_id": scenario.identity.provider_id,
+        "provider_account_id": scenario.identity.provider_account_id,
+        "provider_device_id": scenario.identity.provider_device_id,
+        "subject_id": scenario.identity.subject_id,
+        "device_id": scenario.identity.device_id,
+        "device_binding_id": scenario.identity.device_binding_id,
+        "binding_version": scenario.identity.binding_version,
+        "timezone_name": scenario.environment.timezone_name,
+        "observation_type": source.observation_type,
+        "payload": source.payload,
+        "source_kind": _source_kind(source.observation_type),
+        "quality": _server_quality(
+            scenario,
+            source.observation_type,
+            source.payload,
+            processing_step=processing_step,
+        ),
+        "measurement_at": source.measurement_at,
+        "event_occurred_at": source.event_occurred_at,
+        "received_at": source.received_at,
+        "timezone_status": source.timezone_status,
+        "source_key": f"external-fact:{fact_sha256}",
+        "idempotency_identity": (
+            f"replay:{generated.manifest.scenario_sha256}:"
+            f"{sequence}:{fact_sha256}"
+        ),
+        "source_record_id": source.provenance.source_record_id,
+    }
+    if observation_semantics_version == "v1":
+        return ReplayObservationInput(**common)
+    movement_payload = None
+    if source.observation_type is ObservationType.MOVEMENT:
+        if not isinstance(source.payload, MovementPayload):
+            raise ValueError("replay movement payload is not compatible with V2")
+        movement_payload = MovementPayloadV2(
+            metric_id=MovementMetricId.MOVEMENT_INDEX,
+            value=source.payload.value,
+            unit="vendor_index",
+            vendor_semantic_code="perceptor.body_shake.index",
+        )
+    return ReplayObservationInputV2(
+        **common,
+        movement_payload_v2=movement_payload,
+    )
 
 
 def _server_quality(

@@ -1,0 +1,28 @@
+{
+  "request_id": "SANITIZED-PULL-SLEEP-REQUEST",
+  "success": true,
+  "code": "200",
+  "message": "SANITIZED",
+  "timestamp": 1787472000,
+  "data": {
+    "sleep_profile": {
+      "deep_sleep_rate": null,
+      "in_bed_time": null,
+      "in_sleep_time": null,
+      "leave_bed_time": null,
+      "sleep_duration": null,
+      "sleep_efficiency": null,
+      "sleep_time": null,
+      "wake_ups": null,
+      "wakeup_time": null
+    },
+    "sleep_stage_list": null,
+    "heart_rate_data": null,
+    "heart_rate_avg": 0,
+    "breathe_data": null,
+    "breathe_avg": 0,
+    "body_shake_data": [],
+    "sum_body_shake_times": 0,
+    "getups": []
+  }
+}

@@ -1,0 +1,152 @@
+"""Concrete Perceptor executor for provider-neutral scheduled acquisition work."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timedelta
+from typing import Any, Mapping
+from zoneinfo import ZoneInfo
+
+from sleepagent.application.acquisition import AcquisitionJobType
+from sleepagent.application.device_bindings import DeviceBindingService
+from sleepagent.application.night_finalization import NightFinalizationService
+from sleepagent.config import BackendKeyProvider, SleepBackendSettings
+from sleepagent.integrations.perceptor.client import PerceptorPlatformClient
+from sleepagent.integrations.perceptor.pull_ingestion import (
+    DurablePerceptorPullIngress,
+    PerceptorPullBackfillRunner,
+)
+from sleepagent.persistence.uow import UnitOfWorkFactory
+from sleepagent.workers.kernel import RetryableWorkError, WorkContext
+from sleepagent.workers.runtime import B3ClaimInvariantError, exact_worker_scope
+
+
+class PerceptorAcquisitionExecutor:
+    """Reuse the existing read-only Perceptor Pull and intake authorities."""
+
+    def __init__(
+        self,
+        settings: SleepBackendSettings,
+        uow_factory: UnitOfWorkFactory[Any],
+        *,
+        client: PerceptorPlatformClient | None = None,
+    ) -> None:
+        self.settings = settings
+        self.uow_factory = uow_factory
+        self._client = client
+
+    def execute(
+        self,
+        *,
+        context: WorkContext,
+        job_type: AcquisitionJobType,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        scope = exact_worker_scope(context, allowed_handler=job_type.value)
+        instant = _scheduled_instant(payload)
+        if job_type is AcquisitionJobType.NIGHT_FINALIZATION_SCAN:
+            result = NightFinalizationService(
+                self.uow_factory
+            ).finalize_latest_for_binding(
+                scope,
+                device_binding_id=str(payload["device_binding_id"]),
+                evaluated_at=instant,
+            )
+            return result.model_dump(mode="json")
+
+        binding = DeviceBindingService(self.uow_factory).show(
+            scope,
+            device_binding_id=str(payload["device_binding_id"]),
+        )
+        if binding.binding.binding_version != int(payload["binding_version"]):
+            raise B3ClaimInvariantError("scheduled work binding version drifted")
+        client = self._client or self._build_client()
+        ingress = DurablePerceptorPullIngress(
+            self.settings,
+            self.uow_factory,
+            client_id_sha256=hashlib.sha256(
+                self._client_id().encode("utf-8")
+            ).hexdigest(),
+            operation_scope=scope,
+        )
+        runner = PerceptorPullBackfillRunner(client, ingress, binding.binding)
+        if job_type is AcquisitionJobType.HISTORY_OVERLAP_PULL:
+            return _run_scheduled_recent_history(runner, instant=instant)
+        report_date = instant.astimezone(
+            ZoneInfo(binding.binding.timezone_name)
+        ).date()
+        result = runner.pull_sleep_report(report_date)
+        return {
+            "disposition": result.disposition,
+            "raw_ingress_record_id": result.raw_ingress_record_id,
+            "normalization_work_id": result.normalization_work_id,
+            "duplicate": result.duplicate,
+        }
+
+    def _client_id(self) -> str:
+        reference = self.settings.perceptor_client_id_ref
+        if reference is None:
+            raise ValueError("Perceptor client ID is not configured")
+        raw = BackendKeyProvider(self.settings.deployment_mode).secret(
+            reference,
+            purpose="Perceptor client ID",
+            minimum_bytes=1,
+        )
+        return raw.decode("utf-8", errors="strict")
+
+    def _build_client(self) -> PerceptorPlatformClient:
+        reference = self.settings.perceptor_client_secret_ref
+        if reference is None:
+            raise ValueError("Perceptor client secret is not configured")
+        secret = BackendKeyProvider(self.settings.deployment_mode).secret(
+            reference,
+            purpose="Perceptor scheduled Pull",
+            minimum_bytes=1,
+        ).decode("utf-8", errors="strict")
+        self._client = PerceptorPlatformClient(
+            client_id=self._client_id(),
+            client_secret=secret,
+            base_url=self.settings.perceptor_base_url,
+        )
+        return self._client
+
+
+def _scheduled_instant(payload: Mapping[str, Any]) -> datetime:
+    instant = datetime.fromisoformat(str(payload["scheduled_for"]))
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError("scheduled_for must be timezone-aware")
+    return instant.replace(microsecond=0)
+
+
+def _run_scheduled_recent_history(
+    runner: PerceptorPullBackfillRunner,
+    *,
+    instant: datetime,
+) -> Mapping[str, Any]:
+    """Fetch one isolated recent window without consuming rolling history state."""
+
+    window_start = instant - timedelta(minutes=15)
+    chunks = runner.backfill_history(start_at=window_start, end_at=instant)
+    if len(chunks) != 1:
+        raise B3ClaimInvariantError("scheduled recent History must be one bounded chunk")
+    chunk = chunks[0]
+    if chunk.status != "succeeded" or chunk.ingress is None:
+        raise RetryableWorkError(
+            chunk.error_code or "scheduled_recent_history_failed",
+            retry_after_seconds=60,
+        )
+    result = chunk.ingress
+    return {
+        "disposition": result.disposition,
+        "raw_ingress_record_id": result.raw_ingress_record_id,
+        "normalization_work_id": result.normalization_work_id,
+        "duplicate": result.duplicate,
+        "history_window_start": chunk.window_start_at.isoformat(),
+        "history_window_end": chunk.window_end_at.isoformat(),
+        "checkpoint_source": "isolated_scheduled_recent_window",
+        "vendor_record_count": chunk.vendor_record_count,
+        "raw_series_sample_count": chunk.raw_series_sample_count,
+    }
+
+
+__all__ = ["PerceptorAcquisitionExecutor"]

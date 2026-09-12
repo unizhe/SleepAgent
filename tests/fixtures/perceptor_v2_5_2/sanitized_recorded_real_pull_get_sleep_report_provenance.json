@@ -1,0 +1,20 @@
+{
+  "schema_version": "sanitized_perceptor_sleep_report_provenance.v1",
+  "source": "minimized sanitized derivative of the G7.1 failing response shape",
+  "data": {
+    "heart_rate_data": [
+      {
+        "time_long": 1787616000,
+        "type": 1,
+        "value": 60
+      }
+    ],
+    "breathe_data": [
+      {
+        "time_long": 1787616000,
+        "type": 1,
+        "value": 12
+      }
+    ]
+  }
+}

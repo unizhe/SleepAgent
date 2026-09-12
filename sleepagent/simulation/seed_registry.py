@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Immutable server registry for replay seed identity and authority pins."""
 
 from __future__ import annotations
@@ -172,9 +173,13 @@ def load_replay_seed_registry() -> ReplaySeedRegistry:
 def verify_packaged_seed(seed: ReplaySeedDefinition) -> ReplayScenario:
     """Verify only the strict scenario document; generation remains Worker-only."""
 
-    raw = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", seed.scenario_id, "scenario.json"
-    ).read_bytes()
+    raw = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath(seed.scenario_id)
+        .joinpath("scenario.json")
+        .read_bytes()
+    )
     try:
         scenario = ReplayScenario.model_validate_json(raw)
     except Exception as exc:

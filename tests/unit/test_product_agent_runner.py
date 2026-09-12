@@ -1,30 +1,31 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
-import sleepagent.product_runtime.runner as runner_module
-from sleepagent.product_runtime.acceptance import (
-    AcceptanceEvidenceKind,
-    AcceptanceScenario,
-    observation_from_runtime,
-)
-from sleepagent.product_runtime.agents import ProductAgentFactory
-from sleepagent.product_runtime.agents.sleepcare import (
+import sleepagent.runtime.runner as runner_module
+from sleepagent.domain.habit import HabitFact, HabitOperation
+from sleepagent.domain.contracts import DataMode
+from sleepagent.runtime.agents import ProductAgentFactory
+from sleepagent.runtime.agents import (
     EpisodePlanProposal,
     EvaluationDecision,
     SleepCareEvaluation,
+    _CareStrategyPlan,
+    _CareStrategySelectedAction,
+    _SleepCareContentPlan,
 )
-from sleepagent.product_runtime.cold_start import (
+from sleepagent.runtime.cold_start import (
     ClaimKind,
     build_unavailable_entry_decisions,
     snapshot_binding_material,
 )
-from sleepagent.product_runtime.contracts import (
+from sleepagent.runtime.contracts import (
     AgentId,
     AuthenticatedBinding,
     CareActionCandidate,
@@ -59,59 +60,83 @@ from sleepagent.product_runtime.contracts import (
     RelativeBaselineDeviation,
     ToolEffect,
     ToolRequest,
+    TrustLabel,
     WorkProductKind,
     WorkProductStatus,
     stable_hash,
 )
-from sleepagent.product_runtime.external_actions import (
-    ExternalActionExecutionResult,
-)
-from sleepagent.product_runtime.governance import (
+from sleepagent.runtime.governance import (
     AcceptanceError,
     DeterministicCommitController,
 )
-from sleepagent.product_runtime.hitl import (
+from sleepagent.runtime.hitl import (
     HITL_POLICY_VERSION,
     ActionProposal,
     DecisionExplanation,
     HumanDecisionChoice,
     HumanDecisionService,
 )
-from sleepagent.product_runtime.invocation import (
+from sleepagent.runtime.invocation import (
     CareStrategyModelOutput,
     EvidenceReasoningModelOutput,
     SafetyReviewModelOutput,
     SleepCareModelOutput,
 )
-from sleepagent.product_runtime.longitudinal_memory import (
-    DeploymentControlAttestation,
+from sleepagent.runtime.memory import (
+    MemoryHandle,
+    MemoryItemStatus,
+    MemoryPurpose,
+    MemoryReadReceipt,
+    MemorySliceItem,
+    ProvenanceType,
 )
-from sleepagent.product_runtime.registry import EPISODE_DEFINITIONS
-from sleepagent.persistence import RadarPersistenceStore
-from sleepagent.product_runtime.runner import ProductEpisodeRunner
-from sleepagent.product_runtime.runtime_contracts import (
-    CommitFrozenConfirmedAction,
+from sleepagent.runtime.registry import EPISODE_DEFINITIONS
+from sleepagent.runtime.runner import ProductEpisodeRunner
+from sleepagent.runtime.results import (
+    PRODUCT_EPISODE_RUNNER_VERSION,
+    PinnedPersonalizationContext,
     ProductEpisodeRunRequest,
     ProductUserFactResponse,
-    ReexecuteWithAddedFact,
     bind_product_episode_checkpoint,
+    product_episode_request_hash,
 )
-from sleepagent.product_runtime.runtime_factory import (
+from sleepagent.runtime.factory import (
     ProductRuntimeBundle,
-    ProductRuntimeStores,
+    build_deterministic_product_runtime_bundle,
     build_product_runtime_bundle,
 )
-from sleepagent.product_runtime.skills import (
+from sleepagent.runtime.deterministic_model import (
+    DeterministicReplayStructuredAgentModel,
+)
+from sleepagent.runtime.registry import (
     SkillRegistry,
     default_agent_profiles,
     default_skill_packages,
 )
-from sleepagent.product_runtime.questionnaire import (
-    HabitAnswerDisposition,
-    HabitQuestionAnswer,
-    HabitQuestionTrigger,
+from sleepagent.runtime.reports import (
+    ElderNarrativeRequest,
+    ElderNarrativeState,
+    ReportRole,
+    ReportingContextV1,
+    RoleProjectionState,
+    SharedAnalysisRunRequest,
+    SharedAnalysisSourceV1,
+    ZH_CN_ROLE_RENDERER_VERSION,
+    build_elder_message_atoms,
+    build_shared_role_projections,
 )
-from sleepagent.product_runtime.schemas import RadarNightSummary
+from sleepagent.application.product_data import ProductElderPresentationFacts
+from sleepagent.runtime.agents import (
+    _ElderNarrativeRenderingSelection,
+    _ElderNarrativeRewritePlan,
+)
+from sleepagent.runtime.schemas import RadarNightSummary
+from sleepagent.persistence.uow import UowScope
+from sleepagent.workers.product import (
+    _consumed_context_sha256,
+    _desired_analysis_sha256,
+    _fact_snapshot_for_shared,
+)
 
 
 NOW = datetime(2026, 7, 26, 7, 0, tzinfo=timezone.utc)
@@ -167,6 +192,48 @@ def test_legacy_entry_without_exact_cohort_publishes_reviewed_boundary() -> None
     assert result.receipt.status == EpisodeStatus.PARTIAL
     assert result.publication is not None
     assert "还没有可用于这项判断的个人记录" in result.publication.text
+
+
+def test_deterministic_assembly_preserves_cold_start_degraded_boundary() -> None:
+    model = DeterministicReplayStructuredAgentModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    base = request(EpisodeType.MORNING_REVIEW)
+    decisions = build_unavailable_entry_decisions(
+        decision_namespace="deterministic-runner-entry",
+        claim_kind=ClaimKind.DESCRIBE_CURRENT_NIGHT,
+    )
+    old_snapshot = base.fact_snapshot
+    guarded_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-deterministic-cold-start-entry",
+        binding=old_snapshot.binding,
+        source_scope=old_snapshot.source_scope.model_copy(
+            update={"valid_night_count": 0}
+        ),
+        canonical_data_version=old_snapshot.canonical_data_version,
+        care_context_version=old_snapshot.care_context_version,
+        memory_context_version=old_snapshot.memory_context_version,
+        source_refs=old_snapshot.source_refs,
+        **snapshot_binding_material(decisions=decisions),
+        created_at=NOW,
+    )
+    guarded = ProductEpisodeRunRequest.model_validate(
+        base.model_copy(
+            update={
+                "fact_snapshot": guarded_snapshot,
+                "runtime_readiness_decisions": decisions,
+            }
+        ).model_dump(mode="python")
+    )
+
+    result = instance.run(guarded)
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert result.publication is not None
+    assert "还没有可用于这项判断的个人记录" in result.publication.text
+    assert all(
+        binding.rendered_text in result.publication.text
+        for binding in result.publication.semantic_bindings
+    )
 
 
 def snapshot(
@@ -394,7 +461,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="完成证据判断",
                 output_payload=EvidencePacket(
-                    packet_id=f"evidence:{context['episode_id']}",
+                    packet_id=f"evidence:{context_packet_id}",
                     source_scope=scope,
                     claims=[
                         EvidenceClaim(
@@ -413,6 +480,21 @@ class ScenarioModel:
                     ],
                 ),
             )
+        if schema is _CareStrategyPlan:
+            return schema(
+                disposition="propose",
+                summary="形成单一行动",
+                selected_action=_CareStrategySelectedAction(
+                    care_action_id="consistent-wake-time",
+                    version=1,
+                    title="连续五天固定起床时间",
+                    rationale_evidence_refs=["claim-1"],
+                    parameters={"tolerance_minutes": 30},
+                    duration_days=5,
+                    stop_conditions=["不适时停止"],
+                    activatable=True,
+                ),
+            )
         if schema is CareStrategyModelOutput:
             evidence_ref = next(
                 item["source_refs"][0]
@@ -423,7 +505,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="形成单一行动",
                 output_payload=CareStrategy(
-                    strategy_id=f"care:{context['episode_id']}",
+                    strategy_id=f"care:{context_packet_id}",
                     disposition="propose",
                     evidence_packet_refs=[evidence_ref],
                     primary_action=CareActionCandidate.create(
@@ -521,7 +603,7 @@ class ScenarioModel:
                 status=WorkProductStatus.COMPLETED,
                 summary="发布统一表达",
                 output_payload=CommunicationDraft(
-                    draft_id=f"draft:{context['episode_id']}",
+                    draft_id=f"draft:{context_packet_id}",
                     audience_role=audience_role,
                     text=rendered,
                     claim_refs=sorted(set(claims)),
@@ -550,6 +632,100 @@ class ProviderReceiptScenarioModel(ScenarioModel):
         self.last_provider_request_id = (
             f"provider-request:{self._provider_request_counter}"
         )
+        return result
+
+
+class CommunicationAcceptanceRepairScenarioModel(ScenarioModel):
+    def __init__(self, episode_type: EpisodeType) -> None:
+        super().__init__(episode_type)
+        self.communication_calls = 0
+
+    def generate(self, **kwargs):
+        result = super().generate(**kwargs)
+        if kwargs["schema"] is not SleepCareModelOutput:
+            return result
+        self.communication_calls += 1
+        if self.communication_calls != 1:
+            return result
+        draft = result.output_payload
+        assert isinstance(draft, CommunicationDraft)
+        claim_ref = draft.claim_refs[0]
+        rendered = "今晚增加99分钟。"
+        return result.model_copy(
+            update={
+                "output_payload": CommunicationDraft(
+                    draft_id=draft.draft_id,
+                    audience_role=draft.audience_role,
+                    text=rendered,
+                    claim_refs=[claim_ref],
+                    semantic_bindings=[
+                        CommunicationSemanticBinding(
+                            binding_id="invented-number",
+                            source_kind="evidence_claim",
+                            source_ref=claim_ref,
+                            rendered_text=rendered,
+                        )
+                    ],
+                    context_notice=draft.context_notice,
+                )
+            }
+        )
+
+
+class ProvenanceAcceptanceRepairScenarioModel(ScenarioModel):
+    def __init__(self, episode_type: EpisodeType) -> None:
+        super().__init__(episode_type)
+        self.evidence_calls = 0
+        self.safety_calls = 0
+        self.evidence_revision_reasons: list[str] = []
+
+    def generate(self, **kwargs):
+        result = super().generate(**kwargs)
+        if kwargs["schema"] is EvidenceReasoningModelOutput:
+            self.evidence_calls += 1
+            context = json.loads(kwargs["messages"][-1]["content"])
+            self.evidence_revision_reasons.extend(
+                str(item["value"])
+                for item in context["items"]
+                if item["key"] == "revision_reason"
+            )
+            if self.evidence_calls == 1:
+                packet = result.output_payload
+                claim = packet.claims[0]
+                return result.model_copy(
+                    update={
+                        "output_payload": packet.model_copy(
+                            update={
+                                "claims": [
+                                    claim.model_copy(
+                                        update={
+                                            "date_start": (
+                                                claim.date_start
+                                                - timedelta(days=1)
+                                            )
+                                        }
+                                    ),
+                                    *packet.claims[1:],
+                                ]
+                            }
+                        )
+                    }
+                )
+        if kwargs["schema"] is SafetyReviewModelOutput:
+            self.safety_calls += 1
+            if self.safety_calls == 1:
+                decision = result.output_payload
+                return result.model_copy(
+                    update={
+                        "output_payload": decision.model_copy(
+                            update={
+                                "reviewed_episode_state_revision": (
+                                    decision.reviewed_episode_state_revision + 1
+                                )
+                            }
+                        )
+                    }
+                )
         return result
 
 
@@ -709,7 +885,7 @@ class ProfileAwareScenarioModel(ScenarioModel):
                     status=WorkProductStatus.COMPLETED,
                     summary="只使用当前问题相关的已确认画像",
                     output_payload=EvidencePacket(
-                        packet_id=f"evidence:{context['episode_id']}",
+                        packet_id=f"evidence:{context_packet_id}",
                         source_scope=SourceScope.model_validate(
                             context["source_scope"]
                         ),
@@ -754,7 +930,7 @@ class LongitudinalMemoryScenarioModel(ScenarioModel):
         if kwargs["schema"] is not EvidenceReasoningModelOutput:
             return result
         context = json.loads(kwargs["messages"][-1]["content"])
-        if not context["episode_id"].endswith(":query"):
+        if not kwargs["context_packet_id"].endswith(":query"):
             return result
         memory_read = next(
             (
@@ -819,11 +995,11 @@ class LongitudinalMemoryScenarioModel(ScenarioModel):
             update={
                 "tool_requests": [],
                 "output_payload": EvidencePacket(
-                    packet_id=f"memory-evidence:{context['episode_id']}",
+                    packet_id=f"memory-evidence:{kwargs['context_packet_id']}",
                     source_scope=scope,
                     claims=[
                         EvidenceClaim(
-                            claim_id=f"memory-claim:{context['episode_id']}",
+                            claim_id=f"memory-claim:{kwargs['context_packet_id']}",
                             semantic=EvidenceSemantic.OBSERVED_FACT,
                             statement="当前授权来源支持这项最小个人上下文。",
                             source_kind=source_kind,
@@ -850,9 +1026,6 @@ def runtime_bundle(
     model,
     *,
     source_resolvers=None,
-    external_executor=None,
-    stores: ProductRuntimeStores | None = None,
-    persistence_store: RadarPersistenceStore | None = None,
 ) -> ProductRuntimeBundle:
     return build_product_runtime_bundle(
         sleepcare_model=model,
@@ -861,9 +1034,6 @@ def runtime_bundle(
         safety_review_model=model,
         sleepcare_planning_model=model,
         source_resolvers=source_resolvers,
-        external_executor=external_executor,
-        stores=stores,
-        persistence_store=persistence_store,
     )
 
 
@@ -876,7 +1046,6 @@ def request(
     *,
     personalized=True,
     doctor_material=False,
-    external_action=False,
     user_text="昨晚睡得怎么样？",
     binding_role="elder",
     binding_authorization_scope=None,
@@ -939,7 +1108,6 @@ def request(
         tool_inputs=inputs,
         personalized=personalized,
         doctor_material=doctor_material,
-        external_action=external_action,
         **extra,
     )
 
@@ -971,10 +1139,52 @@ def test_concrete_roster_preserves_phase_c_tool_contract_audit_identity() -> Non
         ]
 
     roster_projection = audit_projection(roster_result)
-    # Phase C intentionally removed fake Tool requests from the Skill package;
-    # freeze the resulting invocation identity for this exact Episode input.
+    # Freeze invocation identity, including the runtime-bound Care receipt and
+    # the reviewed Habit/Memory grounding instructions in the SkillLock and
+    # the identifier-free provider Context projection.
     assert stable_hash(roster_projection) == (
-        "f6e91bc15648fd67f316aebe05fa7dcafe07fb6f1ac16825714bee1cd05bd805"
+        "435fed6856df4e2098fc4ecfa6866e1dfbffebda2c36c552409e4e626ec7f0b6"
+    )
+
+
+def test_live_episode_budget_allows_schema_correction_latency() -> None:
+    for episode_type in EpisodeType:
+        assert (
+            EPISODE_DEFINITIONS[episode_type].budget.soft_deadline_seconds
+            == 180
+        )
+
+
+def test_communication_gets_one_live_acceptance_repair_turn() -> None:
+    model = CommunicationAcceptanceRepairScenarioModel(
+        EpisodeType.MORNING_REVIEW
+    )
+
+    result = product_runner(model).run(request(EpisodeType.MORNING_REVIEW))
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert model.communication_calls == 2
+
+
+def test_evidence_and_safety_get_one_provenance_repair_turn_each() -> None:
+    model = ProvenanceAcceptanceRepairScenarioModel(
+        EpisodeType.ROLE_MATERIAL
+    )
+
+    result = product_runner(model).run(
+        request(
+            EpisodeType.ROLE_MATERIAL,
+            doctor_material=True,
+            binding_role="doctor",
+        )
+    )
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert model.evidence_calls == 2
+    assert model.safety_calls >= 2
+    assert any(
+        "fact_ref" in reason and "retrieval_handle" in reason
+        for reason in model.evidence_revision_reasons
     )
 
 
@@ -1029,176 +1239,6 @@ def longitudinal_request(
     )
 
 
-def test_memory_trust_labels_are_allowed_only_for_authorized_agents() -> None:
-    profiles = default_agent_profiles()
-
-    assert "episodic_hint_untrusted" in profiles[
-        AgentId.EVIDENCE_REASONING
-    ].allowed_context_labels
-    assert "user_memory_untrusted_data" in profiles[
-        AgentId.EVIDENCE_REASONING
-    ].allowed_context_labels
-    assert "user_memory_untrusted_data" in profiles[
-        AgentId.SLEEP_CARE
-    ].allowed_context_labels
-    assert "episodic_hint_untrusted" not in profiles[
-        AgentId.SLEEP_CARE
-    ].allowed_context_labels
-    for agent_id in (AgentId.CARE_STRATEGY, AgentId.SAFETY_REVIEW):
-        assert "episodic_hint_untrusted" not in profiles[
-            agent_id
-        ].allowed_context_labels
-        assert "user_memory_untrusted_data" not in profiles[
-            agent_id
-        ].allowed_context_labels
-
-
-def test_confirmed_memory_slice_supports_a_structured_evidence_episode() -> None:
-    model = LongitudinalMemoryScenarioModel(
-        EpisodeType.MORNING_REVIEW,
-        memory_type="governed_memory",
-        concept_id="sleep.preferred_wake_time",
-    )
-    instance = product_runner(model)
-    episode_request = longitudinal_request("episode:governed-memory:query")
-    candidate = MemoryChangeCandidate(
-        candidate_id="memory:wake-time",
-        operation="create",
-        subject_id="subject-1",
-        memory_type="routine",
-        concept_id="sleep.preferred_wake_time",
-        value_schema_id="bounded_string.v1",
-        typed_value="07:00",
-        provenance_type="elder_confirmed",
-        source_ref="user_report:wake-time",
-        sensitivity_class="personal",
-        allowed_roles=(AgentId.EVIDENCE_REASONING, AgentId.SLEEP_CARE),
-        allowed_purposes=(
-            "personal_evidence_context",
-            "explicit_memory_review",
-            "explicit_memory_change",
-            "explicit_memory_forget",
-        ),
-        explicit_user_authorization=True,
-        confirmation_required=True,
-    )
-    instance.commit_controller.memory_store.apply(
-        candidate,
-        expected_version=0,
-        confirmed=True,
-        fact_snapshot=episode_request.fact_snapshot,
-        confirmation_ref="confirmation:wake-time",
-    )
-
-    result = instance.run(episode_request)
-
-    assert (
-        result.receipt.status == EpisodeStatus.COMPLETE
-    ), result.receipt.failure_codes
-    evidence = next(
-        item
-        for item in result.accepted_work_products
-        if item.agent_id == AgentId.EVIDENCE_REASONING
-    )
-    assert evidence.payload["claims"][0]["source_kind"] == "confirmed_memory"
-    memory_receipt = next(
-        item for item in result.tool_receipts if item.tool_name == "memory.read"
-    )
-    assert (
-        memory_receipt.output["items"][0]["allowed_current_use"]
-        == "confirmed_memory"
-    )
-
-
-def test_terminal_episode_scheduler_and_digest_revalidation_end_to_end() -> None:
-    resolver_calls: list[tuple[str, ...]] = []
-
-    def accepted_ledger_resolver(source_refs, query):
-        resolver_calls.append(source_refs)
-        assert query.subject_id == "subject-1"
-        return {
-            "source_class": "accepted_ledger",
-            "typed_result": {
-                "availability": "current",
-                "accepted_work_product_ref": source_refs[0],
-            },
-            "observed_at": query.as_of.isoformat(),
-        }
-
-    model = LongitudinalMemoryScenarioModel(
-        EpisodeType.MORNING_REVIEW,
-        memory_type="episode_digest",
-        concept_id="sleep.last_night",
-    )
-    instance = product_runner(
-        model,
-        source_resolvers={"accepted_ledger": accepted_ledger_resolver},
-    )
-    scheduler = runner_module.ProductInductionScheduler(
-        lambda: instance,
-        interval_seconds=0.01,
-        batch_limit=10,
-    )
-    scheduler.start()
-    try:
-        source_result = instance.run(
-            longitudinal_request("episode:longitudinal:source")
-        )
-        assert (
-            source_result.receipt.status == EpisodeStatus.COMPLETE
-        ), source_result.receipt.failure_codes
-        deadline = time.monotonic() + 2
-        while (
-            not instance.result_store.list_active_digests(
-                "subject-1",
-                as_of=datetime.now(timezone.utc),
-            )
-            and time.monotonic() < deadline
-        ):
-            time.sleep(0.01)
-    finally:
-        scheduler.stop()
-
-    assert instance.result_store.list_active_digests(
-        "subject-1",
-        as_of=datetime.now(timezone.utc),
-    )
-    assert instance.result_store.digest_read_enabled() is False
-
-    # This attestation only opens the in-memory test route; production remains off.
-    instance.result_store.enable_digest_read(
-        DeploymentControlAttestation(
-            attestation_id="attestation:test-only",
-            manifest_encryption_verified=True,
-            backup_crypto_expiry_verified=True,
-            worker_least_privilege_verified=True,
-            publication_journal_verified=True,
-            writer_fencing_verified=True,
-            orphan_terminal_count=0,
-            benchmark_gate_passed=True,
-            attested_at=datetime.now(timezone.utc),
-        )
-    )
-    query_result = instance.run(
-        longitudinal_request("episode:longitudinal:query")
-    )
-
-    assert query_result.receipt.status == EpisodeStatus.COMPLETE
-    assert resolver_calls
-    assert resolver_calls[0][0].startswith("evidence_reasoning:")
-    assert any(
-        item.tool_name == "memory.resolve_source"
-        and item.outcome == InvocationOutcome.SUCCEEDED
-        for item in query_result.tool_receipts
-    )
-    evidence = next(
-        item
-        for item in query_result.accepted_work_products
-        if item.agent_id == AgentId.EVIDENCE_REASONING
-    )
-    assert evidence.payload["claims"][0]["source_kind"] == "canonical_observation"
-
-
 def test_morning_uses_sleepcare_evidence_sleepcare_without_fixed_safety() -> None:
     instance, _ = runner(EpisodeType.MORNING_REVIEW)
     result = instance.run(request(EpisodeType.MORNING_REVIEW))
@@ -1207,6 +1247,15 @@ def test_morning_uses_sleepcare_evidence_sleepcare_without_fixed_safety() -> Non
         AgentId.EVIDENCE_REASONING,
         AgentId.SLEEP_CARE,
     ]
+    assert AgentId.CARE_STRATEGY not in {
+        item.agent_id for item in result.accepted_work_products
+    }
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["candidate_intents"] == []
     assert result.agent_invocations
     assert {
         item.invocation_id for item in result.agent_invocations
@@ -1214,29 +1263,71 @@ def test_morning_uses_sleepcare_evidence_sleepcare_without_fixed_safety() -> Non
     assert all(item.provider == "test" for item in result.agent_invocations)
 
 
-def test_runtime_observation_binds_unique_real_provider_receipts() -> None:
-    model = ProviderReceiptScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
+def test_deterministic_runtime_uses_shared_content_plan_and_omits_normal_care() -> None:
+    class CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas: list[type] = []
+
+        def generate(self, **kwargs):
+            self.schemas.append(kwargs["schema"])
+            return super().generate(**kwargs)
+
+    model = CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+
     result = instance.run(request(EpisodeType.MORNING_REVIEW))
-    observation = observation_from_runtime(
-        result,
-        scenario=AcceptanceScenario.NORMAL_MORNING,
-        repetition=1,
-        role="elder",
-        evidence_kind=AcceptanceEvidenceKind.REAL,
-        real_provider=True,
-        domain_reviewed=False,
+
+    assert result.receipt.status is EpisodeStatus.COMPLETE
+    assert _SleepCareContentPlan in model.schemas
+    assert SleepCareModelOutput not in model.schemas
+    assert CareStrategyModelOutput not in model.schemas
+    communication = next(
+        item
+        for item in result.envelopes
+        if item.agent_id is AgentId.SLEEP_CARE
+    ).output_payload
+    assert isinstance(communication, CommunicationDraft)
+    assert all(
+        binding.rendered_text in communication.text
+        for binding in communication.semantic_bindings
+    )
+    record = next(
+        item
+        for item in result.agent_invocations
+        if item.agent_id is AgentId.SLEEP_CARE
+        and item.schema_version == "SleepCareModelOutput.v1"
+    )
+    assert record.schema_version == "SleepCareModelOutput.v1"
+
+
+def test_deterministic_urgent_path_has_zero_model_and_zero_care_calls() -> None:
+    class CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas: list[type] = []
+
+        def generate(self, **kwargs):
+            self.schemas.append(kwargs["schema"])
+            return super().generate(**kwargs)
+
+    model = CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+
+    result = instance.run(
+        request(
+            EpisodeType.MORNING_REVIEW,
+            user_text="我现在胸痛并且呼吸困难",
+        )
     )
 
-    assert observation.provider_receipt is not None
-    assert observation.provider_receipt.receipt_ref == result.receipt.trace_ref
-    assert len(observation.provider_receipt.provider_request_ids) == len(
-        result.agent_invocations
-    )
-    assert observation.runtime_receipt is not None
-    assert observation.runtime_receipt.trace_ref == result.receipt.trace_ref
-    assert observation.runtime_receipt.result_hash == stable_hash(
-        result.model_dump(mode="json")
+    assert result.receipt.execution_mode is ExecutionMode.DETERMINISTIC_ONLY
+    assert result.receipt.episode_type is EpisodeType.URGENT_BOUNDARY
+    assert model.schemas == []
+    assert result.agent_invocations == []
+    assert not any(
+        item.agent_id is AgentId.CARE_STRATEGY
+        for item in result.accepted_work_products
     )
 
 
@@ -1497,7 +1588,12 @@ def test_elder_role_material_does_not_fixed_call_safety() -> None:
     assert sleepcare_artifact["source_refs"][0] == (
         artifact.tool_invocation_id
     )
-    assert sleepcare_artifact["value"] == artifact.output
+    assert "episode_id" not in sleepcare_artifact["value"]
+    assert sleepcare_artifact["value"] == {
+        key: value
+        for key, value in artifact.output.items()
+        if key != "episode_id"
+    }
 
 
 def test_role_material_basis_binds_safety_revised_evidence() -> None:
@@ -1584,6 +1680,11 @@ def test_urgent_preempts_all_model_agents() -> None:
     assert result.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
     assert not result.envelopes
     assert not model.calls
+    assert not result.accepted_work_products
+    assert not any(
+        item.tool_name == "coordination.read_policy"
+        for item in result.tool_receipts
+    )
 
 
 def test_failed_urgent_text_preflight_blocks_before_model_agents() -> None:
@@ -1633,73 +1734,6 @@ def test_authenticated_user_fact_urgent_answer_preempts_all_model_agents() -> No
     assert model.calls == []
 
 
-def test_failed_online_risk_preflight_blocks_before_model_agents() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-
-    def unavailable(arguments, context):
-        raise RuntimeError("online risk unavailable")
-
-    instance.tool_executor.register_handler(
-        "risk.classify_signal",
-        unavailable,
-    )
-
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            online_events=(online_night_event(),),
-        )
-    )
-
-    assert result.receipt.status is EpisodeStatus.BLOCKED
-    assert result.receipt.execution_mode is ExecutionMode.SAFE_DEGRADED
-    assert result.receipt.failure_codes == [
-        "required_tool_failed:risk.classify_signal"
-    ]
-    assert model.calls == []
-    assert result.tool_receipts[0].outcome is InvocationOutcome.FAILED
-
-
-def test_failed_post_evidence_online_risk_stops_before_care_or_publication() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-    calls = 0
-
-    def intermittent(arguments, context):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return {
-                "risk_level": "normal",
-                "urgent_required": False,
-                "safety_required": False,
-                "reason_codes": ["routine_observation"],
-                "source_refs": [],
-            }
-        raise RuntimeError("post-evidence risk unavailable")
-
-    instance.tool_executor.register_handler(
-        "risk.classify_signal",
-        intermittent,
-    )
-
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            online_events=(online_night_event(),),
-        )
-    )
-
-    assert result.receipt.goal_achieved is False
-    assert any(
-        item.tool_name == "risk.classify_signal"
-        and item.outcome is InvocationOutcome.FAILED
-        for item in result.tool_receipts
-    )
-    assert CareStrategyModelOutput.__name__ not in model.calls
-    assert SleepCareModelOutput.__name__ not in model.calls
-    assert result.publication_delivered is False
-
-
 def test_data_quality_recovery_is_deterministic_and_truthful() -> None:
     instance, model = runner(EpisodeType.DATA_QUALITY_RECOVERY)
     result = instance.run(request(EpisodeType.DATA_QUALITY_RECOVERY))
@@ -1727,1583 +1761,8 @@ def test_doctor_data_quality_recovery_preserves_agentless_deterministic_view() -
     assert not model.calls
 
 
-def test_normal_morning_does_not_ask_to_complete_habit_profile() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    result = instance.run(request(EpisodeType.MORNING_REVIEW))
-    assert result.receipt.status == EpisodeStatus.COMPLETE
-    assert result.habit_selection is None
-    assert "questionnaire.select_profile" not in {
-        item.tool_name for item in result.tool_receipts
-    }
 
-
-def test_optional_habit_intake_is_plan_bound_and_does_not_block_answer() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    intake_request = request(
-        EpisodeType.MORNING_REVIEW,
-        habit_question_trigger=HabitQuestionTrigger.OPTIONAL_LIGHT_INTAKE,
-        habit_candidate_concept_ids=(
-            "habit.primary_goal",
-            "habit.schedule_constraint",
-        ),
-        habit_question_max=2,
-    )
-    result = instance.run(intake_request)
-    assert result.receipt.status == EpisodeStatus.COMPLETE
-    assert result.publication_delivered
-    assert result.habit_selection is not None
-    assert len(result.habit_selection.candidates) == 2
-    assert result.habit_selection.plan_id.startswith("plan:")
-    selection_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-    assert selection_receipt.caller == "runtime"
-    assert selection_receipt.effect is ToolEffect.STATE_WRITE
-
-    remaining = instance.habit_runtime.questionnaire.remaining_budget(
-        episode_id=intake_request.episode_id,
-        subject_id=intake_request.fact_snapshot.binding.subject_id,
-    )
-    replay = instance.run(intake_request)
-    replay_receipt = next(
-        item
-        for item in replay.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-    assert replay.habit_selection == result.habit_selection
-    assert replay_receipt.outcome is InvocationOutcome.SUCCEEDED
-    assert replay_receipt.idempotency_key == selection_receipt.idempotency_key
-    assert instance.habit_runtime.questionnaire.remaining_budget(
-        episode_id=intake_request.episode_id,
-        subject_id=intake_request.fact_snapshot.binding.subject_id,
-    ) == remaining
-
-
-def test_skipping_all_habit_questions_still_delivers_morning_answer() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    offered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.OPTIONAL_LIGHT_INTAKE,
-            habit_candidate_concept_ids=("habit.primary_goal",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    skipped = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_selection=selection,
-            habit_answers=(
-                HabitQuestionAnswer(
-                    concept_id=selection.candidates[0].concept_id,
-                    concept_version=selection.candidates[0].concept_version,
-                    disposition=HabitAnswerDisposition.SKIPPED,
-                ),
-            ),
-        )
-    )
-    assert skipped.receipt.status == EpisodeStatus.COMPLETE
-    assert skipped.publication_delivered
-    assert skipped.habit_capture is not None
-    assert not skipped.habit_capture.answers[0].profile_candidate_eligible
-    capture_receipt = next(
-        item
-        for item in skipped.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    assert capture_receipt.caller == "runtime"
-    assert capture_receipt.effect is ToolEffect.STATE_WRITE
-
-
-def test_answer_builds_pending_atomic_change_set_without_writing_memory() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    offered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.nap_pattern",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    answered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_selection=selection,
-            habit_answers=(
-                HabitQuestionAnswer(
-                    concept_id="habit.nap_pattern",
-                    concept_version="1.0.0",
-                    disposition=HabitAnswerDisposition.ANSWERED,
-                    value="偶尔午睡",
-                ),
-            ),
-        )
-    )
-    assert answered.publication_delivered
-    assert answered.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert answered.habit_change_set is not None
-    assert len(answered.habit_change_set.candidates) == 1
-    assert instance.habit_runtime.store.get("subject-1").facts == ()
-
-
-def test_habit_response_safety_signal_preempts_remaining_agent_path() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-    offered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.observed_snoring",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    calls_before = len(model.calls)
-    answer_request = request(
-        EpisodeType.MORNING_REVIEW,
-        habit_selection=selection,
-        habit_answers=(
-            HabitQuestionAnswer(
-                concept_id="habit.observed_snoring",
-                concept_version="1.0.0",
-                disposition=HabitAnswerDisposition.ANSWERED,
-                value="观察到",
-            ),
-        ),
-    )
-    result = instance.run(answer_request)
-    assert result.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
-    assert result.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
-    assert result.habit_capture is not None
-    assert result.habit_capture.stop_remaining_questions
-    assert len(model.calls) == calls_before
-
-    capture_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    replay = instance.run(answer_request)
-    replay_receipt = next(
-        item
-        for item in replay.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    assert replay.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
-    assert replay.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
-    assert replay.habit_capture == result.habit_capture
-    assert replay_receipt.outcome is InvocationOutcome.SUCCEEDED
-    assert replay_receipt.idempotency_key == capture_receipt.idempotency_key
-    assert len(model.calls) == calls_before
-
-
-def test_habit_capture_failure_blocks_before_any_new_model_call() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-    offered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.nap_pattern",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-
-    def unavailable(_arguments, _context):
-        raise TimeoutError("questionnaire capture unavailable")
-
-    instance.tool_executor.register_handler(
-        "questionnaire.capture_profile", unavailable
-    )
-    calls_before = len(model.calls)
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_selection=selection,
-            habit_answers=(
-                HabitQuestionAnswer(
-                    concept_id="habit.nap_pattern",
-                    concept_version="1.0.0",
-                    disposition=HabitAnswerDisposition.ANSWERED,
-                    value="偶尔午睡",
-                ),
-            ),
-        )
-    )
-
-    capture_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    assert capture_receipt.outcome is InvocationOutcome.FAILED
-    assert result.receipt.status == EpisodeStatus.BLOCKED
-    assert result.receipt.execution_mode == ExecutionMode.SAFE_DEGRADED
-    assert result.receipt.goal_achieved is False
-    assert result.receipt.failure_codes == [
-        "required_tool_failed:questionnaire.capture_profile"
-    ]
-    assert result.publication is None
-    assert result.publication_delivered is False
-    assert not result.agent_invocations
-    assert len(model.calls) == calls_before
-
-
-def test_habit_selection_failure_cannot_finish_complete() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-
-    def unavailable(_arguments, _context):
-        raise TimeoutError("questionnaire selection unavailable")
-
-    instance.tool_executor.register_handler(
-        "questionnaire.select_profile", unavailable
-    )
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.nap_pattern",),
-            habit_question_max=1,
-        )
-    )
-
-    selection_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-    assert selection_receipt.outcome is InvocationOutcome.FAILED
-    assert result.receipt.status == EpisodeStatus.PARTIAL
-    assert result.receipt.goal_achieved is False
-    assert result.receipt.failure_codes == [
-        "required_tool_failed:questionnaire.select_profile"
-    ]
-    assert not result.accepted_work_products
-    assert EvidenceReasoningModelOutput.__name__ not in model.calls
-
-
-def test_optional_habit_selection_failure_keeps_core_answer_but_is_partial() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-
-    def unavailable(_arguments, _context):
-        raise TimeoutError("optional questionnaire selection unavailable")
-
-    instance.tool_executor.register_handler(
-        "questionnaire.select_profile", unavailable
-    )
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.OPTIONAL_LIGHT_INTAKE,
-            habit_candidate_concept_ids=("habit.primary_goal",),
-            habit_question_max=1,
-        )
-    )
-
-    selection_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-    assert selection_receipt.outcome is InvocationOutcome.FAILED
-    assert result.habit_selection is None
-    assert result.receipt.status == EpisodeStatus.PARTIAL
-    assert result.receipt.goal_achieved is False
-    assert result.receipt.failure_codes == [
-        "required_tool_failed:questionnaire.select_profile"
-    ]
-    assert result.publication_delivered
-    assert result.accepted_work_products
-    assert EvidenceReasoningModelOutput.__name__ in model.calls
-    assert SleepCareModelOutput.__name__ in model.calls
-
-
-def test_habit_selection_identity_includes_derived_decision_kind() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    common = {
-        "habit_question_trigger": HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-        "habit_candidate_concept_ids": ("habit.nap_pattern",),
-        "habit_question_max": 1,
-    }
-
-    care = instance.run(
-        request(EpisodeType.MORNING_REVIEW, profile_purpose="care", **common)
-    )
-    evidence = instance.run(
-        request(EpisodeType.MORNING_REVIEW, profile_purpose="evidence", **common)
-    )
-    care_receipt = next(
-        item
-        for item in care.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-    evidence_receipt = next(
-        item
-        for item in evidence.tool_receipts
-        if item.tool_name == "questionnaire.select_profile"
-    )
-
-    assert care_receipt.outcome is InvocationOutcome.SUCCEEDED
-    assert evidence_receipt.outcome is InvocationOutcome.SUCCEEDED
-    assert care_receipt.idempotency_key != evidence_receipt.idempotency_key
-    assert care.habit_selection is not None
-    assert evidence.habit_selection is not None
-    assert care.habit_selection.selection_id != evidence.habit_selection.selection_id
-
-
-def test_habit_safety_capture_replays_after_persistent_runtime_restart(
-    tmp_path,
-) -> None:
-    database = tmp_path / "runner-habit-capture-replay.sqlite3"
-    first_persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(database, check_same_thread=False)
-    )
-    first_model = ScenarioModel(EpisodeType.MORNING_REVIEW)
-    first_bundle = runtime_bundle(
-        first_model,
-        persistence_store=first_persistence,
-    )
-    offered = first_bundle.runner.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.observed_snoring",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    answer_request = request(
-        EpisodeType.MORNING_REVIEW,
-        habit_selection=selection,
-        habit_answers=(
-            HabitQuestionAnswer(
-                concept_id="habit.observed_snoring",
-                concept_version="1.0.0",
-                disposition=HabitAnswerDisposition.ANSWERED,
-                value="观察到",
-            ),
-        ),
-    )
-    captured = first_bundle.runner.run(answer_request)
-    assert captured.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
-    first_persistence.connection.close()
-
-    restarted_persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(database, check_same_thread=False)
-    )
-    restarted_model = ScenarioModel(EpisodeType.MORNING_REVIEW)
-    restarted_bundle = runtime_bundle(
-        restarted_model,
-        persistence_store=restarted_persistence,
-    )
-    replay = restarted_bundle.runner.run(answer_request)
-
-    assert replay.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
-    assert replay.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
-    assert replay.habit_capture == captured.habit_capture
-    assert not restarted_model.calls
-
-
-def test_expired_persistent_safety_capture_cannot_replay_or_preempt(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    import sleepagent.product_runtime.questionnaire.service as questionnaire_service
-
-    database = tmp_path / "runner-expired-habit-capture.sqlite3"
-    first_persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(database, check_same_thread=False)
-    )
-    first_bundle = runtime_bundle(
-        ScenarioModel(EpisodeType.MORNING_REVIEW),
-        persistence_store=first_persistence,
-    )
-    offered = first_bundle.runner.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.observed_snoring",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    answer_request = request(
-        EpisodeType.MORNING_REVIEW,
-        habit_selection=selection,
-        habit_answers=(
-            HabitQuestionAnswer(
-                concept_id="habit.observed_snoring",
-                concept_version="1.0.0",
-                disposition=HabitAnswerDisposition.ANSWERED,
-                value="观察到",
-            ),
-        ),
-    )
-    captured = first_bundle.runner.run(answer_request)
-    assert captured.habit_capture is not None
-    expiry = captured.habit_capture.answers[0].episode_valid_until
-    first_persistence.connection.close()
-
-    real_datetime = questionnaire_service.datetime
-
-    class ExpiredClock(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return expiry.astimezone(tz) if tz is not None else expiry
-
-    monkeypatch.setattr(questionnaire_service, "datetime", ExpiredClock)
-    restarted_persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(database, check_same_thread=False)
-    )
-    restarted_model = ScenarioModel(EpisodeType.MORNING_REVIEW)
-    restarted = runtime_bundle(
-        restarted_model,
-        persistence_store=restarted_persistence,
-    )
-
-    result = restarted.runner.run(answer_request)
-
-    capture_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    assert capture_receipt.outcome is InvocationOutcome.FAILED
-    assert result.receipt.episode_type == EpisodeType.MORNING_REVIEW
-    assert result.receipt.status == EpisodeStatus.BLOCKED
-    assert result.receipt.execution_mode == ExecutionMode.SAFE_DEGRADED
-    assert result.receipt.failure_codes == [
-        "required_tool_failed:questionnaire.capture_profile"
-    ]
-    assert result.habit_capture is None
-    assert not result.publication_delivered
-    assert not restarted_model.calls
-
-
-def test_nonterminal_capture_cache_cannot_replay_expired_answer(
-    monkeypatch,
-) -> None:
-    import sleepagent.product_runtime.tooling as product_tooling
-    import sleepagent.product_runtime.questionnaire.service as questionnaire_service
-
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-    offered = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.nap_pattern",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    answer_request = request(
-        EpisodeType.MORNING_REVIEW,
-        habit_selection=selection,
-        habit_answers=(
-            HabitQuestionAnswer(
-                concept_id="habit.nap_pattern",
-                concept_version="1.0.0",
-                disposition=HabitAnswerDisposition.ANSWERED,
-                value="偶尔午睡",
-            ),
-        ),
-    )
-    captured = instance.run(answer_request)
-    assert captured.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert captured.habit_capture is not None
-    expiry = captured.habit_capture.answers[0].episode_valid_until
-    calls_before = len(model.calls)
-
-    real_datetime = questionnaire_service.datetime
-
-    class ExpiredClock(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return expiry.astimezone(tz) if tz is not None else expiry
-
-    monkeypatch.setattr(questionnaire_service, "datetime", ExpiredClock)
-    monkeypatch.setattr(product_tooling, "datetime", ExpiredClock)
-
-    replay = instance.run(answer_request)
-
-    capture_receipt = next(
-        item
-        for item in replay.tool_receipts
-        if item.tool_name == "questionnaire.capture_profile"
-    )
-    assert capture_receipt.outcome is InvocationOutcome.FAILED
-    assert replay.receipt.status == EpisodeStatus.BLOCKED
-    assert replay.receipt.execution_mode == ExecutionMode.SAFE_DEGRADED
-    assert replay.habit_capture is None
-    assert not replay.publication_delivered
-    assert len(model.calls) == calls_before
-
-
-def test_profile_tool_context_is_user_data_and_not_disclosed_to_care() -> None:
-    instance, model = runner(EpisodeType.CARE_PLAN)
-    result = instance.run(
-        request(
-            EpisodeType.CARE_PLAN,
-            profile_purpose="care",
-            profile_relevant_concept_ids=("habit.schedule_constraint",),
-        )
-    )
-    assert result.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    contexts = {
-        AgentId(item["agent_id"]): item
-        for item in model.contexts
-        if item["agent_id"] in {member.value for member in AgentId}
-    }
-    evidence_items = contexts[AgentId.EVIDENCE_REASONING]["items"]
-    assert any(
-        item["key"] == "tool_receipt:profile.read"
-        and item["trust_label"] == "user_data"
-        for item in evidence_items
-    )
-    assert all(
-        item["key"] != "tool_receipt:profile.read"
-        for item in contexts[AgentId.CARE_STRATEGY]["items"]
-    )
-
-
-def test_unavailable_profile_service_degrades_without_blocking_core_answer() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-
-    def unavailable(arguments, context):
-        raise TimeoutError("profile unavailable")
-
-    instance.tool_executor.register_handler("profile.read", unavailable)
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            profile_purpose="evidence",
-            profile_relevant_concept_ids=("habit.nap_pattern",),
-        )
-    )
-    profile_receipt = next(
-        item for item in result.tool_receipts if item.tool_name == "profile.read"
-    )
-    assert profile_receipt.outcome == InvocationOutcome.FAILED
-    assert result.receipt.status == EpisodeStatus.COMPLETE
-    assert result.publication_delivered
-
-
-def test_paired_replay_changes_only_relevant_profile_evidence() -> None:
-    seed_model = ScenarioModel(EpisodeType.MORNING_REVIEW)
-    seed_bundle = runtime_bundle(seed_model)
-    seed_runner = seed_bundle.runner
-    offered = seed_runner.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_question_trigger=HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION,
-            habit_candidate_concept_ids=("habit.nap_pattern",),
-            habit_question_max=1,
-        )
-    )
-    selection = offered.habit_selection
-    assert selection is not None
-    pending = seed_runner.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            habit_selection=selection,
-            habit_answers=(
-                HabitQuestionAnswer(
-                    concept_id="habit.nap_pattern",
-                    concept_version="1.0.0",
-                    disposition=HabitAnswerDisposition.ANSWERED,
-                    value="偶尔午睡",
-                ),
-            ),
-        )
-    )
-    changes = pending.habit_change_set
-    assert changes is not None
-    confirmed_at = datetime.now(timezone.utc)
-    base_snapshot = snapshot()
-    controller = DeterministicCommitController(
-        habit_profile_store=seed_runner.habit_runtime.store
-    )
-    approval = authorize_target(
-        HumanDecisionService(),
-        episode_id="paired-profile",
-        fact_snapshot=base_snapshot,
-        target_kind="habit_profile",
-        target_id=changes.change_set_id,
-        target_hash=changes.manifest_hash,
-        action_scope="write_habit_profile",
-        expires_at=changes.confirmation_expires_at,
-        idempotency_key="paired-profile-commit",
-    )
-    commit = controller.commit_habit_profile(
-        change_set=changes,
-        approval_capability=approval,
-        fact_snapshot=base_snapshot,
-        idempotency_key="paired-profile-commit",
-        now=approval.grant.issued_at,
-    )
-    assert commit.outcome == InvocationOutcome.SUCCEEDED
-    versioned_snapshot = FactSnapshot.create(
-        fact_snapshot_id="snapshot-profile-v1",
-        binding=base_snapshot.binding,
-        source_scope=base_snapshot.source_scope,
-        canonical_data_version=base_snapshot.canonical_data_version,
-        entry_ledger_version=base_snapshot.entry_ledger_version,
-        care_context_version=base_snapshot.care_context_version,
-        memory_context_version=1,
-        source_refs=base_snapshot.source_refs,
-        created_at=base_snapshot.created_at,
-    )
-    model = ProfileAwareScenarioModel(EpisodeType.MORNING_REVIEW)
-    paired_runner = product_runner(model, stores=seed_bundle.stores)
-
-    no_profile_request = request(EpisodeType.MORNING_REVIEW).model_copy(
-        update={
-            "episode_id": "paired-no-profile",
-            "fact_snapshot": versioned_snapshot,
-        }
-    )
-    no_profile = paired_runner.run(no_profile_request)
-    relevant = paired_runner.run(
-        no_profile_request.model_copy(
-            update={
-                "episode_id": "paired-relevant-profile",
-                "profile_purpose": "evidence",
-                "profile_relevant_concept_ids": ("habit.nap_pattern",),
-            }
-        )
-    )
-    unrelated = paired_runner.run(
-        no_profile_request.model_copy(
-            update={
-                "episode_id": "paired-unrelated-profile",
-                "profile_purpose": "evidence",
-                "profile_relevant_concept_ids": (
-                    "habit.environment_preference",
-                ),
-            }
-        )
-    )
-
-    def statement(result):
-        evidence = next(
-            item
-            for item in result.accepted_work_products
-            if item.agent_id == AgentId.EVIDENCE_REASONING
-        )
-        return evidence.payload["claims"][0]["statement"]
-
-    assert statement(no_profile) == statement(unrelated)
-    assert statement(relevant) == "habit.nap_pattern=偶尔午睡"
-    assert "导致" not in statement(relevant)
-
-
-def test_family_observation_requires_later_elder_owned_change_set() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    elder_snapshot = snapshot()
-    family_snapshot = FactSnapshot.create(
-        fact_snapshot_id="snapshot-family-observation",
-        binding=AuthenticatedBinding(
-            actor_id="family-1",
-            subject_id="subject-1",
-            role="family",
-            authorization_scope=("report_observation",),
-        ),
-        source_scope=elder_snapshot.source_scope,
-        canonical_data_version=elder_snapshot.canonical_data_version,
-        source_refs=elder_snapshot.source_refs,
-        created_at=elder_snapshot.created_at,
-    )
-    family_offer_request = request(EpisodeType.MORNING_REVIEW).model_copy(
-        update={
-            "episode_id": "family-observation",
-            "fact_snapshot": family_snapshot,
-            "habit_question_trigger": (
-                HabitQuestionTrigger.EXPLICIT_HABIT_QUESTION
-            ),
-            "habit_candidate_concept_ids": ("habit.nap_pattern",),
-            "habit_question_max": 1,
-        }
-    )
-    offered = instance.run(family_offer_request)
-    selection = offered.habit_selection
-    assert selection is not None
-    current_only = instance.run(
-        family_offer_request.model_copy(
-            update={
-                "habit_question_trigger": None,
-                "habit_candidate_concept_ids": (),
-                "habit_selection": selection,
-                "habit_answers": (
-                    HabitQuestionAnswer(
-                        concept_id="habit.nap_pattern",
-                        concept_version="1.0.0",
-                        disposition=HabitAnswerDisposition.ANSWERED,
-                        value="多数天午睡",
-                    ),
-                ),
-            }
-        )
-    )
-    assert current_only.habit_capture is not None
-    assert current_only.habit_change_set is None
-    assert current_only.receipt.status == EpisodeStatus.COMPLETE
-
-    elder_review = instance.run(
-        request(EpisodeType.MORNING_REVIEW).model_copy(
-            update={
-                "episode_id": "elder-reviews-family-observation",
-                "habit_profile_candidate_answers": (
-                    current_only.habit_capture.answers[0],
-                ),
-                "habit_profile_update_requested": True,
-            }
-        )
-    )
-    changes = elder_review.habit_change_set
-    assert changes is not None
-    assert elder_review.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert changes.candidates[0].origin_semantic == "family_observation"
-
-    committed_at = datetime.now(timezone.utc)
-    approval = authorize_target(
-        HumanDecisionService(),
-        episode_id="family-observation-profile",
-        fact_snapshot=elder_snapshot,
-        target_kind="habit_profile",
-        target_id=changes.change_set_id,
-        target_hash=changes.manifest_hash,
-        action_scope="write_habit_profile",
-        expires_at=changes.confirmation_expires_at,
-        idempotency_key="family-observation-elder-commit",
-    )
-    commit = DeterministicCommitController(
-        habit_profile_store=instance.habit_runtime.store
-    ).commit_habit_profile(
-        change_set=changes,
-        approval_capability=approval,
-        fact_snapshot=elder_snapshot,
-        idempotency_key="family-observation-elder-commit",
-        now=approval.grant.issued_at,
-    )
-    assert commit.outcome == InvocationOutcome.SUCCEEDED
-    assert (
-        instance.habit_runtime.store.get("subject-1").facts[0].origin_semantic
-        == "family_observation"
-    )
-
-
-def test_agent_tool_request_executes_receipt_and_reinvokes_with_feedback() -> None:
-    model = ToolFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-
-    result = instance.run(request(EpisodeType.MORNING_REVIEW))
-
-    assert result.receipt.status == EpisodeStatus.COMPLETE
-    evidence_invocations = [
-        item
-        for item in result.agent_invocations
-        if item.agent_id == AgentId.EVIDENCE_REASONING
-    ]
-    assert len(evidence_invocations) == 2
-    feedback_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "knowledge.retrieve_reviewed"
-    )
-    assert feedback_receipt.caller == AgentId.EVIDENCE_REASONING.value
-    evidence_contexts = [
-        item
-        for item in model.contexts
-        if item["agent_id"] == AgentId.EVIDENCE_REASONING.value
-    ]
-    assert any(
-        context_item["key"] == "tool:knowledge.retrieve_reviewed"
-        for context_item in evidence_contexts[-1]["items"]
-    )
-
-
-def test_care_evidence_request_is_centrally_routed_and_bounded() -> None:
-    model = CollaborationFeedbackScenarioModel(EpisodeType.CARE_PLAN)
-    instance = product_runner(model)
-
-    result = instance.run(request(EpisodeType.CARE_PLAN))
-
-    assert result.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert len(
-        [
-            item
-            for item in result.agent_invocations
-            if item.agent_id == AgentId.EVIDENCE_REASONING
-        ]
-    ) == 2
-    assert len(
-        [
-            item
-            for item in result.agent_invocations
-            if item.agent_id == AgentId.CARE_STRATEGY
-        ]
-    ) == 2
-    assert model.care_rounds == 2
-
-
-def test_user_fact_request_waits_with_exact_request_and_resumes_with_feedback() -> None:
-    model = UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    initial = request(EpisodeType.MORNING_REVIEW)
-
-    first = instance.run(initial)
-
-    assert first.receipt.status == EpisodeStatus.WAITING_USER
-    assert first.pending_user_input is not None
-    assert first.pending_user_input.request_id == "user-fact-bedtime"
-    assert first.pending_user_input.source_agent == AgentId.EVIDENCE_REASONING
-
-    continued = ReexecuteWithAddedFact(
-        request=initial,
-        frozen_result=first,
-        added_fact=ProductUserFactResponse(
-            request_id=first.pending_user_input.request_id,
-            answer="是，比平时晚约一小时。",
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            observed_at=NOW,
-        ),
-    )
-    resumed = instance.reexecute_with_added_fact(continued)
-
-    assert resumed.receipt.status == EpisodeStatus.COMPLETE
-    assert resumed.pending_user_input is None
-    evidence_contexts = [
-        item
-        for item in model.contexts
-        if item["agent_id"] == AgentId.EVIDENCE_REASONING.value
-    ]
-    assert any(
-        item["key"] == "user_fact_response:user-fact-bedtime"
-        for item in evidence_contexts[-1]["items"]
-    )
-
-
-def test_persistent_waiting_continuation_restores_provider_budget() -> None:
-    persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(":memory:", check_same_thread=False)
-    )
-    initial_model = UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
-    initial_bundle = runtime_bundle(
-        initial_model,
-        persistence_store=persistence,
-    )
-    initial = request(EpisodeType.MORNING_REVIEW)
-    frozen = initial_bundle.runner.run(initial)
-    assert frozen.pending_user_input is not None
-    assert frozen.agent_invocations
-    assert all(
-        record.provider_input_tokens > 0
-        for record in frozen.agent_invocations
-    )
-
-    added_fact = ProductUserFactResponse(
-        request_id=frozen.pending_user_input.request_id,
-        answer="是，比平时晚约一小时。",
-        actor_id="actor-1",
-        actor_role="elder",
-        subject_id="subject-1",
-        observed_at=NOW,
-    )
-    command = ReexecuteWithAddedFact(
-        request=initial,
-        frozen_result=frozen,
-        added_fact=added_fact,
-    )
-    resumed_request = command.reexecution_request()
-    assert resumed_request.continuation_lineage is not None
-
-    restarted_bundle = runtime_bundle(
-        UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW),
-        persistence_store=persistence,
-    )
-    assert restarted_bundle.provider_input_ledger.episode_total(
-        initial.episode_id
-    ) == 0
-    recovered = (
-        restarted_bundle.episode_result_finalizer.resolve_frozen_checkpoint(
-            frozen,
-            request=initial,
-            result_request=resumed_request,
-            lineage=resumed_request.continuation_lineage,
-        )
-    )
-
-    assert recovered is None
-    for agent_id in AgentId:
-        assert restarted_bundle.provider_input_ledger.episode_total(
-            initial.episode_id,
-            agent_id,
-        ) == sum(
-            record.provider_input_tokens
-            for record in frozen.agent_invocations
-            if record.agent_id is agent_id
-        )
-
-
-def test_real_runner_rejects_self_rebound_tampered_waiting_user_checkpoint() -> None:
-    model = UserFactFeedbackScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    initial = request(EpisodeType.MORNING_REVIEW)
-    trusted = instance.run(initial)
-    assert trusted.pending_user_input is not None
-    calls_before_resume = list(model.calls)
-    tampered = bind_product_episode_checkpoint(
-        trusted.model_copy(
-            update={
-                "pending_user_input": trusted.pending_user_input.model_copy(
-                    update={
-                        "question_text": (
-                            "Tampered question that was never persisted."
-                        )
-                    }
-                )
-            }
-        )
-    )
-    command = ReexecuteWithAddedFact(
-        request=initial,
-        frozen_result=tampered,
-        added_fact=ProductUserFactResponse(
-            request_id=tampered.pending_user_input.request_id,
-            answer="Yes, later than usual.",
-            actor_id="actor-1",
-            actor_role="elder",
-            subject_id="subject-1",
-            observed_at=NOW,
-        ),
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="frozen continuation does not match the latest persisted lineage",
-    ):
-        instance.reexecute_with_added_fact(command)
-
-    assert model.calls == calls_before_resume
-    [persisted] = instance.episode_result_finalizer.result_store.history(
-        initial.episode_id
-    )
-    assert persisted == trusted
-    assert persisted != tampered
-
-
-def test_every_model_invocation_is_profile_skill_and_prompt_locked() -> None:
-    instance, _ = runner(EpisodeType.MORNING_REVIEW)
-    expected_skill_versions = {
-        package.skill_id: package.version for package in default_skill_packages()
-    }
-    expected_profile_versions = {
-        agent_id: profile.version
-        for agent_id, profile in default_agent_profiles().items()
-    }
-
-    result = instance.run(request(EpisodeType.MORNING_REVIEW))
-
-    assert result.agent_invocations
-    for invocation in result.agent_invocations:
-        assert invocation.profile_hash != "0" * 64
-        assert invocation.skill_package_hash != "0" * 64
-        assert invocation.skill_lock_hash != "0" * 64
-        assert invocation.prompt_bundle_hash != "0" * 64
-        assert invocation.skill_version == expected_skill_versions[
-            invocation.skill_id
-        ]
-        assert invocation.profile_version == expected_profile_versions[
-            invocation.agent_id
-        ]
-
-
-def test_context_assembly_hides_raw_radar_receipts_from_sleepcare_and_care() -> None:
-    instance, model = runner(EpisodeType.CARE_PLAN)
-
-    result = instance.run(request(EpisodeType.CARE_PLAN))
-
-    assert result.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    for context in model.contexts:
-        agent_id = AgentId(context["agent_id"])
-        keys = {item["key"] for item in context["items"]}
-        if agent_id in {AgentId.SLEEP_CARE, AgentId.CARE_STRATEGY}:
-            assert not any(key.startswith("tool:radar.") for key in keys)
-
-
-def test_memory_candidate_requires_bound_confirmation_then_commits() -> None:
-    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    user_text = "请记住我周末希望晚起半小时"
-    episode_request = request(
-        EpisodeType.MORNING_REVIEW,
-        user_text=user_text,
-        idempotency_key="memory-episode",
-    )
-    first = instance.run(episode_request)
-    candidate = first.publication.memory_change_candidates[0]
-    assert first.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert first.pending_confirmations[0].candidate_id == candidate.candidate_id
-    assert (
-        first.pending_confirmations[0].candidate_hash
-        == candidate.candidate_hash
-    )
-    assert first.pending_confirmations[0].action_scope == "commit_memory"
-    assert first.pending_confirmations[0].decision_id is None
-    assert first.pending_confirmations[0].proposal_id is None
-    assert instance.commit_controller.memory_store.get("subject-1").version == 0
-
-    target = first.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-    )
-    with pytest.raises(ValueError, match="explicit authority bindings"):
-        CommitFrozenConfirmedAction(
-            request=episode_request,
-            frozen_result=first,
-        )
-    first = bind_frozen_target(first, target, decision)
-    second = instance.commit_frozen_confirmations(
-        CommitFrozenConfirmedAction(
-            request=episode_request,
-            frozen_result=first,
-        )
-    )
-
-    assert second.receipt.status == EpisodeStatus.COMPLETE
-    assert second.committed_memory_candidate_ids == [candidate.candidate_id]
-    assert instance.commit_controller.memory_store.get("subject-1").version == 1
-
-
-def test_real_runner_rejects_self_rebound_tampered_confirmation_checkpoint() -> None:
-    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    episode_request = request(
-        EpisodeType.MORNING_REVIEW,
-        user_text="请记住我周末希望晚起半小时",
-        idempotency_key="tampered-confirmation-checkpoint",
-    )
-    trusted = instance.run(episode_request)
-    target = trusted.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-    )
-    bound = bind_frozen_target(trusted, target, decision)
-    [bound_target] = bound.pending_confirmations
-    tampered = bind_product_episode_checkpoint(
-        bound.model_copy(
-            update={
-                "pending_confirmations": [
-                    bound_target.model_copy(
-                        update={
-                            "reason": (
-                                "Tampered confirmation reason never persisted."
-                            )
-                        }
-                    )
-                ]
-            }
-        )
-    )
-    command = CommitFrozenConfirmedAction(
-        request=episode_request,
-        frozen_result=tampered,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="frozen continuation does not match the latest persisted lineage",
-    ):
-        instance.commit_frozen_confirmations(command)
-
-    assert instance.commit_controller.memory_store.get("subject-1").version == 0
-    [persisted] = instance.episode_result_finalizer.result_store.history(
-        episode_request.episode_id
-    )
-    assert persisted == trusted
-    assert persisted != tampered
-
-
-def test_unrelated_same_request_terminal_cannot_impersonate_confirmed_descendant() -> None:
-    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    episode_request = request(
-        EpisodeType.MORNING_REVIEW,
-        user_text="请记住我周末希望晚起半小时",
-        idempotency_key="unrelated-same-request-rerun",
-    )
-    frozen = instance.run(episode_request)
-    target = frozen.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-    )
-    bound = bind_frozen_target(frozen, target, decision)
-    unrelated_rerun = frozen.model_copy(
-        update={
-            "continuation_checkpoint_hash": None,
-            "receipt": frozen.receipt.model_copy(
-                update={
-                    "receipt_revision": frozen.receipt.receipt_revision + 1,
-                    "terminal": True,
-                    "status": EpisodeStatus.COMPLETE,
-                    "goal_achieved": True,
-                    "trace_ref": "trace:unrelated-same-request-rerun",
-                }
-            ),
-            "pending_confirmations": [],
-        }
-    )
-    unrelated_terminal = instance.episode_result_finalizer.finalize(
-        unrelated_rerun,
-        subject_id=episode_request.fact_snapshot.binding.subject_id,
-        request=episode_request,
-    )
-    assert unrelated_terminal.receipt.terminal
-    assert unrelated_terminal.continuation_kind is None
-
-    with pytest.raises(
-        ValueError,
-        match="frozen continuation does not match the latest persisted lineage",
-    ):
-        instance.commit_frozen_confirmations(
-            CommitFrozenConfirmedAction(
-                request=episode_request,
-                frozen_result=bound,
-            )
-        )
-
-    assert instance.commit_controller.memory_store.get("subject-1").version == 0
-    assert (
-        instance.episode_result_finalizer.result_store.latest(
-            episode_request.episode_id
-        )
-        == unrelated_terminal
-    )
-
-
-def test_exact_confirmed_terminal_retry_returns_one_durable_result_and_effect() -> None:
-    persistence = RadarPersistenceStore.connect_sqlite(
-        sqlite3.connect(":memory:", check_same_thread=False)
-    )
-    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
-    bundle = runtime_bundle(model, persistence_store=persistence)
-    instance = bundle.runner
-    episode_request = request(
-        EpisodeType.MORNING_REVIEW,
-        user_text="请记住我周末希望晚起半小时",
-        idempotency_key="exact-confirmed-terminal-retry",
-    )
-    frozen = instance.run(episode_request)
-    target = frozen.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-    )
-    bound = bind_frozen_target(frozen, target, decision)
-    command = CommitFrozenConfirmedAction(
-        request=episode_request,
-        frozen_result=bound,
-    )
-
-    first_terminal = instance.commit_frozen_confirmations(command)
-    version_after_first = instance.commit_controller.memory_store.get(
-        "subject-1"
-    ).version
-    retried_terminal = instance.commit_frozen_confirmations(command)
-
-    assert retried_terminal == first_terminal
-    assert (
-        instance.episode_result_finalizer.result_store.latest(
-            episode_request.episode_id
-        )
-        == first_terminal
-    )
-    assert len(
-        instance.episode_result_finalizer.result_store.history(
-            episode_request.episode_id
-        )
-    ) == 2
-    assert len(persistence.list_product_terminal_result_rows()) == 1
-    assert version_after_first == 1
-    assert instance.commit_controller.memory_store.get("subject-1").version == 1
-
-
-def test_executing_confirmation_recovery_uses_frozen_policy_binding() -> None:
-    model = MemoryScenarioModel(EpisodeType.MORNING_REVIEW)
-    instance = product_runner(model)
-    episode_request = request(
-        EpisodeType.MORNING_REVIEW,
-        user_text="请记住我周末希望晚起半小时",
-        idempotency_key="policy-recovery-episode",
-    )
-    frozen = instance.run(episode_request)
-    candidate = frozen.publication.memory_change_candidates[0]
-    target = frozen.pending_confirmations[0]
-    commit_key = (
-        f"{episode_request.idempotency_key}:memory:"
-        f"{candidate.candidate_id}:{candidate.candidate_version}"
-    )
-    original_capability = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-        idempotency_key=commit_key,
-    )
-    decision = instance.human_decisions.get(
-        original_capability.grant.decision_id
-    )
-    frozen = bind_frozen_target(frozen, target, decision)
-
-    upgraded_policy_version = "hitl-policy.test-upgraded"
-    instance.human_decisions.policy.version = upgraded_policy_version
-
-    resumed = instance.commit_frozen_confirmations(
-        CommitFrozenConfirmedAction(
-            request=episode_request,
-            frozen_result=frozen,
-        )
-    )
-
-    assert resumed.receipt.status == EpisodeStatus.COMPLETE
-    assert resumed.committed_memory_candidate_ids == [candidate.candidate_id]
-    committed = instance.human_decisions.get(decision.decision_id)
-    assert committed.status.value == "committed"
-    assert committed.active_grant is not None
-    assert committed.active_grant.policy_version == HITL_POLICY_VERSION
-
-
-def test_care_candidate_confirmation_activates_only_through_commit_controller() -> None:
-    instance, _ = runner(EpisodeType.CARE_PLAN)
-    episode_request = request(
-        EpisodeType.CARE_PLAN,
-        idempotency_key="care-episode",
-    )
-    first = instance.run(episode_request)
-    care = next(
-        item
-        for item in first.accepted_work_products
-        if item.agent_id == AgentId.CARE_STRATEGY
-    )
-    action = CareActionCandidate.model_validate(care.payload["primary_action"])
-    assert first.pending_confirmations[0].candidate_id == action.candidate_id
-    assert first.pending_confirmations[0].candidate_hash == action.candidate_hash
-    assert first.pending_confirmations[0].action_scope == "activate_care"
-    target = first.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=episode_request.episode_id,
-        fact_snapshot=episode_request.fact_snapshot,
-        target_kind=target.target_kind,
-        target_id=target.candidate_id,
-        target_hash=target.candidate_hash,
-        action_scope=target.action_scope,
-        expires_at=target.expires_at,
-    )
-    first = bind_frozen_target(first, target, decision)
-    second = instance.commit_frozen_confirmations(
-        CommitFrozenConfirmedAction(
-            request=episode_request,
-            frozen_result=first,
-        )
-    )
-
-    assert second.receipt.status == EpisodeStatus.COMPLETE
-    assert second.committed_care_candidate_id == action.candidate_id
-    state = instance.commit_controller.care_store.get("subject-1")
-    assert state.version == 1
-    assert state.active_primary_action["candidate_id"] == action.candidate_id
-
-
-def test_external_action_has_separate_safety_confirmation_and_commit_target() -> None:
-    calls: list[dict] = []
-    model = ScenarioModel(EpisodeType.GROUNDED_DIALOGUE)
-    instance = product_runner(
-        model,
-        external_executor=lambda target: (
-            calls.append(target.payload)
-            or ExternalActionExecutionResult(
-                provider="test-gateway",
-                provider_request_id="external-request-1",
-                delivery_status="delivered",
-                executed_at=NOW,
-            )
-        ),
-    )
-    target = ExternalActionTarget(
-        target_id="share-summary-1",
-        tool_name="external.share",
-        actor_id="actor-1",
-        subject_id="subject-1",
-        action_scope="share_sleep_summary",
-        payload={"recipient": "doctor-1", "artifact_ref": "draft-1"},
-        expires_at=VALID_UNTIL,
-    )
-    base_request = request(
-        EpisodeType.GROUNDED_DIALOGUE,
-        personalized=False,
-        external_action=True,
-        external_action_target=target,
-        idempotency_key="external-episode",
-    )
-    first = instance.run(base_request)
-    external_review = next(
-        item.output_payload
-        for item in reversed(first.envelopes)
-        if item.agent_id == AgentId.SAFETY_REVIEW
-        and item.output_payload.review_target_id == target.target_id
-    )
-    assert first.receipt.status == EpisodeStatus.WAITING_CONFIRMATION
-    assert first.pending_confirmations[0].candidate_id == target.target_id
-    assert (
-        first.pending_confirmations[0].candidate_hash
-        == external_review.review_target_hash
-    )
-    assert (
-        first.pending_confirmations[0].action_scope
-        == target.action_scope
-    )
-    assert not calls
-    pending_target = first.pending_confirmations[0]
-    decision = authorize_target(
-        instance.human_decisions,
-        episode_id=base_request.episode_id,
-        fact_snapshot=base_request.fact_snapshot,
-        target_kind=pending_target.target_kind,
-        target_id=pending_target.candidate_id,
-        target_hash=pending_target.candidate_hash,
-        action_scope=pending_target.action_scope,
-        expires_at=pending_target.expires_at,
-    )
-    first = bind_frozen_target(first, pending_target, decision)
-    model_calls_before_commit = len(model.calls)
-    second = instance.commit_frozen_confirmations(
-        CommitFrozenConfirmedAction(
-            request=base_request,
-            frozen_result=first,
-        )
-    )
-
-    assert second.receipt.status == EpisodeStatus.COMPLETE
-    assert second.external_action_receipt_id
-    assert second.external_action_delivery_status == "delivered"
-    assert calls == [target.payload]
-    assert len(model.calls) == model_calls_before_commit
-    observation = observation_from_runtime(
-        second,
-        scenario=AcceptanceScenario.EXTERNAL_ACTION,
-        repetition=1,
-        role="elder",
-        evidence_kind=AcceptanceEvidenceKind.SIMULATED,
-        real_provider=False,
-        domain_reviewed=False,
-    )
-    assert observation.external_action_receipt is not None
-    assert (
-        observation.external_action_receipt.provider_request_id
-        == "external-request-1"
-    )
-    assert (
-        observation.external_action_receipt.target_hash
-        == external_review.review_target_hash
-    )
-
-    declined_request = base_request.model_copy(
-        update={
-            "episode_id": "external-declined",
-            "idempotency_key": "external-declined",
-        }
-    )
-    declined_frozen = instance.run(declined_request)
-    declined_target = declined_frozen.pending_confirmations[0]
-    declined_decision = authorize_target(
-        instance.human_decisions,
-        episode_id=declined_request.episode_id,
-        fact_snapshot=declined_request.fact_snapshot,
-        target_kind=declined_target.target_kind,
-        target_id=declined_target.candidate_id,
-        target_hash=declined_target.candidate_hash,
-        action_scope=declined_target.action_scope,
-        expires_at=declined_target.expires_at,
-        approve=False,
-    )
-    declined_frozen = bind_frozen_target(
-        declined_frozen,
-        declined_target,
-        declined_decision,
-    )
-    declined = instance.commit_frozen_confirmations(
-        CommitFrozenConfirmedAction(
-            request=declined_request,
-            frozen_result=declined_frozen,
-        )
-    )
-    assert declined.receipt.status == EpisodeStatus.COMPLETE
-    assert declined.external_action_receipt_id is None
-    assert calls == [target.payload]
-
-
-def online_night_event(
-    *,
-    absolute_red_flag: bool = False,
-    urgent: bool = False,
-    significant_deviation: bool = False,
-) -> OnlineReasoningEvent:
-    return OnlineReasoningEvent(
-        event_id="event:night-out-of-bed:runner",
-        event_type=OnlineEventType.NIGHT_OUT_OF_BED,
-        occurred_at=NOW,
-        current_signals={
-            "out_of_bed_started_at": "02:00",
-            "out_of_bed_duration_minutes": 18,
-            "respiratory_rate_per_minute": 24,
-        },
-        current_signal_refs=("night:1",),
-        quality_refs=("quality:1",),
-        trend_refs=("range:1",),
-        clinical_context_refs=("clinical-context:1",),
-        safety_factors=MultifactorSafetyInput(
-            absolute_red_flag=absolute_red_flag,
-            absolute_red_flag_codes=(
-                ("severe_respiratory_abnormality",)
-                if absolute_red_flag
-                else ()
-            ),
-            absolute_red_flag_requires_urgent=urgent,
-            relative_baseline_deviation=(
-                RelativeBaselineDeviation.SIGNIFICANT
-                if significant_deviation
-                else RelativeBaselineDeviation.WITHIN_BASELINE
-            ),
-            multi_source_consistency=MultiSourceConsistency.CONSISTENT,
-            data_quality=OnlineDataQuality.USABLE,
-            current_context=(
-                CurrentContextRisk.CONCERNING
-                if significant_deviation
-                else CurrentContextRisk.ROUTINE
-            ),
-            longitudinal_trend=(
-                LongitudinalTrend.WORSENING
-                if significant_deviation
-                else LongitudinalTrend.STABLE
-            ),
-            source_refs=("night:1", "quality:1", "range:1"),
-        ),
-    )
-
-
-def test_online_event_auto_resolves_profile_and_baseline_without_manual_concepts() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-    run_request = request(
-        EpisodeType.MORNING_REVIEW,
-        online_events=(online_night_event(),),
-    )
-    assert run_request.profile_relevant_concept_ids == ()
-    assert run_request.profile_purpose is None
-
-    result = instance.run(run_request)
-
-    receipt_names = [item.tool_name for item in result.tool_receipts]
-    assert "reasoning.resolve_event_context" in receipt_names
-    assert "profile.read" in receipt_names
-    assert "baseline.read" in receipt_names
-    resolution_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "reasoning.resolve_event_context"
-    )
-    assert (
-        resolution_receipt.output["resolution"]["evidence_gap_code"]
-        == "E-NIGHT-OBSERVATION"
-    )
-    baseline_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "baseline.read"
-    )
-    assert baseline_receipt.output["missing_metric_ids"] == [
-        "baseline.night_out_of_bed"
-    ]
-    evidence_context = next(
-        item
-        for item in model.contexts
-        if item["agent_id"] == AgentId.EVIDENCE_REASONING.value
-    )
-    evidence_keys = {item["key"] for item in evidence_context["items"]}
-    assert "tool:reasoning.resolve_event_context" in evidence_keys
-    assert "tool_receipt:profile.read" in evidence_keys
-    assert "tool:baseline.read" in evidence_keys
-
-
-def test_online_risk_escalate_deterministically_invokes_safety() -> None:
-    instance, model = runner(EpisodeType.MORNING_REVIEW)
-
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            online_events=(
-                online_night_event(significant_deviation=True),
-            ),
-        )
-    )
-
-    risk_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "risk.classify_signal"
-    )
-    assert risk_receipt.output["risk_level"] == OnlineRiskLevel.ESCALATE.value
-    assert SafetyReviewModelOutput.__name__ in model.calls
-    assert any(
-        item.agent_id == AgentId.SAFETY_REVIEW
-        for item in result.accepted_work_products
-    )
-
-
-def test_exact_revision_risk_escalate_deterministically_invokes_safety() -> None:
+def test_exact_revision_risk_escalate_routes_care_and_retains_result() -> None:
     instance, model = runner(EpisodeType.MORNING_REVIEW)
     run_request = request(EpisodeType.MORNING_REVIEW)
     tool_inputs = dict(run_request.tool_inputs)
@@ -3328,9 +1787,102 @@ def test_exact_revision_risk_escalate_deterministically_invokes_safety() -> None
     )
     assert risk_receipt.output["risk_level"] == "escalate"
     assert risk_receipt.output["safety_required"] is True
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["candidate_intents"]
+    assert _CareStrategyPlan.__name__ in model.calls
     assert SafetyReviewModelOutput.__name__ in model.calls
+    care = next(
+        item
+        for item in result.accepted_work_products
+        if item.agent_id == AgentId.CARE_STRATEGY
+    )
+    care_candidate = care.payload["primary_action"]["candidate_id"]
+    assert result.publication is not None
+    assert care_candidate in result.publication.care_candidate_refs
     assert any(
         item.agent_id == AgentId.SAFETY_REVIEW
+        for item in result.accepted_work_products
+    )
+
+
+def test_longitudinal_watch_routes_care_without_forcing_safety() -> None:
+    instance, model = runner(EpisodeType.MORNING_REVIEW)
+    base = request(EpisodeType.MORNING_REVIEW)
+    trend_refs = tuple(
+        f"night_episode_revision:replay:{day}" for day in range(24, 27)
+    )
+    trend_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-morning-longitudinal-watch",
+        binding=base.fact_snapshot.binding,
+        source_scope=SourceScope(
+            kind=SourceScopeKind.HISTORICAL_RANGE,
+            as_of=NOW,
+            timezone_name="Asia/Shanghai",
+            date_start=date(2026, 7, 24),
+            date_end=date(2026, 7, 26),
+            valid_night_count=3,
+        ),
+        canonical_data_version=base.fact_snapshot.canonical_data_version,
+        source_refs=(*base.fact_snapshot.source_refs, *trend_refs),
+        created_at=NOW,
+    )
+    tool_inputs = dict(base.tool_inputs)
+    tool_inputs["risk.classify_signal"] = {
+        "data": {
+            "risk_state": "no_reviewed_signal",
+            "data_sufficiency": "sufficient",
+            "health_escalation_allowed": False,
+            "reason_codes": ["no_reviewed_signal_in_source_scope"],
+        },
+        "source_refs": list(trend_snapshot.source_refs),
+        "trend_signals": [
+            {
+                "risk_level": "watch",
+                "confidence": 0.75,
+                "source_refs": list(trend_refs),
+            }
+        ],
+        "trend_observation": {
+            "quality_status": "good",
+            "confidence_label": "normal",
+            "health_conclusion_allowed": True,
+            "source_refs": list(trend_refs),
+        },
+    }
+
+    result = instance.run(
+        base.model_copy(
+            update={
+                "fact_snapshot": trend_snapshot,
+                "tool_inputs": tool_inputs,
+            }
+        )
+    )
+
+    risk_receipts = [
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "risk.classify_signal"
+    ]
+    assert [item.output["risk_level"] for item in risk_receipts] == [
+        "normal",
+        "watch",
+    ]
+    coordination = next(
+        item
+        for item in result.tool_receipts
+        if item.tool_name == "coordination.read_policy"
+    )
+    assert coordination.output["routing"]["risk_level"] == "watch"
+    assert coordination.output["routing"]["candidate_intents"]
+    assert _CareStrategyPlan.__name__ in model.calls
+    assert SafetyReviewModelOutput.__name__ not in model.calls
+    assert any(
+        item.agent_id == AgentId.CARE_STRATEGY
         for item in result.accepted_work_products
     )
 
@@ -3371,210 +1923,1099 @@ def test_failed_required_evidence_tool_degrades_before_evidence_agent() -> None:
     )
 
 
-def test_online_care_path_auto_reads_delivery_preferences_and_policies() -> None:
-    instance, model = runner(EpisodeType.CARE_PLAN)
-
-    result = instance.run(
-        request(
-            EpisodeType.CARE_PLAN,
-            online_events=(online_night_event(),),
-        )
+def _shared_analysis_request(*, partial: bool = False) -> SharedAnalysisRunRequest:
+    base = request(
+        EpisodeType.MORNING_REVIEW,
+        user_text="",
+        binding_role="system",
     )
-
-    profile_receipt = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "profile.read"
+    original = base.fact_snapshot
+    revision_id = "night-revision-shared-1"
+    shared_snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-shared-analysis",
+        binding=original.binding,
+        source_scope=original.source_scope,
+        canonical_data_version=original.canonical_data_version,
+        care_context_version=original.care_context_version,
+        memory_context_version=original.memory_context_version,
+        source_refs=original.source_refs,
+        created_at=NOW,
     )
-    assert set(profile_receipt.output["requested_concept_ids"]) >= {
-        "habit.night_toileting_pattern",
-        "habit.night_activity_assistance_need",
-        "habit.delivery_timing_preference",
-        "habit.delivery_modality_preference",
-        "habit.interruption_burden",
-        "habit.family_notification_preference",
-        "habit.quiet_hours",
-        "habit.voice_volume_preference",
-    }
-    assert {
-        "device.read_delivery_policy",
-        "coordination.read_policy",
-    }.issubset({item.tool_name for item in result.tool_receipts})
-    coordination = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "coordination.read_policy"
+    runtime_request = base.model_copy(
+        update={
+            "episode_id": "product-shared-analysis-1",
+            "fact_snapshot": shared_snapshot,
+        }
     )
-    delivery_policy = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "device.read_delivery_policy"
-    )
-    assert coordination.tool_version == "coordination.read_policy.v2"
-    assert delivery_policy.tool_version == "device.read_delivery_policy.v2"
-    evidence = next(
-        item
-        for item in result.accepted_work_products
-        if item.agent_id is AgentId.EVIDENCE_REASONING
-    )
-    risk_receipts = [
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "risk.classify_signal"
-    ]
-    assert coordination.output["tool_version"] == (
-        "sleepagent-care-coordination-tool.v1"
-    )
-    assert coordination.output["accepted_evidence_ref"] == (
-        evidence.work_product_ref
-    )
-    assert coordination.output["accepted_evidence_hash"] == evidence.target_hash
-    assert coordination.output["risk_receipt_refs"] == [
-        item.tool_invocation_id for item in risk_receipts
-    ]
-    assert coordination.output["routing"]["risk_level"] == "info"
-    assert coordination.output["routing"]["data_quality_status"] == "good"
-    assert coordination.output["routing"]["candidate_intents"] == []
-    assert coordination.output["source_refs"][0] == "coordination-policy.v1"
-    assert coordination.output["policy"] == {
-        "coordination_policy_ref": "coordination-policy.v1",
-        "family_notification_requires_candidate": True,
-    }
-    care_context = next(
-        item
-        for item in model.contexts
-        if item["agent_id"] == AgentId.CARE_STRATEGY.value
-    )
-    care_policy = next(
-        item
-        for item in care_context["items"]
-        if item["key"] == "tool:coordination.read_policy"
-    )
-    assert care_policy["value"] == coordination.output
-
-
-def test_coordination_policy_failure_degrades_before_care_agent() -> None:
-    instance, model = runner(EpisodeType.CARE_PLAN)
-
-    def unavailable(_arguments, _context):
-        raise RuntimeError("coordination policy unavailable")
-
-    instance.tool_executor.register_handler(
-        "coordination.read_policy",
-        unavailable,
-    )
-    result = instance.run(
-        request(
-            EpisodeType.CARE_PLAN,
-            online_events=(online_night_event(),),
-        )
-    )
-
-    assert result.receipt.status == EpisodeStatus.PARTIAL
-    assert not any(
-        item.agent_id is AgentId.CARE_STRATEGY
-        for item in result.envelopes
-    )
-    assert CareStrategyModelOutput.__name__ not in model.calls
-    coordination = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "coordination.read_policy"
-    )
-    assert coordination.outcome is InvocationOutcome.FAILED
-
-
-def test_online_care_escalation_receipt_reaches_care_and_safety() -> None:
-    instance, model = runner(EpisodeType.CARE_PLAN)
-
-    result = instance.run(
-        request(
-            EpisodeType.CARE_PLAN,
-            online_events=(
-                online_night_event(significant_deviation=True),
+    return SharedAnalysisRunRequest(
+        source=SharedAnalysisSourceV1(
+            night_episode_id="night-episode-shared-1",
+            night_episode_revision_id=revision_id,
+            night_episode_revision_number=1,
+            wake_date=date(2026, 7, 26),
+            observation_set_sha256=stable_hash(("observation-1",)),
+            canonical_data_version=shared_snapshot.canonical_data_version,
+            desired_analysis_sha256=stable_hash("desired-analysis"),
+            consumed_context_sha256=stable_hash("consumed-context"),
+            runtime_manifest_sha256=stable_hash("runtime-manifest"),
+            data_sufficiency="partial" if partial else "sufficient",
+            quality_state="partial" if partial else "good",
+            risk_state="unknown" if partial else "no_reviewed_signal",
+            quality_reason_codes=("coverage_limited",) if partial else (),
+            limitations=("设备观察不能替代临床评估。",),
+            partial_caveat=(
+                "昨夜记录覆盖不完整，结论仅反映已观测时段。"
+                if partial
+                else None
             ),
+            reporting_context=ReportingContextV1(
+                timezone_name="Asia/Shanghai",
+                locale="zh-CN",
+                audience="shared",
+                authoritative_start_at_utc=datetime(
+                    2026, 7, 25, 14, 30, tzinfo=timezone.utc
+                ),
+                authoritative_end_at_utc=datetime(
+                    2026, 7, 25, 22, 30, tzinfo=timezone.utc
+                ),
+                local_sleep_date=date(2026, 7, 26),
+                renderer_version="shared_semantic_facts.v1",
+            ),
+        ),
+        runtime_request=runtime_request,
+    )
+
+
+class _CapturingDeterministicModel(DeterministicReplayStructuredAgentModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.schemas: list[type] = []
+        self.message_payloads: list[str] = []
+
+    def generate(self, **kwargs):
+        self.schemas.append(kwargs["schema"])
+        self.message_payloads.append(
+            json.dumps(kwargs["messages"], ensure_ascii=False, sort_keys=True)
         )
+        return super().generate(**kwargs)
+
+
+def _selected_personalization(
+    *,
+    profile_version: int,
+    memory_state_version: int,
+    volatile_suffix: str,
+    memory_value: str = "quiet_room",
+) -> PinnedPersonalizationContext:
+    habit = HabitFact(
+        fact_id="habit-fact:stable-selected",
+        fact_hash="a" * 64,
+        revision=1,
+        operation=HabitOperation.REMEMBER,
+        subject_id="subject-1",
+        concept_id="sleep.context.night_routine",
+        concept_version="1.0.0",
+        value="consistent bedtime",
+        value_hash="b" * 64,
+        confirmed_at=NOW,
+        valid_until=NOW + timedelta(days=90),
+        confirmation_ref="confirmation:habit:stable",
+        change_id="habit-change:stable",
+    )
+    item_value_hash = stable_hash(
+        {
+            "concept_id": "sleep.context.environment",
+            "value_schema_id": "enum.v1",
+            "value_schema_version": "1",
+            "typed_value": memory_value,
+        }
+    )
+    item = MemorySliceItem(
+        revision_ref="memory:environment:v1",
+        concept_id="sleep.context.environment",
+        value_schema_id="enum.v1",
+        value_schema_version="1",
+        typed_value=memory_value,
+        value_hash=item_value_hash,
+        provenance_type=ProvenanceType.ELDER_CONFIRMED,
+        source_ref="user-report:environment",
+        source_scope_kind=SourceScopeKind.HISTORICAL_RANGE,
+        status=MemoryItemStatus.ACTIVE,
+        valid_from=NOW - timedelta(days=30),
+        valid_until=NOW + timedelta(days=30),
+        trust_label=TrustLabel.USER_MEMORY_UNTRUSTED_DATA,
+        verified_evidence=False,
+        verified_medical_fact=False,
+    )
+    query_hash = stable_hash(f"query:{volatile_suffix}")
+    result_hash = stable_hash(
+        {
+            "query_hash": query_hash,
+            "items": [item.model_dump(mode="json")],
+        }
+    )
+    handle = MemoryHandle(
+        handle_id="mh_" + stable_hash(f"handle:{volatile_suffix}")[:48],
+        subject_id="subject-1",
+        actor_id="workload:worker",
+        requesting_agent=AgentId.EVIDENCE_REASONING,
+        purpose=MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT,
+        invocation_id=f"invocation:{volatile_suffix}",
+        query_id=f"memory-query:{volatile_suffix}",
+        query_hash=query_hash,
+        result_hash=result_hash,
+        revision_ref=item.revision_ref,
+        privacy_epoch=1,
+        authorization_epoch=1,
+        created_at=NOW,
+        expires_at=NOW + timedelta(minutes=15),
+    )
+    receipt = MemoryReadReceipt(
+        receipt_id=(
+            "memory-read:" + stable_hash(f"receipt:{volatile_suffix}")[:32]
+        ),
+        query_id=f"memory-query:{volatile_suffix}",
+        query_hash=query_hash,
+        invocation_id=f"invocation:{volatile_suffix}",
+        subject_id="subject-1",
+        requesting_agent=AgentId.EVIDENCE_REASONING,
+        purpose=MemoryPurpose.PERSONAL_EVIDENCE_CONTEXT,
+        result_hash=result_hash,
+        items=(item,),
+        handles=(handle,),
+        candidate_count=1,
+        filter_reason_codes=(),
+        actual_tokens=12,
+        privacy_epoch=1,
+        authorization_epoch=1,
+        completed_at=NOW + timedelta(minutes=len(volatile_suffix)),
+    )
+    profile_hash = stable_hash(
+        {
+            "subject_id": "subject-1",
+            "profile_version": profile_version,
+            "fact_hashes": [habit.fact_hash],
+        }
+    )
+    return PinnedPersonalizationContext(
+        subject_id="subject-1",
+        habit_profile_version=profile_version,
+        habit_profile_hash=profile_hash,
+        habit_facts=(habit,),
+        memory_state_version=memory_state_version,
+        memory_read_receipts=(receipt,),
     )
 
-    coordination = next(
-        item
-        for item in result.tool_receipts
-        if item.tool_name == "coordination.read_policy"
+
+def _stable_shared_request(
+    personalization: PinnedPersonalizationContext,
+) -> SharedAnalysisRunRequest:
+    command = _shared_analysis_request()
+    base = command.runtime_request
+    selected_habit_hash = stable_hash(
+        {
+            "schema_version": "selected_habit_facts.v1",
+            "facts": [
+                {
+                    "fact_id": personalization.habit_facts[0].fact_id,
+                    "fact_hash": personalization.habit_facts[0].fact_hash,
+                }
+            ],
+        }
     )
-    assert coordination.output["routing"]["risk_level"] == "escalate"
-    assert {
-        item["action_code"]
-        for item in coordination.output["routing"]["candidate_intents"]
-    } == {
-        "export_doctor_material",
-        "send_doctor_material",
-        "create_medical_evaluation_card",
+    snapshot = FactSnapshot.create(
+        fact_snapshot_id="snapshot-selected-stable",
+        binding=base.fact_snapshot.binding,
+        source_scope=base.fact_snapshot.source_scope,
+        canonical_data_version=base.fact_snapshot.canonical_data_version,
+        habit_profile_version=1,
+        habit_profile_hash=selected_habit_hash,
+        memory_context_version=0,
+        source_refs=(
+            *base.fact_snapshot.source_refs,
+            personalization.habit_facts[0].fact_id,
+            "consumed-context:stable",
+        ),
+        created_at=NOW,
+    )
+    runtime_request = ProductEpisodeRunRequest(
+        episode_id=base.episode_id,
+        episode_type=base.episode_type,
+        objective=base.objective,
+        fact_snapshot=snapshot,
+        tool_inputs=base.tool_inputs,
+        personalized=True,
+        personalization=personalization,
+        personalization_projection_version="selected_stable.v1",
+    )
+    return command.model_copy(update={"runtime_request": runtime_request})
+
+
+def _desired_identity_for_selected(
+    personalization: PinnedPersonalizationContext,
+    *,
+    runtime_manifest_sha256: str | None = None,
+) -> tuple[str, str]:
+    consumed = _consumed_context_sha256(
+        personalization,
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+    )
+    scope = UowScope(
+        namespace_id="replay:test",
+        data_mode="replay",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="worker-test",
+        namespace_generation=1,
+        run_id="run-test",
+        arm_id="arm-test",
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-test",
+    )
+    source = SimpleNamespace(
+        night_episode_id="night-1",
+        night_episode_revision_id="revision-1",
+        night_episode_revision_number=1,
+        observation_set_sha256=stable_hash("observations"),
+        policy_versions={"quality": "v1", "risk": "v1"},
+        facts=SimpleNamespace(
+            canonical_data_version="canonical-v1",
+            provider_quality_summary=lambda: {
+                "quality_state": "good",
+                "data_sufficiency": "sufficient",
+            },
+            provider_risk_summary=lambda: {
+                "risk_state": "no_reviewed_signal",
+                "health_escalation_allowed": False,
+            },
+        ),
+    )
+    return consumed, _desired_analysis_sha256(
+        scope=scope,
+        source=source,
+        consumed_context_sha256=consumed,
+        runtime_manifest_sha256=(
+            stable_hash("runtime-manifest")
+            if runtime_manifest_sha256 is None
+            else runtime_manifest_sha256
+        ),
+    )
+
+
+def test_corrected_runner_identity_prevents_old_shared_analysis_reuse() -> None:
+    personalization = _selected_personalization(
+        profile_version=2,
+        memory_state_version=3,
+        volatile_suffix="window-version",
+    )
+    assert PRODUCT_EPISODE_RUNNER_VERSION == "sleepagent-product-runner.v49"
+    current_runtime = stable_hash(
+        {"runner_version": PRODUCT_EPISODE_RUNNER_VERSION}
+    )
+    old_runtime = stable_hash(
+        {"runner_version": "sleepagent-product-runner.v48"}
+    )
+
+    _, current_desired = _desired_identity_for_selected(
+        personalization,
+        runtime_manifest_sha256=current_runtime,
+    )
+    _, old_desired = _desired_identity_for_selected(
+        personalization,
+        runtime_manifest_sha256=old_runtime,
+    )
+
+    assert current_runtime != old_runtime
+    assert current_desired != old_desired
+
+
+def test_selected_context_ignores_volatile_l2_identity_in_every_provider_hash() -> None:
+    first_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=3,
+            volatile_suffix="first",
+    )
+    second_personalization = _selected_personalization(
+            profile_version=200,
+            memory_state_version=300,
+            volatile_suffix="second",
+    )
+    first_request = _stable_shared_request(first_personalization)
+    second_request = _stable_shared_request(second_personalization)
+    first_model = _CapturingDeterministicModel()
+    second_model = _CapturingDeterministicModel()
+    first_runner = build_deterministic_product_runtime_bundle(
+        model=first_model
+    ).runner
+    second_runner = build_deterministic_product_runtime_bundle(
+        model=second_model
+    ).runner
+
+    first_result = first_runner.analyze_shared(first_request)
+    second_result = second_runner.analyze_shared(second_request)
+
+    assert product_episode_request_hash(
+        first_request.runtime_request
+    ) == product_episode_request_hash(second_request.runtime_request)
+    assert _desired_identity_for_selected(
+        first_personalization
+    ) == _desired_identity_for_selected(second_personalization)
+    assert first_model.message_payloads == second_model.message_payloads
+    assert [item.context_hash for item in first_result.agent_invocations] == [
+        item.context_hash for item in second_result.agent_invocations
+    ]
+    provider_input = "\n".join(first_model.message_payloads)
+    assert "memory-read:" not in provider_input
+    assert "memory-query:" not in provider_input
+    assert "invocation:first" not in provider_input
+    assert "habit-fact:stable-selected" not in provider_input
+    assert "memory:environment:v1" not in provider_input
+
+
+def test_relevant_selected_memory_changes_request_and_provider_hashes() -> None:
+    first_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=3,
+            volatile_suffix="first",
+            memory_value="quiet_room",
+    )
+    changed_personalization = _selected_personalization(
+            profile_version=2,
+            memory_state_version=4,
+            volatile_suffix="changed",
+            memory_value="white_noise",
+    )
+    first_request = _stable_shared_request(first_personalization)
+    changed_request = _stable_shared_request(changed_personalization)
+    first_model = _CapturingDeterministicModel()
+    changed_model = _CapturingDeterministicModel()
+
+    build_deterministic_product_runtime_bundle(
+        model=first_model
+    ).runner.analyze_shared(first_request)
+    build_deterministic_product_runtime_bundle(
+        model=changed_model
+    ).runner.analyze_shared(changed_request)
+
+    assert product_episode_request_hash(
+        first_request.runtime_request
+    ) != product_episode_request_hash(changed_request.runtime_request)
+    assert _desired_identity_for_selected(
+        first_personalization
+    ) != _desired_identity_for_selected(changed_personalization)
+    assert first_model.message_payloads != changed_model.message_payloads
+
+
+def test_shared_fact_snapshot_does_not_promote_memory_to_evidence_sources() -> None:
+    personalization = _selected_personalization(
+        profile_version=2,
+        memory_state_version=3,
+        volatile_suffix="evidence-boundary",
+    )
+    consumed, _desired = _desired_identity_for_selected(personalization)
+    scope = UowScope(
+        namespace_id="replay:test",
+        data_mode="replay",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="worker-test",
+        namespace_generation=1,
+        run_id="run-test",
+        arm_id="arm-test",
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-test",
+    )
+    source = SimpleNamespace(
+        subject_id="subject-1",
+        episode=SimpleNamespace(
+            wake_at=NOW,
+            deterministic_close_deadline_at=NOW + timedelta(hours=1),
+        ),
+        facts=SimpleNamespace(
+            data_mode=DataMode.REPLAY,
+            local_sleep_date=NOW.date().isoformat(),
+            timezone_name="Asia/Shanghai",
+            longitudinal_risk_context=None,
+            canonical_data_version="canonical-v1",
+            deterministic_quality={"reason_codes": []},
+            deterministic_risk={"reason_codes": []},
+            agent_source_refs=lambda: ("canonical-night:sha256:safe",),
+        ),
+    )
+
+    snapshot = _fact_snapshot_for_shared(
+        scope=scope,
+        source=source,
+        fact_snapshot_id="snapshot-evidence-boundary",
+        created_at=NOW + timedelta(days=1),
+        consumed_context_sha256=consumed,
+        personalization=personalization,
+    )
+
+    memory_item = personalization.memory_read_receipts[0].items[0]
+    assert memory_item.revision_ref not in snapshot.source_refs
+    assert personalization.memory_read_receipts[0].receipt_id not in (
+        snapshot.source_refs
+    )
+    assert personalization.memory_read_receipts[0].handles[0].handle_id not in (
+        snapshot.source_refs
+    )
+    assert personalization.habit_facts[0].fact_id in snapshot.source_refs
+    assert snapshot.created_at == NOW
+
+
+def test_shared_analysis_stops_before_communication_and_result_store() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    command = _shared_analysis_request()
+
+    shared = instance.analyze_shared(command)
+
+    assert type(shared).model_validate(shared.model_dump(mode="json")) == shared
+    assert shared.evidence.agent_id is AgentId.EVIDENCE_REASONING
+    assert shared.doctor_projection_allowed is True
+    assert shared.safety is not None
+    assert shared.safety.agent_id is AgentId.SAFETY_REVIEW
+    assert WorkProductKind.COMMUNICATION not in shared.accepted_products()
+    assert SleepCareModelOutput not in model.schemas
+    assert _SleepCareContentPlan not in model.schemas
+    assert instance.result_store.history(command.episode_id) == []
+    assert all(item.agent_id is not AgentId.SLEEP_CARE for item in shared.envelopes)
+    provider_input = "\n".join(model.message_payloads)
+    assert command.source.night_episode_id not in provider_input
+    assert command.source.night_episode_revision_id not in provider_input
+
+
+def test_shared_role_projections_are_deterministic_and_keep_partial_caveat() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+
+    first = build_shared_role_projections(shared)
+    second = build_shared_role_projections(shared)
+
+    assert first == second
+    assert tuple(item.role for item in first) == (
+        ReportRole.ELDER,
+        ReportRole.FAMILY,
+        ReportRole.DOCTOR,
+    )
+    assert {item.source_shared_analysis_sha256 for item in first} == {
+        shared.shared_analysis_sha256
     }
-    care_context = next(
-        item
-        for item in model.contexts
-        if item["agent_id"] == AgentId.CARE_STRATEGY.value
+    assert all(item.state is RoleProjectionState.READY for item in first)
+    assert all(
+        shared.source.partial_caveat in item.caveats
+        and shared.source.partial_caveat in (item.text or "")
+        for item in first
     )
+    assert len({item.projection_sha256 for item in first}) == 3
+    assert tuple(
+        type(item).model_validate(item.model_dump(mode="json")) for item in first
+    ) == first
+
+
+def test_reporting_context_converts_cross_midnight_and_dst_with_zoneinfo() -> None:
+    shanghai = ReportingContextV1(
+        timezone_name="Asia/Shanghai",
+        authoritative_start_at_utc=datetime(
+            2026, 8, 25, 17, 35, tzinfo=timezone.utc
+        ),
+        authoritative_end_at_utc=datetime(
+            2026, 8, 25, 22, 30, tzinfo=timezone.utc
+        ),
+        local_sleep_date=date(2026, 8, 26),
+        renderer_version="shared_semantic_facts.v1",
+    )
+    assert shanghai.authoritative_start_at_utc.astimezone(
+        ZoneInfo("Asia/Shanghai")
+    ).strftime("%Y-%m-%d %H:%M") == "2026-08-26 01:35"
+
+    los_angeles = ReportingContextV1(
+        timezone_name="America/Los_Angeles",
+        authoritative_start_at_utc=datetime(
+            2026, 11, 1, 8, 30, tzinfo=timezone.utc
+        ),
+        authoritative_end_at_utc=datetime(
+            2026, 11, 1, 9, 30, tzinfo=timezone.utc
+        ),
+        local_sleep_date=date(2026, 11, 1),
+        renderer_version="shared_semantic_facts.v1",
+    )
+    local_start = los_angeles.authoritative_start_at_utc.astimezone(
+        ZoneInfo("America/Los_Angeles")
+    )
+    local_end = los_angeles.authoritative_end_at_utc.astimezone(
+        ZoneInfo("America/Los_Angeles")
+    )
+    assert local_start.utcoffset() != local_end.utcoffset()
+    assert local_start.fold == 0
+    assert local_end.fold == 1
+
+
+def test_corrected_renderer_cannot_reuse_old_projection_identity() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    semantic_hash = shared.shared_analysis_sha256
+
+    first = build_shared_role_projections(
+        shared,
+        renderer_version=ZH_CN_ROLE_RENDERER_VERSION,
+    )
+    second = build_shared_role_projections(
+        shared,
+        renderer_version="zh_cn_role_renderer.v1",
+    )
+
+    assert ZH_CN_ROLE_RENDERER_VERSION == "zh_cn_role_renderer.v2"
+    assert shared.semantic_hash_version == "structured_facts.v1"
+    assert shared.shared_analysis_sha256 == semantic_hash
+    assert {item.projection_sha256 for item in first}.isdisjoint(
+        item.projection_sha256 for item in second
+    )
+    assert all(
+        item.reporting_context is not None
+        and item.reporting_context.renderer_version == ZH_CN_ROLE_RENDERER_VERSION
+        for item in first
+    )
+
+
+def test_structured_facts_drive_zh_cn_roles_without_english_claim_leakage() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    command = _shared_analysis_request()
+    night_request = command.runtime_request.model_copy(
+        update={
+            "tool_inputs": {
+                **command.runtime_request.tool_inputs,
+                "radar.get_night_evidence": {
+                    "data": {
+                        "deterministic_night_summary": {
+                            "schema_version": (
+                                "product_deterministic_night_summary.v2"
+                            ),
+                            "sleep_window_start": (
+                                "2026-07-25T17:35:00+00:00"
+                            ),
+                            "sleep_window_end": (
+                                "2026-07-25T18:41:01.996000+00:00"
+                            ),
+                            "sleep_window_minutes": 66.0,
+                            "stage_minutes": {
+                                "light": 43.0,
+                                "deep": 13.0,
+                                "rem": 10.0,
+                            },
+                            "vital_centers": {
+                                "heart_rate": 63,
+                                "respiratory_rate": 15,
+                            },
+                            "bed_exit_count": 2,
+                        }
+                    }
+                },
+            }
+        }
+    )
+    shared = instance.analyze_shared(
+        command.model_copy(update={"runtime_request": night_request})
+    )
+    structured = shared.model_copy(
+        update={
+            "summary_lines": ("English claim must not leak",),
+        }
+    )
+    stage_start = datetime(2026, 7, 25, 17, 35, tzinfo=timezone.utc)
+    stage_end = datetime(
+        2026, 7, 25, 18, 41, 1, 996_000, tzinfo=timezone.utc
+    )
+    atoms = build_elder_message_atoms(
+        structured,
+        ProductElderPresentationFacts(
+            timezone_name="Asia/Shanghai",
+            episode_observation_start_at=datetime(
+                2026, 7, 25, 14, 30, tzinfo=timezone.utc
+            ),
+            episode_observation_end_at=datetime(
+                2026, 7, 25, 22, 30, tzinfo=timezone.utc
+            ),
+            episode_observation_minutes=480.0,
+            episode_local_display="7月25日 22:30–7月26日 06:30",
+            vendor_stage_span_start_at=stage_start,
+            vendor_stage_span_end_at=datetime(
+                2026, 7, 25, 18, 55, tzinfo=timezone.utc
+            ),
+            vendor_stage_span_minutes=80.0,
+            vendor_stage_local_display="01:35–02:55",
+            presented_stage_start_at=stage_start,
+            presented_stage_end_at=stage_end,
+            presented_stage_local_display="01:35–02:41",
+            stage_observation_minutes=66.0,
+            classified_stage_minutes={
+                "light": 43.0,
+                "deep": 13.0,
+                "rem": 10.0,
+            },
+            classified_totals_state="reliable",
+            stage_boundary_state="constrained_to_episode",
+            out_of_episode_interval_count=1,
+            source_refs=("governed_evidence_set:test",),
+        ),
+    )
+    elder, family, doctor = build_shared_role_projections(
+        structured,
+        elder_message_atoms=atoms,
+    )
+
     assert any(
-        item["key"] == "tool:coordination.read_policy"
-        and item["value"] == coordination.output
-        for item in care_context["items"]
+        item.metric_id == "sleep_window_minutes"
+        for item in shared.semantic_facts
     )
-    assert AgentId.SAFETY_REVIEW in {
-        item.agent_id for item in result.envelopes
+    by_metric = {
+        item.metric_id: item
+        for item in shared.semantic_facts
+        if item.fact_kind == "direct_metric"
     }
-    assert [item.agent_id for item in result.envelopes] == [
-        AgentId.EVIDENCE_REASONING,
-        AgentId.CARE_STRATEGY,
-        AgentId.SAFETY_REVIEW,
-        AgentId.SLEEP_CARE,
-    ]
-    assert [
-        (item.agent_id, item.skill_id) for item in result.agent_invocations
-    ] == [
-        (AgentId.SLEEP_CARE, "plan_episode"),
-        (AgentId.EVIDENCE_REASONING, "interpret_scoped_evidence"),
-        (AgentId.SLEEP_CARE, "evaluate_work_product"),
-        (AgentId.CARE_STRATEGY, "propose_single_care_action"),
-        (AgentId.SLEEP_CARE, "evaluate_work_product"),
-        (AgentId.SAFETY_REVIEW, "review_action_and_publication"),
-        (AgentId.SLEEP_CARE, "evaluate_work_product"),
-        (AgentId.SLEEP_CARE, "explain_for_elder"),
-        (AgentId.SLEEP_CARE, "evaluate_work_product"),
-    ]
-    assert [item.tool_name for item in result.tool_receipts] == [
-        "care.read_catalog",
-        "care.read_state",
-        "policy.read",
-        "runtime.build_fact_snapshot",
-        "reasoning.resolve_event_context",
-        "profile.read",
-        "baseline.read",
-        "device.read_delivery_policy",
-        "risk.classify_signal",
-        "coordination.read_policy",
-    ]
+    assert by_metric["sleep_stage_coverage_start_at"].value == (
+        "2026-07-25T17:35:00+00:00"
+    )
+    assert by_metric["sleep_stage_coverage_end_at"].value == (
+        "2026-07-25T18:41:01.996000+00:00"
+    )
+    assert all(
+        fact.window == "effective_sleep_stage_coverage"
+        for metric_id, fact in by_metric.items()
+        if metric_id == "sleep_window_minutes"
+        or metric_id.startswith("sleep_stage")
+    )
+    assert "01:35–02:41" in (elder.text or "")
+    for projection in (family, doctor):
+        assert "07月26日 01:35至02:41" in (projection.text or "")
+    for projection in (elder, family, doctor):
+        assert "66分钟" in (projection.text or "")
+        assert "记录时段：66分钟" not in (projection.text or "")
+    assert "观测窗口：07月25日 22:30至07月26日 06:30" in (
+        family.text or ""
+    )
+    assert "睡眠分期覆盖：07月26日 01:35至02:41，共约66分钟" in (
+        family.text or ""
+    )
+    assert "浅睡：43分钟" in (doctor.text or "")
+    assert "深睡：13分钟" in (doctor.text or "")
+    assert "REM 睡眠：10分钟" in (doctor.text or "")
+    assert "浅睡约43分钟" in (elder.text or "")
+    assert "深睡约13分钟" in (elder.text or "")
+    assert "REM 睡眠约10分钟" in (elder.text or "")
+    assert "平均心率：63bpm" in (doctor.text or "")
+    assert "质量限定：完整" in (doctor.text or "")
+    assert "quality" not in (doctor.text or "").lower()
+    assert "good" not in (doctor.text or "").lower()
+    for projection in (elder, family, doctor):
+        if projection.text is not None:
+            assert "English claim must not leak" not in projection.text
 
 
-def test_online_urgent_red_flag_preempts_all_model_agents() -> None:
+def test_semantic_facts_reject_duration_inconsistent_with_stage_boundaries() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    command = _shared_analysis_request()
+    night_request = command.runtime_request.model_copy(
+        update={
+            "tool_inputs": {
+                **command.runtime_request.tool_inputs,
+                "radar.get_night_evidence": {
+                    "data": {
+                        "deterministic_night_summary": {
+                            "schema_version": (
+                                "product_deterministic_night_summary.v2"
+                            ),
+                            "sleep_window_start": (
+                                "2026-07-25T17:35:00+00:00"
+                            ),
+                            "sleep_window_end": (
+                                "2026-07-25T18:41:00+00:00"
+                            ),
+                            "sleep_window_minutes": 80.0,
+                            "stage_minutes": {"light": 43.0},
+                        }
+                    }
+                },
+            }
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="sleep-stage coverage duration is inconsistent",
+    ):
+        instance.analyze_shared(
+            command.model_copy(update={"runtime_request": night_request})
+        )
+
+
+def test_elder_projection_is_localized_chinese_dense_and_nonduplicative() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    stage_start = episode_start + timedelta(minutes=35)
+    stage_end = stage_start + timedelta(minutes=80)
+    presentation = ProductElderPresentationFacts(
+        timezone_name="Asia/Shanghai",
+        episode_observation_start_at=episode_start,
+        episode_observation_end_at=episode_start + timedelta(hours=8),
+        episode_observation_minutes=480,
+        episode_local_display="01:00–09:00",
+        vendor_stage_span_start_at=stage_start,
+        vendor_stage_span_end_at=stage_end,
+        vendor_stage_span_minutes=80,
+        vendor_stage_local_display="01:35–02:55",
+        presented_stage_start_at=stage_start,
+        presented_stage_end_at=stage_end,
+        presented_stage_local_display="01:35–02:55",
+        stage_observation_minutes=80,
+        classified_stage_minutes={"light": 57, "deep": 13, "rem": 10},
+        classified_totals_state="reliable",
+        stage_boundary_state="within_episode",
+        bed_exit_count=0,
+        source_refs=("governed_evidence_set:test",),
+    )
+    atoms = build_elder_message_atoms(shared, presentation)
+
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
+
+    assert elder.text is not None
+    assert "设备在01:35–02:55记录到约80分钟的睡眠分期数据" in elder.text
+    assert "浅睡约57分钟" in elder.text
+    assert "深睡约13分钟" in elder.text
+    assert "REM 睡眠约10分钟" in elder.text
+    assert "您睡了" not in elder.text
+    assert "sleep window" not in elder.text.lower()
+    assert "UTC" not in elder.text
+    assert "sample" not in elder.text.lower()
+    assert "pull-backfilled" not in elder.text
+    assert "reconstructed" not in elder.text.lower()
+    assert "movement" not in elder.text.lower()
+    assert "%" not in elder.text
+    assert "HIPAA" not in elder.text
+    assert "FDA" not in elder.text
+    assert "本次已验收信息：" not in elder.text
+    assert elder.text.count("数据不完整") == 1
+    assert elder.text.count("不构成诊断或医疗建议") == 1
+    assert elder.presentation_authority_sha256 is not None
+
+
+def test_elder_projection_flags_constrained_bounds_and_hides_overlap_totals() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    stage_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    presentation = ProductElderPresentationFacts(
+        timezone_name="Asia/Shanghai",
+        presented_stage_start_at=stage_start,
+        presented_stage_end_at=stage_start + timedelta(hours=4),
+        presented_stage_local_display="01:00–05:00",
+        stage_observation_minutes=90,
+        classified_stage_minutes={"light": 60, "deep": 60},
+        classified_totals_state="overlap_ambiguous",
+        stage_boundary_state="constrained_to_episode",
+        out_of_episode_interval_count=1,
+        source_refs=("governed_evidence_set:test",),
+    )
+
+    atoms = build_elder_message_atoms(shared, presentation)
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
+
+    assert elder.text is not None
+    assert "按夜间时段范围" in elder.text
+    assert "分期区间存在重叠" in elder.text
+    assert "浅睡约60分钟" not in elder.text
+    assert "深睡约60分钟" not in elder.text
+    assert elder.text.count("数据不完整") == 1
+
+
+def test_elder_rewrite_schema_cannot_carry_provider_authored_facts_or_numbers() -> None:
+    with pytest.raises(ValueError):
+        _ElderNarrativeRewritePlan.model_validate(
+            {
+                "status": "completed",
+                "selections": [],
+                "text": "新增了不受支持的事实 999。",
+            }
+        )
+
+
+def _policy_routed_care_shared_request() -> SharedAnalysisRunRequest:
+    command = _shared_analysis_request()
+    tool_inputs = dict(command.runtime_request.tool_inputs)
+    refs = list(command.runtime_request.fact_snapshot.source_refs)
+    tool_inputs["risk.classify_signal"] = {
+        "data": {
+            "risk_state": "no_reviewed_signal",
+            "data_sufficiency": "sufficient",
+            "health_escalation_allowed": False,
+            "reason_codes": ["no_reviewed_signal_in_source_scope"],
+        },
+        "source_refs": refs,
+        "trend_signals": [
+            {
+                "risk_level": "watch",
+                "confidence": 0.75,
+                "source_refs": refs,
+            }
+        ],
+        "trend_observation": {
+            "quality_status": "good",
+            "confidence_label": "normal",
+            "health_conclusion_allowed": True,
+            "source_refs": refs,
+        },
+    }
+    return command.model_copy(
+        update={
+            "runtime_request": command.runtime_request.model_copy(
+                update={"tool_inputs": tool_inputs}
+            )
+        }
+    )
+
+
+def test_shared_analysis_runs_care_only_when_deterministic_policy_routes_it() -> None:
     instance, model = runner(EpisodeType.MORNING_REVIEW)
 
-    result = instance.run(
-        request(
-            EpisodeType.MORNING_REVIEW,
-            online_events=(
-                online_night_event(
-                    absolute_red_flag=True,
-                    urgent=True,
-                ),
-            ),
-        )
+    shared = instance.analyze_shared(_policy_routed_care_shared_request())
+
+    assert shared.care is not None
+    strategy = CareStrategy.model_validate(shared.care.payload)
+    assert strategy.primary_action is not None
+    assert strategy.primary_action.title in shared.summary_lines
+    assert model.calls.count(_CareStrategyPlan.__name__) == 1
+
+
+def test_shared_safety_failure_blocks_doctor_without_losing_elder_family() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        fail_agent=AgentId.SAFETY_REVIEW,
     )
 
-    assert result.receipt.episode_type == EpisodeType.URGENT_BOUNDARY
-    assert result.receipt.execution_mode == ExecutionMode.DETERMINISTIC_ONLY
-    assert model.calls == []
-    risk_receipt = result.tool_receipts[0]
-    assert risk_receipt.tool_name == "risk.classify_signal"
-    assert risk_receipt.output["risk_level"] == OnlineRiskLevel.ESCALATE.value
-    assert risk_receipt.output["personalization_effect"] == "explanation_only"
+    shared = instance.analyze_shared(_policy_routed_care_shared_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.evidence is not None
+    assert shared.care is not None
+    assert shared.safety is None
+    assert shared.doctor_failure_codes == ("DOCTOR_SAFETY_UNAVAILABLE",)
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+
+
+def test_doctor_projection_blocks_without_approved_safety() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        fail_agent=AgentId.SAFETY_REVIEW,
+    )
+
+    shared = instance.analyze_shared(_shared_analysis_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.doctor_projection_allowed is False
+    assert shared.safety is None
+    assert shared.doctor_failure_codes
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+    assert doctor.text is None
+
+
+def test_doctor_projection_blocks_but_retains_accepted_nonapprove_safety() -> None:
+    instance, _ = runner(
+        EpisodeType.MORNING_REVIEW,
+        safety_verdicts=[SafetyVerdict.BLOCK],
+    )
+
+    shared = instance.analyze_shared(_shared_analysis_request())
+    elder, family, doctor = build_shared_role_projections(shared)
+
+    assert shared.safety is not None
+    decision = SafetyDecision.model_validate(shared.safety.payload)
+    assert decision.verdict is SafetyVerdict.BLOCK
+    assert shared.doctor_projection_allowed is False
+    assert shared.doctor_failure_codes == ("DOCTOR_SAFETY_NOT_APPROVED",)
+    assert elder.state is RoleProjectionState.READY
+    assert family.state is RoleProjectionState.READY
+    assert doctor.state is RoleProjectionState.POLICY_BLOCKED
+
+
+def _elder_narrative_request(
+    shared,
+    *,
+    episode_id: str = "product-elder-narrative-1",
+) -> ElderNarrativeRequest:
+    atoms = build_elder_message_atoms(
+        shared,
+        ProductElderPresentationFacts(
+            timezone_name="Asia/Shanghai",
+            classified_totals_state="reliable",
+            stage_boundary_state="episode_bounds_unavailable",
+            source_refs=("governed_evidence_set:test",),
+        ),
+    )
+    elder = build_shared_role_projections(
+        shared,
+        elder_message_atoms=atoms,
+    )[0]
+    runtime_request = _shared_analysis_request().runtime_request.model_copy(
+        update={
+            "episode_id": episode_id,
+            "fact_snapshot": _shared_analysis_request().runtime_request.fact_snapshot,
+            "audience_role": "elder",
+        }
+    )
+    assert runtime_request.fact_snapshot.fact_snapshot_hash == shared.fact_snapshot_hash
+    return ElderNarrativeRequest.create(
+        runtime_request=runtime_request,
+        shared_analysis=shared,
+        elder_projection=elder,
+        message_atoms=atoms,
+        render_manifest_sha256=stable_hash("elder-render-manifest"),
+    )
+
+
+def test_elder_narrative_uses_exactly_one_content_plan_call() -> None:
+    model = _CapturingDeterministicModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    schemas_before = list(model.schemas)
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    narrative_schemas = model.schemas[len(schemas_before) :]
+    assert narrative.state is ElderNarrativeState.READY
+    assert type(narrative).model_validate(
+        narrative.model_dump(mode="json")
+    ) == narrative
+    assert narrative.communication is not None
+    assert narrative.text == narrative.communication.text
+    assert narrative_schemas == [_ElderNarrativeRewritePlan]
+    assert instance.result_store.history(command.episode_id) == []
+    assert all(
+        binding.rendered_text in narrative.text
+        for binding in narrative.communication.semantic_bindings
+    )
+    narrative_provider_input = model.message_payloads[-1]
+    packet = EvidencePacket.model_validate(shared.evidence.payload)
+    assert all(
+        claim.statement not in narrative_provider_input
+        for claim in packet.claims
+    )
+    assert "sample_counts" not in narrative_provider_input
+    assert "pull_backfilled_measurement_count" not in narrative_provider_input
+
+
+class _RequestingNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
+            self.schemas.append(kwargs["schema"])
+            return _ElderNarrativeRewritePlan(
+                status=WorkProductStatus.NEEDS_INPUT,
+            )
+        return super().generate(**kwargs)
+
+
+class _UnknownAtomNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
+            self.schemas.append(kwargs["schema"])
+            return _ElderNarrativeRewritePlan(
+                status=WorkProductStatus.COMPLETED,
+                selections=[
+                    _ElderNarrativeRenderingSelection(
+                        atom_id="elder-atom:" + "0" * 32,
+                        rendering_id="invented.rendering",
+                    )
+                ],
+            )
+        return super().generate(**kwargs)
+
+
+class _OmitPartialAtomNarrativeModel(_CapturingDeterministicModel):
+    def generate(self, **kwargs):
+        plan = super().generate(**kwargs)
+        if kwargs["schema"] is _ElderNarrativeRewritePlan:
+            assert isinstance(plan, _ElderNarrativeRewritePlan)
+            assert len(plan.selections) == 4
+            return plan.model_copy(
+                update={"selections": [
+                    *plan.selections[:2],
+                    plan.selections[-1],
+                ]}
+            )
+        return plan
+
+
+def test_elder_narrative_rejects_requests_and_returns_exact_fallback() -> None:
+    model = _RequestingNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    command = _elder_narrative_request(
+        shared,
+        episode_id="product-elder-narrative-fallback",
+    )
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.communication is None
+    assert narrative.invocation is None
+    assert narrative.failure_codes == (
+        "ELDER_NARRATIVE_INVALID",
+    )
+
+
+def test_elder_rewrite_unknown_atom_fails_to_deterministic_fallback() -> None:
+    model = _UnknownAtomNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request())
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.failure_codes == ("ELDER_NARRATIVE_INVALID",)
+
+
+def test_elder_rewrite_cannot_omit_mandatory_partial_meaning() -> None:
+    model = _OmitPartialAtomNarrativeModel()
+    instance = build_deterministic_product_runtime_bundle(model=model).runner
+    shared = instance.analyze_shared(_shared_analysis_request(partial=True))
+    command = _elder_narrative_request(shared)
+
+    narrative = instance.render_elder_narrative(command)
+
+    assert narrative.state is ElderNarrativeState.FALLBACK
+    assert narrative.text == command.elder_projection.text
+    assert narrative.text is not None
+    assert narrative.text.count("数据不完整") == 1

@@ -1,3 +1,4 @@
+# 本模块负责可复现模拟数据与回放契约，不参与生产事实判定。
 """Deterministic canonical observation generation from strict replay recipes."""
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from sleepagent.simulation.contracts import (
     ReplayScenario,
     VendorAlertOverlay,
 )
-from sleepagent.sleep_domain.contracts import (
+from sleepagent.domain.contracts import (
     AlgorithmVersionValue,
     AlertLifecycleState,
     AlertSeverity,
@@ -186,8 +187,11 @@ def load_packaged_scenario(scenario_id: str) -> ReplayScenario:
         for character in scenario_id
     ):
         raise ReplayFixtureError("scenario_id must be a lowercase slug")
-    fixture = resources.files("sleepagent.simulation.fixtures").joinpath(
-        "scenarios", scenario_id, "scenario.json"
+    fixture = (
+        resources.files("sleepagent.simulation.fixtures")
+        .joinpath("scenarios")
+        .joinpath(scenario_id)
+        .joinpath("scenario.json")
     )
     try:
         raw = fixture.read_bytes()

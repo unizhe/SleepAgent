@@ -1,4 +1,0 @@
-interface:
-  display_name: "SleepAgent Codebase Curator"
-  short_description: "按模块审计、重构并完善 SleepAgent 注释"
-  default_prompt: "Use $sleepagent-codebase-curator to audit SleepAgent and recommend the safest module-scoped curation round."

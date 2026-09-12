@@ -1,0 +1,17 @@
+{
+  "request_id": "SANITIZED-PULL-REALTIME-REQUEST",
+  "success": true,
+  "code": "200",
+  "message": "SANITIZED",
+  "timestamp": 1787472000,
+  "data": {
+    "endTime": 1787472180000,
+    "HeartRate": "72",
+    "BreathRate": "16",
+    "probStatus": 6,
+    "smbdFlag": "2",
+    "keepTime": "120",
+    "time": "1787472000000",
+    "timeFormat": "2026-08-23 16:00:00"
+  }
+}

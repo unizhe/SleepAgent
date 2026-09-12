@@ -1,0 +1,66 @@
+{
+  "schema_version": "sanitized_perceptor_sleep_report_full.v1",
+  "source": "sanitized structural derivative of the complete G7.1 real SleepReport; identifiers removed and all numeric health values replaced",
+  "request_id": "SANITIZED-PULL-SLEEP-FULL-REQUEST",
+  "success": true,
+  "code": "200",
+  "message": "SANITIZED",
+  "timestamp": 1787350200,
+  "data": {
+    "sleep_profile": {
+      "deep_sleep_rate": "25.00%",
+      "in_bed_time": "21-45",
+      "in_sleep_time": "0-25",
+      "leave_bed_time": "06-35",
+      "sleep_duration": "8-0",
+      "sleep_efficiency": "88.50%",
+      "sleep_time": "22-06",
+      "wake_ups": "2026-08-22 03:33:00 - 2026-08-22 03:35:00",
+      "wakeup_time": "06-06"
+    },
+    "sleep_stage_list": [
+      {
+        "start_time": 1787321160,
+        "start_time_str": null,
+        "end_time": 1787322060,
+        "end_time_str": null,
+        "type": 2
+      },
+      {
+        "start_time": 1787322060,
+        "start_time_str": null,
+        "end_time": 1787349120,
+        "end_time_str": null,
+        "type": 3
+      },
+      {
+        "start_time": 1787349120,
+        "start_time_str": null,
+        "end_time": 1787349960,
+        "end_time_str": null,
+        "type": 1
+      }
+    ],
+    "heart_rate_data": [
+      {"time_long": 1787321160, "type": null, "value": 64},
+      {"time_long": 1787335200, "type": null, "value": 62},
+      {"time_long": 1787349960, "type": null, "value": 66}
+    ],
+    "heart_rate_avg": 64,
+    "breathe_data": [
+      {"time_long": 1787321160, "value": 15},
+      {"time_long": 1787335200, "value": 14},
+      {"time_long": 1787349960, "value": 16}
+    ],
+    "breathe_avg": 15,
+    "body_shake_data": [
+      {"hour": "22", "count": 2},
+      {"hour": "05", "count": 1}
+    ],
+    "sum_body_shake_times": 3,
+    "getups": [
+      "2026-08-22 03:33:00",
+      "2026-08-22 04:10:00"
+    ]
+  }
+}

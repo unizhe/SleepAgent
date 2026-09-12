@@ -12,7 +12,35 @@ import httpx
 import pytest
 
 
-_EXECUTION_MARKERS = ("postgres", "asgi_lifespan", "e2e")
+_EXECUTION_MARKERS = (
+    "postgres",
+    "asgi_lifespan",
+    "process_harness",
+    "e2e",
+)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(
+    session: pytest.Session,
+    exitstatus: int,
+) -> None:
+    """Make verifier-required lanes fail if pytest reports any skip."""
+
+    del exitstatus
+    if os.environ.get("SLEEPAGENT_PYTEST_FAIL_ON_SKIP") != "1":
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped = () if reporter is None else reporter.stats.get("skipped", ())
+    if not skipped:
+        return
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    if reporter is not None:
+        reporter.write_sep(
+            "=",
+            f"required verifier lane had {len(skipped)} unexpected skip(s)",
+            red=True,
+        )
 
 
 @pytest.hookimpl(tryfirst=True)

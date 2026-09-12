@@ -1,0 +1,1299 @@
+## Act 3 — Build
+
+### Round 1 — Codex build
+
+Implemented the frozen P1.5 CareStrategy production-routing work order from the
+referenced attachment. Morning Review now permits, but does not require, Care;
+accepted Evidence and typed risk receipts feed the existing coordination policy;
+Care runs only when that policy returns candidate intents without an urgent
+preemption. A revision-bound three-night vital trend supplies the missing typed
+production signal, and accepted Care candidates remain in publication.
+
+The initial real PostgreSQL worsening run exposed one contract-shape defect:
+`trend_signals` had been placed inside the deterministic `data` payload and was
+therefore ignored by the risk tool. The smallest fix moved `trend_signals` and
+`trend_observation` to the existing top-level structured tool arguments. A fresh
+real PostgreSQL run then produced six CareStrategy work products across the two
+triggered nights, and all six retained Care candidate references appeared in
+publication.
+
+No Habit, Memory, frontend, radar, migration, legacy, scenario-name, or test-only
+routing changes were made.
+
+### Codex verification
+
+- Focused Product/Care tests: 88 passed.
+- Core runtime/governance/PostgreSQL-adjacent regression set: 140 passed.
+- PostgreSQL Product repository integration: 6 passed before the final
+  tool-argument nesting correction; the corrected nesting is covered directly by
+  the focused unit regression.
+- Full non-PostgreSQL/non-e2e suite excluding nine known environment or dependency
+  compatibility nodes: 522 passed, 21 deselected.
+- The nine excluded nodes consist of eight tests that require loopback socket
+  creation denied by the sandbox and one existing FastAPI route-enumeration test
+  incompatible with the installed lazy `_IncludedRouter` representation.
+- `git diff --check`: passed.
+- Python compilation: passed.
+- Mypy: the changed scope is clean; three pre-existing errors remain only in the
+  explicitly out-of-scope Habit/Memory-related files `runtime/memory.py` and
+  `runtime/governance.py`.
+- Real PostgreSQL `normal-one-night`: passed with Evidence present and zero Care.
+- Real PostgreSQL `worsening-vital-trend`: passed its public verifier; four Product
+  operations succeeded, Care ran on the two policy-triggered nights, and every
+  accepted Care candidate was retained in publication.
+- Real PostgreSQL `urgent-zero-model`: passed against a fresh isolated PostgreSQL
+  16 database plus canonical BFF API, Demo API, and durable worker. The verifier
+  returned `verified=true` with the expected terminal error code
+  `unexpected_urgent_route`. Database cross-checks showed zero Product attempts,
+  zero model/provider invocations, zero analysis revisions/Care products, one
+  succeeded `fast_path` operation, and four persisted fast-path signal receipts
+  and projections. The replay journey terminated at the authoritative boundary
+  exactly as designed. All three temporary service processes and the database
+  were stopped after verification.
+
+Diff review found no scenario-name branching, unconditional four-agent pipeline,
+Habit/Memory scope creep, migration change, or remote write. One manifest snapshot
+hash was updated because the Morning Review registry contract intentionally
+changed. Fix rounds used: 1 of 2.
+
+## Act 4 — P2 Build
+
+### Codex verification
+
+Implemented the frozen P2 L2 wiring without replacing the retained Habit or
+Governed Memory reducers. One additive migration (`009`) supplies separate
+append-only Habit and Memory revisions, governed Memory read receipts, question
+selection persistence, and a narrowly checked family-to-elder Habit confirmation
+handoff. The canonical Product API owns proposal/confirmation/read commands; the
+durable Product worker pins effective Habit state and purpose-scoped Memory
+receipts into each role Episode before Evidence/Care consumption.
+
+Real PostgreSQL verification found and minimally corrected three adapter defects:
+psycopg JSONB parameters were bound as `bytea`, family-originated elder handles
+were rejected by the original actor-local RLS policy, and strict tuple DTOs did
+not normalize decoded JSON arrays. No product semantics or safety boundary was
+relaxed.
+
+- Existing completed suites retained: 464 unit tests and 65 non-PostgreSQL
+  integration tests.
+- Final targeted regression after the real-backend fixes: 80 passed.
+- Focused real PostgreSQL Habit/Memory + Product pinning scenarios: 2 passed.
+- Canonical signed HTTP Habit/Memory proposal, exact confirmation, and read:
+  passed against schema 009.
+- Canonical baseline versus personalized reanalysis pinned L2 versions 0/0 then
+  1/1; `confirmed_habit` and governed `morning_voice` consumption changed from
+  absent to present, with Care receipts returning the allowed item and Evidence
+  receipts remaining empty.
+- Canonical `worsening-vital-trend` verifier: `verified=true`.
+- Canonical `urgent-zero-model` verifier: `verified=true`, terminal
+  `unexpected_urgent_route`; Product/model/Care counts remained zero and the
+  fast path persisted one succeeded operation plus four receipts/projections.
+- Migration ledger/manifest check: schema version 009.
+- `001`–`008` remained immutable; no new production Python file or package was
+  introduced.
+- All isolated API, Demo API, worker, and PostgreSQL processes were stopped.
+- GitHub remote write: none.
+
+## Act 3 — Build (P3)
+
+### Round 1 — Codex build
+
+Implemented the frozen P3 terminal Product demo work order from the referenced
+attachment. The existing single OpenAI-compatible Product provider now reuses
+the existing local DeepSeek environment names when the newer Product names are
+absent, records provider prompt-token evidence, and remains selectable through
+the existing Worker `live`/`deterministic` model mode. The unified CLI adds five
+Product stories, a product-first terminal renderer, exact Habit/Memory/HITL
+interactions, public reanalysis, and a replay-only read projection over existing
+durable Product attempts, Agent records, SkillLocks, Habit revisions, governed
+Memory revisions, and Memory ReadReceipts.
+
+The first focused pass found a demo test double that lacked the new read-only
+trace response, an urgent-story assumption that every root has a Product
+analysis, and a missing transactional marker on migration `010`. The smallest
+fixes completed the test double, made urgent selection explicitly empty, and
+restored the manifest-pinned transactional migration contract.
+
+### Round 2 — Codex build
+
+The adversarial story review added fail-closed product assertions: Cold Start
+must move Habit profile v0 to v1; Habit baseline must add a real
+`confirmed_habit` Evidence claim; worsening must durably invoke Evidence and
+Care; longitudinal personalization must preserve Episode A at Habit/Memory v1,
+Episode B at v2, retain both append-only revisions, expose the family dispute,
+and persist Memory ReadReceipts; urgent safety must retain zero Product attempts,
+zero Agent/Care invocations, and a succeeded deterministic fast path. The
+terminal view now displays the longitudinal v1/v2 pins and dispute explicitly.
+
+### Codex verification
+
+- Focused changed-scope regression: 88 passed, 3 deselected before the final
+  story assertions; final CLI/API/provider/data focused set: 60 passed.
+- Real loopback OpenAI-compatible provider tests: 8 passed.
+- Full non-PostgreSQL/non-ASGI-lifespan/non-e2e regression, rerun with local
+  loopback permission: 542 passed, 24 deselected.
+- Packaged narrow replay overlay: verified at 499 canonical observations and one
+  night; registry/scenario/manifest hashes match.
+- Migration discovery: 10 contiguous checksum-pinned migrations; migration
+  `010` is transactional and the `001` immutable baseline remains unchanged.
+- Real configured DeepSeek probe: HTTP 200, provider `openai-compatible`, model
+  `deepseek-v4-flash`, strict JSON result accepted, provider request ID present,
+  118 input tokens recorded. No credential was printed or persisted.
+- Python compilation and `git diff --check`: passed.
+- Mypy could not run because it is not installed in the available host Python.
+- Required real PostgreSQL/API/Worker demo proof is environment-blocked: Docker
+  is installed, but the current account cannot access `/var/run/docker.sock`;
+  passwordless sudo is unavailable, no PostgreSQL server is listening, and the
+  host Python lacks `psycopg`. The targeted PostgreSQL test therefore skipped for
+  missing `psycopg`. No in-memory substitute was used to claim process proof.
+- Diff review found no scenario name in Agent prompts (enforced in the live
+  Worker integration responder), no hard-coded Product conclusion, no mock
+  Product result, no new package, no generic verifier framework, no second LLM
+  router, no secret/config file change, and no GitHub remote write.
+
+Deviation: the code and live provider path are verified, but the five stories
+could not be executed against real PostgreSQL/API/Worker processes in this
+environment. Fix rounds used: 2 of 2. No commit was created.
+
+### Runtime continuation (supersedes the earlier environment-blocked note)
+
+A portable PostgreSQL 16 server and isolated host-side API/Demo API/durable
+Worker processes were subsequently brought up without Docker. Migrations
+`001–010` and the bounded test authority were applied. The configured live
+DeepSeek provider returned real OpenAI-compatible responses for the current
+structured runtime.
+
+- Demo 1 (`cold-start`) completed with 21 durable live-provider Agent
+  invocations and exact Habit v0 → v1 HITL.
+- Demo 2 (`habit-baseline`) completed with 37 durable live-provider Agent
+  invocations; the initial Evidence had no confirmed Habit, while reanalysis
+  consumed the exact `约 02:00` Habit baseline without promoting it to clinical
+  truth.
+- Demo 3 (`worsening-care`) completed four durable Product attempts with 64
+  live-provider Agent invocations, including real EvidenceReasoning and
+  CareStrategy calls. The durable advance released 1,490 staged facts exactly
+  once; the CLI resume guard prevented a second clock advance.
+- The full host suite passed after loopback permission was granted: 557 passed,
+  21 skipped. The changed-scope focused suite passed: 141 passed.
+
+Demo 4 and Demo 5 remain to be run after the environment explicitly approves
+reapplying the bounded local test bootstrap to the clean isolated database.
+No commit or GitHub remote write was performed.
+
+### Runtime continuation 2
+
+The bounded bootstrap was explicitly approved and completed only against local
+`sleepagent_replay_test` on `127.0.0.1:15433`. Schema `010`, three test
+principals, nine seed allowlist rows, the Demo 4/5 fixtures, and technical-trace
+function authority were verified before resuming from Demo 4; Demos 1–3 were not
+rerun.
+
+The first real Demo 4 attempt reached the configured live DeepSeek provider and
+exposed two narrow issues. Evidence instructions named a Habit entity `fact_id`
+instead of the ToolReceipt authority `fact_ref`, causing fail-closed acceptance;
+the repair prompt now names exact Habit `fact_ref` and Memory
+`retrieval_handle` references. The story also requested the family copy of a
+question after the elder answer had correctly activated the seven-day cooldown.
+It now obtains both actor-bound question receipts first, then preserves the
+required elder answer → Episode A → family answer → exact elder confirmation
+order without changing cooldown or HITL governance. Corresponding focused
+regression is green at 68 passed, and the urgent verifier now directly rejects
+any top-level durable provider invocation in addition to requiring zero Product
+attempts, zero Care, and a succeeded fast path.
+
+The failed Demo 4 generation was safely sealed with the public replay reset.
+That reset is intentionally irreversible: it raised authority epochs and the
+seed reservation function then returned `generation_fenced`, so the sealed
+namespace cannot be reseeded. Recreating the one isolated test database is now
+the only clean rerun path, but database deletion was not included in the
+bootstrap authorization and was refused by the execution safety boundary. Demo
+4, Demo 5, final reconciliation, and the conditional local completion commit
+therefore remain pending explicit authorization to recreate only
+`sleepagent_replay_test`. No remote write was performed.
+
+### Runtime continuation 3 — final P3 reconciliation
+
+The user explicitly authorized permanent drop/recreate of only the isolated
+`sleepagent_replay_test` database on `127.0.0.1:15433`, with no backup and no
+effect on any other database or service. The exact PostgreSQL target and data
+directory were verified before recreation. Migrations `001–010` were applied to
+the fresh database, and the bounded `sleepagent.persistence.test_bootstrap`
+restored the three test principals, nine replay seed reservations, actor-key
+authority, Demo 4/5 fixtures, grants, and the technical-trace function. Demos
+1–3 were not rerun.
+
+The earlier reset result is retained as a test-harness lifecycle limitation:
+reset advances replay generation from 1 to 2 and the authorization, privacy,
+and retrieval authority epochs from 1/1/1 to 2/2/2, while the fresh seed
+contract accepts only authority 1/1/1. A reset namespace therefore cannot be
+seeded again. P3 intentionally does not change either the authority epoch model
+or the seed contract to support reset-after-seed reuse.
+
+The resumed live Demo 4 exposed two further production-path defects, each fixed
+at the narrowest owning boundary. A family-originated proposal stored the
+family policy hash and epochs on an elder-confirmation handle, so exact elder
+confirmation failed when family and elder authorities differed. Pending L2
+handles now resolve and persist the designated elder confirmer's authoritative
+epochs and policy hash while retaining the family source actor/role in the
+proposal payload. Separately, migration `010` projected Habit evidence
+`actor_role`, but the durable evidence field is `role`; the trace projection and
+manifest checksum now use the correct field. Focused real PostgreSQL regression
+covered distinct elder/family policy hashes, and the fresh schema `010` trace
+was exercised by the completed demo.
+
+Live Demo 4 (`longitudinal-personalization`) passed against the real PostgreSQL
+database, canonical API and Demo API, durable Worker, and configured DeepSeek
+provider. Root operation `019fffe2-08c4-7e85-aaa6-27d9a1f406c3` completed three
+Product attempts and two succeeded fast paths. The durable trace recorded 44
+OpenAI-compatible `deepseek-v4-flash` Agent invocations with provider request
+IDs, prompt-token counts, latency, and SkillLocks. Habit revisions remained
+append-only at v1 elder (`通常不午睡`) and v2 family (`多数天午睡`), both with
+confirmation references. Governed Memory advanced from v1 to v2 with exact
+confirmation references. Episode A pinned Habit/Memory 1/1; Episode B pinned
+2/2, preserved the family dispute, changed the personalized evidence/context,
+and persisted 18 Memory ReadReceipts, including governed item reads in both
+episodes.
+
+Live-configured Demo 5 (`urgent-zero-model`) passed its authoritative verifier
+at root operation `019fffea-ecc3-7ac7-be57-7c41cf587c7b`. The deterministic
+urgent boundary persisted one succeeded fast-path operation and then terminated
+the replay journey with the expected `unexpected_urgent_route`. The durable
+trace proved Product attempts = 0, durable/provider LLM invocations = 0,
+CareStrategy invocations = 0, Memory ReadReceipts = 0, and fast-path succeeded =
+1. No Product Runtime or role projection was invoked.
+
+Final reconciliation retained the previously completed full-suite result of 557
+passed and 21 skipped and the focused 141 passed rather than rerunning them for
+form. The final changed-scope unit/API/foundation regression passed 192 tests;
+the focused live PostgreSQL cross-authority regression passed; the real Demo 4
+and Demo 5 verifiers passed; migration `010` was applied from a fresh database;
+and `git diff --check` passed. Diff review found no scenario-name routing in the
+runtime, no committed credential/private key, no second provider/router, no
+authority/seed lifecycle scope expansion, and no GitHub remote write.
+
+## Act 3 — Build
+
+### Round 1 — Codex build: deterministic Communication assembly convergence
+
+The deterministic SleepCare communication path now emits the same private
+`SleepCareContentPlan` used by the live path and delegates final text, bindings,
+numeric preservation, audience presentation, and source references to the
+single assembler in `sleepagent.runtime.agents`. The canonical deterministic
+runtime enables the same per-invocation assembly adapter. Direct deterministic
+`SleepCareModelOutput` generation also uses that shared catalog/plan/assembler
+core, while urgent preflight remains before every model and Care invocation.
+
+The four canonical SleepCare communication skills were versioned to `3.0.0` and
+now instruct the model to select only existing `source_type`/`source_ref` pairs
+and never generate final prose, bindings, numbers, audience, references, or
+template text. Their package, SkillLock, and compiled prompt hashes therefore
+change through the existing registry/compiler mechanisms while their external
+output schema remains `CommunicationDraft` and invocation records remain
+`SleepCareModelOutput.v1`.
+
+### Codex verification
+
+The final scoped unit/provider/runner/governance/contracts/cold-start/worker
+regression passed 249 tests. The loopback HTTP provider and live-configured
+urgent zero-provider regression passed 9 tests in an isolated local socket
+namespace. Python 3.11 imports and `git diff --check` passed. No real Demo,
+PostgreSQL operation, commit, or remote write was performed.
+
+## Act 3 — P4 real-radar completion and repository consolidation
+
+P4 now provides the production YunYun/Perceptor cloud boundary: authenticated
+Push, bounded read-only Pull, durable PostgreSQL canonicalization,
+Push/Pull reconciliation, NightEpisode quality semantics, and the unchanged
+downstream 1+2+1 Agent Runtime. The final engineering verdict remains
+`P4_COMPLETION = COMPLETE_WITH_LIMITATIONS` and `RELEASE_READY = NO`.
+
+The root execution plan, 17 construction reports, 13 one-shot stage scripts,
+10 script-only tests, and the full P4 construction diary were copied to a
+repository-external owner-only archive with a checksum manifest before removal.
+Stable source retains the Perceptor production package, migrations 011–013,
+sanitized contract fixtures, production regressions, and extracted frozen
+evidence integrity/restore-semantic checks. Current architecture, operations,
+final evidence, and cleanup verification are recorded under `docs/`.
+
+No vendor, model-provider, Git remote, commit, or tag operation was performed
+by this consolidation checkpoint.
+
+## Act 5 — Build: Product report CLI and shared-analysis authority
+
+### Round 1 — Codex build
+
+Implemented the frozen Product report plan through the existing ASGI/Worker
+topology. Exact authenticated wake-date report requests now converge on one
+canonical `SharedNightAnalysis.v1`, one deterministic three-role projection
+set, and an independently reusable elder narrative. Automatic fast-path and
+public reanalysis work route through the same authoritative urgent/UNUSABLE
+gate and shared semantic identity; the legacy automatic Product operation is
+retained only as a non-claimable compatibility bridge.
+
+The shared identity binds the exact episode revision, canonical observations,
+quality/risk policy, selected stable Habit/Memory meaning, governance epochs,
+and semantic runtime manifest. Volatile receipt, invocation, timestamp, and
+unrelated global revision values are excluded. Provider work is fenced before
+every HTTP attempt and again at final commit. Safe call/token aggregates are
+retained for committed, failed, prepared, and journaled-success/staging-failure
+attempts, while full provider request IDs remain confined to the governed
+invocation journal.
+
+The Product API now exposes report run/show/list contracts without internal
+identifiers. POST retains replay-consuming command authentication; the two
+idempotent report GET routes use the tightly scoped stateless verifier and
+SELECT-only authority/report/context reads. The new `sleepagent-report` command
+is an authenticated HTTP-only client with `run`, `show`, and `list`, polling,
+bounded timeouts, strict response allowlists, safe JSON/text rendering, and
+environment-only identity/credential configuration. Existing `/today`, sole
+process roots, provider transports, schema, migrations, dependencies, and
+runtime roster remain unchanged.
+
+### Round 2 — adversarial fixes
+
+The bounded audit found and closed: stable narrative retry generation after
+known-not-sent/dead-letter outcomes; ambiguous-send non-replay; Memory revision
+references accidentally becoming canonical Evidence; narrative projection
+content-vs-identity binding drift; failed-provider aggregate persistence;
+query-invisible prepared and orphaned journal usage accounting; a nonempty
+Memory read-path string/enum mismatch; legacy retrieval-handle compatibility;
+and automatic compatibility-wrapper terminal behavior. Direct regressions now
+cover those boundaries, concurrent canonical reuse, projection refresh,
+provider request-ID redaction, urgent/UNUSABLE zero-provider handling, and
+stable provider input/request hashes.
+
+### Codex verification
+
+- Runtime/worker focused regression: 109 passed.
+- API/report focused regression: 84 passed.
+- CLI/client focused regression: 35 passed, 1 opt-in live E2E skipped.
+- Independent adversarial focused regression: 250 passed, 1 opt-in E2E skipped.
+- Full unit suite: 917 passed.
+- Complete repository suite with localhost loopback permission: 1,000 passed,
+  27 skipped.
+- The nine real loopback OpenAI-compatible HTTP tests passed separately after
+  the default sandbox denied local socket creation.
+- Python 3.11 and host-Python compilation, CLI help smoke proof, AST duplicate-
+  key scan, and `git diff --check` passed.
+
+The 27 skips are environment-only: the host Python lacks `psycopg` and no test
+PostgreSQL/compose profile is configured; the Product report CLI process E2E is
+opt-in through `SLEEPAGENT_E2E_REPORT_ENABLED=1`. No database, provider, radar
+service, Git remote, migration, commit, or tag was changed or contacted. No
+commit was created.
+
+## Act 6 — Build: Product report publication and final-fence repair
+
+### Round 1 — Codex build
+
+Repaired the three post-implementation audit findings without changing the
+Product report topology, schema, public contracts, provider transport, Agent
+roster, or legacy per-role execution path. Analysis publication now serializes
+per exact NightEpisode revision and a valid journaled v3 result may transfer to
+a later business attempt and rebase only its revision number/parent envelope
+under the final publication fence. Provider-derived content and stable artifact
+identifiers remain unchanged.
+
+Urgent and UNUSABLE request closure now locks and re-reads governance epochs,
+the finalized current Episode revision, and the exact current quality/risk
+authority. A changed gate is not terminalized: the durable request refreshes
+its exact pins, returns to `retry`, and re-resolves without Product Agent or
+provider work from the stale decision. Shared-analysis and elder-narrative
+final commits now acquire the existing L2 writer advisory keys in fixed
+`habit`, then `memory` order before re-reading context and hold them through
+the atomic commit.
+
+### Codex verification
+
+- Focused repair and Product/runtime/API/privacy regression: 178 passed.
+- Repair module regression after concurrency additions: 32 passed.
+- Full unit-marked suite with localhost loopback permission: 1,015 passed,
+  27 deselected.
+- Complete repository suite with localhost loopback permission: 1,015 passed,
+  27 skipped.
+- PostgreSQL/process-gated collection: 27 skipped; `psycopg`, test DSNs, the
+  compose test-postgres profile, and the opt-in report CLI E2E configuration
+  are unavailable.
+- Python compilation and `git diff --check` passed.
+
+No external provider, radar/device service, production database, migration,
+dependency, Git remote, commit, or tag was contacted or changed. No commit was
+created.
+
+## Act 7 — Build: Product Report UX Closure
+
+### Round 1 — Codex build
+
+Implemented the narrow Elder presentation closure without changing Product
+Runtime topology or shared-analysis inputs. `ProductRevisionFacts` now retains
+the authoritative Episode bed/wake span for presentation and derives a separate
+typed Elder view that preserves canonical timestamps, localizes with
+`ZoneInfo`, distinguishes Episode span, vendor stage envelope, observed stage
+coverage, and classified stage totals, clips only the presentation view to
+Episode bounds, and flags overlap/invalid/boundary conditions instead of
+silently choosing a classification policy. The existing
+`deterministic_night_summary()` and provider-facing shared inputs remain
+unchanged.
+
+The Elder projection now derives a deliberately small set of source-bound
+message atoms for the stage summary, bed-exit observation, one quality caveat,
+and one AI-assisted/non-diagnostic boundary. Each atom owns its numeric values,
+units, Runtime-selected display values, subject-local times, quality/risk/safety
+classification, source references, priority, mandatory state, and finite safe
+zh-CN renderings. The independent Elder model call may select and order only
+those renderings; its schema has no prose or numeric field. Runtime validates
+mandatory selection, source/risk/safety authority, exact rendering membership,
+numeric bindings, locale compatibility, and the final Communication binding.
+Invalid/provider-failed output publishes the same deterministic Chinese atom
+fallback while Shared Analysis stays ready.
+
+The public fallback now carries deterministic text. Elder CLI pretty mode is
+narrative-first, omits the duplicate full projection/context/legal boilerplate,
+and renders the PARTIAL caveat and compact boundary once. Elder `run` continues
+GET polling after shared readiness until narrative `ready`, `fallback`, or
+`failed`; `--no-wait`, Family, Doctor, `show`, `list`, `--trace`, and `--json`
+retain their prior authority and side-effect behavior.
+
+### Round 2 — adversarial fix pass
+
+The diff audit found that an initial atom transport through a new SleepCare
+Context key would have broadened the concrete-Agent manifest. The atoms were
+moved onto the existing Runtime invocation binding, omitted when empty for
+legacy serialization/hash compatibility, and included only in the Elder target
+hash. The provider receives the bounded atom manifest without the dense
+free-form Evidence statements. Additional checks now bind atom IDs to their
+complete authority, verify Shared Analysis/risk/safety references, reject
+inconsistent localized spans and Runtime number displays, validate persisted
+ready narratives again at the API boundary, and always use projection text for
+fallback publication.
+
+No shared-analysis manifest bump is required: the repair changes only the
+projection/narrative presentation manifests. A direct baseline comparison at
+commit `51947e6` proved the concrete-Agent manifest hash, desired-analysis hash,
+and resulting deterministic Shared Analysis hash are byte-identical before and
+after this closure; the role-projection manifest hash changes as intended.
+
+### Codex verification
+
+- Focused Product data/report/runner/worker/API/CLI regression: 372 passed,
+  1 opt-in process E2E skipped.
+- Full unit suite: 948 passed.
+- Complete repository suite with localhost loopback permission: 1,031 passed,
+  35 skipped.
+- Focused PostgreSQL Product collection: 1 passed, 18 skipped because the host
+  environment lacks `psycopg`; no test database is configured.
+- Python 3.11 compilation, host-Python compilation, real-shaped Elder rendering,
+  baseline/current shared-identity parity, and `git diff --check` passed.
+- Static `mypy` verification was unavailable because `mypy` is not installed.
+
+The 35 complete-suite skips are environment-only PostgreSQL/process/opt-in E2E
+gates. No DeepSeek, YunYun, radar/device, production database, migration,
+dependency, Git remote, commit, or tag was contacted or changed. No commit was
+created. One bounded adversarial fix pass was used.
+
+## Act 3 — Build: G1 M0 remediation safeguards
+
+### Round 1 — Codex build
+
+Recorded the exact dirty-worktree baseline before production edits, then added
+seven remediation ADRs, a classified report-consumer inventory, typed
+default-preserving switches in the existing settings authority, a reproducible
+characterization fixture/suite, an AST import no-growth guard, and an explicit
+OpenAPI drift classification. No observation, report, scheduling, delivery,
+database, or external-effect migration was activated.
+
+The characterization evidence freezes the current mixed movement aggregation,
+Push/Pull/Replay validator asymmetry, UTC-as-local report defect, and English
+claim leakage under Chinese headings. The architecture fixture freezes six
+existing SCCs and exact forbidden edges while allowing later debt reduction.
+
+### Round 2 — Codex fix pass
+
+The dependency snapshot review found that `from package import submodule` in a
+package `__init__` was initially being counted as a false package self-import.
+The resolver now records a known imported submodule when it exists, restoring
+the G0 six-SCC baseline while retaining exact real self-imports. Spec review
+also added the separate Night Finalization ADR so the attached G1 work order
+and master M0 ADR set are both covered. Final evidence review corrected the
+OpenAPI schema-group count to 12 personalization plus 11 report schemas.
+
+### Codex verification
+
+- Focused G1 settings, characterization, and architecture: 18 passed.
+- Full architecture suite: 5 passed, including synthetic new-debt rejection.
+- Unit-marked suite with localhost permission: 1,047 passed, 35 deselected.
+- Full non-PostgreSQL/non-E2E/non-ASGI-lifespan suite with localhost permission:
+  1,044 passed, 38 deselected.
+- Python 3.13 and supported Python 3.11.15 compilation passed; Python 3.11.15
+  import smoke passed; `git diff --check` passed.
+- OpenAPI check still fails for both snapshots and is classified
+  `STALE_SNAPSHOT`; no snapshot was overwritten.
+- PostgreSQL verification and mypy are `ENV_BLOCKED`.
+
+Diff review found no G1 edits to the 18 pre-existing dirty report/runtime/test
+files. `sleepagent/config.py` is the only G1 production edit and future switch
+states have no production consumer. No external provider or real effect was
+invoked. The build used one bounded fix pass. A safe isolated commit is blocked
+because the new characterization evidence depends on the authoritative
+uncommitted report baseline; no staging, commit, or push occurred.
+
+### Supplemental G1 verification
+
+Reverified the completed G1 safeguards on the supported Python 3.11.15
+interpreter using an isolated environment installed from the repository's
+hash-locked development requirements. Compile/import checks, 46 focused tests,
+5 architecture tests, 1,047 unit-marked tests, and 1,044 non-PostgreSQL tests
+passed. The two broad selections initially hit eight sandbox-only localhost
+bind denials and passed with approved `127.0.0.1` permission.
+
+The now-available declared mypy 2.3.0 reports a known baseline of 86 errors in
+20 files; an archived clean HEAD independently reports 63 errors in 20 files,
+and no error is in the sole G1 production file, `sleepagent/config.py`.
+PostgreSQL remains environment-blocked because there is no database URL or
+native server/client and the installed Docker socket is inaccessible. OpenAPI
+remains the classified stale-snapshot failure and both snapshot files were
+left at their original hashes. The frozen 18-file user patch still hashes to
+`f306cc80aa4e25df543501ccbdd23e9917c57ecf9dfc9a152abb436381f78806`.
+No staging, commit, push, provider call, or real effect occurred.
+
+## Act 4 — Build: G1.5 pre-G2 baseline consolidation
+
+### Round 1 — Codex build
+
+Reconfirmed the frozen pre-G1 report/runtime/test patch at SHA-256
+`f306cc80aa4e25df543501ccbdd23e9917c57ecf9dfc9a152abb436381f78806`,
+then re-ran the structural OpenAPI comparison. It reproduced only the
+classified 10/23 backend and 1/1 Demo additions, with no changed or removed
+existing path/schema. The existing generator reconciled both snapshots and the
+canonical check now passes.
+
+Established Python 3.11.15 as authoritative using an isolated environment
+installed from the hash-locked development requirements. Compile/import,
+focused safeguards, architecture, unit-marked, and non-PostgreSQL selections
+pass. Declared mypy 2.3.0 ran and is recorded as an existing failure baseline,
+not repaired broadly.
+
+Validated the repository's isolated PostgreSQL 16 Compose configuration and
+all 13 immutable migration hashes. Actual PostgreSQL execution remains
+environment-blocked because the Docker socket is inaccessible and no native
+server/client exists. This yields separate M1/M2 readiness from M3 readiness.
+
+The exact 40-path checkpoint candidate is classified in
+`docs/remediation/G1_5_CHECKPOINT_COMPOSITION.md`. Ignored environments,
+caches, secrets, key material, attachments, and unrelated files are excluded.
+The final staged audit proved a 40/40 manifest match with no unstaged,
+untracked, deleted, or whitespace-error path. The local checkpoint is
+`0aa1674653da93e135572b06f858cd0d18f41926`, tree
+`3639228c82af4509c885ec23dc15459630b74eae`; this documentation-only follow-up
+records the hash that the checkpoint cannot self-contain.
+
+## Act 5 — Build: G2A M1-M2 Observation Semantics V2
+
+### Round 1 — Codex build
+
+Added a typed `movement_payload.v2` contract and minimal semantic registry for
+`movement_index`, `movement_event_count`, and audit-only
+`legacy_ambiguous_movement`, with stable categorized domain rejections. Added
+one `CanonicalObservationFactoryV2` for schema/semantic/provenance/time
+validation, UTC normalization, canonical semantic projection, and deterministic
+semantic identity distinct from transport receipt identity.
+
+Wired the existing typed setting into Push, Pull, replay journey generation,
+and replay normalization. V1 remains the default and unchanged. V2 maps proved
+vendor meanings before the shared factory and has no permissive fallback.
+Because M3 is excluded, accepted V2 facts cross the unchanged persistence
+boundary through an explicit legacy compatibility candidate; no migration,
+historical upcast, aggregation, trend, risk, CareStrategy, or report cutover was
+performed.
+
+The factory is placed in the current domain layer instead of the master plan's
+suggested future application package. This avoids a new reverse dependency from
+the existing replay persistence seam and produces no architecture-debt growth.
+
+### Round 2 — Codex fix pass
+
+The initial event-count parity assertion used different authoritative instants
+for Pull and Replay. The fixture was corrected to represent the same semantic
+observation, then semantic identity equality was added for both index and count
+parity. New mypy findings in the two semantic modules were resolved without
+touching the repository's existing failure baseline. No production behavior
+change was needed after the first implementation pass.
+
+### Codex verification
+
+- G2A contract/factory/parity/feature suite: 24 passed.
+- Focused G2A/G1/Perceptor/Pull/Replay/architecture selection: 190 passed.
+- Unit-marked suite under Python 3.11.15: 1,071 passed, 35 deselected.
+- Non-PostgreSQL/non-E2E/non-ASGI suite: 1,068 passed, 38 deselected.
+- Architecture suite: 5 passed; no new SCC, self-import, or forbidden edge.
+- OpenAPI canonical check, compileall/import smoke, and `git diff --check`: PASS.
+- The sandbox-only eight localhost bind failures disappeared in the approved
+  local-only rerun; no external provider was contacted.
+- PostgreSQL remains `ENV_BLOCKED`; no M3 work or host repair was attempted.
+
+Diff review confirms V1 default behavior and the G1 `20.9` characterization
+remain unchanged, V2 uses one semantic authority, all persistence/analytics
+work is deferred, and no OpenAPI snapshot or migration changed. One bounded
+fix pass was used.
+
+## Act 6 — Build: G2B-Preflight PostgreSQL 16 readiness
+
+### Round 1 — Environment proof
+
+Reconfirmed the exact clean G2A entry commit and diagnosed Docker as
+`DOCKER_SOCKET_PERMISSION`: the default socket is owned by uid/gid 65534 and
+is not accessible to uid/gid 1018. No privileged host mutation was attempted.
+Discovered the user-owned PostgreSQL 16.14 distribution outside `PATH`, then
+created a unique loopback-only temporary cluster and dedicated
+`sleepagent_replay_test` database without touching the unrelated demo cluster.
+
+Applied immutable migrations 001-013 from zero, bootstrapped the canonical
+test roles, and verified the clean ledger, hashes, forced RLS, policies,
+triggers, and critical functions. The initial PostgreSQL marker produced 30
+passes, one expected process-proof skip, and two fixture foreign-key failures.
+
+### Round 2 — Codex fix pass
+
+The two Perceptor fixtures used hard-coded service principals that canonical
+`test-bootstrap` never creates. Changed only those tests to consume the
+existing API and Worker principal environment variables. The focused tests
+then passed 2/2. No production or migration file changed.
+
+Reset the dedicated database, reapplied 001-013, enabled loopback TCP
+SCRAM-SHA-256, verified all four test credentials, and ran the authoritative
+fresh-database marker: 32 passed, one intentional completed-process evidence
+reader skipped, and 1,073 deselected. A deliberate no-reset repeat confirmed
+that durable-state collisions make reset-before-full-marker part of the
+contract; a final fresh SCRAM run passed.
+
+G2A/characterization re-verification passed 29 tests, architecture passed 5,
+the final migration check remained at 013, and `git diff --check` passed. The
+Compose example is loopback-only and the new remediation document records
+canonical Compose plus verified native start/reset/test/stop commands. M3 was
+not started.
+
+## Act 7 — Build: G2B M3 persisted Observation Semantics V2
+
+### Round 1 — Codex build
+
+Added manifest-pinned migration 014 and an immutable forced-RLS semantic
+sidecar linked to the existing V1 canonical observation. The domain-owned
+persisted contract and PostgreSQL adapter carry metric/value/unit/window,
+source/provenance, semantic identity, version fields, analytic trust, and
+classification evidence without changing raw/vendor rows or migrations
+001-013.
+
+Retained the canonical V2 result through Push, Pull, and Replay persistence;
+added a bounded dry-run/resumable historical classifier; and implemented
+separate index and interval-aware count aggregation. Product exact-revision
+facts now join the semantic sidecar and expose metric-safe deterministic
+evidence. V1 remains the default and its legacy `20.9` characterization remains
+unchanged. The unresolved generic runtime Movement threshold is explicitly
+fail-closed as `SEMANTIC_THRESHOLD_UNRESOLVED` for V2.
+
+### Round 2 — Codex fix pass
+
+The first explicit-V2 run of the broad Pull integration correctly rejected an
+unrelated vendor-derived realtime bed-presence candidate under the frozen V2
+ontology. Kept that later legacy branch on V1 and narrowed explicit V2 to the
+Movement-relevant history/reconciliation segment instead of broadening M3.
+
+Hardened aggregation so identical count-window observations deduplicate to one
+fact while conflicting and overlapping windows are excluded. Added per-semantic
+advisory locking to make concurrent upcasts safe, tightened non-movement trust
+constraints, moved the runtime-role privilege proof to the canonically
+bootstrapped database, and added executable constraint/append-only evidence.
+The final audit also scoped the upcast identity cache and keyset cursor by
+namespace/data mode, made already-classified/error counts explicit, required
+source authority at the aggregation boundary, and excluded non-hourly windows
+from the hourly maximum without excluding them from a compatible disjoint
+total.
+
+### Codex verification
+
+- Focused semantic/Product/Perceptor selection: 113 passed.
+- Migration/tooling/architecture selection: 69 passed.
+- Unit-marked suite: 1,081 passed, 36 deselected.
+- Non-PostgreSQL/non-E2E/non-ASGI suite: 1,081 passed, 36 deselected.
+- PostgreSQL 16 marker from a clean 001-014 database: 33 passed, one expected
+  completed-process evidence-reader skip, 1,083 deselected.
+- Fresh 001-014 and realistic 013-to-014 upgrade/upcast/RLS/constraint proof:
+  PASS on isolated temporary databases, including unchanged raw hashes and
+  zero inserts on rerun.
+- Architecture no-growth, OpenAPI snapshot check, compileall/import smoke,
+  migration check, historical migration hashes, and `git diff --check`: PASS.
+
+Diff review confirms one V2 analytic authority, no generic mixed Movement in
+V2 Product evidence, no invented threshold, no default flip, and no work from
+later reporting or remediation phases. Two bounded fix rounds were used.
+
+## Act 8 — Build: G2C default Observation Semantics V2 cutover
+
+### Round 1 — Codex build
+
+Traced the generic `RadarNightSummary.movement_count` through current consumers,
+historical adapters, deleted quality aggregation, tests, fixtures, and the
+original risk/trend policy. The historical value mixed a sample-count-above-2.0
+heuristic, a supplied report count, and later a count of all Movement payloads;
+it has no authoritative V2 producer. Classified it as an obsolete legacy
+threshold, retained its V1 characterization, and kept both proved V2 Movement
+metrics excluded rather than guessing a replacement.
+
+Traced Pull `smbdFlag`/`probStatus` to vendor-derived bed-presence candidates
+and Push `OnBed` to device-measured state. Replaced the ontology's blanket
+device-source fallback with an exact bed-presence allowlist and bumped that
+ontology contract to v2. Unproved sources continue to fail closed. Changed the
+typed settings default and environment fallback to Observation Semantics V2,
+while retaining explicit V1 rollback.
+
+### Round 2 — Codex fix pass
+
+The first settings test exposed a second hard-coded V1 fallback in
+`from_environment`; changed it to V2. Restored the legacy single-source error
+wording while retaining the new multi-source form so the frozen G1 rejection
+characterization remained stable. No production scope expanded.
+
+### Codex verification
+
+- Focused G2C selection: 125 passed.
+- Fresh PostgreSQL 16.14 migration/bootstrap/check at schema 014: PASS.
+- Explicit V2 PostgreSQL Push/Pull/persistence: 3 passed.
+- Unit-marked regression: 1,085 passed, 36 deselected.
+- Architecture: 5 passed with no new debt.
+- OpenAPI check, compileall, and `git diff --check`: PASS.
+
+Diff review confirms the default cutover is a two-line typed configuration
+change, the ontology change is narrowly source-scoped, V1 rollback remains
+tested, the obsolete threshold cannot consume V2 analytics, and no later-phase
+or external-effect behavior was introduced. One bounded fix pass was used.
+
+## Act 9 — Build: G3 reporting time and locale semantics
+
+### Round 1 — Codex build
+
+Added a single reporting context to the existing shared-analysis/report
+framework, pinning IANA timezone, zh-CN locale, audience, UTC boundaries, local
+sleep date, and renderer version. Product desired identity and new shared
+analysis now bind the reporting time authority. Fixed deterministic bed-exit
+display conversion to use the exact-revision timezone instead of labeling a
+UTC clock as local.
+
+Introduced content-addressed structured report facts derived from deterministic
+Product metrics and typed accepted-claim semantics. New semantic hashes exclude
+free-form summary prose and localized wording; role projection hashes include
+audience, renderer, and localized context. Replaced Family/Doctor compatibility
+prose projection with deterministic zh-CN role rendering and kept the existing
+bounded Elder atom path. Historical serialized artifacts retain the exact
+legacy hash-validation branch.
+
+### Round 2 — Codex fix pass
+
+The initial focused run exposed two bounded implementation defects: defaulted
+fact fields were absent from the pre-validation hash material, and legacy test
+shims lacked real episode/timezone fields expected by desired identity. Built
+fact IDs from fully defaulted model material and limited the compatibility
+omission to non-production source shims. A final integrity review then changed
+the new localization test to produce its semantic facts through the real
+shared-analysis path rather than mutating hashed fact content after creation.
+
+### Codex verification
+
+- Focused report/shared-analysis suite: 169 passed.
+- Reporting/time/Product characterization selection: 84 passed.
+- Broader Product/report regression: 347 passed.
+- Unit-marked regression: 1,088 passed, 36 deselected.
+- Fresh PostgreSQL 16.14 Product/report integration at schema 014: 19 passed.
+- Architecture: 5 passed with no new debt.
+- OpenAPI check, compileall, and `git diff --check`: PASS.
+
+Diff review confirms one local-night authority, no UTC clock mislabeled as
+local, no arbitrary English claim prose entering zh-CN role projections, and
+semantic identity stability across renderer changes. Existing public API and
+migrations remain unchanged, later report cutover and external-effect phases
+were not started, and the bounded two-fix-round limit was respected.
+
+## Act 10 — Build: G4 shared report shadow migration
+
+### Round 1 — Codex build
+
+Re-scanned runtime operation creators, worker routing, API joins, CLI/Demo and
+reference-client flows, and applied SQL consumers. Confirmed the current
+forward path already converges on one SharedNightAnalysis and three
+deterministic projections; the remaining automatic legacy-shaped operation is
+a non-claimable compatibility result bridge, not a second Agent analysis.
+
+Activated the existing `shadow` configuration at the Product processor. Shadow
+now prepares the dormant three-Agent path without publishing it and persists a
+content-addressed structured comparison on the authoritative shared artifact.
+The comparator covers seven required semantic categories and explicitly
+forbids external side effects. Added a deterministic executable consumer audit
+that combines AST call sites with worker/API/CLI/client/SQL evidence, and
+updated the frozen consumer document with current classifications.
+
+### Round 2 — Codex fix pass
+
+The first fresh PostgreSQL shadow run exposed that `prepare_shared` deleted its
+lease argument before the audit-only legacy preparation could receive it.
+Retained the lease and reran from a recreated isolated database. The first
+successful comparison then correctly showed one false source-reference
+mismatch because legacy role views cite raw facts while shared role views cite
+their analysis/projection authority. Changed that category to compare the
+evidence facts' actual source references on both paths. The final sample was
+equal in all seven semantic categories.
+
+### Codex verification
+
+- Focused shadow/config/Product unit selection: 81 passed.
+- Consumer audit executable/unit proof: PASS / 1 passed.
+- Fresh PostgreSQL 16.14 schema-014 shadow persistence/no-publication proof:
+  1 passed; seven categories equal and zero mismatches.
+- Unit-marked regression: 1,089 passed, 37 deselected under the required
+  loopback provider-test profile.
+- Architecture: 5 passed with no new debt.
+- Compile and `git diff --check`: PASS.
+
+Diff review confirms shadow cannot become a second publication/effect
+authority, comparison ignores prose, current new-report consumers are
+shared-ready, and the remaining compatibility writes/reads are explicitly
+enumerated rather than hidden behind a zero claim. The two-fix-round limit was
+used and G5 cutover gates are satisfied.
+
+## Act 11 — Build: G5 shared-only report cutover
+
+### Round 1 — Codex build
+
+Flipped the typed report default and environment fallback to `shared_only` with
+legacy compatibility emission disabled, and made the pair a fail-closed
+configuration contract. Separated the authoritative fast-path report child ID
+from the optional compatibility-operation ID. New shared-only work creates the
+report request directly; explicit `shared_compat + true` retains rollback.
+
+Migrated Replay journey progress to follow the report request to its linked
+shared operation/result. Disabled direct legacy `product_agent` execution in
+the production shared-only handler while retaining the implementation for
+explicit rollback, shadow comparison, and historical characterization. Updated
+the executable consumer audit to distinguish default consumer zero from
+retained rollback/history code.
+
+### Round 2 — Codex fix pass
+
+The new FastPath ID-matrix test showed that an active but unreviewed vendor
+alert is correctly classified `operational_review`, not
+`no_reviewed_signal`; corrected only that test expectation. No production
+logic changed in the fix pass.
+
+### Codex verification
+
+- Focused settings/audit/FastPath/simulation/backend selection: 68 passed.
+- FastPath shared-only/rollback matrix: 3 passed.
+- Unit-marked regression: 1,095 passed, 38 deselected.
+- Fresh PostgreSQL 16.14 Product suite at schema 014: 19 passed.
+- Shared-only topology proof: one report request, one shared analysis, three
+  projections, zero legacy or compatibility operations.
+- Migration/hash/RLS check: PASS at schema 014.
+
+Diff review confirms the default path cannot create or execute legacy report
+work, simulation has a shared-native child identity, rollback is explicit and
+tested, and historical reads were not destructively removed. One bounded fix
+pass was used.
+
+## Act 12 — Build: G6 architecture boundary cleanup
+
+### Round 1 — Codex build
+
+Removed all six characterized self-imports, then replaced the large worker
+runtime's concrete handler imports with a bootstrap-owned registry assembly.
+Injected API service construction into `build_backend_runtime` to eliminate the
+process/app inversion. Moved the Product data provider into application scope
+and the concrete PostgreSQL slice into infrastructure scope, retaining narrow
+compatibility facades while migrating every known production and test caller.
+
+Extracted the durable worker contracts, lease/fence primitives, handler
+protocol, result types, invocation records, and shared errors into a minimal
+`workers.kernel`. Concrete handlers now depend on the kernel; runtime preserves
+the historical public names without importing any concrete handler.
+
+### Round 2 — Codex fix pass
+
+The initial exact-baseline assertion incorrectly compared snapshot-only fields
+with fixture metadata and was corrected to compare only graph debt. The full
+unit run then found that the executable report-consumer audit still scanned the
+pre-move domain path; it now scans the authoritative infrastructure adapter.
+The architecture rule was narrowed to permit the intended
+`workers.runtime -> workers.kernel` contract edge while still rejecting every
+kernel/runtime dependency on concrete worker modules.
+
+### Codex verification
+
+- Focused moved-module and runtime regression: 233 passed.
+- Extracted-kernel regression: 111 passed.
+- Unit-marked regression: 1,096 passed, 38 deselected under the required
+  loopback provider-test profile.
+- Architecture: 6 passed; executable SCCs 3 to 1, self-imports 6 to 0, and
+  forbidden edges 11 to 0.
+- Worker bootstrap/compatibility CLI help, compilation, source audit, and
+  `git diff --check`: PASS.
+
+Diff review confirms concrete assembly is bootstrap-owned, the worker kernel
+has no concrete handler dependency, domain authorities no longer import
+runtime/workers/infrastructure, and the reduced baseline absorbed no new debt.
+The remaining runtime-contract SCC is explicit and bounded. Two fix rounds
+were used.
+
+## Act 13 — Build: G7 device automation lifecycle
+
+### Round 1 — Codex build
+
+Added one governed DeviceBinding service and CLI for discovery, temporal bind,
+read, rebind/transfer, end/unbind, revoke, and validation. Migration 015 adds
+CAS, immutable temporal chaining, overlap prevention, IANA timezone checks,
+append-only transfer audit, forced RLS, and a narrow SECURITY DEFINER command
+authority.
+
+Added PostgreSQL acquisition schedules and a feature-gated scheduler
+composition root. Due scans use `FOR UPDATE SKIP LOCKED`, deterministic UUIDv7
+operation identity, semantic idempotency, bounded jitter, pause/resume, failure
+backoff, and the existing lease/fence worker protocol. Concrete Perceptor work
+remains behind the integration boundary and reuses the existing Pull ingress,
+checkpoint, and client authorities.
+
+Implemented a separate immutable night-data finalization aggregate with
+OPEN/SOFT/HARD/reconciliation states. Late material evidence creates a new
+revision and bounded UUIDv7 reanalysis work without mutating prior authority.
+
+### Round 2 — Native PostgreSQL correction and self-review
+
+PostgreSQL execution found and corrected output-column ambiguity in binding
+lifecycle updates and scheduler conflict targets. Durable-operation checks then
+required deterministic UUIDv7 identity and the matching `id_scheme`; both were
+aligned with the existing v2 contract rather than weakening it. Self-review
+separated scheduler enqueue purpose from the production worker purpose and
+persisted the full exact workload snapshot required by `exact_worker_scope`.
+The final diff audit also preserved each ended predecessor's own immutable JSON
+identity during rebind and separated the vendor client-ID reference from the
+generic SleepAgent service credential.
+
+### Codex verification
+
+- Focused unit/settings/architecture selection: 28 passed.
+- Clean native PostgreSQL 16.14 G7 authority matrix: 1 passed.
+- Full PostgreSQL marker: 36 passed, one process-proof fixture skipped.
+- Full unit and non-E2E/non-PostgreSQL gates: 1,105 passed each.
+- Schema apply/check: 001–017, manifest-pinned.
+- Device and scheduler CLI help, compilation, and `git diff --check`: PASS.
+- No Perceptor cloud/device call; live acceptance deferred.
+
+## Act 14 — Build: G7.1 controlled live acquisition acceptance
+
+### Round 1 — Concrete process entrypoints and claimed scope
+
+The clean authoritative entry checkpoint was verified before live work. The
+single existing DeviceBinding and owner-only credential mechanism were reused;
+no binding, device, vendor setting, or physical configuration was changed.
+Read-only authentication/discovery, Current, known non-empty History, and
+SleepReport preflights were completed with sanitized evidence only.
+
+Actual CLI and scheduler startup exposed that both entrypoints called the pool
+provider with unsupported keyword arguments. They now use the provider's
+concrete `open()` lifecycle contract, with focused process-entry regressions.
+The first scheduled worker attempt then proved that the existing Pull ingress
+discarded the exact claimed Worker scope and constructed API ingress authority.
+Scheduled execution now passes and strictly validates the claimed Worker scope;
+the existing API path is unchanged.
+
+### Round 2 — Immutable SQL authority and role grants
+
+Application-only correction could not succeed because the migration-012/013
+SECURITY DEFINER functions hard-coded API/perceptor-ingress authority. Added
+migration 018 to admit only Worker/worker calls carrying the exact active
+History or SleepReport handler grant, while preserving API authority and the
+migration-013 covered-window retry no-op. The test-role bootstrap now grants
+the planner and ingress functions to its bounded Worker role.
+
+The live operation was reclaimed through lease generation 5 and reached one
+terminal success after the privilege correction. Duplicate due evaluation
+reused the same deterministic fire and operation. No third fix round was used;
+the fail-closed SleepReport V2 provenance mismatch and missing initial shared
+report handoff remain explicit acceptance failures.
+
+### Codex verification
+
+- Actual DeviceBinding CLI, scheduler, and Worker process boundaries: PASS.
+- Focused G7 PostgreSQL matrix: 1 passed.
+- Observation V2 unit/PostgreSQL selection: 117 passed.
+- Product/report/finalization selection: 90 passed.
+- Full PostgreSQL marker: 36 passed, 1 expected process-proof skip.
+- Broader non-E2E/non-PostgreSQL gate: 1,110 passed, 39 deselected. The first
+  sandboxed run could not open loopback test sockets; the approved loopback run
+  passed without code changes.
+- Architecture: 6 passed. OpenAPI snapshot check: PASS and unchanged.
+- Migration proofs: fresh 001→018, exact entry-HEAD 001→017 then 017→018,
+  restored 013→018, manifest/schema check, API no-op, and Worker planner: PASS.
+- Controlled schedules paused; final enabled scheduler scan emitted zero fires;
+  external delivery remained disabled.
+
+Diff review confirms the live credential separation is intact, scheduled Pull
+authority is exact and handler-bounded, migrations 015–017 remain immutable,
+retry semantics are preserved, no payload/credential/runtime artifact entered
+the repository, and the two bounded fix rounds stayed within the frozen goal.
+
+## Act 15 — Build: G7.1-R2 full SleepReport V2 semantic closure
+
+### Round 1 — Evidence matrix and complete adapter contract
+
+Reconstructed the complete retained-real SleepReport shape against the pinned
+Perceptor V2.5.2 document and wrote one field-level semantic authority. Added
+distinct vendor-derived whole-report metric identities, canonical units,
+numeric constraints, and required stage-envelope aggregation windows for heart
+mean, respiratory mean, movement total, deep-sleep ratio, and sleep efficiency.
+Raw physiological samples retain device-measured authority. Ambiguous profile
+time/duration strings and apnea values remain encrypted raw-only evidence.
+
+Added the complete sanitized structural fixture and routed it through the real
+adapter, canonical factory, reconciliation, and PostgreSQL V2 sidecar path.
+Unknown mapped/documented structure fails atomically; explicitly known
+unsupported fields remain visible to normalization without becoming trusted.
+Missing/invalid facts were traced to provider-emitted sensor sentinels at
+explicit timestamps rather than SleepAgent cadence-gap synthesis.
+
+### Round 2 — PostgreSQL compatibility and fail-closed review
+
+The strict new-write adapter correctly stopped producing legacy ambiguous
+movement candidates, exposing an upgrade-test fixture that still attempted to
+create historical ambiguity through the live adapter. The fixture now creates
+that historical row directly, preserving read/upcast compatibility without
+weakening new writes. Its isolated fresh/upgrade PostgreSQL proof passes.
+
+Self-review also found that documented raw-only `apnea_images` content was not
+validating nested keys. The adapter now validates the exact documented chart
+shape while continuing to emit no clinical or trusted fact. Legacy raw-only
+apnea optionals with no published schema remain opaque type-checked lists, and
+the extension policy documents that distinction.
+
+### Final Codex verification
+
+- Focused semantic/adapter/Observation V2/Product selection: 316 passed.
+- Unit marker: 1,117 passed, 40 deselected.
+- Broad non-E2E/non-PostgreSQL: 1,117 passed, 40 deselected.
+- Focused Perceptor/Observation V2 PostgreSQL plus exact G7.1-R1 convergent
+  shared-handoff regression: 3 passed.
+- Full PostgreSQL marker: 37 passed; 1 expected process-proof skip.
+- Architecture: 6 passed; OpenAPI, schema-018 apply/check, compilation, and
+  `git diff --check`: PASS.
+
+The explicitly sourced owner-only credential references passed production
+resolver checks. A fresh bounded provider response for the retained known-full
+date crossed the current client, adapter, canonical factory, durable ingress,
+and Worker reconciliation path as 885 accepted and persisted V2 facts with
+zero semantic rejects, conflicts, unknown extensions, contract drift, legacy
+execution, or external effects. The live field inventory matches the complete
+semantic matrix; the G7.1-R2 ledger is accepted.
+
+## Act 16 — Build: G8 governed CareAction and HITL approval authority
+
+### Round 1 — Canonical authority and parser review
+
+Re-baselined generic HITL, Product binding/scope/epoch authority, current care
+catalog, SharedNightAnalysis commit, and the legacy interaction care path.
+Added one source-pinned candidate/policy/proposal/decision/grant path, worker
+commit integration, authenticated Product surface, and aggregate operations
+signals. Native PostgreSQL exposed `grant` as a reserved alias in migration and
+read SQL; semantic aliases replaced it and the manifest was repinned.
+
+### Round 2 — Expiry, concurrency, and final authority audit
+
+The expanded non-owner database proof reached expiry and exposed ambiguity
+between the PL/pgSQL `decision_id` variable and conflict-target column. Both
+expiry/supersession inserts now name the primary-key constraint. Migration 020
+was repinned and fresh 001→020 plus 019→020 were rebuilt and reproved.
+
+Final review recursively rejects nested destination keys and explicitly proves
+zero delivery intents, journal entries, replay effects, and Memory revisions.
+It confirms one CAS winner, exact retry convergence, restart/revocation,
+supersession, RLS/direct-write denial, bounded audit text, and no G9 behavior.
+No third fix round was used.
+
+### Codex verification
+
+- Focused selection: 98 passed; final focused selections: 38 passed plus one
+  real PostgreSQL G8 acceptance pass.
+- Unit marker and broad non-E2E/non-PostgreSQL: 1,139 passed each.
+- Full fresh PostgreSQL marker: 38 passed, one pre-existing environment-gated
+  process-root reader skipped.
+- Fresh/upgrade migration, manifest hash, RLS/privileges, OpenAPI, compilation,
+  architecture, and diff whitespace: PASS.
+
+Final diff review found no grant producer outside the authenticated decision
+function, arbitrary recipient authority, Memory outcome write, DeliveryIntent,
+effect handler, or changes to migrations 001–019. G8 stops at an inert,
+exact-bound ApprovalGrant.
+
+## Act 17 — Build: G9 terminal CarePlan and human execution tracking
+
+### Round 1 — Grant authority, execution contract, and PostgreSQL proof
+
+Re-baselined the legacy replay/delivery care interaction and per-night follow-up
+projection against G8's source-pinned grant authority. Added a closed immutable
+CarePlan contract, action-specific execution policy, separate status lifecycle,
+human-attested append-only events, application service, terminal CLI, and
+PostgreSQL 021 persistence. Grant insert creates one deterministic plan in the
+approval transaction; active pre-021 grants receive a bounded idempotent
+backfill. The first native PostgreSQL run exposed a proof fixture clock two
+minutes ahead of database time; the fixture was corrected to use a past base
+without weakening the production time fence.
+
+### Round 2 — Process recovery, authority loss, and isolation review
+
+Expanded the non-owner PostgreSQL matrix through independent terminal
+processes for list, START, restart/show, COMPLETE, and immutable history.
+Added direct-completion policy, terminal resurrection rejection, wrong
+subject/role/scope/epoch, expiry, explicit revocation, material supersession,
+duplicate/key-conflict handling, START/CANCEL and COMPLETE/CANCEL contention,
+completed-before-revocation history, a deliberately lost post-commit client
+response, and zero delivery/Habit/Memory evidence. Static and terminal tests
+cover every CLI command and closed action renderer, safe zh-CN rendering,
+missing/expired plans, RLS/FORCE RLS, append-only evidence, the actual aggregate
+metrics surface, sanitized structured lifecycle logs, and the explicit absence
+of CareOutcome persistence. No third fix round was used.
+
+### Codex verification
+
+- G9 domain/application/CLI: 18 passed; focused Product/app/foundation and
+  architecture: 124 passed.
+- Unit marker and broad non-E2E/non-PostgreSQL: 1,158 passed each.
+- Fresh PostgreSQL marker: 40 passed, one pre-existing environment-gated G7.2
+  process-root reader skipped; G9's independent terminal process proof passed.
+- Exact G8 schema 020→021 populated-grant upgrade, fresh 001→021, manifest
+  check, RLS/privileges, append-only triggers, OpenAPI, compilation,
+  architecture, and diff whitespace: PASS.
+- The packaged `python -m sleepagent.care_cli` entry point resolved a real
+  non-owner API authority and rendered its durable completed plan.
+
+Final diff review found no proposal-to-plan bypass, delivery/effect producer,
+Habit/Memory execution mutation, CareOutcome persistence, arbitrary role
+authority, mutable plan/event evidence, PUBLIC command authority, or changes to
+migrations 001–020. G9 stops at durable human attestation; external effects
+remain zero and outcome evaluation remains not started.
+
+## Act 18 — Build: G10 care outcome and personalization feedback closure
+
+### Round 1 — Deterministic outcome authority and governed proposal boundary
+
+Re-baselined G9 human-attested execution, current HARD_FINALIZED revision
+authority, Observation Semantics V2, Product longitudinal context, and the
+existing elder-confirmed Habit/Memory paths. Added action-keyed deterministic
+evaluation policy, immutable CareOutcome and PersonalizationEffectReceipt
+contracts, a fenced durable Worker boundary, migration 022 persistence,
+aggregate operations signals, and bounded zh-CN terminal views. The candidate
+is compatible with the existing governed Memory contract but cannot write a
+confirmed Habit or Memory revision.
+
+### Round 2 — Upgrade, expiry, lineage, and fence audit
+
+The user-owned PostgreSQL 16.14 distribution became available during the
+acceptance audit. Its first process run exposed an indeterminate nullable SQL
+parameter, which was fixed with an explicit text cast. The expanded round then
+closed upgrade, expiry, and lineage gaps: pre-022 completed G9 plans receive an
+idempotent backfill; one delayed semantic operation closes idle windows without
+polling; sufficient current HARD_FINALIZED follow-up advances WAITING to READY;
+and every outcome pins both finalization and episode revision identities.
+
+The projection write revalidates the exact operation fence. A deliberately
+lost response was reclaimed without duplicate authority, and revised late
+evidence created one outcome/receipt supersession chain. Receipt lineage now
+binds stale proposals, current metrics exclude superseded proposals, and the
+candidate hash is byte-for-byte canonical with existing Memory governance.
+The exact candidate passed existing elder confirmation and current-memory
+projection tests without any direct Memory write. No third fix round was used.
+
+### Codex verification
+
+- Focused G10: 27 passed; final G8/G9/G10, Habit/Memory, architecture,
+  API/runtime/settings, compile/import, and diff selection: 225 passed.
+- Unit marker: 1,185 passed, 45 deselected.
+- Broad non-E2E/non-PostgreSQL: 1,185 passed, 45 deselected.
+- Architecture: 6 passed with the frozen 0/0/1 dependency baseline.
+- PostgreSQL 16.14 focused G10 fresh/process plus populated 021→022 upgrade:
+  2 passed.
+- Full fresh PostgreSQL marker: 42 passed; only the documented completed
+  process-root evidence-reader skipped.
+- Manifest target 22 and migration hash
+  `168818d849c061e17d1e22110c16cf8914408d201b60c888309d37b33c911c0f`
+  are internally consistent; compilation, import, and `git diff --check` pass.
+
+Final review found no changes to migrations 001–021, direct confirmed
+Habit/Memory mutation, external effect, generic Movement reconstruction,
+additional action/Agent role, PUBLIC table privilege, or dependency-baseline
+growth. G10 implementation and release proofs pass. The coherent commit remains
+pending the required user approval; nothing is pushed.
+
+## Act 19 — Build: R1 bounded runtime and repository closure
+
+### Round 1 — Durable ceilings, due discovery, and deployment/security authority
+
+Reconfirmed the eight R1 findings against the post-C3 tree and implemented two
+additive migrations. Migration 026 separates expired-execution reclaim count
+from handler attempt count across the four active work kinds, installs
+category-specific terminal routing, corrects operational aggregation, enforces
+jitter below cadence, and bounds overdue schedule advancement. Migration 027
+removes `internal_status` from ten Care base-table policies and strengthens the
+five aggregate-only functions with one exact BFF/database-role guard.
+
+The application adds bounded oldest-first due-Episode discovery with explicit
+current evaluation time, a trusted-operator acknowledgement for Care CLI
+mutations, and a fail-closed outcome-evaluation capability/consumer invariant.
+The first fresh PostgreSQL pass exposed one invalid operations-column update
+in the generic terminal helper and a settings test double lacking the new
+capability field. The invalid column reference was removed and the operational
+adapter retained compatibility with narrow status test doubles without
+weakening real settings validation.
+
+### Round 2 — Observable scheduler progress and adversarial closure review
+
+The initial scheduler correction used `clock_timestamp() + 1 microsecond` as
+the overdue floor. The focused proof correctly showed that this was monotonic
+inside the UPDATE but could already be past by the observing statement. The
+final policy uses one full positive jittered cadence from PostgreSQL time,
+made positive by `jitter < cadence`, while preserving the prior deterministic
+signed offset and one-fire-per-schedule scan bound.
+
+The final review expanded crash exhaustion to all four active work categories,
+ordinary recovery, stale fences, delivery ambiguity, and sanitized aggregate
+health degradation. It tested two missed Episodes with batch size one, direct
+internal-status denial across all ten Care tables, subject/scope isolation,
+outcome startup matrices, fresh and 025-upgrade migrations, and truthful
+ENV_BLOCKED propagation. Benchmark-harness corrections were limited to
+observing the replay journey at its exact Episode boundary and matching
+generation columns to the actual schema; no production Episode policy or
+persistence design changed. No third production fix round was used.
+
+### Codex verification
+
+- PostgreSQL 16.14 fresh 001→027 and isolated 025→027 upgrade: PASS; final
+  schema 027 and manifest checksums are exact.
+- Broad non-PostgreSQL/non-E2E/non-lifespan: 1,215 passed, 56 deselected.
+- Final canonical-profile PostgreSQL marker: 50 passed, one environment-gated
+  completed-process-root reader skipped, 1,220 deselected.
+- Architecture: 6 passed at the frozen 0 self-import / 0 forbidden-growth /
+  one bounded runtime-SCC baseline; OpenAPI: 2 passed.
+- Controlled process-fault: 45 static/foundation plus 11 executed PostgreSQL
+  crash/reclaim proofs, repeatable across consecutive standalone runs.
+  Controlled report CLI/contract/audit equivalent: 62 plus the exact executed
+  production PostgreSQL report reservation/read proof.
+- Authoritative closure verifier: all eight named lanes PASS and `FINAL =
+  PASS`; the C1A--C3 nodes executed in the full PostgreSQL lane are explicitly
+  attested by the closure lane. Absent PostgreSQL DSNs produce `ENV_BLOCKED`,
+  `NOT_VERIFIED`, exit 77.
+- The real 497-observation benchmark measured 495 immutable revisions and
+  memberships, 5,861,786 logical revision-JSON bytes, 7,454,720 physical delta
+  bytes across the three core relations, 103.011-second serial ingest,
+  1,249.396-ms median reconstruction, and 15.834-ms median finalization lookup.
+  Decision: `ACCEPTABLE_FOR_PORTFOLIO_SCALE`; optimization is deferred debt.
+- Compile/import, shell syntax, migration immutability 001–025, protected RLS
+  functions, and `git diff --check`: PASS.
+
+Final diff review found no new Agent, Memory/retrieval system, delivery
+channel, broker, scheduler platform, end-user auth claim, public-doc rewrite,
+legacy cleanup, or historical migration mutation. The five coherent R1
+checkpoints are local and nothing is pushed; the untracked audit snapshots
+remain untouched.

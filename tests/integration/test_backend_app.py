@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
-from sleepagent.backend_app import (
+from sleepagent.app import (
     BoundedRequestMiddleware,
     CorrelationIdMiddleware,
     ReplayWatermarkMiddleware,
@@ -20,7 +20,7 @@ from sleepagent.backend_app import (
     _product_error_handler,
     create_sleep_backend_app,
 )
-from sleepagent.backend_runtime import (
+from sleepagent.process import (
     DatabaseAttestation,
     RuntimeServices,
     SleepBackendRuntime,
@@ -28,22 +28,23 @@ from sleepagent.backend_runtime import (
 from tests.support.runtime_fixtures import (
     reset_backend_runtime_state as reset_active_runtime_for_tests,
 )
-from sleepagent.backend_settings import (
+from sleepagent.config import (
     ApiSurface,
     DataMode,
     DeploymentMode,
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.demo_api import (
+from sleepagent.api.demo import (
     DemoAcceptedResponse,
     DemoApiError,
+    DemoTechnicalTraceResponse,
     DemoTraceResponse,
     ScenarioClockResponse,
 )
-from sleepagent.product_api.contracts import InteractionStatusResponse
-from sleepagent.product_api.contracts import InteractionStartRequest
-from sleepagent.product_api.service import (
+from sleepagent.api.product_contracts import InteractionStatusResponse
+from sleepagent.api.product_contracts import InteractionStartRequest
+from sleepagent.api.product import (
     ProductApiError,
     ProductApiService,
     ProductRequestContext,
@@ -162,11 +163,48 @@ class Demo:
         del operation_id, cursor, limit
         return DemoTraceResponse(generation=1, entries=())
 
+    def technical_trace(self, *, operation_id):
+        return DemoTechnicalTraceResponse(
+            root_operation_id=operation_id,
+            namespace_generation=1,
+            run_id="run-test",
+            arm_id="arm-test",
+            subject_id="subject-test",
+            journey_state="succeeded",
+            product_operation_count=1,
+            product_attempt_count=1,
+            fast_path_succeeded_count=1,
+        )
+
+
+def test_demo_technical_trace_accepts_postgres_json_array_shapes() -> None:
+    response = DemoTechnicalTraceResponse.model_validate(
+        {
+            "root_operation_id": "root-op",
+            "namespace_generation": 1,
+            "run_id": "run-test",
+            "arm_id": "arm-test",
+            "subject_id": "subject-test",
+            "journey_state": "succeeded",
+            "product_operation_count": 1,
+            "product_attempt_count": 1,
+            "fast_path_succeeded_count": 1,
+            "product_attempts": [{"attempt_state": "committed"}],
+            "durable_invocations": [],
+            "habit_revisions": [],
+            "memory_revisions": [],
+            "memory_read_receipts": [],
+        }
+    )
+
+    assert response.product_attempts == [{"attempt_state": "committed"}]
+
 
 class InternalStatus:
     def operational_metrics(self):
         return {
-            "schema_version": "sleepagent_durable_operational_metrics.v1",
+            "schema_version": "sleepagent_durable_operational_metrics.v2",
+            "status": "healthy",
             "queues": [],
             "product_attempts": [],
             "safety": [],
@@ -379,7 +417,7 @@ def test_today_openapi_is_state_and_role_discriminated() -> None:
     }
 
 
-def test_stage_three_read_routes_publish_distinct_versioned_schemas() -> None:
+def test_read_routes_publish_distinct_versioned_schemas() -> None:
     runtime, _, _ = _runtime(
         surfaces=frozenset({ApiSurface.PUBLIC_V1, ApiSurface.PRODUCT})
     )
@@ -578,7 +616,7 @@ def test_request_timeout_includes_decode_and_json_parse(
     phase: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import sleepagent.backend_app as backend_app_module
+    import sleepagent.app as backend_app_module
 
     messages: list[dict[str, Any]] = []
 
@@ -700,6 +738,24 @@ def test_demo_is_token_protected_and_watermarked() -> None:
     assert denied.value.status_code == 401
     assert allowed.data_mode == "replay"
     assert allowed.synthetic_non_release is True
+
+
+def test_demo_technical_trace_is_token_protected_and_read_only() -> None:
+    runtime, _, _ = _runtime(surfaces=frozenset({ApiSurface.DEMO}))
+    app = create_sleep_backend_app(runtime)
+    route = next(
+        item
+        for item in app.routes
+        if getattr(item, "path", None) == "/demo/v1/technical-trace"
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        route.endpoint(operation_id="root-1", demo_token=None)
+    allowed = route.endpoint(operation_id="root-1", demo_token=DEMO_TOKEN)
+
+    assert denied.value.status_code == 401
+    assert allowed.root_operation_id == "root-1"
+    assert allowed.product_attempt_count == 1
 
 
 def test_demo_and_product_errors_are_flat_correlated_watermarked_envelopes() -> None:

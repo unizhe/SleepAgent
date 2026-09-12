@@ -243,6 +243,150 @@
         "title": "DemoSeedRequest",
         "type": "object"
       },
+      "DemoTechnicalTraceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "arm_id": {
+            "minLength": 1,
+            "title": "Arm Id",
+            "type": "string"
+          },
+          "data_mode": {
+            "const": "replay",
+            "default": "replay",
+            "title": "Data Mode",
+            "type": "string"
+          },
+          "durable_invocations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Durable Invocations",
+            "type": "array"
+          },
+          "fast_path_succeeded_count": {
+            "minimum": 0.0,
+            "title": "Fast Path Succeeded Count",
+            "type": "integer"
+          },
+          "habit_revisions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Habit Revisions",
+            "type": "array"
+          },
+          "journey_error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journey Error Code"
+          },
+          "journey_result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journey Result"
+          },
+          "journey_state": {
+            "minLength": 1,
+            "title": "Journey State",
+            "type": "string"
+          },
+          "memory_read_receipts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Memory Read Receipts",
+            "type": "array"
+          },
+          "memory_revisions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Memory Revisions",
+            "type": "array"
+          },
+          "namespace_generation": {
+            "minimum": 1.0,
+            "title": "Namespace Generation",
+            "type": "integer"
+          },
+          "product_attempt_count": {
+            "minimum": 0.0,
+            "title": "Product Attempt Count",
+            "type": "integer"
+          },
+          "product_attempts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Product Attempts",
+            "type": "array"
+          },
+          "product_operation_count": {
+            "minimum": 0.0,
+            "title": "Product Operation Count",
+            "type": "integer"
+          },
+          "root_operation_id": {
+            "minLength": 1,
+            "title": "Root Operation Id",
+            "type": "string"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "demo_technical_trace.v1",
+            "default": "demo_technical_trace.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "subject_id": {
+            "minLength": 1,
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "synthetic_non_release": {
+            "const": true,
+            "default": true,
+            "title": "Synthetic Non Release",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "root_operation_id",
+          "namespace_generation",
+          "run_id",
+          "arm_id",
+          "subject_id",
+          "journey_state",
+          "product_operation_count",
+          "product_attempt_count",
+          "fast_path_succeeded_count"
+        ],
+        "title": "DemoTechnicalTraceResponse",
+        "type": "object"
+      },
       "DemoTraceEntry": {
         "additionalProperties": false,
         "properties": {
@@ -1176,6 +1320,146 @@
           }
         },
         "summary": "Seed",
+        "tags": [
+          "Replay demo controller"
+        ]
+      }
+    },
+    "/demo/v1/technical-trace": {
+      "get": {
+        "operationId": "technical_trace_demo_v1_technical_trace_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Demo-Controller-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Demo-Controller-Token"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoTechnicalTraceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Not Implemented"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Technical Trace",
         "tags": [
           "Replay demo controller"
         ]

@@ -4,7 +4,7 @@ x-backend-image: &backend-image
   image: sleepagent-backend-test:local
   build:
     context: .
-    dockerfile: docker/Dockerfile
+    dockerfile: Dockerfile
     target: development
 
 x-runtime-environment: &runtime-environment
@@ -17,6 +17,7 @@ x-runtime-environment: &runtime-environment
   SLEEPAGENT_BACKEND_SIGNING_KEY_REF: file:/run/sleepagent/actor-public.pem
   SLEEPAGENT_BACKEND_ENCRYPTION_KEY_REF: test:key-provider/encryption
   SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER: ${SLEEPAGENT_BACKEND_ACTOR_ASSERTION_ISSUER:-sleepagent-bff-v1}
+  SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED: ${SLEEPAGENT_BACKEND_OUTCOME_EVALUATION_ENABLED:-false}
 
 services:
   postgres:
@@ -98,7 +99,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -111,6 +112,12 @@ services:
       SLEEPAGENT_BACKEND_DATABASE_ROLE: ${SLEEPAGENT_TEST_POSTGRES_API_USER:?required}
       SLEEPAGENT_BACKEND_SERVICE_PRINCIPAL_ID: sleepagent-bff-test
       SLEEPAGENT_BACKEND_SERVICE_CREDENTIAL_REF: test:key-provider/api-service-credential
+      # Report reads must compute the same semantic model manifest as the worker.
+      SLEEPAGENT_PRODUCT_ANALYSIS_MODEL_MODE: ${SLEEPAGENT_BACKEND_MODEL_MODE:-deterministic}
+      SLEEPAGENT_PRODUCT_LLM_MODEL: ${SLEEPAGENT_PRODUCT_LLM_MODEL:-${SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID:-deepseek-v4-flash}}
+      SLEEPAGENT_PRODUCT_LLM_BASE_URL: ${SLEEPAGENT_PRODUCT_LLM_BASE_URL:-${SLEEPAGENT_RADAR_AGENT_LLM_BASE_URL:-https://api.deepseek.com}}
+      SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS: ${SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS:-${SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS:-30}}
+      SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS: ${SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS:-4000}
       SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_API_POOL_MIN_SIZE:-1}
       SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_API_POOL_MAX_SIZE:-5}
     volumes:
@@ -135,7 +142,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -172,7 +179,7 @@ services:
     <<: *backend-image
     command:
       - uvicorn
-      - backend.main:app
+      - sleepagent.app:app
       - --host
       - 0.0.0.0
       - --port
@@ -210,10 +217,10 @@ services:
     command:
       - python
       - -m
-      - sleepagent.worker_runtime
+      - sleepagent.workers.runtime
       - run
       - --lease-seconds
-      - ${SLEEPAGENT_TEST_WORKER_LEASE_SECONDS:-30}
+      - ${SLEEPAGENT_TEST_WORKER_LEASE_SECONDS:-300}
       - --heartbeat-seconds
       - ${SLEEPAGENT_TEST_WORKER_HEARTBEAT_SECONDS:-10}
     environment:
@@ -227,8 +234,18 @@ services:
       SLEEPAGENT_BACKEND_POOL_MIN_SIZE: ${SLEEPAGENT_WORKER_POOL_MIN_SIZE:-1}
       SLEEPAGENT_BACKEND_POOL_MAX_SIZE: ${SLEEPAGENT_WORKER_POOL_MAX_SIZE:-4}
       SLEEPAGENT_BACKEND_WORKER_QUEUES: ${SLEEPAGENT_TEST_WORKER_QUEUES:?required}
+      # Replay data authority stays fake; Product LLM selection is independent.
       SLEEPAGENT_BACKEND_PROVIDER_MODE: fake
-      SLEEPAGENT_BACKEND_MODEL_MODE: deterministic
+      SLEEPAGENT_BACKEND_MODEL_MODE: ${SLEEPAGENT_BACKEND_MODEL_MODE:-deterministic}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-${SLEEPAGENT_RADAR_AGENT_LLM_API_KEY:-}}
+      SLEEPAGENT_RADAR_AGENT_LLM_API_KEY: ${SLEEPAGENT_RADAR_AGENT_LLM_API_KEY:-}
+      SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID: ${SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID:-}
+      SLEEPAGENT_RADAR_AGENT_LLM_BASE_URL: ${SLEEPAGENT_RADAR_AGENT_LLM_BASE_URL:-}
+      SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS: ${SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS:-}
+      SLEEPAGENT_PRODUCT_LLM_MODEL: ${SLEEPAGENT_PRODUCT_LLM_MODEL:-${SLEEPAGENT_RADAR_AGENT_LLM_MODEL_ID:-deepseek-v4-flash}}
+      SLEEPAGENT_PRODUCT_LLM_BASE_URL: ${SLEEPAGENT_PRODUCT_LLM_BASE_URL:-${SLEEPAGENT_RADAR_AGENT_LLM_BASE_URL:-https://api.deepseek.com}}
+      SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS: ${SLEEPAGENT_PRODUCT_LLM_TIMEOUT_SECONDS:-${SLEEPAGENT_RADAR_AGENT_LLM_TIMEOUT_SECONDS:-30}}
+      SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS: ${SLEEPAGENT_PRODUCT_LLM_MAX_TOKENS:-4000}
     depends_on:
       test-bootstrap:
         condition: service_completed_successfully
@@ -237,7 +254,7 @@ services:
         - CMD
         - python
         - -m
-        - sleepagent.worker_runtime
+        - sleepagent.workers.runtime
         - healthcheck
       interval: 3s
       timeout: 5s
