@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping, Protocol, TypeAlias
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -600,10 +600,11 @@ class SleepSlicePolicy:
 def default_sleep_slice_policy() -> SleepSlicePolicy:
     return SleepSlicePolicy(
         boundary=EpisodeBoundaryPolicy(
-            policy_version="boundary-v1",
+            policy_version="boundary-v2-wake-confirmation",
             rollover_local_minute=12 * 60,
             report_deadline_local_minute=10 * 60,
             maximum_episode_seconds=20 * 3600,
+            wake_confirmation_seconds=30 * 60,
             allowed_lateness_seconds=2 * 3600,
         ),
         quality=DeterministicQualityPolicy(
@@ -749,40 +750,58 @@ class EpisodeLifecycleProjector:
         observation_ids = tuple(
             sorted(set((*current.observation_ids, observation.observation_id)))
         )
-        if is_bed_out:
-            if event_at <= current.episode.collection_start_at:
-                raise SleepSliceInvariantError("wake cannot precede Episode opening")
-            candidate_date = event_at.astimezone(
-                ZoneInfo(current.episode.timezone_name)
-            ).date()
-            conflict_id = conflicting_episode(candidate_date)
-            episode = finalize_episode_date(
-                current.episode,
-                committed_at=committed_at,
-                wake_at=event_at,
-                canonical_date_available=lambda _value: conflict_id is None,
-            )
-            return EpisodeRevisionMutation(
-                episode=episode,
-                database_state=NightEpisodeState.AWAITING_REPORT.value,
-                revision_id=self.id_generator(committed_at),
-                parent_revision_id=current.current_revision_id,
-                observation_ids=observation_ids,
-                revision_cause=(
-                    "observed_wake_date_conflict"
-                    if conflict_id is not None
-                    else "observed_wake"
-                ),
-                expected_episode_cas=current.cas_version,
-                snapshot=snapshot,
-                newly_opened=False,
-                closes_episode=True,
-                conflicting_episode_id=conflict_id,
-            )
+        episode_updates: dict[str, Any] = {}
+        revision_cause = "normalized_observation"
+        if is_bed_in or is_bed_out:
+            latest = current.episode.latest_bed_presence_at
+            if latest is None or event_at > latest:
+                episode_updates["latest_bed_presence_at"] = event_at
+                if is_bed_in:
+                    if current.episode.candidate_wake_at is not None:
+                        revision_cause = "wake_candidate_cancelled"
+                    episode_updates["candidate_wake_at"] = None
+                else:
+                    if event_at <= current.episode.collection_start_at:
+                        raise SleepSliceInvariantError(
+                            "wake candidate cannot precede Episode opening"
+                        )
+                    candidate_wake_at = (
+                        current.episode.candidate_wake_at or event_at
+                    )
+                    episode_updates["candidate_wake_at"] = candidate_wake_at
+                    if current.episode.candidate_wake_at is None:
+                        revision_cause = "wake_candidate_started"
+                    else:
+                        revision_cause = "wake_candidate_observed"
+                    if event_at >= candidate_wake_at + timedelta(
+                        seconds=self.policy.boundary.wake_confirmation_seconds
+                    ):
+                        candidate_snapshot = replace(
+                            snapshot,
+                            episode=replace(
+                                current,
+                                episode=NightEpisodeV2.model_validate(
+                                    {
+                                        **current.episode.model_dump(mode="python"),
+                                        **episode_updates,
+                                    }
+                                ),
+                            ),
+                        )
+                        return self.close_at_confirmed_wake(
+                            snapshot=candidate_snapshot,
+                            confirmed_at=event_at,
+                            committed_at=committed_at,
+                            conflicting_episode=conflicting_episode,
+                            observation_ids=observation_ids,
+                        )
+            else:
+                revision_cause = "normalized_observation_stale_event"
 
         episode = NightEpisodeV2.model_validate(
             {
                 **current.episode.model_dump(mode="python"),
+                **episode_updates,
                 "current_revision": current.episode.current_revision + 1,
                 "updated_at": committed_at,
             }
@@ -793,11 +812,67 @@ class EpisodeLifecycleProjector:
             revision_id=self.id_generator(committed_at),
             parent_revision_id=current.current_revision_id,
             observation_ids=observation_ids,
-            revision_cause="normalized_observation",
+            revision_cause=revision_cause,
             expected_episode_cas=current.cas_version,
             snapshot=snapshot,
             newly_opened=False,
             closes_episode=False,
+        )
+
+    def close_at_confirmed_wake(
+        self,
+        *,
+        snapshot: LifecycleSnapshotRecord,
+        confirmed_at: datetime,
+        committed_at: datetime,
+        conflicting_episode: Callable[[date], str | None],
+        observation_ids: tuple[str, ...] | None = None,
+    ) -> EpisodeRevisionMutation:
+        current = snapshot.episode
+        if snapshot.state != "active" or current is None:
+            raise SleepSliceInvariantError(
+                "wake confirmation requires one active NightEpisode"
+            )
+        candidate_wake_at = current.episode.candidate_wake_at
+        if candidate_wake_at is None:
+            raise SleepSliceInvariantError("wake confirmation requires a candidate")
+        confirmation_at = candidate_wake_at + timedelta(
+            seconds=self.policy.boundary.wake_confirmation_seconds
+        )
+        if confirmed_at < confirmation_at:
+            raise SleepSliceInvariantError(
+                "wake candidate has not reached its confirmation interval"
+            )
+        candidate_date = candidate_wake_at.astimezone(
+            ZoneInfo(current.episode.timezone_name)
+        ).date()
+        conflict_id = conflicting_episode(candidate_date)
+        episode = finalize_episode_date(
+            current.episode,
+            committed_at=committed_at,
+            wake_at=candidate_wake_at,
+            canonical_date_available=lambda _value: conflict_id is None,
+        )
+        return EpisodeRevisionMutation(
+            episode=episode,
+            database_state=NightEpisodeState.AWAITING_REPORT.value,
+            revision_id=self.id_generator(committed_at),
+            parent_revision_id=current.current_revision_id,
+            observation_ids=(
+                current.observation_ids
+                if observation_ids is None
+                else observation_ids
+            ),
+            revision_cause=(
+                "confirmed_observed_wake_date_conflict"
+                if conflict_id is not None
+                else "confirmed_observed_wake"
+            ),
+            expected_episode_cas=current.cas_version,
+            snapshot=snapshot,
+            newly_opened=False,
+            closes_episode=True,
+            conflicting_episode_id=conflict_id,
         )
 
     def project_late_observation(
@@ -1049,6 +1124,112 @@ class EpisodeProjectionBoundary:
             persist_required=True,
         )
 
+    def prepare_deadline_close(
+        self,
+        *,
+        scope: UowScope,
+        repository: "PostgresSleepSliceRepository",
+        committed_at: datetime,
+    ) -> EpisodeProjectionDecision | None:
+        """Close the active Episode only after its deterministic deadline."""
+
+        if scope.subject_id is None:
+            raise SleepSliceInvariantError(
+                "deadline close requires exact subject authority"
+            )
+        repository.lock_subject_lifecycle()
+        snapshot = repository.load_lifecycle()
+        if snapshot.state != "active" or snapshot.episode is None:
+            return None
+        if committed_at < snapshot.episode.episode.deterministic_close_deadline_at:
+            return None
+        mutation = self.projector.close_at_deadline(
+            snapshot=snapshot,
+            committed_at=committed_at,
+            conflicting_episode=lambda value: repository.find_conflicting_episode(
+                episode_local_date=value,
+                excluding_episode_id=snapshot.episode.episode.night_episode_id,
+            ),
+        )
+        return EpisodeProjectionDecision(
+            snapshot=snapshot,
+            mutation=mutation,
+            fast_path_operation_id=(
+                self.id_generator(committed_at)
+                if mutation.enqueues_fast_path
+                else None
+            ),
+            reconciliation_operation_id=(
+                self.id_generator(committed_at)
+                if mutation.conflicting_episode_id is not None
+                else None
+            ),
+            persist_required=True,
+        )
+
+    def prepare_scheduled_close(
+        self,
+        *,
+        scope: UowScope,
+        repository: "PostgresSleepSliceRepository",
+        committed_at: datetime,
+    ) -> EpisodeProjectionDecision | None:
+        """Confirm a sustained wake candidate or apply the close deadline."""
+
+        if scope.subject_id is None:
+            raise SleepSliceInvariantError(
+                "scheduled close requires exact subject authority"
+            )
+        repository.lock_subject_lifecycle()
+        snapshot = repository.load_lifecycle()
+        if snapshot.state != "active" or snapshot.episode is None:
+            return None
+        current = snapshot.episode.episode
+        candidate_wake_at = current.candidate_wake_at
+        if (
+            candidate_wake_at is not None
+            and committed_at
+            >= candidate_wake_at
+            + timedelta(
+                seconds=self.policy.boundary.wake_confirmation_seconds
+            )
+        ):
+            mutation = self.projector.close_at_confirmed_wake(
+                snapshot=snapshot,
+                confirmed_at=committed_at,
+                committed_at=committed_at,
+                conflicting_episode=lambda value: repository.find_conflicting_episode(
+                    episode_local_date=value,
+                    excluding_episode_id=current.night_episode_id,
+                ),
+            )
+        elif committed_at >= current.deterministic_close_deadline_at:
+            mutation = self.projector.close_at_deadline(
+                snapshot=snapshot,
+                committed_at=committed_at,
+                conflicting_episode=lambda value: repository.find_conflicting_episode(
+                    episode_local_date=value,
+                    excluding_episode_id=current.night_episode_id,
+                ),
+            )
+        else:
+            return None
+        return EpisodeProjectionDecision(
+            snapshot=snapshot,
+            mutation=mutation,
+            fast_path_operation_id=(
+                self.id_generator(committed_at)
+                if mutation.enqueues_fast_path
+                else None
+            ),
+            reconciliation_operation_id=(
+                self.id_generator(committed_at)
+                if mutation.conflicting_episode_id is not None
+                else None
+            ),
+            persist_required=True,
+        )
+
     def _active_episode_owns_observation(
         self,
         *,
@@ -1107,12 +1288,19 @@ def project_authoritative_canonical_observations(
         repository.load_authoritative_canonical_observation(observation_id)
         for observation_id in dict.fromkeys(observation_ids)
     ]
-    if resolve_opening_boundary_first:
-        selected_observations.sort(
-            key=lambda selected: (
-                0 if _is_in_bed_observation(selected.observation) else 1
-            )
+    selected_observations.sort(
+        key=lambda selected: (
+            _observation_time(selected.observation)
+            or datetime.max.replace(tzinfo=UTC),
+            (
+                0
+                if resolve_opening_boundary_first
+                and _is_in_bed_observation(selected.observation)
+                else 1
+            ),
+            selected.observation.observation_id,
         )
+    )
     decisions: list[EpisodeProjectionDecision] = []
     for selected in selected_observations:
         if fault_injector is not None:
@@ -2267,6 +2455,32 @@ class PostgresSleepSliceRepository:
         finally:
             cursor.close()
 
+    def episode_has_binding(
+        self, *, night_episode_id: str, device_binding_id: str
+    ) -> bool:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT 1
+                FROM public.sleep_domain_episode_observation_memberships
+                WHERE namespace_id = %s AND data_mode = %s
+                  AND subject_id = %s AND night_episode_id = %s
+                  AND device_binding_id = %s
+                LIMIT 1
+                """,
+                (
+                    self.scope.namespace_id,
+                    self.scope.data_mode,
+                    self.scope.subject_id,
+                    night_episode_id,
+                    device_binding_id,
+                ),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            cursor.close()
+
     def persist_episode_projection(
         self,
         *,
@@ -2291,6 +2505,32 @@ class PostgresSleepSliceRepository:
                     projection.reconciliation_operation_id
                 ),
                 late_association=projection.late_association,
+                policy=policy,
+                committed_at=committed_at,
+            )
+        finally:
+            cursor.close()
+
+    def persist_deadline_close(
+        self,
+        *,
+        projection: EpisodeProjectionDecision,
+        policy: SleepSlicePolicy,
+        committed_at: datetime,
+    ) -> None:
+        mutation = projection.mutation
+        if not projection.persist_required or mutation is None:
+            return
+        cursor = self.connection.cursor()
+        try:
+            self._persist_episode_projection(
+                cursor,
+                observation=None,
+                snapshot=projection.snapshot,
+                mutation=mutation,
+                fast_path_operation_id=projection.fast_path_operation_id,
+                reconciliation_operation_id=projection.reconciliation_operation_id,
+                late_association=None,
                 policy=policy,
                 committed_at=committed_at,
             )
@@ -3570,7 +3810,7 @@ class PostgresSleepSliceRepository:
         self,
         cursor: Any,
         *,
-        observation: SleepObservation,
+        observation: SleepObservation | None,
         snapshot: LifecycleSnapshotRecord,
         mutation: EpisodeRevisionMutation | None,
         fast_path_operation_id: str | None,
@@ -3580,6 +3820,10 @@ class PostgresSleepSliceRepository:
         committed_at: datetime,
     ) -> None:
         if late_association is not None:
+            if observation is None:
+                raise SleepSliceInvariantError(
+                    "late association requires an observation"
+                )
             self._write_late_association(
                 cursor,
                 observation=observation,
@@ -3642,7 +3886,7 @@ class PostgresSleepSliceRepository:
                     self.scope.namespace_generation,
                     self.scope.run_id,
                     self.scope.arm_id,
-                    observation.subject_id,
+                    mutation.episode.subject_id,
                     mutation.episode.night_episode_id,
                     mutation.conflicting_episode_id,
                     mutation.revision_id,
@@ -3696,7 +3940,7 @@ class PostgresSleepSliceRepository:
             aggregate_id=mutation.episode.night_episode_id,
             aggregate_version=mutation.episode.current_revision,
             sequence=mutation.episode.current_revision,
-            subject_id=observation.subject_id,
+            subject_id=mutation.episode.subject_id,
             operation_id=fast_path_operation_id or reconciliation_operation_id,
             payload=event_payload,
             created_at=committed_at,

@@ -307,6 +307,70 @@ def test_vendor_error_is_redacted_and_never_auto_falls_back() -> None:
     assert leaked not in str(caught.value)
 
 
+def test_vendor_error_retains_only_sanitized_message_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token/get"):
+            return _response(
+                {
+                    "access_token": ACCESS_TOKEN,
+                    "token_type": "Bearer",
+                    "expires_time": 1,
+                }
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": False,
+                "code": "6001",
+                "message": " device offline \n retry later ",
+                "data": {},
+            },
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(PlatformApiError) as caught:
+            client.product_list()
+    finally:
+        http.close()
+
+    assert caught.value.category == "DEVICE_OFFLINE"
+    assert caught.value.vendor_code == "6001"
+    assert caught.value.vendor_message == "device offline retry later"
+    assert CLIENT_SECRET not in repr(caught.value)
+    assert ACCESS_TOKEN not in repr(caught.value)
+
+
+def test_secret_like_vendor_message_is_discarded() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token/get"):
+            return _response(
+                {
+                    "access_token": ACCESS_TOKEN,
+                    "token_type": "Bearer",
+                    "expires_time": 1,
+                }
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": False,
+                "code": "500",
+                "message": "Authorization Bearer must-not-be-retained",
+                "data": {},
+            },
+        )
+
+    client, http = _client(handler)
+    try:
+        with pytest.raises(PlatformApiError) as caught:
+            client.product_list()
+    finally:
+        http.close()
+
+    assert caught.value.vendor_message is None
+
+
 def test_pull_methods_use_documented_request_shapes_and_capture_exact_bytes() -> None:
     requests: list[httpx.Request] = []
     evidence: list[PlatformRawResponseEvidence] = []

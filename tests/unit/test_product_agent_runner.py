@@ -93,6 +93,7 @@ from sleepagent.runtime.memory import (
 from sleepagent.runtime.registry import EPISODE_DEFINITIONS
 from sleepagent.runtime.runner import ProductEpisodeRunner
 from sleepagent.runtime.results import (
+    PRODUCT_EPISODE_RUNNER_VERSION,
     PinnedPersonalizationContext,
     ProductEpisodeRunRequest,
     ProductUserFactResponse,
@@ -2152,6 +2153,8 @@ def _stable_shared_request(
 
 def _desired_identity_for_selected(
     personalization: PinnedPersonalizationContext,
+    *,
+    runtime_manifest_sha256: str | None = None,
 ) -> tuple[str, str]:
     consumed = _consumed_context_sha256(
         personalization,
@@ -2196,8 +2199,39 @@ def _desired_identity_for_selected(
         scope=scope,
         source=source,
         consumed_context_sha256=consumed,
-        runtime_manifest_sha256=stable_hash("runtime-manifest"),
+        runtime_manifest_sha256=(
+            stable_hash("runtime-manifest")
+            if runtime_manifest_sha256 is None
+            else runtime_manifest_sha256
+        ),
     )
+
+
+def test_corrected_runner_identity_prevents_old_shared_analysis_reuse() -> None:
+    personalization = _selected_personalization(
+        profile_version=2,
+        memory_state_version=3,
+        volatile_suffix="window-version",
+    )
+    assert PRODUCT_EPISODE_RUNNER_VERSION == "sleepagent-product-runner.v49"
+    current_runtime = stable_hash(
+        {"runner_version": PRODUCT_EPISODE_RUNNER_VERSION}
+    )
+    old_runtime = stable_hash(
+        {"runner_version": "sleepagent-product-runner.v48"}
+    )
+
+    _, current_desired = _desired_identity_for_selected(
+        personalization,
+        runtime_manifest_sha256=current_runtime,
+    )
+    _, old_desired = _desired_identity_for_selected(
+        personalization,
+        runtime_manifest_sha256=old_runtime,
+    )
+
+    assert current_runtime != old_runtime
+    assert current_desired != old_desired
 
 
 def test_selected_context_ignores_volatile_l2_identity_in_every_provider_hash() -> None:
@@ -2427,7 +2461,7 @@ def test_reporting_context_converts_cross_midnight_and_dst_with_zoneinfo() -> No
     assert local_end.fold == 1
 
 
-def test_renderer_version_changes_projection_not_shared_semantic_hash() -> None:
+def test_corrected_renderer_cannot_reuse_old_projection_identity() -> None:
     instance = build_deterministic_product_runtime_bundle(
         model=_CapturingDeterministicModel()
     ).runner
@@ -2440,9 +2474,10 @@ def test_renderer_version_changes_projection_not_shared_semantic_hash() -> None:
     )
     second = build_shared_role_projections(
         shared,
-        renderer_version="zh_cn_role_renderer.v2-test",
+        renderer_version="zh_cn_role_renderer.v1",
     )
 
+    assert ZH_CN_ROLE_RENDERER_VERSION == "zh_cn_role_renderer.v2"
     assert shared.semantic_hash_version == "structured_facts.v1"
     assert shared.shared_analysis_sha256 == semantic_hash
     assert {item.projection_sha256 for item in first}.isdisjoint(
@@ -2467,8 +2502,21 @@ def test_structured_facts_drive_zh_cn_roles_without_english_claim_leakage() -> N
                 "radar.get_night_evidence": {
                     "data": {
                         "deterministic_night_summary": {
-                            "sleep_window_minutes": 455,
-                            "stage_minutes": {"deep": 72, "rem": 64},
+                            "schema_version": (
+                                "product_deterministic_night_summary.v2"
+                            ),
+                            "sleep_window_start": (
+                                "2026-07-25T17:35:00+00:00"
+                            ),
+                            "sleep_window_end": (
+                                "2026-07-25T18:41:01.996000+00:00"
+                            ),
+                            "sleep_window_minutes": 66.0,
+                            "stage_minutes": {
+                                "light": 43.0,
+                                "deep": 13.0,
+                                "rem": 10.0,
+                            },
                             "vital_centers": {
                                 "heart_rate": 63,
                                 "respiratory_rate": 15,
@@ -2488,13 +2536,87 @@ def test_structured_facts_drive_zh_cn_roles_without_english_claim_leakage() -> N
             "summary_lines": ("English claim must not leak",),
         }
     )
-    elder, family, doctor = build_shared_role_projections(structured)
+    stage_start = datetime(2026, 7, 25, 17, 35, tzinfo=timezone.utc)
+    stage_end = datetime(
+        2026, 7, 25, 18, 41, 1, 996_000, tzinfo=timezone.utc
+    )
+    atoms = build_elder_message_atoms(
+        structured,
+        ProductElderPresentationFacts(
+            timezone_name="Asia/Shanghai",
+            episode_observation_start_at=datetime(
+                2026, 7, 25, 14, 30, tzinfo=timezone.utc
+            ),
+            episode_observation_end_at=datetime(
+                2026, 7, 25, 22, 30, tzinfo=timezone.utc
+            ),
+            episode_observation_minutes=480.0,
+            episode_local_display="7月25日 22:30–7月26日 06:30",
+            vendor_stage_span_start_at=stage_start,
+            vendor_stage_span_end_at=datetime(
+                2026, 7, 25, 18, 55, tzinfo=timezone.utc
+            ),
+            vendor_stage_span_minutes=80.0,
+            vendor_stage_local_display="01:35–02:55",
+            presented_stage_start_at=stage_start,
+            presented_stage_end_at=stage_end,
+            presented_stage_local_display="01:35–02:41",
+            stage_observation_minutes=66.0,
+            classified_stage_minutes={
+                "light": 43.0,
+                "deep": 13.0,
+                "rem": 10.0,
+            },
+            classified_totals_state="reliable",
+            stage_boundary_state="constrained_to_episode",
+            out_of_episode_interval_count=1,
+            source_refs=("governed_evidence_set:test",),
+        ),
+    )
+    elder, family, doctor = build_shared_role_projections(
+        structured,
+        elder_message_atoms=atoms,
+    )
 
     assert any(
         item.metric_id == "sleep_window_minutes"
         for item in shared.semantic_facts
     )
-    assert "455分钟" in (family.text or "")
+    by_metric = {
+        item.metric_id: item
+        for item in shared.semantic_facts
+        if item.fact_kind == "direct_metric"
+    }
+    assert by_metric["sleep_stage_coverage_start_at"].value == (
+        "2026-07-25T17:35:00+00:00"
+    )
+    assert by_metric["sleep_stage_coverage_end_at"].value == (
+        "2026-07-25T18:41:01.996000+00:00"
+    )
+    assert all(
+        fact.window == "effective_sleep_stage_coverage"
+        for metric_id, fact in by_metric.items()
+        if metric_id == "sleep_window_minutes"
+        or metric_id.startswith("sleep_stage")
+    )
+    assert "01:35–02:41" in (elder.text or "")
+    for projection in (family, doctor):
+        assert "07月26日 01:35至02:41" in (projection.text or "")
+    for projection in (elder, family, doctor):
+        assert "66分钟" in (projection.text or "")
+        assert "记录时段：66分钟" not in (projection.text or "")
+    assert "观测窗口：07月25日 22:30至07月26日 06:30" in (
+        family.text or ""
+    )
+    assert "睡眠分期覆盖：07月26日 01:35至02:41，共约66分钟" in (
+        family.text or ""
+    )
+    assert "浅睡：43分钟" in (doctor.text or "")
+    assert "深睡：13分钟" in (doctor.text or "")
+    assert "REM 睡眠：10分钟" in (doctor.text or "")
+    assert "浅睡约43分钟" in (elder.text or "")
+    assert "深睡约13分钟" in (elder.text or "")
+    assert "REM 睡眠约10分钟" in (elder.text or "")
     assert "平均心率：63bpm" in (doctor.text or "")
     assert "质量限定：完整" in (doctor.text or "")
     assert "quality" not in (doctor.text or "").lower()
@@ -2502,6 +2624,45 @@ def test_structured_facts_drive_zh_cn_roles_without_english_claim_leakage() -> N
     for projection in (elder, family, doctor):
         if projection.text is not None:
             assert "English claim must not leak" not in projection.text
+
+
+def test_semantic_facts_reject_duration_inconsistent_with_stage_boundaries() -> None:
+    instance = build_deterministic_product_runtime_bundle(
+        model=_CapturingDeterministicModel()
+    ).runner
+    command = _shared_analysis_request()
+    night_request = command.runtime_request.model_copy(
+        update={
+            "tool_inputs": {
+                **command.runtime_request.tool_inputs,
+                "radar.get_night_evidence": {
+                    "data": {
+                        "deterministic_night_summary": {
+                            "schema_version": (
+                                "product_deterministic_night_summary.v2"
+                            ),
+                            "sleep_window_start": (
+                                "2026-07-25T17:35:00+00:00"
+                            ),
+                            "sleep_window_end": (
+                                "2026-07-25T18:41:00+00:00"
+                            ),
+                            "sleep_window_minutes": 80.0,
+                            "stage_minutes": {"light": 43.0},
+                        }
+                    }
+                },
+            }
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="sleep-stage coverage duration is inconsistent",
+    ):
+        instance.analyze_shared(
+            command.model_copy(update={"runtime_request": night_request})
+        )
 
 
 def test_elder_projection_is_localized_chinese_dense_and_nonduplicative() -> None:

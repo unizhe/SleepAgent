@@ -11,6 +11,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from sleepagent.domain.episodes import UUID7Generator
+from sleepagent.infrastructure.postgres_sleep_slice import (
+    EpisodeProjectionBoundary,
+    EpisodeRevisionMutation,
+    PostgresSleepSliceRepository,
+    SleepSlicePolicy,
+    default_sleep_slice_policy,
+)
 from sleepagent.observability import log_event
 from sleepagent.persistence.uow import UnitOfWorkFactory, UowScope
 
@@ -78,11 +85,17 @@ class NightFinalizationService:
         policy: NightFinalizationPolicy | None = None,
         now_factory: Any = lambda: datetime.now(tz=UTC),
         id_generator: Any | None = None,
+        sleep_slice_policy: SleepSlicePolicy | None = None,
     ) -> None:
         self.uow_factory = uow_factory
         self.policy = policy or NightFinalizationPolicy()
         self.now_factory = now_factory
         self.id_generator = id_generator or UUID7Generator()
+        self.sleep_slice_policy = sleep_slice_policy or default_sleep_slice_policy()
+        self.episode_boundary = EpisodeProjectionBoundary(
+            self.sleep_slice_policy,
+            id_generator=self.id_generator,
+        )
 
     def finalize_latest_for_binding(
         self,
@@ -154,6 +167,11 @@ class NightFinalizationService:
         now = evaluated_at or self.now_factory()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("evaluated_at must be timezone-aware")
+        self.close_overdue_for_binding(
+            scope,
+            device_binding_id=device_binding_id,
+            evaluated_at=now,
+        )
         episode_ids = self._discover_due_episode_ids(
             scope,
             device_binding_id=device_binding_id,
@@ -175,6 +193,57 @@ class NightFinalizationService:
                 # transaction. A later bounded scan will reconsider it.
                 continue
         return tuple(finalized)
+
+    def close_overdue_for_binding(
+        self,
+        scope: UowScope,
+        *,
+        device_binding_id: str,
+        evaluated_at: datetime | None = None,
+    ) -> EpisodeRevisionMutation | None:
+        """Confirm a wake candidate or apply deadline close transactionally."""
+
+        if scope.process_role != "worker" or scope.subject_id is None:
+            raise PermissionError("night deadline close requires exact worker scope")
+        now = evaluated_at or self.now_factory()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("evaluated_at must be timezone-aware")
+        with self.uow_factory.begin(scope) as uow:
+            repository = PostgresSleepSliceRepository(
+                uow.connection,
+                scope,
+                id_generator=self.id_generator,
+            )
+            projection = self.episode_boundary.prepare_scheduled_close(
+                scope=scope,
+                repository=repository,
+                committed_at=now,
+            )
+            if projection is None or projection.mutation is None:
+                return None
+            mutation = projection.mutation
+            if not repository.episode_has_binding(
+                night_episode_id=mutation.episode.night_episode_id,
+                device_binding_id=device_binding_id,
+            ):
+                return None
+            repository.persist_deadline_close(
+                projection=projection,
+                policy=self.sleep_slice_policy,
+                committed_at=now,
+            )
+            uow.commit()
+        log_event(
+            (
+                "night_episode_wake_confirmed"
+                if mutation.revision_cause.startswith("confirmed_observed_wake")
+                else "night_episode_deadline_closed"
+            ),
+            night_episode_id=mutation.episode.night_episode_id,
+            night_episode_revision_id=mutation.revision_id,
+            revision_cause=mutation.revision_cause,
+        )
+        return mutation
 
     def _discover_due_episode_ids(
         self,

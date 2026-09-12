@@ -46,6 +46,7 @@ sleepagent-demo = "sleepagent.simulation.cli:main"
 sleepagent-migrate = "sleepagent.persistence.migrate:main"
 sleepagent-report = "sleepagent.report_cli:main"
 sleepagent-care = "sleepagent.care_cli:main"
+sleepagent-device = "sleepagent.device_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["sleepagent*", "reference_client*"]

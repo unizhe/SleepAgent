@@ -17,7 +17,7 @@ from sleepagent.integrations.perceptor.pull_ingestion import (
     PerceptorPullBackfillRunner,
 )
 from sleepagent.persistence.uow import UnitOfWorkFactory
-from sleepagent.workers.kernel import WorkContext
+from sleepagent.workers.kernel import RetryableWorkError, WorkContext
 from sleepagent.workers.runtime import B3ClaimInvariantError, exact_worker_scope
 
 
@@ -43,7 +43,7 @@ class PerceptorAcquisitionExecutor:
         payload: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         scope = exact_worker_scope(context, allowed_handler=job_type.value)
-        instant = datetime.fromisoformat(str(payload["scheduled_for"]))
+        instant = _scheduled_instant(payload)
         if job_type is AcquisitionJobType.NIGHT_FINALIZATION_SCAN:
             result = NightFinalizationService(
                 self.uow_factory
@@ -71,15 +71,11 @@ class PerceptorAcquisitionExecutor:
         )
         runner = PerceptorPullBackfillRunner(client, ingress, binding.binding)
         if job_type is AcquisitionJobType.HISTORY_OVERLAP_PULL:
-            result = runner.pull_history(
-                start_at=instant - timedelta(minutes=15),
-                end_at=instant,
-            )
-        else:
-            report_date = instant.astimezone(
-                ZoneInfo(binding.binding.timezone_name)
-            ).date()
-            result = runner.pull_sleep_report(report_date)
+            return _run_scheduled_recent_history(runner, instant=instant)
+        report_date = instant.astimezone(
+            ZoneInfo(binding.binding.timezone_name)
+        ).date()
+        result = runner.pull_sleep_report(report_date)
         return {
             "disposition": result.disposition,
             "raw_ingress_record_id": result.raw_ingress_record_id,
@@ -113,6 +109,44 @@ class PerceptorAcquisitionExecutor:
             base_url=self.settings.perceptor_base_url,
         )
         return self._client
+
+
+def _scheduled_instant(payload: Mapping[str, Any]) -> datetime:
+    instant = datetime.fromisoformat(str(payload["scheduled_for"]))
+    if instant.tzinfo is None or instant.utcoffset() is None:
+        raise ValueError("scheduled_for must be timezone-aware")
+    return instant.replace(microsecond=0)
+
+
+def _run_scheduled_recent_history(
+    runner: PerceptorPullBackfillRunner,
+    *,
+    instant: datetime,
+) -> Mapping[str, Any]:
+    """Fetch one isolated recent window without consuming rolling history state."""
+
+    window_start = instant - timedelta(minutes=15)
+    chunks = runner.backfill_history(start_at=window_start, end_at=instant)
+    if len(chunks) != 1:
+        raise B3ClaimInvariantError("scheduled recent History must be one bounded chunk")
+    chunk = chunks[0]
+    if chunk.status != "succeeded" or chunk.ingress is None:
+        raise RetryableWorkError(
+            chunk.error_code or "scheduled_recent_history_failed",
+            retry_after_seconds=60,
+        )
+    result = chunk.ingress
+    return {
+        "disposition": result.disposition,
+        "raw_ingress_record_id": result.raw_ingress_record_id,
+        "normalization_work_id": result.normalization_work_id,
+        "duplicate": result.duplicate,
+        "history_window_start": chunk.window_start_at.isoformat(),
+        "history_window_end": chunk.window_end_at.isoformat(),
+        "checkpoint_source": "isolated_scheduled_recent_window",
+        "vendor_record_count": chunk.vendor_record_count,
+        "raw_series_sample_count": chunk.raw_series_sample_count,
+    }
 
 
 __all__ = ["PerceptorAcquisitionExecutor"]

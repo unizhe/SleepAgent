@@ -1,6 +1,6 @@
 {
   "schema_version": "sleepagent_migration_manifest.v1",
-  "target_version": 28,
+  "target_version": 31,
   "migrations": [
     {
       "version": 1,
@@ -195,6 +195,27 @@
       "version": 28,
       "filename": "028_worker_authority_boundaries.sql",
       "sha256": "4ac13a1b65c0c652d7fd51cacf80f3c22c15c752aac893d1a3246b7bda9f23d1",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 29,
+      "filename": "029_realtime_normalization_isolation.sql",
+      "sha256": "d4da925c37c65d20655912d8af51b35984e52ff723cefbca93b352cfc90ac11b",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 30,
+      "filename": "030_perceptor_pull_quarantine_reprocess.sql",
+      "sha256": "509843194cbea260a10e4b7a63588ac2a9f4e2731869e1f7b9bb1dc3bf25152a",
+      "transactional": true,
+      "minimum_app_release": "0.1.0"
+    },
+    {
+      "version": 31,
+      "filename": "031_perceptor_pull_quarantine_reprocess_grant.sql",
+      "sha256": "60069ef4a9420615445f4b42e00bbc47fa90b63aede69ec2ee1334888373d004",
       "transactional": true,
       "minimum_app_release": "0.1.0"
     }

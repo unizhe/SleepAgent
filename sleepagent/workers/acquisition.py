@@ -124,14 +124,15 @@ class ScheduledAcquisitionWorkHandler:
             )
             raise
         except Exception as exc:
+            error_code = _scheduled_acquisition_error_code(exc)
             self.schedules.record_result(
                 scope,
                 fire_id=fire_id,
                 succeeded=False,
-                error_code="scheduled_acquisition_failed",
+                error_code=error_code,
             )
             raise RetryableWorkError(
-                "scheduled_acquisition_failed", retry_after_seconds=60
+                error_code, retry_after_seconds=60
             ) from exc
         return WorkResult(
             disposition=WorkDisposition.SUCCEEDED,
@@ -220,6 +221,31 @@ class _NightFinalizationExecutor:
                 item.night_finalization_revision_id for item in results
             ],
         }
+
+
+def _scheduled_acquisition_error_code(exc: Exception) -> str:
+    current: BaseException | None = exc
+    while current is not None:
+        if type(current).__name__ == "PerceptorHistoryBackfillRequired":
+            return "historical_backfill_required"
+        category = getattr(current, "category", None)
+        if isinstance(category, str) and category:
+            parts = ["platform_api", category.lower()]
+            status = getattr(current, "http_status", None)
+            if isinstance(status, int):
+                parts.append(f"http_{status}")
+            vendor_code = getattr(current, "vendor_code", None)
+            if isinstance(vendor_code, str) and vendor_code.isascii():
+                safe_code = "".join(
+                    character
+                    for character in vendor_code.lower()
+                    if character.isalnum() or character in {"_", "-"}
+                )[:24]
+                if safe_code:
+                    parts.append(f"vendor_{safe_code}")
+            return "_".join(parts)[:120]
+        current = current.__cause__
+    return "scheduled_acquisition_failed"
 
 
 __all__ = [

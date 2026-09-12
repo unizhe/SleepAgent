@@ -8,8 +8,20 @@ from sleepagent.application.acquisition import PostgresAcquisitionScheduler
 from sleepagent.application.acquisition import AcquisitionSchedule
 from sleepagent.application.night_finalization import (
     NightFinalizationPolicy,
+    NightFinalizationService,
     _decide,
 )
+from sleepagent.integrations.perceptor.client import PlatformApiError
+from sleepagent.integrations.perceptor.pull_ingestion import (
+    PerceptorHistoryBackfillChunkResult,
+    PerceptorPullIngressResult,
+)
+from sleepagent.integrations.perceptor.scheduled import (
+    _run_scheduled_recent_history,
+    _scheduled_instant,
+)
+from sleepagent.workers.kernel import RetryableWorkError
+from sleepagent.workers.acquisition import _scheduled_acquisition_error_code
 
 
 pytestmark = pytest.mark.unit
@@ -169,3 +181,135 @@ def test_schedule_contract_accepts_zero_and_near_cadence_jitter(
         }
     )
     assert schedule.jitter_seconds == jitter
+
+
+def test_scheduled_history_boundaries_drop_microseconds_deterministically() -> None:
+    instant = _scheduled_instant(
+        {"scheduled_for": "2026-09-05T01:02:03.987654+08:00"}
+    )
+
+    assert instant.isoformat() == "2026-09-05T01:02:03+08:00"
+    assert (instant - timedelta(minutes=15)).microsecond == 0
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _scheduled_instant({"scheduled_for": "2026-09-05T01:02:03"})
+
+
+def test_scheduled_recent_history_uses_isolated_window_not_rolling_checkpoint() -> None:
+    instant = datetime(
+        2026, 9, 6, 14, 15, 19, tzinfo=timezone(timedelta(hours=8))
+    )
+    ingress = PerceptorPullIngressResult(
+        disposition="accepted",
+        raw_ingress_record_id="raw-recent-1",
+        normalization_work_id="work-recent-1",
+        subject_id="subject-1",
+        device_binding_id="binding-1",
+        duplicate=False,
+        batch_identity="batch-recent-1",
+        response_semantic_sha256="a" * 64,
+    )
+
+    class Runner:
+        calls: list[tuple[datetime, datetime]] = []
+
+        def pull_history(self, **kwargs: object) -> object:
+            del kwargs
+            raise AssertionError("scheduled recent path must not consume rolling state")
+
+        def backfill_history(
+            self, *, start_at: datetime, end_at: datetime
+        ) -> tuple[PerceptorHistoryBackfillChunkResult, ...]:
+            self.calls.append((start_at, end_at))
+            return (
+                PerceptorHistoryBackfillChunkResult(
+                    window_start_at=start_at,
+                    window_end_at=end_at,
+                    status="succeeded",
+                    vendor_record_count=2,
+                    raw_series_sample_count=17,
+                    ingress=ingress,
+                ),
+            )
+
+    runner = Runner()
+    result = _run_scheduled_recent_history(runner, instant=instant)  # type: ignore[arg-type]
+
+    assert runner.calls == [(instant - timedelta(minutes=15), instant)]
+    assert (runner.calls[0][1] - runner.calls[0][0]).total_seconds() == 900
+    assert all(value.microsecond == 0 for value in runner.calls[0])
+    assert result == {
+        "disposition": "accepted",
+        "raw_ingress_record_id": "raw-recent-1",
+        "normalization_work_id": "work-recent-1",
+        "duplicate": False,
+        "history_window_start": (instant - timedelta(minutes=15)).isoformat(),
+        "history_window_end": instant.isoformat(),
+        "checkpoint_source": "isolated_scheduled_recent_window",
+        "vendor_record_count": 2,
+        "raw_series_sample_count": 17,
+    }
+
+
+def test_scheduled_recent_history_retries_failed_isolated_request() -> None:
+    instant = datetime(2026, 9, 6, 14, 15, 19, tzinfo=UTC)
+
+    class Runner:
+        def backfill_history(
+            self, *, start_at: datetime, end_at: datetime
+        ) -> tuple[PerceptorHistoryBackfillChunkResult, ...]:
+            return (
+                PerceptorHistoryBackfillChunkResult(
+                    window_start_at=start_at,
+                    window_end_at=end_at,
+                    status="failed",
+                    vendor_record_count=0,
+                    raw_series_sample_count=0,
+                    ingress=None,
+                    error_code="platform_api_timeout",
+                ),
+            )
+
+    with pytest.raises(RetryableWorkError, match="platform_api_timeout") as failure:
+        _run_scheduled_recent_history(Runner(), instant=instant)  # type: ignore[arg-type]
+    assert failure.value.retry_after_seconds == 60
+
+
+def test_finalization_scan_closes_deadline_episode_before_discovery() -> None:
+    events: list[str] = []
+
+    class RecordingService(NightFinalizationService):
+        def __init__(self) -> None:
+            pass
+
+        def close_overdue_for_binding(self, *args: object, **kwargs: object) -> None:
+            events.append("close")
+
+        def _discover_due_episode_ids(
+            self, *args: object, **kwargs: object
+        ) -> tuple[str, ...]:
+            events.append("discover")
+            return ()
+
+    service = RecordingService()
+
+    assert service.finalize_due_for_binding(
+        object(),  # type: ignore[arg-type]
+        device_binding_id="binding-1",
+        evaluated_at=DEADLINE,
+    ) == ()
+    assert events == ["close", "discover"]
+
+
+def test_scheduled_provider_failure_code_retains_safe_structure() -> None:
+    error = PlatformApiError(
+        "DEVICE_OFFLINE",
+        endpoint="/vitalSigns/getHistoryData",
+        http_status=429,
+        vendor_code="6001",
+        vendor_message="device offline",
+    )
+
+    assert _scheduled_acquisition_error_code(error) == (
+        "platform_api_device_offline_http_429_vendor_6001"
+    )
+    assert "device offline" not in _scheduled_acquisition_error_code(error)

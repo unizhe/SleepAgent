@@ -764,11 +764,13 @@ def test_elder_presentation_separates_episode_stage_span_and_classified_totals()
         }
     )
 
-    legacy = facts.deterministic_night_summary()
+    summary = facts.deterministic_night_summary()
     presentation = facts.elder_presentation_facts()
 
-    assert legacy["sleep_window_minutes"] == 80.0
-    assert legacy["stage_minutes"] == {
+    assert summary["schema_version"] == "product_deterministic_night_summary.v2"
+    assert summary["observation_window_minutes"] == 240.0
+    assert summary["sleep_window_minutes"] == 80.0
+    assert summary["stage_minutes"] == {
         "awake": 10.0,
         "deep": 20.0,
         "light": 30.0,
@@ -778,7 +780,7 @@ def test_elder_presentation_separates_episode_stage_span_and_classified_totals()
     assert presentation.vendor_stage_span_minutes == 80.0
     assert presentation.stage_observation_minutes == 70.0
     assert presentation.unclassified_gap_minutes == 10.0
-    assert presentation.classified_stage_minutes == legacy["stage_minutes"]
+    assert presentation.classified_stage_minutes == summary["stage_minutes"]
     assert presentation.classified_totals_state == "reliable"
     assert presentation.presented_stage_local_display == "01:35–02:55"
     assert "UTC" not in presentation.presented_stage_local_display
@@ -814,6 +816,155 @@ def test_elder_presentation_constrains_stage_intervals_to_episode_bounds() -> No
     assert presentation.vendor_stage_local_display == "00:50–07:00"
 
 
+def test_summary_clips_real_stage_window_at_episode_end_in_utc() -> None:
+    episode_start = datetime(
+        2026, 8, 24, 16, 0, 2, 80_000, tzinfo=timezone.utc
+    )
+    episode_end = datetime(
+        2026, 8, 24, 18, 41, 1, 996_000, tzinfo=timezone.utc
+    )
+    stage_start = datetime(2026, 8, 24, 17, 35, tzinfo=timezone.utc)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": episode_start,
+            "episode_wake_at": episode_end,
+            "canonical_observations": (
+                _stage_observation(
+                    "light", stage_start, stage_start + timedelta(minutes=27)
+                ),
+                _stage_observation(
+                    "deep",
+                    stage_start + timedelta(minutes=27),
+                    stage_start + timedelta(minutes=40),
+                ),
+                _stage_observation(
+                    "rem",
+                    stage_start + timedelta(minutes=40),
+                    stage_start + timedelta(minutes=50),
+                ),
+                _stage_observation(
+                    "light",
+                    stage_start + timedelta(minutes=50),
+                    stage_start + timedelta(minutes=80),
+                ),
+            ),
+        }
+    )
+
+    summary = facts.deterministic_night_summary()
+    presentation = facts.elder_presentation_facts()
+
+    assert summary["observation_window_start"] == episode_start.isoformat()
+    assert summary["observation_window_end"] == episode_end.isoformat()
+    assert summary["sleep_window_start"] == stage_start.isoformat()
+    assert summary["sleep_window_end"] == episode_end.isoformat()
+    assert summary["sleep_window_minutes"] == 66.0
+    assert summary["stage_minutes"] == {
+        "deep": 13.0,
+        "light": 43.0,
+        "rem": 10.0,
+    }
+    assert presentation.stage_observation_minutes == 66.0
+    assert presentation.classified_stage_minutes == summary["stage_minutes"]
+    assert presentation.presented_stage_local_display == "01:35–02:41"
+
+
+def test_summary_clips_stage_interval_at_episode_start() -> None:
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    episode_end = episode_start + timedelta(hours=4)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": episode_start,
+            "episode_wake_at": episode_end,
+            "canonical_observations": (
+                _stage_observation(
+                    "light",
+                    episode_start - timedelta(minutes=10),
+                    episode_start + timedelta(minutes=10),
+                ),
+            ),
+        }
+    )
+
+    summary = facts.deterministic_night_summary()
+
+    assert summary["sleep_window_start"] == episode_start.isoformat()
+    assert summary["sleep_window_minutes"] == 10.0
+    assert summary["stage_minutes"] == {"light": 10.0}
+
+
+def test_summary_clips_stage_interval_at_episode_end() -> None:
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    episode_end = episode_start + timedelta(hours=4)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": episode_start,
+            "episode_wake_at": episode_end,
+            "canonical_observations": (
+                _stage_observation(
+                    "deep",
+                    episode_end - timedelta(minutes=10),
+                    episode_end + timedelta(minutes=10),
+                ),
+            ),
+        }
+    )
+
+    summary = facts.deterministic_night_summary()
+
+    assert summary["sleep_window_end"] == episode_end.isoformat()
+    assert summary["sleep_window_minutes"] == 10.0
+    assert summary["stage_minutes"] == {"deep": 10.0}
+
+
+def test_summary_excludes_stage_interval_outside_episode() -> None:
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    episode_end = episode_start + timedelta(hours=4)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": episode_start,
+            "episode_wake_at": episode_end,
+            "canonical_observations": (
+                _stage_observation(
+                    "rem",
+                    episode_end + timedelta(minutes=10),
+                    episode_end + timedelta(minutes=30),
+                ),
+            ),
+        }
+    )
+
+    summary = facts.deterministic_night_summary()
+
+    assert summary["sleep_window_start"] is None
+    assert summary["sleep_window_end"] is None
+    assert summary["sleep_window_minutes"] is None
+    assert summary["stage_minutes"] == {}
+
+
+def test_summary_preserves_stage_interval_contained_by_episode() -> None:
+    episode_start = datetime(2026, 8, 24, 17, tzinfo=timezone.utc)
+    episode_end = episode_start + timedelta(hours=4)
+    stage_start = episode_start + timedelta(minutes=35)
+    stage_end = stage_start + timedelta(minutes=80)
+    facts = _product_facts().model_copy(
+        update={
+            "episode_bed_at": episode_start,
+            "episode_wake_at": episode_end,
+            "canonical_observations": (
+                _stage_observation("light", stage_start, stage_end),
+            ),
+        }
+    )
+
+    summary = facts.deterministic_night_summary()
+
+    assert summary["sleep_window_start"] == stage_start.isoformat()
+    assert summary["sleep_window_end"] == stage_end.isoformat()
+    assert summary["sleep_window_minutes"] == 80.0
+    assert summary["stage_minutes"] == {"light": 80.0}
+
+
 def test_elder_presentation_flags_overlap_and_rejects_naive_invalid_intervals() -> None:
     bed_at = datetime(2026, 8, 24, 17, 0, tzinfo=timezone.utc)
     facts = _product_facts().model_copy(
@@ -839,7 +990,7 @@ def test_elder_presentation_flags_overlap_and_rejects_naive_invalid_intervals() 
     assert presentation.invalid_interval_count == 1
 
 
-def test_episode_presentation_fields_do_not_change_shared_agent_inputs() -> None:
+def test_episode_bounds_are_authoritative_in_shared_agent_inputs() -> None:
     facts = _product_facts()
     with_episode_bounds = facts.model_copy(
         update={
@@ -848,7 +999,14 @@ def test_episode_presentation_fields_do_not_change_shared_agent_inputs() -> None
         }
     )
 
-    assert with_episode_bounds.tool_inputs() == facts.tool_inputs()
+    summary = with_episode_bounds.tool_inputs()["radar.get_night_evidence"][
+        "data"
+    ]["deterministic_night_summary"]
+
+    assert with_episode_bounds.tool_inputs() != facts.tool_inputs()
+    assert summary["observation_window_start"] == "2026-08-24T17:00:00+00:00"
+    assert summary["observation_window_end"] == "2026-08-25T01:00:00+00:00"
+    assert summary["observation_window_minutes"] == 480.0
     assert with_episode_bounds.canonical_data_version == facts.canonical_data_version
 
 

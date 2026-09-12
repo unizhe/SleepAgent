@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import re
 from typing import Any, Generic, TypeVar
 
 import httpx
@@ -63,12 +64,14 @@ class PlatformApiError(RuntimeError):
         endpoint: str,
         http_status: int | None = None,
         vendor_code: str | None = None,
+        vendor_message: str | None = None,
     ) -> None:
         super().__init__(category)
         self.category = category
         self.endpoint = endpoint
         self.http_status = http_status
         self.vendor_code = vendor_code
+        self.vendor_message = vendor_message
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,7 +623,12 @@ def _response_payload(envelope: Mapping[str, Any], *, endpoint: str) -> object:
     code = str(envelope.get("code", "MISSING"))
     if envelope.get("success") is not True or code != "200":
         raise PlatformApiError(
-            _vendor_error_category(code), endpoint=endpoint, vendor_code=code
+            _vendor_error_category(code),
+            endpoint=endpoint,
+            vendor_code=code,
+            vendor_message=_safe_vendor_message(
+                envelope.get("message", envelope.get("msg"))
+            ),
         )
     data = envelope.get("data")
     if data is None:
@@ -666,6 +674,22 @@ def _vendor_error_category(code: str) -> str:
         "6000": "DEVICE_NOT_FOUND",
         "6001": "DEVICE_OFFLINE",
     }.get(code, "VENDOR_ERROR")
+
+
+def _safe_vendor_message(value: object) -> str | None:
+    """Keep a short diagnostic phrase while rejecting secret-like content."""
+
+    if not isinstance(value, str):
+        return None
+    message = " ".join(value.split())
+    if not message or len(message) > 160:
+        return None
+    if re.search(
+        r"(?i)(authorization|bearer|client[_ -]?secret|access[_ -]?token|signature)",
+        message,
+    ):
+        return None
+    return message
 
 
 def _identifier_text(value: object, name: str) -> str:

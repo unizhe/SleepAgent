@@ -258,7 +258,7 @@ def _closed_candidate(ids: Ids) -> tuple[ClosedEpisodeCandidate, datetime, datet
         conflicting_episode=lambda _value: None,
     )
     assert opened is not None
-    closed = projector.project(
+    candidate = projector.project(
         scope=_scope(),
         snapshot=LifecycleSnapshotRecord(
             ids(bed_at),
@@ -283,7 +283,36 @@ def _closed_candidate(ids: Ids) -> tuple[ClosedEpisodeCandidate, datetime, datet
         committed_at=wake_at + timedelta(seconds=2),
         conflicting_episode=lambda _value: None,
     )
-    assert closed is not None
+    assert candidate is not None
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            ids(wake_at),
+            "active",
+            2,
+            bed_at,
+            wake_at,
+            StoredEpisode(
+                candidate.episode,
+                "collecting",
+                candidate.revision_id,
+                candidate.observation_ids,
+                2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: None,
+    )
     return (
         ClosedEpisodeCandidate(
             stored_episode=StoredEpisode(
@@ -481,7 +510,7 @@ def test_projection_boundary_never_guesses_between_closed_episodes() -> None:
     assert decision.late_association.selected is None
 
 
-def test_episode_projector_finalizes_on_observed_wake_date() -> None:
+def test_episode_projector_finalizes_only_after_confirmed_observed_wake() -> None:
     ids = Ids()
     projector = EpisodeLifecycleProjector(_policy(), id_generator=ids)
     zone = ZoneInfo("Asia/Shanghai")
@@ -510,7 +539,7 @@ def test_episode_projector_finalizes_on_observed_wake_date() -> None:
     assert opened.episode.episode_local_date is None
     assert opened.episode.legacy_local_sleep_date == date(2026, 8, 7)
 
-    closed = projector.project(
+    candidate = projector.project(
         scope=_scope(),
         snapshot=LifecycleSnapshotRecord(
             monitoring_snapshot_id=ids(bed_at),
@@ -535,10 +564,45 @@ def test_episode_projector_finalizes_on_observed_wake_date() -> None:
         committed_at=wake_at + timedelta(seconds=2),
         conflicting_episode=lambda _value: None,
     )
+    assert candidate is not None
+    assert candidate.episode.wake_at is None
+    assert candidate.episode.candidate_wake_at == wake_at
+    assert candidate.closes_episode is False
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            monitoring_snapshot_id=ids(wake_at),
+            state="active",
+            cas_version=2,
+            created_at=bed_at,
+            updated_at=wake_at,
+            episode=StoredEpisode(
+                episode=candidate.episode,
+                database_state="collecting",
+                current_revision_id=candidate.revision_id,
+                observation_ids=candidate.observation_ids,
+                cas_version=2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: None,
+    )
     assert closed is not None
     assert closed.episode.episode_local_date == date(2026, 8, 8)
     assert closed.episode.assignment_basis == EpisodeAssignmentBasis.OBSERVED_WAKE
-    assert closed.episode.current_revision == 2
+    assert closed.episode.current_revision == 3
+    assert closed.episode.wake_at == wake_at
+    assert closed.revision_cause == "confirmed_observed_wake"
     assert closed.enqueues_fast_path is True
     assert closed.promotes_revision is True
     assert closed.domain_event_type == "NIGHT_EPISODE_REVISION_COMMITTED"
@@ -563,7 +627,7 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     )
     assert opened is not None
     wake_at = datetime(2026, 8, 8, 7, 5, tzinfo=zone)
-    closed = projector.project(
+    candidate = projector.project(
         scope=_scope(),
         snapshot=LifecycleSnapshotRecord(
             ids(bed_at),
@@ -588,6 +652,36 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
         committed_at=wake_at + timedelta(seconds=2),
         conflicting_episode=lambda _value: "existing-episode",
     )
+    assert candidate is not None
+    closed = projector.close_at_confirmed_wake(
+        snapshot=LifecycleSnapshotRecord(
+            ids(wake_at),
+            "active",
+            2,
+            bed_at,
+            wake_at,
+            StoredEpisode(
+                candidate.episode,
+                "collecting",
+                candidate.revision_id,
+                candidate.observation_ids,
+                2,
+            ),
+        ),
+        confirmed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        committed_at=(
+            wake_at
+            + timedelta(
+                seconds=_policy().boundary.wake_confirmation_seconds
+            )
+        ),
+        conflicting_episode=lambda _value: "existing-episode",
+    )
     assert closed is not None
     assert closed.episode.publication_status == (
         EpisodePublicationStatus.RECONCILIATION_REQUIRED
@@ -595,9 +689,9 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert closed.conflicting_episode_id == "existing-episode"
     assert closed.enqueues_fast_path is False
     assert closed.promotes_revision is False
-    assert closed.revision_cause == "observed_wake_date_conflict"
+    assert closed.revision_cause == "confirmed_observed_wake_date_conflict"
     assert len(closed.observation_ids) == 2
-    assert len(closed.new_membership_observation_ids) == 1
+    assert closed.new_membership_observation_ids == ()
     assert (
         closed.domain_event_type
         == "NIGHT_EPISODE_DATE_RECONCILIATION_REQUIRED"
@@ -639,33 +733,11 @@ def test_episode_date_conflict_is_unpublishable_and_does_not_enqueue_fast_path()
     assert "date_conflict" not in set_clause
     assert "current_revision_id = %s" in aggregate_update
     assert "current_revision_number = %s" in aggregate_update
-    membership_insert, membership_insert_params = next(
-        (statement, params)
-        for statement, params in cursor.statements
-        if "INSERT INTO public.sleep_domain_episode_observation_memberships"
+    assert not any(
+        "INSERT INTO public.sleep_domain_episode_observation_memberships"
         in statement
+        for statement, _params in cursor.statements
     )
-    assert "'episode-membership:'" in membership_insert
-    assert "decode('00', 'hex')" in membership_insert
-    assert "ON CONFLICT (namespace_id, data_mode, observation_id) DO NOTHING" in (
-        membership_insert
-    )
-    assert membership_insert_params[-1] == list(
-        closed.new_membership_observation_ids
-    )
-    membership_check, membership_check_params = next(
-        (statement, params)
-        for statement, params in cursor.statements
-        if "count(*) = cardinality" in statement
-    )
-    assert membership_check_params[0] == list(
-        closed.new_membership_observation_ids
-    )
-    assert membership_check_params[-1] == list(
-        closed.new_membership_observation_ids
-    )
-    assert "array_agg" not in membership_check
-    assert "membership.night_episode_id = %s" in membership_check
     assert all(
         "array_agg(membership.observation_id" not in statement
         for statement, _params in cursor.statements

@@ -698,6 +698,13 @@ def normalize_sleep_report(
             raise PullContractError(
                 "sleep_stage_list.type must be one of the documented codes 1-4"
             ) from exc
+        if end < start:
+            raise PullContractError(
+                "sleep_stage_list.end_time must not precede start_time"
+            )
+        if end == start:
+            ignored.add("sleep_stage_list[].zero_duration_interval")
+            continue
         report_window_start = (
             start if report_window_start is None else min(report_window_start, start)
         )

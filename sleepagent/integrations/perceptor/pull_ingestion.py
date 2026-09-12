@@ -22,7 +22,12 @@ from sleepagent.config import (
     ProcessRole,
     SleepBackendSettings,
 )
-from sleepagent.domain.contracts import DataMode, DeviceBinding, bind_adapter_candidate
+from sleepagent.domain.contracts import (
+    DataMode,
+    DeviceBinding,
+    QuarantineReprocessAudit,
+    bind_adapter_candidate,
+)
 from sleepagent.domain.episodes import UUID7Generator
 from sleepagent.infrastructure.postgres_sleep_slice import (
     EpisodeProjectionBoundary,
@@ -40,6 +45,7 @@ from sleepagent.integrations.perceptor.client import (
     REALTIME_READ_ENDPOINT,
     SLEEP_REPORT_ENDPOINT,
     PerceptorPlatformClient,
+    PlatformApiError,
     PlatformEvidencedRead,
 )
 from sleepagent.integrations.perceptor.pull import (
@@ -76,6 +82,7 @@ UTC = timezone.utc
 PULL_RESPONSE_PROFILE = "perceptor-platform-read-response.v1"
 PULL_NORMALIZER = "perceptor_pull"
 PULL_HISTORY_OVERLAP = timedelta(seconds=3)
+PULL_HISTORY_RECONCILIATION_CHUNK_SIZE = 8
 PULL_ENDPOINTS = frozenset(
     {
         GET_CURRENT_ENDPOINT,
@@ -103,6 +110,7 @@ _SAFE_PULL_INGRESS_ERRORS = {
     "Perceptor Pull safe device key mismatch": "device_key_mismatch",
     "bound Perceptor subject has no governance epochs": "governance_epochs_missing",
     "Perceptor normalization requires one exact worker grant": "normalization_grant_mismatch",
+    "Perceptor history continuation exceeds one hour": "historical_backfill_required",
 }
 
 
@@ -119,8 +127,40 @@ def _safe_pull_error_code(exc: Exception) -> str:
     return "unclassified"
 
 
+def _error_chain_has_primary(exc: Exception, message: str) -> bool:
+    current: BaseException | None = exc
+    while current is not None:
+        diagnostic = getattr(current, "diag", None)
+        if getattr(diagnostic, "message_primary", None) == message:
+            return True
+        current = current.__cause__
+    return False
+
+
+def _safe_pull_error_fields(exc: Exception) -> dict[str, object]:
+    """Return only bounded provider failure metadata suitable for logs."""
+
+    if not isinstance(exc, PlatformApiError):
+        return {"error_code": _safe_pull_error_code(exc)}
+    fields: dict[str, object] = {
+        "error_code": "platform_api_error",
+        "provider_category": exc.category,
+    }
+    if exc.http_status is not None:
+        fields["http_status"] = exc.http_status
+    if exc.vendor_code is not None:
+        fields["vendor_code"] = exc.vendor_code
+    if exc.vendor_message is not None:
+        fields["vendor_message"] = exc.vendor_message
+    return fields
+
+
 class PerceptorPullIngressError(RuntimeError):
     """A response could not safely enter the durable Pull boundary."""
+
+
+class PerceptorHistoryBackfillRequired(PerceptorPullIngressError):
+    """The rolling checkpoint is too stale for one scheduled vendor request."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +169,7 @@ class PullRequestCoordinates:
     window_start_at: datetime | None = None
     window_end_at: datetime | None = None
     report_date: date | None = None
+    historical_backfill: bool = False
 
     def __post_init__(self) -> None:
         if self.endpoint not in PULL_ENDPOINTS:
@@ -159,6 +200,8 @@ class PullRequestCoordinates:
             for value in (self.window_start_at, self.window_end_at, self.report_date)
         ):
             raise ValueError("snapshot Pull cannot carry a window or report date")
+        if self.historical_backfill and self.endpoint != HISTORY_ENDPOINT:
+            raise ValueError("historical backfill is valid only for History")
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +214,7 @@ class PerceptorPullIngressResult:
     duplicate: bool
     batch_identity: str
     response_semantic_sha256: str | None
+    normalization_not_before: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +275,27 @@ class PerceptorPullNormalizationResult:
     checkpoint_advanced: bool
     no_data: bool
     quarantined: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PerceptorPullQuarantineReprocessResult:
+    request_id: str
+    quarantine_id: str
+    work_id: str
+    raw_ingress_record_id: str
+    status: str
+    attempt_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class PerceptorHistoryBackfillChunkResult:
+    window_start_at: datetime
+    window_end_at: datetime
+    status: str
+    vendor_record_count: int
+    raw_series_sample_count: int
+    ingress: PerceptorPullIngressResult | None
+    error_code: str | None = None
 
 
 class DurablePerceptorPullIngress:
@@ -321,27 +386,36 @@ class DurablePerceptorPullIngress:
         namespace = cast(str, self.settings.perceptor_namespace_id)
         account = cast(str, self.settings.perceptor_provider_account_id)
         scope = self._ingress_scope(binding)
-        with self.uow_factory.begin(scope) as uow:
-            cursor = uow.connection.cursor()
-            try:
-                cursor.execute(
-                    "SELECT * FROM public.sleepagent_plan_perceptor_history("
-                    + ",".join(["%s"] * 8)
-                    + ")",
-                    (
-                        namespace,
-                        self.settings.perceptor_namespace_generation,
-                        account,
-                        binding.device_binding_id,
-                        binding.binding_version,
-                        binding.subject_id,
-                        requested_start_at,
-                        requested_end_at,
-                    ),
-                )
-                row = cursor.fetchone()
-            finally:
-                cursor.close()
+        try:
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    cursor.execute(
+                        "SELECT * FROM public.sleepagent_plan_perceptor_history("
+                        + ",".join(["%s"] * 8)
+                        + ")",
+                        (
+                            namespace,
+                            self.settings.perceptor_namespace_generation,
+                            account,
+                            binding.device_binding_id,
+                            binding.binding_version,
+                            binding.subject_id,
+                            requested_start_at,
+                            requested_end_at,
+                        ),
+                    )
+                    row = cursor.fetchone()
+                finally:
+                    cursor.close()
+        except Exception as exc:
+            if _error_chain_has_primary(
+                exc, "Perceptor history continuation exceeds one hour"
+            ):
+                raise PerceptorHistoryBackfillRequired(
+                    "scheduled History checkpoint requires explicit historical backfill"
+                ) from exc
+            raise
         if row is None or len(row) != 5:
             raise PerceptorPullIngressError(
                 "Perceptor history planner returned a malformed result"
@@ -392,7 +466,12 @@ class DurablePerceptorPullIngress:
         *,
         binding: DeviceBinding,
         coordinates: PullRequestCoordinates,
+        normalization_delay_seconds: int = 0,
     ) -> PerceptorPullIngressResult:
+        if not 0 <= normalization_delay_seconds <= 3_600:
+            raise ValueError(
+                "normalization_delay_seconds must be between 0 and 3600"
+            )
         if read.endpoint != coordinates.endpoint:
             raise ValueError("read evidence and request coordinates disagree")
         if binding.data_mode != DataMode.LIVE:
@@ -473,6 +552,7 @@ class DurablePerceptorPullIngress:
             binding,
             coordinates.endpoint,
             namespace_generation=self.settings.perceptor_namespace_generation,
+            historical_backfill=coordinates.historical_backfill,
         )
         checkpoint_cursor_at, lateness_watermark_at = _checkpoint_coordinates(
             binding,
@@ -575,6 +655,41 @@ class DurablePerceptorPullIngress:
                 raise PerceptorPullIngressError(
                     "durable Pull resolution does not match the asserted DeviceBinding"
                 )
+            normalization_not_before = None
+            if (
+                normalization_delay_seconds
+                and row[2] is not None
+                and not bool(row[5])
+            ):
+                normalization_not_before = evidence.received_at + timedelta(
+                    seconds=normalization_delay_seconds
+                )
+                defer_cursor = uow.connection.cursor()
+                try:
+                    defer_cursor.execute(
+                        """
+                        UPDATE public.sleep_domain_normalization_work
+                        SET available_at = GREATEST(available_at, %s),
+                            updated_at = %s
+                        WHERE work_id = %s AND namespace_id = %s
+                          AND data_mode = 'live' AND namespace_generation = %s
+                          AND subject_id = %s AND status = 'pending'
+                        """,
+                        (
+                            normalization_not_before,
+                            evidence.received_at,
+                            str(row[2]),
+                            namespace,
+                            self.settings.perceptor_namespace_generation,
+                            binding.subject_id,
+                        ),
+                    )
+                    if defer_cursor.rowcount != 1:
+                        raise PerceptorPullIngressError(
+                            "Perceptor recovery normalization deferral was rejected"
+                        )
+                finally:
+                    defer_cursor.close()
             uow.commit()
         result = PerceptorPullIngressResult(
             disposition=str(row[0]),
@@ -585,6 +700,7 @@ class DurablePerceptorPullIngress:
             duplicate=bool(row[5]),
             batch_identity=batch_identity,
             response_semantic_sha256=response_semantic_sha256,
+            normalization_not_before=normalization_not_before,
         )
         record_backend_signal(category="pull", outcome="raw_committed")
         log_event(
@@ -602,6 +718,95 @@ class DurablePerceptorPullIngress:
         return result
 
 
+class PerceptorPullQuarantineReprocessor:
+    """Append an actor audit and requeue one exact eligible Pull quarantine."""
+
+    def __init__(
+        self,
+        uow_factory: UnitOfWorkFactory[Any],
+        *,
+        now_factory: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.uow_factory = uow_factory
+        self.now_factory = now_factory or (lambda: datetime.now(UTC))
+
+    def requeue(
+        self,
+        scope: UowScope,
+        *,
+        quarantine_id: str,
+        expected_work_id: str,
+        request_id: str,
+        actor_id: str,
+        authorization_id: str,
+        reason: str,
+    ) -> PerceptorPullQuarantineReprocessResult:
+        if scope.process_role != "api" or scope.data_mode != "live":
+            raise ValueError("Pull quarantine reprocessing requires live API authority")
+        if scope.actor_id != actor_id:
+            raise ValueError("Pull quarantine reprocessing actor scope disagrees")
+        requested_at = self.now_factory()
+        _require_aware(requested_at, "requested_at")
+        audit = QuarantineReprocessAudit(
+            request_id=request_id,
+            data_mode=DataMode.LIVE,
+            quarantine_ids=(quarantine_id,),
+            actor_id=actor_id,
+            authorization_id=authorization_id,
+            requested_at=requested_at,
+            reason=reason,
+        )
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                cursor.execute(
+                    "SELECT * FROM public."
+                    "sleepagent_requeue_perceptor_pull_quarantine("
+                    + ",".join(["%s"] * 7)
+                    + ")",
+                    (
+                        quarantine_id,
+                        expected_work_id,
+                        request_id,
+                        actor_id,
+                        authorization_id,
+                        reason,
+                        audit.requested_at,
+                    ),
+                )
+                row = cursor.fetchone()
+            finally:
+                cursor.close()
+            if row is None or len(row) != 4:
+                raise PerceptorPullIngressError(
+                    "Pull quarantine reprocess authority returned a malformed result"
+                )
+            if str(row[0]) != expected_work_id:
+                raise PerceptorPullIngressError(
+                    "Pull quarantine reprocess authority returned another work item"
+                )
+            uow.commit()
+        result = PerceptorPullQuarantineReprocessResult(
+            request_id=request_id,
+            quarantine_id=quarantine_id,
+            work_id=str(row[0]),
+            raw_ingress_record_id=str(row[1]),
+            status=str(row[2]),
+            attempt_count=int(row[3]),
+        )
+        log_event(
+            (
+                "pull_quarantine_reprocess_enqueued"
+                if result.status == "pending"
+                else "pull_quarantine_reprocess_replayed"
+            ),
+            quarantine_id=quarantine_id,
+            work_id=result.work_id,
+            status=result.status,
+        )
+        return result
+
+
 class PerceptorPullBackfillRunner:
     """Bounded read-only Platform calls followed by durable response intake."""
 
@@ -614,6 +819,10 @@ class PerceptorPullBackfillRunner:
         self.client = client
         self.ingress = ingress
         self.binding = binding
+        if binding.data_mode != DataMode.LIVE or binding.status.value != "active":
+            raise ValueError("Perceptor Pull requires an active live DeviceBinding")
+        if binding.provider_id != "perceptor":
+            raise ValueError("Perceptor Pull requires a Perceptor DeviceBinding")
         self.device_name = binding.provider_device.provider_device_name or ""
         self.home_id = binding.provider_device.home_id or ""
         assert_requested_device_matches_binding(self.device_name, binding.provider_device)
@@ -644,6 +853,90 @@ class PerceptorPullBackfillRunner:
                 end_at=plan.window_end_at,
             ),
         )
+
+    def backfill_history(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        normalization_delay_seconds: int = 0,
+    ) -> tuple[PerceptorHistoryBackfillChunkResult, ...]:
+        """Fetch deterministic <=1-hour chunks without moving rolling state."""
+
+        chunks = split_history_backfill_range(start_at=start_at, end_at=end_at)
+        results: list[PerceptorHistoryBackfillChunkResult] = []
+        for chunk_start, chunk_end in chunks:
+            coordinates = PullRequestCoordinates(
+                endpoint=HISTORY_ENDPOINT,
+                window_start_at=chunk_start,
+                window_end_at=chunk_end,
+                historical_backfill=True,
+            )
+            _assert_pull_coordinates_within_binding(
+                self.binding,
+                coordinates,
+                requested_at=chunk_end,
+            )
+            record_pull(source="perceptor", endpoint=coordinates.endpoint)
+            record_backend_signal(category="pull", outcome="started")
+            log_event(
+                "pull_started",
+                endpoint=coordinates.endpoint,
+                recovery_mode="historical_backfill",
+            )
+            try:
+                read = self.client.get_history_evidenced(
+                    device_names=(self.device_name,),
+                    start_at=chunk_start,
+                    end_at=chunk_end,
+                )
+                ingress = self._accept_read(
+                    coordinates,
+                    read,
+                    normalization_delay_seconds=normalization_delay_seconds,
+                )
+            except Exception as exc:
+                fields = _safe_pull_error_fields(exc)
+                record_backend_signal(category="pull", outcome="failed")
+                log_event(
+                    "pull_failed",
+                    endpoint=coordinates.endpoint,
+                    recovery_mode="historical_backfill",
+                    error_type=type(exc).__name__,
+                    **fields,
+                )
+                results.append(
+                    PerceptorHistoryBackfillChunkResult(
+                        window_start_at=chunk_start,
+                        window_end_at=chunk_end,
+                        status="failed",
+                        vendor_record_count=0,
+                        raw_series_sample_count=0,
+                        ingress=None,
+                        error_code=str(fields["error_code"]),
+                    )
+                )
+                continue
+            record_backend_signal(category="pull", outcome="succeeded")
+            log_event(
+                "pull_succeeded",
+                endpoint=coordinates.endpoint,
+                recovery_mode="historical_backfill",
+                disposition=ingress.disposition,
+            )
+            results.append(
+                PerceptorHistoryBackfillChunkResult(
+                    window_start_at=chunk_start,
+                    window_end_at=chunk_end,
+                    status="succeeded",
+                    vendor_record_count=len(read.data),
+                    raw_series_sample_count=_history_raw_series_sample_count(
+                        read.data
+                    ),
+                    ingress=ingress,
+                )
+            )
+        return tuple(results)
 
     def _history_checkpoint_noop(
         self,
@@ -710,7 +1003,12 @@ class PerceptorPullBackfillRunner:
             ),
         )
 
-    def pull_sleep_report(self, report_date: date) -> PerceptorPullIngressResult:
+    def pull_sleep_report(
+        self,
+        report_date: date,
+        *,
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
         coordinates = PullRequestCoordinates(
             endpoint=SLEEP_REPORT_ENDPOINT, report_date=report_date
         )
@@ -721,19 +1019,28 @@ class PerceptorPullBackfillRunner:
                 home_id=self.home_id,
                 report_date=report_date,
             ),
+            normalization_delay_seconds=normalization_delay_seconds,
         )
 
     def _run(
         self,
         coordinates: PullRequestCoordinates,
         call: Callable[[], PlatformEvidencedRead[Any]],
+        normalization_delay_seconds: int = 0,
     ) -> PerceptorPullIngressResult:
+        _assert_pull_coordinates_within_binding(
+            self.binding,
+            coordinates,
+            requested_at=datetime.now(tz=UTC),
+        )
         record_pull(source="perceptor", endpoint=coordinates.endpoint)
         record_backend_signal(category="pull", outcome="started")
         log_event("pull_started", endpoint=coordinates.endpoint)
         try:
-            result = self.ingress.accept(
-                call(), binding=self.binding, coordinates=coordinates
+            result = self._accept_read(
+                coordinates,
+                call(),
+                normalization_delay_seconds=normalization_delay_seconds,
             )
         except Exception as exc:
             record_backend_signal(category="pull", outcome="failed")
@@ -741,12 +1048,27 @@ class PerceptorPullBackfillRunner:
                 "pull_failed",
                 endpoint=coordinates.endpoint,
                 error_type=type(exc).__name__,
-                error_code=_safe_pull_error_code(exc),
+                **_safe_pull_error_fields(exc),
             )
             raise
         record_backend_signal(category="pull", outcome="succeeded")
         log_event("pull_succeeded", endpoint=coordinates.endpoint, disposition=result.disposition)
         return result
+
+    def _accept_read(
+        self,
+        coordinates: PullRequestCoordinates,
+        read: PlatformEvidencedRead[Any],
+        normalization_delay_seconds: int = 0,
+    ) -> PerceptorPullIngressResult:
+        if normalization_delay_seconds:
+            return self.ingress.accept(
+                read,
+                binding=self.binding,
+                coordinates=coordinates,
+                normalization_delay_seconds=normalization_delay_seconds,
+            )
+        return self.ingress.accept(read, binding=self.binding, coordinates=coordinates)
 
 
 class PerceptorPullNormalizationProcessor:
@@ -1116,6 +1438,17 @@ class PerceptorPullNormalizationProcessor:
         normalized: Mapping[str, Any],
         committed_at: datetime,
     ) -> dict[str, Any]:
+        if (
+            len(normalized["candidates"])
+            > PULL_HISTORY_RECONCILIATION_CHUNK_SIZE
+        ):
+            return self._commit_bounded_pull_reconciliation(
+                scope,
+                lease,
+                loaded=loaded,
+                normalized=normalized,
+                committed_at=committed_at,
+            )
         receipt_id = _phase_receipt_id(lease.work_id)
         with self.uow_factory.begin(scope) as uow:
             cursor = uow.connection.cursor()
@@ -1261,6 +1594,261 @@ class PerceptorPullNormalizationProcessor:
             uow.commit()
         return summary
 
+    def _commit_bounded_pull_reconciliation(
+        self,
+        scope: UowScope,
+        lease: NormalizationLease,
+        *,
+        loaded: Mapping[str, Any],
+        normalized: Mapping[str, Any],
+        committed_at: datetime,
+    ) -> dict[str, Any]:
+        """Commit large Pull responses in fenced, restart-safe chunks.
+
+        Each chunk releases the subject lifecycle lock before the next chunk,
+        preserving realtime Push opportunity.  The work row carries only
+        deterministic progress and aggregate reconciliation evidence; final
+        checkpoint advancement still occurs after one complete phase receipt.
+        """
+
+        candidates = tuple(normalized["candidates"])
+        observations = tuple(normalized["observations"])
+        semantics = tuple(normalized["canonical_semantics"])
+        total = len(candidates)
+        if len(observations) != total or len(semantics) != total:
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation inputs disagree"
+            )
+        work = cast(Mapping[str, Any], loaded["work_json"])
+        progress_value = work.get("bounded_reconciliation")
+        if progress_value is None:
+            next_index = 0
+            summary: dict[str, Any] = {
+                "canonical_observation_ids": [],
+                "canonical_created_count": 0,
+                "push_pull_overlap_count": 0,
+                "conflict_created_count": 0,
+                "duplicate_count": 0,
+                "last_canonical_observation_id": None,
+                "no_data": bool(normalized["no_data"]),
+            }
+        else:
+            progress = _json_mapping(progress_value)
+            next_index = int(progress.get("next_index", -1))
+            summary_value = progress.get("summary")
+            if not isinstance(summary_value, Mapping):
+                raise SleepSliceInvariantError(
+                    "bounded History reconciliation progress is malformed"
+                )
+            summary = dict(summary_value)
+        if not 0 <= next_index <= total:
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation offset is invalid"
+            )
+        canonical_ids = summary.get("canonical_observation_ids")
+        if not isinstance(canonical_ids, list) or any(
+            not isinstance(item, str) for item in canonical_ids
+        ):
+            raise SleepSliceInvariantError(
+                "bounded History reconciliation identity evidence is malformed"
+            )
+
+        receipt_id = _phase_receipt_id(lease.work_id)
+        while next_index < total:
+            chunk_end = min(
+                total,
+                next_index + PULL_HISTORY_RECONCILIATION_CHUNK_SIZE,
+            )
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    self._lock_fence(cursor, scope, lease)
+                    cursor.execute(
+                        "SELECT receipt_json FROM "
+                        "public.sleep_domain_processing_receipts "
+                        "WHERE receipt_id = %s AND namespace_id = %s "
+                        "AND data_mode = 'live'",
+                        (receipt_id, scope.namespace_id),
+                    )
+                    existing = cursor.fetchone()
+                    if existing is not None:
+                        completed = _json_mapping(existing[0]).get(
+                            "reconciliation_summary"
+                        )
+                        if not isinstance(completed, Mapping):
+                            raise SleepSliceInvariantError(
+                                "Pull reconciliation receipt is malformed"
+                            )
+                        uow.commit()
+                        return dict(completed)
+                    reconciliations: list[PerceptorReconciliationResult] = []
+                    for index in range(next_index, chunk_end):
+                        observation = observations[index]
+                        reconciliations.append(
+                            self.reconciler.reconcile(
+                                cursor,
+                                scope,
+                                raw_ingress_record_id=str(
+                                    loaded["raw_ingress_record_id"]
+                                ),
+                                candidate=candidates[index],
+                                observation=observation,
+                                canonical_semantics=semantics[index],
+                                semantic_surface=semantic_surface_for_pull(
+                                    str(normalized["endpoint"]), observation
+                                ),
+                                committed_at=committed_at,
+                            )
+                        )
+                    chunk_ids = tuple(
+                        item.canonical_observation_id
+                        for item in reconciliations
+                    )
+                    project_authoritative_canonical_observations(
+                        uow.connection,
+                        scope,
+                        chunk_ids,
+                        committed_at=committed_at,
+                        policy=self.policy,
+                        projection_boundary=self.projection_boundary,
+                        id_generator=self.id_generator,
+                        fault_injector=self.projection_fault_injector,
+                    )
+                    canonical_ids.extend(chunk_ids)
+                    for field, attribute in (
+                        ("canonical_created_count", "canonical_created"),
+                        ("push_pull_overlap_count", "push_pull_overlap"),
+                        ("conflict_created_count", "conflict_created_count"),
+                        ("duplicate_count", "duplicate"),
+                    ):
+                        summary[field] = int(summary.get(field, 0)) + sum(
+                            int(getattr(item, attribute))
+                            for item in reconciliations
+                        )
+                    summary["last_canonical_observation_id"] = (
+                        None if not canonical_ids else sorted(canonical_ids)[-1]
+                    )
+                    next_index = chunk_end
+                    cursor.execute(
+                        """
+                        UPDATE public.sleep_domain_normalization_work
+                        SET work_json = work_json || %s::jsonb,
+                            updated_at = clock_timestamp()
+                        WHERE work_id = %s AND namespace_id = %s
+                          AND data_mode = 'live' AND namespace_generation = %s
+                          AND subject_id = %s AND status = 'running'
+                          AND lease_generation = %s AND fencing_token = %s
+                          AND worker_instance = %s
+                          AND lease_expires_at > clock_timestamp()
+                        """,
+                        (
+                            json.dumps(
+                                {
+                                    "bounded_reconciliation": {
+                                        "next_index": next_index,
+                                        "total": total,
+                                        "chunk_size": (
+                                            PULL_HISTORY_RECONCILIATION_CHUNK_SIZE
+                                        ),
+                                        "summary": summary,
+                                    }
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                            lease.work_id,
+                            scope.namespace_id,
+                            scope.namespace_generation,
+                            scope.subject_id,
+                            lease.lease_generation,
+                            lease.fencing_token,
+                            lease.worker_instance,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise SleepSliceLeaseLost(
+                            "Pull fence expired during bounded reconciliation"
+                        )
+                finally:
+                    cursor.close()
+                uow.commit()
+
+        classification = normalized.get("history_window_classification")
+        if classification is not None:
+            summary["history_window_classification"] = classification
+        with self.uow_factory.begin(scope) as uow:
+            cursor = uow.connection.cursor()
+            try:
+                self._lock_fence(cursor, scope, lease)
+                if normalized["endpoint"] == SLEEP_REPORT_ENDPOINT:
+                    self._insert_source_report(
+                        cursor,
+                        scope,
+                        loaded=loaded,
+                        normalized=normalized,
+                        committed_at=committed_at,
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO public.sleep_domain_processing_receipts (
+                      receipt_id, namespace_id, data_mode, raw_ingress_record_id,
+                      stage, outcome, receipt_json, occurred_at
+                    ) VALUES (%s, %s, 'live', %s, 'normalization',
+                              'succeeded', %s::jsonb, %s)
+                    ON CONFLICT (receipt_id) DO NOTHING
+                    """,
+                    (
+                        receipt_id,
+                        scope.namespace_id,
+                        loaded["raw_ingress_record_id"],
+                        json.dumps(
+                            {
+                                "schema_version": (
+                                    "perceptor_pull_reconciliation_receipt.v1"
+                                ),
+                                "raw_ingress_record_id": loaded[
+                                    "raw_ingress_record_id"
+                                ],
+                                "reconciliation_summary": summary,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        committed_at,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE public.sleep_domain_normalization_work
+                    SET work_json = (work_json - 'bounded_reconciliation')
+                                    || '{"reconciliation_committed":true}'::jsonb,
+                        updated_at = clock_timestamp()
+                    WHERE work_id = %s AND namespace_id = %s
+                      AND data_mode = 'live' AND namespace_generation = %s
+                      AND subject_id = %s AND status = 'running'
+                      AND lease_generation = %s AND fencing_token = %s
+                      AND worker_instance = %s
+                      AND lease_expires_at > clock_timestamp()
+                    """,
+                    (
+                        lease.work_id,
+                        scope.namespace_id,
+                        scope.namespace_generation,
+                        scope.subject_id,
+                        lease.lease_generation,
+                        lease.fencing_token,
+                        lease.worker_instance,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise SleepSliceLeaseLost(
+                        "Pull fence expired before bounded reconciliation commit"
+                    )
+            finally:
+                cursor.close()
+            uow.commit()
+        return summary
+
     def _advance_checkpoint_and_finalize(
         self,
         scope: UowScope,
@@ -1275,6 +1863,29 @@ class PerceptorPullNormalizationProcessor:
         watermark = _aware_from_text(work.get("lateness_watermark_at"), "lateness_watermark_at")
         stream_key = _required_text(work.get("stream_key"), "stream_key")
         data_surface = _required_text(work.get("data_surface"), "data_surface")
+        binding_payload = loaded.get("binding_json")
+        backfill_stream_key: str | None = None
+        if binding_payload is not None:
+            binding = DeviceBinding.model_validate(binding_payload)
+            rolling_stream_key = _stream_key(
+                binding,
+                str(work.get("endpoint")),
+                namespace_generation=scope.namespace_generation,
+            )
+            backfill_stream_key = (
+                _stream_key(
+                    binding,
+                    HISTORY_ENDPOINT,
+                    namespace_generation=scope.namespace_generation,
+                    historical_backfill=True,
+                )
+                if str(work.get("endpoint")) == HISTORY_ENDPOINT
+                else None
+            )
+            if stream_key not in {rolling_stream_key, backfill_stream_key}:
+                raise SleepSliceInvariantError(
+                    "Pull checkpoint stream identity is invalid"
+                )
         binding_id = _required_text(work.get("device_binding_id"), "device_binding_id")
         binding_version = int(work.get("binding_version", 0))
         if binding_version < 1:
@@ -1305,6 +1916,22 @@ class PerceptorPullNormalizationProcessor:
         last_canonical_observation_id = (
             canonical_ids[-1] if canonical_ids else None
         )
+        if backfill_stream_key is not None and stream_key == backfill_stream_key:
+            if str(work.get("endpoint")) != HISTORY_ENDPOINT:
+                raise SleepSliceInvariantError(
+                    "isolated checkpoint policy is valid only for History"
+                )
+            with self.uow_factory.begin(scope) as uow:
+                cursor = uow.connection.cursor()
+                try:
+                    self._lock_fence(cursor, scope, lease)
+                    self._finalize_work(
+                        cursor, scope, lease, committed_at=committed_at
+                    )
+                finally:
+                    cursor.close()
+                uow.commit()
+            return False
         checkpoint_id = "perceptor:pull:checkpoint:" + _stable_digest(
             scope.namespace_id, scope.data_mode, str(work.get("provider_account_id")), stream_key
         )
@@ -1441,8 +2068,9 @@ class PerceptorPullNormalizationProcessor:
         detail_code: str,
         committed_at: datetime,
     ) -> None:
-        receipt_id = _stable_prefixed_id("receipt", lease.work_id, "quarantine")
-        quarantine_id = _stable_prefixed_id("quarantine", lease.work_id)
+        receipt_id, quarantine_id = _quarantine_evidence_ids(
+            lease.work_id, lease.lease_generation
+        )
         with self.uow_factory.begin(scope) as uow:
             cursor = uow.connection.cursor()
             try:
@@ -1847,8 +2475,7 @@ def _request_descriptor(
     binding: DeviceBinding,
     coordinates: PullRequestCoordinates,
 ) -> str:
-    return json.dumps(
-        [
+    parts = [
             namespace,
             str(namespace_generation),
             account,
@@ -1858,7 +2485,11 @@ def _request_descriptor(
             _iso_or_none(coordinates.window_start_at) or "",
             _iso_or_none(coordinates.window_end_at) or "",
             "" if coordinates.report_date is None else coordinates.report_date.isoformat(),
-        ],
+        ]
+    if coordinates.historical_backfill:
+        parts.append("historical_backfill.v1")
+    return json.dumps(
+        parts,
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -1869,6 +2500,7 @@ def _stream_key(
     endpoint: str,
     *,
     namespace_generation: int,
+    historical_backfill: bool = False,
 ) -> str:
     surface = {
         HISTORY_ENDPOINT: "history.v1",
@@ -1876,6 +2508,10 @@ def _stream_key(
         GET_CURRENT_ENDPOINT: "current.v1",
         SLEEP_REPORT_ENDPOINT: "sleep_report.v1",
     }[endpoint]
+    if historical_backfill:
+        if endpoint != HISTORY_ENDPOINT:
+            raise ValueError("historical backfill stream is valid only for History")
+        surface = "history_backfill.v1"
     return "perceptor:pull:stream:" + _stable_digest(
         binding.provider_account_id,
         binding.device_binding_id,
@@ -1883,6 +2519,40 @@ def _stream_key(
         str(namespace_generation),
         surface,
     )
+
+
+def split_history_backfill_range(
+    *,
+    start_at: datetime,
+    end_at: datetime,
+) -> tuple[tuple[datetime, datetime], ...]:
+    """Normalize and split one explicit historical range deterministically."""
+
+    _require_aware(start_at, "start_at")
+    _require_aware(end_at, "end_at")
+    start = start_at.replace(microsecond=0)
+    end = end_at.replace(microsecond=0)
+    if end <= start:
+        raise ValueError("history backfill range must be positive")
+    chunks: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        chunk_end = min(cursor + timedelta(hours=1), end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    return tuple(chunks)
+
+
+def _history_raw_series_sample_count(
+    records: tuple[Mapping[str, Any], ...],
+) -> int:
+    count = 0
+    for record in records:
+        for field in ("heart_rate", "breath_rate", "body_shake"):
+            value = record.get(field)
+            if isinstance(value, str) and value:
+                count += len(value.split(","))
+    return count
 
 
 def _provider_device_key(
@@ -1924,6 +2594,18 @@ def _emit_reconciliation_observability(
     checkpoint_outcome = "checkpoint_advanced" if checkpoint_advanced else "checkpoint_held"
     record_backend_signal(category="pull", outcome=checkpoint_outcome)
     log_event(f"pull_{checkpoint_outcome}", endpoint=endpoint)
+
+
+def _quarantine_evidence_ids(
+    work_id: str, lease_generation: int
+) -> tuple[str, str]:
+    if lease_generation < 1:
+        raise ValueError("lease_generation must be positive")
+    generation = () if lease_generation == 1 else (str(lease_generation),)
+    return (
+        _stable_prefixed_id("receipt", work_id, "quarantine", *generation),
+        _stable_prefixed_id("quarantine", work_id, *generation),
+    )
 
 
 def _phase_receipt_id(work_id: str) -> str:
@@ -2018,13 +2700,18 @@ __all__ = [
     "PULL_NORMALIZER",
     "PULL_RESPONSE_PROFILE",
     "PerceptorLiveNormalizationDispatcher",
+    "PerceptorHistoryBackfillChunkResult",
+    "PerceptorHistoryBackfillRequired",
     "PerceptorPullBackfillRunner",
     "PerceptorPullIngressError",
     "PerceptorPullIngressResult",
     "PerceptorPullNormalizationProcessor",
     "PerceptorPullNormalizationResult",
+    "PerceptorPullQuarantineReprocessResult",
+    "PerceptorPullQuarantineReprocessor",
     "PullHistoryPlan",
     "PullRequestCoordinates",
     "parse_platform_success_response",
     "perceptor_pull_raw_aad",
+    "split_history_backfill_range",
 ]

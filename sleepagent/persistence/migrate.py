@@ -1211,6 +1211,7 @@ def bootstrap_test_database_roles(
             "sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,text,text,text,timestamptz,timestamptz,date,timestamptz,timestamptz,text,text,text,bytea,text,text,integer,timestamptz,boolean,boolean,text,text,text,text,text,jsonb)",
             "sleepagent_plan_perceptor_history(text,bigint,text,text,integer,text,timestamptz,timestamptz)",
             "sleepagent_manage_device_binding(text,text,text,bigint,text,text,text,text,text,jsonb,text,text,timestamptz,text,text,text,jsonb,jsonb)",
+            "sleepagent_requeue_perceptor_pull_quarantine(text,text,text,text,text,text,timestamptz)",
         )
         worker_functions = (
             "sleepagent_ingest_perceptor_pull(text,bigint,text,text,text,text,text,text,text,timestamptz,timestamptz,date,timestamptz,timestamptz,text,text,text,bytea,text,text,integer,timestamptz,boolean,boolean,text,text,text,text,text,jsonb)",
@@ -1222,6 +1223,7 @@ def bootstrap_test_database_roles(
             "sleepagent_finalize_demo_journey_attempt(text,bigint,text,text,text,timestamptz)",
             "sleepagent_succeed_demo_journey(text,bigint,text,jsonb)",
             "sleepagent_claim_normalization_work(text,integer)",
+            "sleepagent_claim_normalization_work_by_normalizer(text,text,integer)",
             "sleepagent_heartbeat_normalization_work(text,bigint,text,integer)",
             "sleepagent_finalize_normalization_work(text,bigint,text,text,timestamptz,text)",
             "sleepagent_quarantine_scope_allows_v2(text,text,text)",

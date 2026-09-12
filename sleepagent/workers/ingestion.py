@@ -32,6 +32,7 @@ from sleepagent.infrastructure.postgres_sleep_slice import (
     SleepSliceLeaseLost,
     SleepSliceStaleRevision,
 )
+from sleepagent.observability import log_event
 from sleepagent.workers.kernel import (
     LeaseClaim,
     WorkContext,
@@ -109,7 +110,7 @@ class NormalizationWorkHandlerAdapter:
             return _terminal("sleep_slice_invariant_violation")
         except SleepSliceConflict:
             return _retryable("sleep_slice_conflict")
-        except Exception:
+        except Exception as exc:
             # Perceptor Push atomically commits reconciliation + projection;
             # Pull atomically commits that pair before checkpoint advancement.
             # Both are fenced and idempotent, so an unclassified provider
@@ -120,6 +121,11 @@ class NormalizationWorkHandlerAdapter:
                 "perceptor_pull",
             }:
                 raise
+            log_event(
+                "normalization_processor_failed",
+                normalizer=str(context.claim.payload.get("normalizer")),
+                error_type=type(exc).__name__,
+            )
             return _retryable("unclassified_normalization_processor_failure")
 
         return WorkResult(
@@ -201,7 +207,14 @@ def build_b3_worker_handlers(
     handlers: dict[str, WorkHandler] = {}
     cipher: RawPayloadCipher | None = None
     retention_keys: PostgresRetentionKeyCoordinator | None = None
-    if {"ingestion", "replay_journey"}.intersection(settings.worker_queues):
+    normalization_queues = {
+        "ingestion",
+        "ingestion_realtime",
+        "ingestion_repair",
+    }
+    if normalization_queues.union({"replay_journey"}).intersection(
+        settings.worker_queues
+    ):
         key = BackendKeyProvider(settings.deployment_mode).encryption_key(
             settings.encryption_key_ref
         )
@@ -241,7 +254,10 @@ def build_b3_worker_handlers(
 
         handlers["replay_journey"] = journey_handler_factory
 
-    if "ingestion" in settings.worker_queues:
+    selected_normalization_queues = normalization_queues.intersection(
+        settings.worker_queues
+    )
+    if selected_normalization_queues:
         assert cipher is not None
 
         def normalization_processor_factory(
@@ -274,9 +290,10 @@ def build_b3_worker_handlers(
                 ),
             )
 
-        handlers["ingestion"] = NormalizationWorkHandlerAdapter(
-            processor_factory=normalization_processor_factory
-        )
+        for queue in selected_normalization_queues:
+            handlers[queue] = NormalizationWorkHandlerAdapter(
+                processor_factory=normalization_processor_factory
+            )
     if "fast_path" in settings.worker_queues:
         def fast_path_processor_factory(
             uow_factory: UnitOfWorkFactory[Any],
@@ -295,10 +312,18 @@ def build_b3_worker_handlers(
 
 
 def _require_normalization_claim(claim: LeaseClaim) -> None:
+    expected_normalizer = {
+        "ingestion_realtime": "perceptor_push",
+        "ingestion_repair": "perceptor_pull",
+    }.get(claim.queue)
     if (
-        claim.queue != "ingestion"
+        claim.queue not in {"ingestion", "ingestion_realtime", "ingestion_repair"}
         or claim.operation_id is not None
         or claim.metadata.get("work_kind") != "normalization"
+        or (
+            expected_normalizer is not None
+            and claim.payload.get("normalizer") != expected_normalizer
+        )
     ):
         raise B3ClaimInvariantError("claim is not normalization work")
 

@@ -21,6 +21,15 @@ CARE_MIGRATION = ROOT / (
 WORKER_AUTHORITY_MIGRATION = ROOT / (
     "sleepagent/persistence/migrations/028_worker_authority_boundaries.sql"
 )
+REALTIME_ISOLATION_MIGRATION = ROOT / (
+    "sleepagent/persistence/migrations/029_realtime_normalization_isolation.sql"
+)
+PULL_REPROCESS_MIGRATION = ROOT / (
+    "sleepagent/persistence/migrations/030_perceptor_pull_quarantine_reprocess.sql"
+)
+PULL_REPROCESS_GRANT_MIGRATION = ROOT / (
+    "sleepagent/persistence/migrations/031_perceptor_pull_quarantine_reprocess_grant.sql"
+)
 
 
 def test_r1_is_manifest_pinned_as_two_additive_migrations() -> None:
@@ -38,7 +47,7 @@ def test_r1_is_manifest_pinned_as_two_additive_migrations() -> None:
 
 
 def test_p0b_worker_authority_is_manifest_pinned_as_additive_028() -> None:
-    assert LATEST_SCHEMA_VERSION == 28
+    assert LATEST_SCHEMA_VERSION >= 28
     assert any(
         identity.startswith("028:028_worker_authority_boundaries:")
         for identity in EXPECTED_MIGRATION_IDENTITIES
@@ -61,6 +70,58 @@ def test_p0b_worker_authority_is_manifest_pinned_as_additive_028() -> None:
         "FORCE ROW LEVEL SECURITY"
     ) in body
     assert "ALTER TABLE public.sleep_domain_quarantine FORCE ROW LEVEL SECURITY" in body
+
+
+def test_realtime_normalization_isolation_is_additive_and_authority_bounded() -> None:
+    assert LATEST_SCHEMA_VERSION == 31
+    assert any(
+        identity.startswith("029:029_realtime_normalization_isolation:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
+    )
+    body = REALTIME_ISOLATION_MIGRATION.read_text(encoding="utf-8")
+    assert "sleepagent_claim_normalization_work_by_normalizer" in body
+    assert "work.work_json ->> 'normalizer' = requested_normalizer" in body
+    assert "sleepagent_worker_claim_authority_v2" in body
+    assert "sleepagent_exhaust_authorized_reclaims_v2" in body
+    assert "FOR UPDATE OF namespace_row, work SKIP LOCKED" in body
+    assert "REVOKE ALL ON FUNCTION" in body
+
+
+def test_pull_quarantine_reprocess_is_audited_exact_and_fail_closed() -> None:
+    assert LATEST_SCHEMA_VERSION == 31
+    assert any(
+        identity.startswith("030:030_perceptor_pull_quarantine_reprocess:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
+    )
+    body = PULL_REPROCESS_MIGRATION.read_text(encoding="utf-8")
+    for guard in (
+        "sleepagent_principal_context_allows",
+        "sleepagent_subject_scope_allows",
+        "backend_actor_subject_bindings",
+        "target_work_id",
+        "work.status = 'quarantined'",
+        "receipt.outcome = 'succeeded'",
+        "later_quarantine.quarantined_at > quarantine.quarantined_at",
+        "FOR UPDATE OF work",
+        "REVOKE ALL ON FUNCTION",
+    ):
+        assert guard in body
+    assert "'schema_version', 'quarantine_reprocess_audit.v1'" in body
+    assert "'expected_work_id', requested_work_id" not in body
+
+
+def test_pull_quarantine_reprocess_grant_is_narrow_and_manifest_pinned() -> None:
+    assert any(
+        identity.startswith("031:031_perceptor_pull_quarantine_reprocess_grant:")
+        for identity in EXPECTED_MIGRATION_IDENTITIES
+    )
+    body = PULL_REPROCESS_GRANT_MIGRATION.read_text(encoding="utf-8")
+    assert "principal.principal_kind IN" in body
+    assert "GRANT EXECUTE ON FUNCTION" in body
+    assert "REVOKE ALL ON FUNCTION" in body
+    assert "has_function_privilege" in body
+    assert "GRANT SELECT" not in body
+    assert "GRANT INSERT" not in body
 
 
 def test_r1_reclaim_budget_is_independent_and_covers_all_claim_kinds() -> None:

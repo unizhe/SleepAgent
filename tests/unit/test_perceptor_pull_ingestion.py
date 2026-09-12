@@ -36,17 +36,23 @@ from sleepagent.integrations.perceptor.client import (
 )
 from sleepagent.integrations.perceptor.pull import PullContractError
 from sleepagent.integrations.perceptor import pull_ingestion as pull_ingestion_module
+from sleepagent.integrations.perceptor.reconciliation import (
+    PerceptorReconciliationResult,
+)
 from sleepagent.integrations.perceptor.pull_ingestion import (
     DurablePerceptorPullIngress,
     PerceptorLiveNormalizationDispatcher,
+    PerceptorHistoryBackfillRequired,
     PerceptorPullBackfillRunner,
     PerceptorPullIngressError,
     PerceptorPullIngressResult,
     PerceptorPullNormalizationProcessor,
+    PerceptorPullQuarantineReprocessor,
     PullHistoryPlan,
     PullRequestCoordinates,
     parse_platform_success_response,
     perceptor_pull_raw_aad,
+    split_history_backfill_range,
 )
 from sleepagent.persistence.uow import ExternalIngressScope, UowScope
 
@@ -115,6 +121,102 @@ class FailingUowFactory:
     def begin(self, scope: object) -> Uow:
         self.scopes.append(scope)
         raise RuntimeError("synthetic database unavailable before raw commit")
+
+
+def _api_scope() -> UowScope:
+    return UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="api",
+        purpose="device_binding_management",
+        service_principal_id="api-1",
+        namespace_generation=4,
+        subject_id="subject-1",
+        actor_id="admin-1",
+        actor_role="elder",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+    )
+
+
+def test_quarantine_reprocessor_uses_actor_authorized_database_boundary() -> None:
+    factory = UowFactory(("work-1", "raw-1", "pending", 1))
+    service = PerceptorPullQuarantineReprocessor(
+        factory,  # type: ignore[arg-type]
+        now_factory=lambda: RECEIVED_AT,
+    )
+
+    result = service.requeue(
+        _api_scope(),
+        quarantine_id="quarantine-1",
+        expected_work_id="work-1",
+        request_id="reprocess-1",
+        actor_id="admin-1",
+        authorization_id="authorization-1",
+        reason="normalizer compatibility correction",
+    )
+
+    assert result.work_id == "work-1"
+    assert result.raw_ingress_record_id == "raw-1"
+    assert result.status == "pending"
+    assert result.attempt_count == 1
+    assert "sleepagent_requeue_perceptor_pull_quarantine" in factory.cursor.statement
+    assert factory.cursor.params == (
+        "quarantine-1",
+        "work-1",
+        "reprocess-1",
+        "admin-1",
+        "authorization-1",
+        "normalizer compatibility correction",
+        RECEIVED_AT,
+    )
+    assert factory.uow.committed is True
+
+
+def test_quarantine_reprocessor_rejects_worker_self_authority() -> None:
+    factory = FailingUowFactory()
+    worker_scope = UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="worker",
+        purpose="worker",
+        service_principal_id="worker-1",
+        namespace_generation=4,
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-1",
+    )
+
+    with pytest.raises(ValueError, match="live API authority"):
+        PerceptorPullQuarantineReprocessor(
+            factory,  # type: ignore[arg-type]
+            now_factory=lambda: RECEIVED_AT,
+        ).requeue(
+            worker_scope,
+            quarantine_id="quarantine-1",
+            expected_work_id="work-1",
+            request_id="reprocess-1",
+            actor_id="admin-1",
+            authorization_id="authorization-1",
+            reason="normalizer compatibility correction",
+        )
+
+
+def test_repeat_quarantine_evidence_is_generation_scoped() -> None:
+    first = pull_ingestion_module._quarantine_evidence_ids("work-1", 1)
+    second = pull_ingestion_module._quarantine_evidence_ids("work-1", 2)
+
+    assert first == (
+        pull_ingestion_module._stable_prefixed_id(
+            "receipt", "work-1", "quarantine"
+        ),
+        pull_ingestion_module._stable_prefixed_id("quarantine", "work-1"),
+    )
+    assert second == pull_ingestion_module._quarantine_evidence_ids("work-1", 2)
+    assert second != first
 
 
 def _settings() -> SleepBackendSettings:
@@ -1355,3 +1457,440 @@ def test_live_dispatcher_routes_existing_queue_by_durable_normalizer() -> None:
 
     assert push.calls == [(scope, lease)]
     assert pull.calls == [(scope, lease)]
+
+
+def test_explicit_history_backfill_chunks_are_deterministic_and_whole_second() -> None:
+    start = WINDOW_START.replace(microsecond=987654)
+    end = start + timedelta(hours=12, minutes=7, microseconds=100)
+
+    chunks = split_history_backfill_range(start_at=start, end_at=end)
+
+    assert len(chunks) == 13
+    assert chunks[0][0] == WINDOW_START
+    assert chunks[-1][1] == end.replace(microsecond=0)
+    assert chunks[-1][1] - chunks[-1][0] == timedelta(minutes=7)
+    assert all(
+        left.microsecond == right.microsecond == 0
+        and timedelta(0) < right - left <= timedelta(hours=1)
+        for left, right in chunks
+    )
+    assert chunks == split_history_backfill_range(start_at=start, end_at=end)
+
+
+def test_explicit_history_backfill_repeats_stable_chunks_without_planner() -> None:
+    records = (
+        {
+            "device_id": "provider-device-1",
+            "heart_rate": "1,2",
+            "breath_rate": "1,2",
+            "body_shake": "1,2",
+        },
+    )
+
+    class Client:
+        calls: list[tuple[datetime, datetime]] = []
+
+        def get_history_evidenced(
+            self,
+            *,
+            device_names: tuple[str, ...],
+            start_at: datetime,
+            end_at: datetime,
+        ) -> PlatformEvidencedRead[Any]:
+            assert device_names == ("SYNTHETIC-BOUND-DEVICE",)
+            self.calls.append((start_at, end_at))
+            return _read(HISTORY_ENDPOINT, records, raw=_envelope(list(records)))
+
+    class Ingress:
+        calls: list[PullRequestCoordinates] = []
+
+        def accept(
+            self,
+            _value: PlatformEvidencedRead[Any],
+            *,
+            binding: DeviceBinding,
+            coordinates: PullRequestCoordinates,
+        ) -> PerceptorPullIngressResult:
+            assert binding == _binding()
+            self.calls.append(coordinates)
+            duplicate = len(self.calls) > 2
+            return PerceptorPullIngressResult(
+                disposition="duplicate" if duplicate else "accepted",
+                raw_ingress_record_id="raw-1",
+                normalization_work_id="work-1",
+                subject_id=binding.subject_id,
+                device_binding_id=binding.device_binding_id,
+                duplicate=duplicate,
+                batch_identity="batch-1",
+                response_semantic_sha256="a" * 64,
+            )
+
+    client = Client()
+    ingress = Ingress()
+    runner = PerceptorPullBackfillRunner(
+        client,  # type: ignore[arg-type]
+        ingress,  # type: ignore[arg-type]
+        _binding(),
+    )
+    end = WINDOW_START + timedelta(hours=1, minutes=5)
+
+    first = runner.backfill_history(start_at=WINDOW_START, end_at=end)
+    second = runner.backfill_history(start_at=WINDOW_START, end_at=end)
+
+    assert len(first) == len(second) == 2
+    assert [item.status for item in first] == ["succeeded", "succeeded"]
+    assert [item.raw_series_sample_count for item in first] == [6, 6]
+    assert all(item.historical_backfill for item in ingress.calls)
+    assert ingress.calls[:2] == ingress.calls[2:]
+    assert client.calls[:2] == client.calls[2:]
+    assert all(item.ingress is not None and item.ingress.duplicate for item in second)
+
+
+def test_backfill_normalization_finalizes_without_advancing_any_checkpoint() -> None:
+    class SequenceCursor(Cursor):
+        def __init__(self) -> None:
+            super().__init__(("present",))
+            self.calls: list[str] = []
+
+        def execute(self, statement: str, params: tuple[Any, ...]) -> None:
+            super().execute(statement, params)
+            self.calls.append(statement)
+
+    factory = UowFactory()
+    factory.cursor = SequenceCursor()
+    factory.uow = Uow(factory.cursor)
+    scope = UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="worker",
+        purpose="normalization",
+        service_principal_id="worker-1",
+        namespace_generation=4,
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-instance-1",
+    )
+    lease = NormalizationLease(
+        work_id="work-1",
+        lease_generation=2,
+        fencing_token="f" * 32,
+        worker_instance="worker-instance-1",
+    )
+    binding = _binding()
+    backfill_stream = pull_ingestion_module._stream_key(
+        binding,
+        HISTORY_ENDPOINT,
+        namespace_generation=4,
+        historical_backfill=True,
+    )
+    loaded = {
+        "raw_ingress_record_id": "raw-1",
+        "binding_json": binding.model_dump(mode="json"),
+        "work_json": {
+            "endpoint": HISTORY_ENDPOINT,
+            "checkpoint_cursor_at": WINDOW_END.isoformat(),
+            "lateness_watermark_at": (
+                WINDOW_END - timedelta(seconds=3)
+            ).isoformat(),
+            "stream_key": backfill_stream,
+            "data_surface": "history",
+            "device_binding_id": "binding-1",
+            "binding_version": 2,
+            "overlap_seconds": 3,
+            "provider_account_id": "account-1",
+        },
+    }
+    processor = PerceptorPullNormalizationProcessor(
+        factory,  # type: ignore[arg-type]
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+    )
+
+    advanced = processor._advance_checkpoint_and_finalize(
+        scope,
+        lease,
+        loaded=loaded,
+        reconciliation_summary={
+            "canonical_observation_ids": ["observation-1"],
+            "no_data": False,
+        },
+        committed_at=RECEIVED_AT,
+    )
+
+    assert advanced is False
+    assert not any(
+        "INSERT INTO public.sleep_domain_pull_checkpoints" in statement
+        for statement in factory.cursor.calls
+    )
+    assert any(
+        "SET status = 'succeeded'" in statement
+        for statement in factory.cursor.calls
+    )
+
+
+def test_stale_history_checkpoint_is_classified_for_explicit_backfill() -> None:
+    class Diagnostic:
+        message_primary = "Perceptor history continuation exceeds one hour"
+
+    class PlannerError(RuntimeError):
+        diag = Diagnostic()
+
+    class FailingCursor(Cursor):
+        def execute(self, statement: str, params: tuple[Any, ...]) -> None:
+            raise PlannerError("redacted")
+
+    factory = UowFactory()
+    factory.cursor = FailingCursor(None)
+    factory.uow = Uow(factory.cursor)
+    ingress = DurablePerceptorPullIngress(
+        _settings(),
+        factory,  # type: ignore[arg-type]
+        client_id_sha256=CLIENT_ID_SHA256,
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+    )
+
+    with pytest.raises(PerceptorHistoryBackfillRequired):
+        ingress.plan_history_window(
+            binding=_binding(),
+            requested_start_at=WINDOW_START,
+            requested_end_at=WINDOW_END,
+        )
+
+
+def test_exact_date_sleep_report_recovery_retry_never_drifts() -> None:
+    report_date = date(2026, 9, 5)
+    read = _read(SLEEP_REPORT_ENDPOINT, _sleep_report_no_data())
+
+    class Client:
+        dates: list[date] = []
+
+        def get_sleep_report_evidenced(
+            self, *, device_name: str, home_id: str, report_date: date
+        ) -> PlatformEvidencedRead[Any]:
+            assert device_name == "SYNTHETIC-BOUND-DEVICE"
+            assert home_id == "7000000000000000001"
+            self.dates.append(report_date)
+            return read
+
+    class Ingress:
+        coordinates: list[PullRequestCoordinates] = []
+
+        def accept(
+            self,
+            _value: PlatformEvidencedRead[Any],
+            *,
+            binding: DeviceBinding,
+            coordinates: PullRequestCoordinates,
+        ) -> PerceptorPullIngressResult:
+            self.coordinates.append(coordinates)
+            return PerceptorPullIngressResult(
+                disposition="accepted",
+                raw_ingress_record_id="raw-report",
+                normalization_work_id="work-report",
+                subject_id=binding.subject_id,
+                device_binding_id=binding.device_binding_id,
+                duplicate=False,
+                batch_identity="batch-report",
+                response_semantic_sha256="b" * 64,
+            )
+
+    client = Client()
+    ingress = Ingress()
+    runner = PerceptorPullBackfillRunner(
+        client,  # type: ignore[arg-type]
+        ingress,  # type: ignore[arg-type]
+        _binding(),
+    )
+
+    runner.pull_sleep_report(report_date)
+    runner.pull_sleep_report(report_date)
+
+    assert client.dates == [report_date, report_date]
+    assert [item.report_date for item in ingress.coordinates] == [
+        report_date,
+        report_date,
+    ]
+
+
+def test_recovery_ingress_atomically_defers_new_normalization_work() -> None:
+    class RecordingCursor(Cursor):
+        def __init__(self) -> None:
+            super().__init__(
+                ("accepted", "raw-1", "work-1", "subject-1", "binding-1", False)
+            )
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def execute(self, statement: str, params: tuple[Any, ...]) -> None:
+            super().execute(statement, params)
+            self.calls.append((statement, params))
+
+    factory = UowFactory()
+    factory.cursor = RecordingCursor()
+    factory.uow = Uow(factory.cursor)
+    data = ({"device_id": "provider-device-1"},)
+    ingress = DurablePerceptorPullIngress(
+        _settings(),
+        factory,  # type: ignore[arg-type]
+        client_id_sha256=CLIENT_ID_SHA256,
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+    )
+
+    result = ingress.accept(
+        _read(HISTORY_ENDPOINT, data, raw=_envelope(list(data))),
+        binding=_binding(),
+        coordinates=PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=WINDOW_START,
+            window_end_at=WINDOW_END,
+            historical_backfill=True,
+        ),
+        normalization_delay_seconds=600,
+    )
+
+    assert result.normalization_not_before == RECEIVED_AT + timedelta(minutes=10)
+    assert factory.uow.committed is True
+    assert any(
+        "SET available_at = GREATEST" in statement
+        for statement, _params in factory.cursor.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected_source_report_calls"),
+    ((HISTORY_ENDPOINT, 0), (SLEEP_REPORT_ENDPOINT, 1)),
+)
+def test_large_pull_reconciliation_commits_in_bounded_transactions(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+    expected_source_report_calls: int,
+) -> None:
+    class ChunkCursor(Cursor):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def execute(self, statement: str, params: tuple[Any, ...]) -> None:
+            super().execute(statement, params)
+            self.calls.append((statement, params))
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            if "SELECT work_id" in self.statement:
+                return ("work-1",)
+            return None
+
+    class ChunkFactory:
+        def __init__(self) -> None:
+            self.uows: list[Uow] = []
+
+        def begin(self, _scope: object) -> Uow:
+            uow = Uow(ChunkCursor())
+            self.uows.append(uow)
+            return uow
+
+    class Reconciler:
+        def reconcile(
+            self,
+            _cursor: object,
+            _scope: object,
+            *,
+            candidate: int,
+            **_kwargs: object,
+        ) -> PerceptorReconciliationResult:
+            return PerceptorReconciliationResult(
+                canonical_observation_id=f"canonical-{candidate:02d}",
+                canonical_created=True,
+                acquisition_created=True,
+                push_pull_overlap=False,
+                conflict_created_count=0,
+                duplicate=False,
+            )
+
+    projected: list[tuple[str, ...]] = []
+
+    def record_projection(
+        _connection: object,
+        _scope: object,
+        observation_ids: tuple[str, ...],
+        **_kwargs: object,
+    ) -> tuple[object, ...]:
+        projected.append(observation_ids)
+        return ()
+
+    monkeypatch.setattr(
+        pull_ingestion_module,
+        "project_authoritative_canonical_observations",
+        record_projection,
+    )
+    monkeypatch.setattr(
+        pull_ingestion_module,
+        "semantic_surface_for_pull",
+        lambda selected_endpoint, _observation: selected_endpoint,
+    )
+    factory = ChunkFactory()
+    processor = PerceptorPullNormalizationProcessor(
+        factory,  # type: ignore[arg-type]
+        cipher=RawPayloadCipher(b"k" * 32, key_id="test-key"),
+    )
+    processor.reconciler = Reconciler()  # type: ignore[assignment]
+    source_report_calls: list[str] = []
+
+    def record_source_report(
+        _cursor: object,
+        _scope: object,
+        **_kwargs: object,
+    ) -> None:
+        source_report_calls.append(endpoint)
+
+    processor._insert_source_report = record_source_report  # type: ignore[method-assign]
+    scope = UowScope(
+        namespace_id="live:perceptor-pull-test",
+        data_mode="live",
+        process_role="worker",
+        purpose="normalization",
+        service_principal_id="worker-1",
+        namespace_generation=4,
+        subject_id="subject-1",
+        authorization_epoch=1,
+        privacy_epoch=1,
+        retrieval_policy_epoch=1,
+        worker_instance="worker-instance-1",
+    )
+    lease = NormalizationLease(
+        work_id="work-1",
+        lease_generation=2,
+        fencing_token="f" * 32,
+        worker_instance="worker-instance-1",
+    )
+    candidates = tuple(range(17))
+
+    summary = processor._commit_reconciliation(
+        scope,
+        lease,
+        loaded={"raw_ingress_record_id": "raw-1", "work_json": {}},
+        normalized={
+            "endpoint": endpoint,
+            "candidates": candidates,
+            "observations": tuple(object() for _ in candidates),
+            "canonical_semantics": tuple(None for _ in candidates),
+            "no_data": False,
+            "history_window_classification": None,
+        },
+        committed_at=RECEIVED_AT,
+    )
+
+    assert [len(chunk) for chunk in projected] == [8, 8, 1]
+    assert len(factory.uows) == 4
+    assert all(uow.committed for uow in factory.uows)
+    progress = [
+        json.loads(params[0])["bounded_reconciliation"]
+        for uow in factory.uows[:3]
+        for statement, params in uow._cursor.calls  # type: ignore[attr-defined]
+        if "SET work_json = work_json" in statement
+    ]
+    assert [item["next_index"] for item in progress] == [8, 16, 17]
+    assert source_report_calls == [endpoint] * expected_source_report_calls
+    assert summary["canonical_created_count"] == 17
+    assert summary["canonical_observation_ids"] == [
+        f"canonical-{index:02d}" for index in candidates
+    ]

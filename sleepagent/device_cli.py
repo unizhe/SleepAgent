@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import replace
-from datetime import datetime
+from dataclasses import asdict, is_dataclass, replace
+from datetime import date, datetime
 from typing import Any
 
 from sleepagent.application.acquisition import (
@@ -14,8 +15,20 @@ from sleepagent.application.acquisition import (
     AcquisitionScheduleService,
 )
 from sleepagent.application.device_bindings import DeviceBindingService
-from sleepagent.config import ProcessRole, SleepBackendSettings
+from sleepagent.config import (
+    BackendKeyProvider,
+    DataMode,
+    ProcessRole,
+    ProviderMode,
+    SleepBackendSettings,
+)
 from sleepagent.domain.contracts import ProviderDeviceIdentity
+from sleepagent.integrations.perceptor.client import PerceptorPlatformClient
+from sleepagent.integrations.perceptor.pull_ingestion import (
+    DurablePerceptorPullIngress,
+    PerceptorPullBackfillRunner,
+    PerceptorPullQuarantineReprocessor,
+)
 from sleepagent.persistence.uow import (
     PoolConfiguration,
     PsycopgPoolProvider,
@@ -100,29 +113,52 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--expected-cas", type=int, required=True)
         if name == "schedule-resume":
             command.add_argument("--next-run-at")
+    history_backfill = commands.add_parser("history-backfill")
+    history_backfill.add_argument("device_binding_id")
+    history_backfill.add_argument("--start-at", required=True)
+    history_backfill.add_argument("--end-at", required=True)
+
+    sleep_report = commands.add_parser("sleep-report-recover")
+    sleep_report.add_argument("device_binding_id")
+    sleep_report.add_argument("--report-date", required=True)
+    quarantine_reprocess = commands.add_parser("pull-quarantine-reprocess")
+    quarantine_reprocess.add_argument("quarantine_id")
+    quarantine_reprocess.add_argument("--expected-work-id", required=True)
+    quarantine_reprocess.add_argument("--request-id", required=True)
+    quarantine_reprocess.add_argument("--reason", required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     settings = SleepBackendSettings.from_environment()
-    if settings.process_role is not ProcessRole.API:
-        raise ValueError("DeviceBinding CLI requires an API capability profile")
+    recovery_command = arguments.command in {
+        "history-backfill",
+        "sleep-report-recover",
+    }
+    required_role = ProcessRole.WORKER if recovery_command else ProcessRole.API
+    if settings.process_role is not required_role:
+        raise ValueError(
+            "Perceptor recovery requires a Worker capability profile"
+            if recovery_command
+            else "DeviceBinding CLI requires an API capability profile"
+        )
     scope = UowScope(
         namespace_id=arguments.namespace_id,
         data_mode=settings.data_mode.value,  # type: ignore[arg-type]
-        process_role="api",
-        purpose="device_binding_management",
+        process_role="worker" if recovery_command else "api",
+        purpose="worker" if recovery_command else "device_binding_management",
         service_principal_id=settings.service_principal_id,
         namespace_generation=arguments.namespace_generation,
         subject_id=arguments.subject_id,
-        actor_id=arguments.actor_id,
-        actor_role=arguments.actor_role,
+        actor_id=None if recovery_command else arguments.actor_id,
+        actor_role=None if recovery_command else arguments.actor_role,
         run_id=arguments.run_id,
         arm_id=arguments.arm_id,
         authorization_epoch=arguments.authorization_epoch,
         privacy_epoch=arguments.privacy_epoch,
         retrieval_policy_epoch=arguments.retrieval_policy_epoch,
+        worker_instance="perceptor-recovery-cli" if recovery_command else None,
     )
     pool = PsycopgPoolProvider.from_dsn(
         settings.database_dsn.get_secret_value(),
@@ -146,6 +182,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             scope=scope,
             bindings=DeviceBindingService(uow_factory),
             schedules=AcquisitionScheduleService(uow_factory),
+            settings=settings,
+            uow_factory=uow_factory,
         )
     finally:
         pool.close()
@@ -159,6 +197,8 @@ def _execute(
     scope: UowScope,
     bindings: DeviceBindingService,
     schedules: AcquisitionScheduleService,
+    settings: SleepBackendSettings | None = None,
+    uow_factory: UnitOfWorkFactory[Any] | None = None,
 ) -> Any:
     command = arguments.command
     if command == "discover":
@@ -248,7 +288,95 @@ def _execute(
                 else _instant(arguments.next_run_at)
             ),
         )
+    if command == "pull-quarantine-reprocess":
+        if uow_factory is None:
+            raise ValueError("Pull quarantine reprocessing requires persistence")
+        return PerceptorPullQuarantineReprocessor(uow_factory).requeue(
+            scope,
+            quarantine_id=arguments.quarantine_id,
+            expected_work_id=arguments.expected_work_id,
+            request_id=arguments.request_id,
+            actor_id=arguments.actor_id,
+            authorization_id=arguments.authorization_id,
+            reason=arguments.reason,
+        )
+    if command in {"history-backfill", "sleep-report-recover"}:
+        if settings is None or uow_factory is None:
+            raise ValueError("Perceptor recovery requires configured persistence")
+        binding_view = bindings.show(
+            scope, device_binding_id=arguments.device_binding_id
+        )
+        binding = binding_view.binding
+        _validate_recovery_authority(settings, scope, binding)
+        client_id = _perceptor_secret(
+            settings, settings.perceptor_client_id_ref, "Perceptor client ID"
+        )
+        client_secret = _perceptor_secret(
+            settings,
+            settings.perceptor_client_secret_ref,
+            "Perceptor historical recovery",
+        )
+        ingress = DurablePerceptorPullIngress(
+            settings,
+            uow_factory,
+            client_id_sha256=hashlib.sha256(client_id.encode("utf-8")).hexdigest(),
+            operation_scope=scope,
+        )
+        with PerceptorPlatformClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            base_url=settings.perceptor_base_url,
+        ) as client:
+            runner = PerceptorPullBackfillRunner(client, ingress, binding)
+            if command == "history-backfill":
+                return runner.backfill_history(
+                    start_at=_instant(arguments.start_at),
+                    end_at=_instant(arguments.end_at),
+                    normalization_delay_seconds=600,
+                )
+            report_date = date.fromisoformat(arguments.report_date)
+            return runner.pull_sleep_report(
+                report_date,
+                normalization_delay_seconds=600,
+            )
     raise ValueError("unknown device command")
+
+
+def _validate_recovery_authority(
+    settings: SleepBackendSettings,
+    scope: UowScope,
+    binding: Any,
+) -> None:
+    if settings.data_mode is not DataMode.LIVE:
+        raise ValueError("Perceptor recovery requires live data mode")
+    if settings.provider_mode is not ProviderMode.LIVE:
+        raise ValueError("Perceptor recovery requires live provider mode")
+    if scope.namespace_id != settings.perceptor_namespace_id:
+        raise ValueError("recovery namespace does not match Perceptor authority")
+    if scope.namespace_generation != settings.perceptor_namespace_generation:
+        raise ValueError("recovery namespace generation does not match authority")
+    if scope.subject_id != binding.subject_id:
+        raise ValueError("recovery subject does not match DeviceBinding")
+    if binding.data_mode.value != "live" or binding.status.value != "active":
+        raise ValueError("recovery requires an active live DeviceBinding")
+    if binding.provider_id != "perceptor":
+        raise ValueError("recovery requires a Perceptor DeviceBinding")
+    if binding.provider_account_id != settings.perceptor_provider_account_id:
+        raise ValueError("recovery provider account does not match authority")
+
+
+def _perceptor_secret(
+    settings: SleepBackendSettings,
+    reference: str | None,
+    purpose: str,
+) -> str:
+    if reference is None:
+        raise ValueError(f"{purpose} is not configured")
+    return BackendKeyProvider(settings.deployment_mode).secret(
+        reference,
+        purpose=purpose,
+        minimum_bytes=1,
+    ).decode("utf-8", errors="strict")
 
 
 def _provider_device(arguments: argparse.Namespace) -> ProviderDeviceIdentity:
@@ -267,8 +395,16 @@ def _instant(value: str) -> datetime:
 
 
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
     if isinstance(value, tuple):
         return [_jsonable(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if is_dataclass(value):
+        return _jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if hasattr(value, "binding"):

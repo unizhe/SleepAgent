@@ -1470,6 +1470,31 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert closing_result.canonical_created_count == 4
+        final_scope = UowScope(
+            namespace_id=NAMESPACE,
+            namespace_generation=1,
+            data_mode="live",
+            process_role="worker",
+            purpose="worker",
+            service_principal_id=_dsn(
+                "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
+            ),
+            subject_id=SUBJECT,
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+            worker_instance="p4d2-b2-live-finalizer",
+        )
+        confirmed_wake = NightFinalizationService(
+            worker_uow
+        ).close_overdue_for_binding(
+            final_scope,
+            device_binding_id=BINDING_ID,
+            evaluated_at=NOW + timedelta(minutes=37),
+        )
+        assert confirmed_wake is not None
+        assert confirmed_wake.revision_cause == "confirmed_observed_wake"
+        assert confirmed_wake.episode.wake_at == NOW + timedelta(minutes=7)
         with psycopg.connect(admin_dsn) as connection:
             live_chain = connection.execute(
                 "SELECT episode.state, episode.episode_local_date, "
@@ -1494,28 +1519,13 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             "Asia/Shanghai",
         )
         assert live_chain[3] == live_chain[4]
-        assert live_chain[3] == live_chain[5]
+        assert live_chain[3] == live_chain[5] + 1
         assert int(live_chain[6]) > 0
 
-        final_scope = UowScope(
-            namespace_id=NAMESPACE,
-            namespace_generation=1,
-            data_mode="live",
-            process_role="worker",
-            purpose="worker",
-            service_principal_id=_dsn(
-                "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
-            ),
-            subject_id=SUBJECT,
-            authorization_epoch=1,
-            privacy_epoch=1,
-            retrieval_policy_epoch=1,
-            worker_instance="p4d2-b2-live-finalizer",
-        )
         finalized = NightFinalizationService(worker_uow).finalize(
             final_scope,
             night_episode_id=episode_id,
-            evaluated_at=NOW + timedelta(minutes=8),
+            evaluated_at=NOW + timedelta(minutes=38),
         )
         assert finalized.state is NightFinalizationState.HARD_FINALIZED
         assert finalized.source_report_version_id is not None
@@ -2821,6 +2831,112 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
         )
         assert generation_two_no_data_result.no_data is True
         assert generation_two_no_data_result.checkpoint_advanced is True
+
+        with psycopg.connect(admin_dsn) as connection:
+            rolling_checkpoint_before_backfill = connection.execute(
+                "SELECT stream_key, cursor_at, lateness_watermark_at "
+                "FROM sleep_domain_pull_checkpoints "
+                "WHERE namespace_id = %s AND namespace_generation = 2 "
+                "AND data_surface = 'history'",
+                (NAMESPACE,),
+            ).fetchone()
+        assert rolling_checkpoint_before_backfill is not None
+        isolated_coordinates = PullRequestCoordinates(
+            endpoint=HISTORY_ENDPOINT,
+            window_start_at=NOW + timedelta(minutes=40),
+            window_end_at=NOW + timedelta(minutes=41),
+            historical_backfill=True,
+        )
+        deferred_requested_at = datetime.now(tz=UTC)
+        deferred_received_at = deferred_requested_at + timedelta(seconds=1)
+        isolated_read = _read(
+            HISTORY_ENDPOINT,
+            (),
+            requested_at=deferred_requested_at,
+            received_at=deferred_received_at,
+            envelope_nonce="isolated-backfill-no-data",
+        )
+        generation_two_worker_settings = _worker_settings().model_copy(
+            update={
+                "perceptor_provider_account_id": ACCOUNT,
+                "perceptor_namespace_id": NAMESPACE,
+                "perceptor_namespace_generation": 2,
+                "perceptor_authorization_epoch": 1,
+            }
+        )
+        recovery_scope = UowScope(
+            namespace_id=NAMESPACE,
+            namespace_generation=2,
+            data_mode="live",
+            process_role="worker",
+            purpose="worker",
+            service_principal_id=_dsn(
+                "SLEEPAGENT_TEST_POSTGRES_WORKER_PRINCIPAL"
+            ),
+            subject_id=SUBJECT,
+            authorization_epoch=1,
+            privacy_epoch=1,
+            retrieval_policy_epoch=1,
+            worker_instance="p4d2-b2-recovery-cli",
+        )
+        recovery_ingress = DurablePerceptorPullIngress(
+            generation_two_worker_settings,
+            worker_uow,
+            client_id_sha256=hashlib.sha256(CLIENT_ID.encode()).hexdigest(),
+            cipher=cipher,
+            operation_scope=recovery_scope,
+        )
+        isolated_ingress = recovery_ingress.accept(
+            isolated_read,
+            binding=binding,
+            coordinates=isolated_coordinates,
+            normalization_delay_seconds=1,
+        )
+        assert isolated_ingress.disposition == "accepted"
+        assert isolated_ingress.normalization_not_before == (
+            deferred_received_at + timedelta(seconds=1)
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            deferred_work = connection.execute(
+                "SELECT status, available_at FROM "
+                "sleep_domain_normalization_work WHERE work_id = %s",
+                (isolated_ingress.normalization_work_id,),
+            ).fetchone()
+        assert deferred_work == (
+            "pending",
+            deferred_received_at + timedelta(seconds=1),
+        )
+        delay_remaining = (
+            isolated_ingress.normalization_not_before - datetime.now(tz=UTC)
+        ).total_seconds()
+        time.sleep(max(0.0, delay_remaining) + 0.1)
+        isolated_result = _process_next(
+            store,
+            worker_uow,
+            cipher,
+            worker="p4d2-b2-isolated-backfill-worker",
+        )
+        assert isolated_result.no_data is True
+        assert isolated_result.checkpoint_advanced is False
+        repeated_isolated = recovery_ingress.accept(
+            isolated_read,
+            binding=binding,
+            coordinates=isolated_coordinates,
+            normalization_delay_seconds=1,
+        )
+        assert repeated_isolated.duplicate is True
+        assert repeated_isolated.normalization_not_before is None
+        with psycopg.connect(admin_dsn) as connection:
+            history_checkpoints_after_backfill = connection.execute(
+                "SELECT stream_key, cursor_at, lateness_watermark_at "
+                "FROM sleep_domain_pull_checkpoints "
+                "WHERE namespace_id = %s AND namespace_generation = 2 "
+                "AND data_surface = 'history'",
+                (NAMESPACE,),
+            ).fetchall()
+        assert history_checkpoints_after_backfill == [
+            rolling_checkpoint_before_backfill
+        ]
 
         with psycopg.connect(admin_dsn) as connection:
             with connection.cursor() as cursor:

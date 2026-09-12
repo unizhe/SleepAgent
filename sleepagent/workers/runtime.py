@@ -61,11 +61,13 @@ from sleepagent.workers.kernel import (
 
 UTC = timezone.utc
 DEFAULT_QUEUE_ORDER = (
+    "ingestion_realtime",
     "perceptor.history_overlap_pull",
     "perceptor.sleep_report_pull",
     "night.finalization_scan",
     "care.outcome.evaluate.v1",
     "ingestion",
+    "ingestion_repair",
     "fast_path",
     "product_agent",
     "sleep_command",
@@ -379,6 +381,13 @@ class PostgresDurableWorkStore:
         lease_seconds: int,
     ) -> tuple[str, tuple[Any, ...]]:
         if target.kind == WorkKind.NORMALIZATION:
+            if target.selector is not None:
+                return (
+                    "SELECT * FROM "
+                    "public.sleepagent_claim_normalization_work_by_normalizer("
+                    "%s, %s, %s)",
+                    (target.selector, worker_instance, lease_seconds),
+                )
             return (
                 "SELECT * FROM public.sleepagent_claim_normalization_work(%s, %s)",
                 (worker_instance, lease_seconds),
@@ -1986,6 +1995,8 @@ def _record_domain_signal(
         category = "product"
     elif claim.queue == "fast_path":
         category = "safety"
+    elif claim.queue in {"ingestion", "ingestion_realtime", "ingestion_repair"}:
+        category = "normalization"
     elif claim.queue in {"retention", "demo_reset"}:
         category = "retention"
     elif claim.queue == "reconciliation":
@@ -2018,6 +2029,10 @@ def _queue_target(queue: str) -> _QueueTarget:
         raise ValueError("queue is required")
     if value == "ingestion":
         return _QueueTarget(WorkKind.NORMALIZATION)
+    if value == "ingestion_realtime":
+        return _QueueTarget(WorkKind.NORMALIZATION, "perceptor_push")
+    if value == "ingestion_repair":
+        return _QueueTarget(WorkKind.NORMALIZATION, "perceptor_pull")
     if value == "replay_journey":
         return _QueueTarget(WorkKind.JOURNEY)
     if value == "retention":
@@ -2193,7 +2208,14 @@ def _required_function_signatures(queues: Sequence[str]) -> tuple[str, ...]:
     }
     required: list[str] = []
     for queue in queues:
-        for signature in groups[_queue_target(queue).kind]:
+        target = _queue_target(queue)
+        signatures = groups[target.kind]
+        if target.kind == WorkKind.NORMALIZATION and target.selector is not None:
+            signatures = (
+                "public.sleepagent_claim_normalization_work_by_normalizer(text,text,integer)",
+                *signatures[1:],
+            )
+        for signature in signatures:
             if signature not in required:
                 required.append(signature)
         if queue in {"sleep_command", "product_interaction"}:

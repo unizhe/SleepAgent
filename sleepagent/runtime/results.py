@@ -29,7 +29,7 @@ from sleepagent.runtime.memory import MemoryReadReceipt
 from sleepagent.runtime.registry import EPISODE_DEFINITIONS
 
 
-PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v48"
+PRODUCT_EPISODE_RUNNER_VERSION = "sleepagent-product-runner.v49"
 PRODUCT_EPISODE_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v41"
 LEGACY_UNBOUND_WAITING_RESULT_SCHEMA_VERSION = "ProductEpisodeRunResult.v38"
 

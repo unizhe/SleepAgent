@@ -642,7 +642,12 @@ class ProductRevisionFacts(SleepDomainContract):
         }
 
     def deterministic_night_summary(self) -> dict[str, Any]:
-        """Reduce canonical samples to bounded facts before Agent reasoning."""
+        """Reduce canonical samples to Episode-bounded facts before reasoning.
+
+        The Episode bounds are the authoritative observation scope.  Sleep-stage
+        metrics use only the intersection of canonical vendor intervals with that
+        scope; localization is deliberately deferred to presentation code.
+        """
 
         zone = ZoneInfo(self.timezone_name)
         samples: dict[str, list[float]] = {
@@ -653,10 +658,25 @@ class ProductRevisionFacts(SleepDomainContract):
         movement_semantics: list[dict[str, Any]] = []
         unclassified_movement_count = 0
         v2_semantics_present = False
+        _, effective_stage_intervals, _, _ = _bounded_sleep_stage_intervals(
+            self.canonical_observations,
+            episode_start=self.episode_bed_at,
+            episode_end=self.episode_wake_at,
+        )
         stage_minutes: dict[str, float] = {}
+        for start, end, stage in effective_stage_intervals:
+            stage_minutes[stage] = stage_minutes.get(stage, 0.0) + (
+                end - start
+            ).total_seconds() / 60
         bed_events: list[tuple[str, datetime]] = []
-        window_start: datetime | None = None
-        window_end: datetime | None = None
+        window_start = min(
+            (item[0] for item in effective_stage_intervals),
+            default=None,
+        )
+        window_end = max(
+            (item[1] for item in effective_stage_intervals),
+            default=None,
+        )
         for observation in self.canonical_observations:
             payload = observation.get("payload")
             if not isinstance(payload, dict):
@@ -685,17 +705,6 @@ class ProductRevisionFacts(SleepDomainContract):
                     unclassified_movement_count += 1
             elif observation_type in samples and isinstance(value, (int, float)):
                 samples[observation_type].append(float(value))
-            if observation_type == "sleep_stage_interval":
-                start = _aware_wire_datetime(payload.get("start_at"))
-                end = _aware_wire_datetime(payload.get("end_at"))
-                stage = payload.get("stage")
-                if start is not None and end is not None and end > start:
-                    window_start = start if window_start is None else min(window_start, start)
-                    window_end = end if window_end is None else max(window_end, end)
-                    if isinstance(stage, str) and stage:
-                        stage_minutes[stage] = stage_minutes.get(stage, 0.0) + (
-                            end - start
-                        ).total_seconds() / 60
             if observation_type == "bed_exit":
                 event_at = _aware_wire_datetime(
                     observation.get("event_occurred_at")
@@ -741,7 +750,28 @@ class ProductRevisionFacts(SleepDomainContract):
             *({} for _ in range(unclassified_movement_count)),
         ]
         summary = {
-            "schema_version": "product_deterministic_night_summary.v1",
+            "schema_version": "product_deterministic_night_summary.v2",
+            "observation_window_start": (
+                None
+                if self.episode_bed_at is None
+                else self.episode_bed_at.isoformat()
+            ),
+            "observation_window_end": (
+                None
+                if self.episode_wake_at is None
+                else self.episode_wake_at.isoformat()
+            ),
+            "observation_window_minutes": (
+                None
+                if self.episode_bed_at is None or self.episode_wake_at is None
+                else round(
+                    (
+                        self.episode_wake_at - self.episode_bed_at
+                    ).total_seconds()
+                    / 60,
+                    1,
+                )
+            ),
             "sleep_window_start": (
                 None if window_start is None else window_start.isoformat()
             ),
@@ -778,10 +808,9 @@ class ProductRevisionFacts(SleepDomainContract):
     def elder_presentation_facts(self) -> ProductElderPresentationFacts:
         """Reduce canonical facts for Elder display without changing analysis input.
 
-        Valid stage intervals are clipped only in this presentation view.  Raw
-        canonical timestamps and ``deterministic_night_summary`` remain unchanged.
-        Overlapping stage classifications are detected and marked ambiguous rather
-        than being silently double-counted in Elder prose.
+        Stage intervals use the same Episode intersection as the deterministic
+        summary. Overlapping classifications are detected and marked ambiguous
+        rather than being silently double-counted in Elder prose.
         """
 
         zone = ZoneInfo(self.timezone_name)
@@ -789,29 +818,23 @@ class ProductRevisionFacts(SleepDomainContract):
         episode_end = self.episode_wake_at
         has_episode_bounds = episode_start is not None and episode_end is not None
 
-        raw_intervals: list[tuple[datetime, datetime, str]] = []
-        invalid_interval_count = 0
+        (
+            raw_intervals,
+            presented,
+            invalid_interval_count,
+            out_of_episode_count,
+        ) = _bounded_sleep_stage_intervals(
+            self.canonical_observations,
+            episode_start=episode_start,
+            episode_end=episode_end,
+        )
         bed_exits: list[datetime] = []
         for observation in self.canonical_observations:
             payload = observation.get("payload")
             if not isinstance(payload, dict):
                 continue
             observation_type = str(payload.get("observation_type") or "")
-            if observation_type == "sleep_stage_interval":
-                start = _aware_wire_datetime(payload.get("start_at"))
-                end = _aware_wire_datetime(payload.get("end_at"))
-                stage = payload.get("stage")
-                if (
-                    start is None
-                    or end is None
-                    or end <= start
-                    or not isinstance(stage, str)
-                    or not stage
-                ):
-                    invalid_interval_count += 1
-                    continue
-                raw_intervals.append((start, end, stage))
-            elif (
+            if (
                 observation_type == "bed_exit"
                 and payload.get("kind") == "bed_exit"
             ):
@@ -829,20 +852,6 @@ class ProductRevisionFacts(SleepDomainContract):
 
         vendor_start = min((item[0] for item in raw_intervals), default=None)
         vendor_end = max((item[1] for item in raw_intervals), default=None)
-        presented: list[tuple[datetime, datetime, str]] = []
-        out_of_episode_count = 0
-        for start, end, stage in raw_intervals:
-            presented_start = start
-            presented_end = end
-            if has_episode_bounds:
-                assert episode_start is not None and episode_end is not None
-                if start < episode_start or end > episode_end:
-                    out_of_episode_count += 1
-                presented_start = max(start, episode_start)
-                presented_end = min(end, episode_end)
-                if presented_end <= presented_start:
-                    continue
-            presented.append((presented_start, presented_end, stage))
 
         ordered = sorted(presented, key=lambda item: (item[0], item[1], item[2]))
         overlap_detected = False
@@ -1410,6 +1419,54 @@ def _semantic_datetime(value: object) -> datetime | None:
             else None
         )
     return _aware_wire_datetime(value)
+
+
+def _bounded_sleep_stage_intervals(
+    observations: tuple[dict[str, Any], ...],
+    *,
+    episode_start: datetime | None,
+    episode_end: datetime | None,
+) -> tuple[
+    list[tuple[datetime, datetime, str]],
+    list[tuple[datetime, datetime, str]],
+    int,
+    int,
+]:
+    """Return raw and authoritative-scope-intersected stage intervals."""
+
+    raw: list[tuple[datetime, datetime, str]] = []
+    effective: list[tuple[datetime, datetime, str]] = []
+    invalid_count = 0
+    out_of_episode_count = 0
+    for observation in observations:
+        payload = observation.get("payload")
+        if not isinstance(payload, dict) or payload.get(
+            "observation_type"
+        ) != "sleep_stage_interval":
+            continue
+        start = _aware_wire_datetime(payload.get("start_at"))
+        end = _aware_wire_datetime(payload.get("end_at"))
+        stage = payload.get("stage")
+        if (
+            start is None
+            or end is None
+            or end <= start
+            or not isinstance(stage, str)
+            or not stage
+        ):
+            invalid_count += 1
+            continue
+        raw.append((start, end, stage))
+        bounded_start = (
+            start if episode_start is None else max(start, episode_start)
+        )
+        bounded_end = end if episode_end is None else min(end, episode_end)
+        if bounded_start != start or bounded_end != end:
+            out_of_episode_count += 1
+        if bounded_end <= bounded_start:
+            continue
+        effective.append((bounded_start, bounded_end, stage))
+    return raw, effective, invalid_count, out_of_episode_count
 
 
 def _require_aware_datetime(value: datetime, name: str) -> None:

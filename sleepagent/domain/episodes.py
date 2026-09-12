@@ -60,6 +60,8 @@ class NightEpisodeV2(SleepDomainContract):
     boundary_policy_version: str
     collection_start_at: datetime
     bed_at: datetime | None = None
+    candidate_wake_at: datetime | None = None
+    latest_bed_presence_at: datetime | None = None
     wake_at: datetime | None = None
     deterministic_close_deadline_at: datetime
     bed_utc_offset_seconds: int | None = Field(default=None, ge=-64_800, le=64_800)
@@ -110,6 +112,25 @@ class NightEpisodeV2(SleepDomainContract):
             raise ValueError("episode_anchor_key does not match opening identity")
         if self.deterministic_close_deadline_at <= self.collection_start_at:
             raise ValueError("close deadline must follow collection start")
+        if (
+            self.latest_bed_presence_at is not None
+            and self.latest_bed_presence_at < self.collection_start_at
+        ):
+            raise ValueError("latest bed presence cannot precede collection start")
+        if self.candidate_wake_at is not None:
+            if self.candidate_wake_at <= self.collection_start_at:
+                raise ValueError("candidate wake must follow collection start")
+            if (
+                self.latest_bed_presence_at is None
+                or self.latest_bed_presence_at < self.candidate_wake_at
+            ):
+                raise ValueError("candidate wake requires current out-of-bed evidence")
+            if self.wake_at is not None:
+                raise ValueError("confirmed wake cannot retain a wake candidate")
+            if self.assignment_basis != EpisodeAssignmentBasis.PROVISIONAL:
+                raise ValueError(
+                    "only a provisional Episode can retain a wake candidate"
+                )
         if self.updated_at < self.created_at:
             raise ValueError("updated_at cannot precede created_at")
         for instant, local_date, offset, fold, label in (
@@ -279,6 +300,7 @@ def open_episode_v2(
         boundary_policy_version=boundary_policy_version,
         collection_start_at=collection_start_at,
         bed_at=bed_at,
+        latest_bed_presence_at=bed_at,
         bed_local_date=bed_values[0],
         bed_utc_offset_seconds=bed_values[1],
         bed_fold=bed_values[2],
@@ -323,6 +345,7 @@ def finalize_episode_date(
         {
             **episode.model_dump(mode="python"),
             "wake_at": wake_at,
+            "candidate_wake_at": None,
             "wake_local_date": wake_values[0],
             "wake_utc_offset_seconds": wake_values[1],
             "wake_fold": wake_values[2],

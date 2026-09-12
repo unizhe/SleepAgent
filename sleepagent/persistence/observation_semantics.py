@@ -82,7 +82,7 @@ def persist_observation_semantics_v2(
           %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
           %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s
         )
-        ON CONFLICT (observation_id, namespace_id, data_mode) DO NOTHING
+        ON CONFLICT DO NOTHING
         """,
         (
             observation_id,
@@ -111,6 +111,28 @@ def persist_observation_semantics_v2(
         (observation_id, scope.namespace_id, scope.data_mode, subject_id),
     )
     row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            """
+            SELECT schema_version, observation_type, metric_id,
+                   semantic_payload_json, canonical_unit, occurred_at,
+                   aggregation_start_at, aggregation_end_at, source_kind,
+                   provenance_json, vendor_semantic_code, semantics_version,
+                   ontology_version, normalizer_version, semantic_identity,
+                   transport_receipt_identity, trusted_for_analytics,
+                   upcast_status, classification_evidence
+            FROM public.sleep_domain_observation_semantics_v2
+            WHERE namespace_id = %s AND data_mode = %s
+              AND semantic_identity = %s AND subject_id = %s
+            """,
+            (
+                scope.namespace_id,
+                scope.data_mode,
+                record.semantic_identity,
+                subject_id,
+            ),
+        )
+        row = cursor.fetchone()
     if row is None:
         raise ObservationSemanticsPersistenceError(
             "observation semantic identity or content collision"

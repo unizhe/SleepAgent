@@ -1174,6 +1174,7 @@ class EpisodeBoundaryPolicy(SleepDomainContract):
     rollover_local_minute: int = Field(default=720, ge=0, le=1439)
     report_deadline_local_minute: int = Field(default=600, ge=0, le=1439)
     maximum_episode_seconds: int = Field(default=72_000, ge=3600)
+    wake_confirmation_seconds: int = Field(default=1_800, ge=1, le=21_600)
     allowed_lateness_seconds: int = Field(default=21_600, ge=0)
     allow_received_at_fallback: bool = False
 

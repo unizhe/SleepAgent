@@ -40,6 +40,7 @@ def test_production_does_not_import_retired_subsystems() -> None:
 def test_perceptor_imports_stay_in_the_narrow_ingress_boundary() -> None:
     allowed_importers = {
         Path("sleepagent/app.py"),
+        Path("sleepagent/device_cli.py"),
         Path("sleepagent/workers/ingestion.py"),
         Path("sleepagent/integrations/perceptor/ingestion.py"),
         Path("sleepagent/integrations/perceptor/pull_ingestion.py"),

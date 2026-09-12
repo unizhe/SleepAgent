@@ -33,6 +33,7 @@ from sleepagent.persistence.uow import UowScope
 from sleepagent.process import DatabaseAttestation, SleepBackendRuntime
 from sleepagent.workers.ingestion import NormalizationWorkHandlerAdapter
 from sleepagent.workers.runtime import (
+    DEFAULT_QUEUE_ORDER,
     DurableWorkerRuntime,
     InvocationDispatcher,
     InvocationKind,
@@ -48,11 +49,47 @@ from sleepagent.workers.runtime import (
     WorkResult,
     _Heartbeat,
     _final_status,
+    _queue_target,
+    _required_function_signatures,
 )
 
 
 pytestmark = pytest.mark.unit
 UTC = timezone.utc
+
+
+def test_realtime_normalization_queue_has_a_filtered_claim_contract() -> None:
+    target = _queue_target("ingestion_realtime")
+
+    assert target.kind is WorkKind.NORMALIZATION
+    assert target.selector == "perceptor_push"
+    assert DEFAULT_QUEUE_ORDER.index("ingestion_realtime") < (
+        DEFAULT_QUEUE_ORDER.index("perceptor.history_overlap_pull")
+    )
+    signatures = _required_function_signatures(("ingestion_realtime",))
+    assert signatures[0] == (
+        "public.sleepagent_claim_normalization_work_by_normalizer"
+        "(text,text,integer)"
+    )
+    assert "public.sleepagent_claim_normalization_work(text,integer)" not in (
+        signatures
+    )
+
+
+def test_realtime_normalization_queue_rejects_pull_payload() -> None:
+    store = Store()
+    claim = _normalization_claim(normalizer="perceptor_pull").model_copy(
+        update={"queue": "ingestion_realtime"}
+    )
+    context = WorkContext(claim, store, threading.Event())
+    adapter = NormalizationWorkHandlerAdapter(
+        processor=_RaisingNormalizationProcessor(RuntimeError("must not run"))
+    )
+
+    result = adapter(context)
+
+    assert result.disposition is WorkDisposition.TERMINAL
+    assert result.error_code == "invalid_normalization_claim_scope"
 
 
 class Pool:
@@ -289,7 +326,9 @@ class _RaisingNormalizationProcessor:
         raise self.exception
 
 
-def test_normalization_adapter_classifies_unhandled_processor_error_retryable() -> None:
+def test_normalization_adapter_classifies_unhandled_processor_error_retryable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = Store()
     claim = _normalization_claim()
     context = WorkContext(claim, store, threading.Event())
@@ -303,6 +342,13 @@ def test_normalization_adapter_classifies_unhandled_processor_error_retryable() 
     assert result.error_code == "unclassified_normalization_processor_failure"
     assert result.finalization_mode == WorkFinalizationMode.WORKER_OWNED
     assert context.lease_is_valid is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '"error_type": "RuntimeError"' in message
+        and '"event": "normalization_processor_failed"' in message
+        for message in messages
+    )
+    assert all("crash after commit" not in message for message in messages)
 
 
 def test_normalization_adapter_classifies_live_push_projection_error_retryable() -> None:

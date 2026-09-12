@@ -96,6 +96,23 @@ class _LegacySemanticRetryCursor:
         return self.stored_row
 
 
+class _CrossObservationSemanticRetryCursor(_LegacySemanticRetryCursor):
+    def __init__(self, *, stored_row: tuple[object, ...]) -> None:
+        super().__init__(legacy_identity=str(stored_row[14]), stored_row=stored_row)
+        self.selected_row: tuple[object, ...] | None = None
+
+    def execute(self, sql: str, params: tuple[object, ...]) -> None:
+        del params
+        self.rowcount = 0
+        if "WHERE observation_id = %s" in sql:
+            self.selected_row = None
+        elif "AND semantic_identity = %s" in sql:
+            self.selected_row = self.stored_row
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.selected_row
+
+
 def _quality() -> ObservationQuality:
     return ObservationQuality(
         missing_state=MissingState.PRESENT,
@@ -439,6 +456,33 @@ def test_missing_interval_retry_accepts_only_matching_legacy_identity_content() 
             semantics=changed,
             created_at=RECEIVED,
         )
+
+
+def test_identical_semantics_under_another_observation_id_converge() -> None:
+    canonical = canonicalize_push_candidates_v2((_push_movement(),))[0]
+    scope = SimpleNamespace(namespace_id="replay:semantic", data_mode="replay")
+    seed = _LegacySemanticRetryCursor(
+        legacy_identity=canonical.semantic_identity
+    )
+    assert persist_observation_semantics_v2(
+        seed,
+        scope,
+        observation_id="observation:first",
+        subject_id="subject:semantic",
+        semantics=canonical,
+        created_at=RECEIVED,
+    ) is False
+    assert seed.stored_row is not None
+
+    retry = _CrossObservationSemanticRetryCursor(stored_row=seed.stored_row)
+    assert persist_observation_semantics_v2(
+        retry,
+        scope,
+        observation_id="observation:second",
+        subject_id="subject:semantic",
+        semantics=canonical,
+        created_at=RECEIVED,
+    ) is False
 
 
 def test_factory_rejects_invalid_schema_provenance_timestamp_and_semantics() -> None:

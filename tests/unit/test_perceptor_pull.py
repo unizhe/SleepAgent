@@ -346,6 +346,69 @@ def test_sleep_report_keeps_stages_vendor_derived_and_normalizes_series() -> Non
     )
 
 
+def test_sleep_report_ignores_zero_duration_stage_markers() -> None:
+    result = normalize_sleep_report(
+        {
+            "sleep_stage_list": [
+                {"start_time": 1787472000, "end_time": 1787472000, "type": 4},
+                {"start_time": 1787472000, "end_time": 1787472600, "type": 2},
+            ],
+        },
+        report_date=date(2026, 8, 23),
+        binding_timezone_name="Asia/Shanghai",
+        **CONTEXT,
+    )
+
+    stages = tuple(
+        item
+        for item in result.candidates
+        if isinstance(item.payload, SleepStageIntervalPayload)
+    )
+    assert len(stages) == 1
+    assert result.intentionally_ignored_fields == (
+        "sleep_stage_list[].zero_duration_interval",
+    )
+
+
+def test_sleep_report_rejects_reversed_stage_intervals() -> None:
+    with pytest.raises(
+        PullContractError,
+        match="end_time must not precede start_time",
+    ):
+        normalize_sleep_report(
+            {
+                "sleep_stage_list": [
+                    {
+                        "start_time": 1787472600,
+                        "end_time": 1787472000,
+                        "type": 2,
+                    },
+                ],
+            },
+            report_date=date(2026, 8, 23),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+
+
+def test_sleep_report_does_not_hide_invalid_zero_duration_stage_codes() -> None:
+    with pytest.raises(PullContractError, match="documented codes 1-4"):
+        normalize_sleep_report(
+            {
+                "sleep_stage_list": [
+                    {
+                        "start_time": 1787472000,
+                        "end_time": 1787472000,
+                        "type": 0,
+                    },
+                ],
+            },
+            report_date=date(2026, 8, 23),
+            binding_timezone_name="Asia/Shanghai",
+            **CONTEXT,
+        )
+
+
 def test_sanitized_real_sleep_report_series_has_explicit_v2_provenance() -> None:
     fixture = json.loads(
         (

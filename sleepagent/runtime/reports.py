@@ -604,7 +604,7 @@ REPORTING_CONTEXT_SCHEMA_VERSION: Final[Literal["reporting_context.v1"]] = (
 REPORT_SEMANTIC_FACT_SCHEMA_VERSION: Final[Literal["report_semantic_fact.v1"]] = (
     "report_semantic_fact.v1"
 )
-ZH_CN_ROLE_RENDERER_VERSION = "zh_cn_role_renderer.v1"
+ZH_CN_ROLE_RENDERER_VERSION = "zh_cn_role_renderer.v2"
 ELDER_NARRATIVE_REQUEST_SCHEMA_VERSION = "elder_narrative_request.v1"
 ELDER_NARRATIVE_SCHEMA_VERSION = "elder_narrative.v1"
 
@@ -823,8 +823,53 @@ def build_report_semantic_facts(
     if isinstance(night_data, Mapping):
         summary = night_data.get("deterministic_night_summary")
         if isinstance(summary, Mapping):
+            stage_minutes = summary.get("stage_minutes")
+            has_stage_metrics = isinstance(stage_minutes, Mapping) and bool(
+                stage_minutes
+            )
+            if (
+                has_stage_metrics
+                or summary.get("sleep_window_minutes") is not None
+            ) and summary.get("schema_version") != (
+                "product_deterministic_night_summary.v2"
+            ):
+                raise ValueError(
+                    "stage facts require product deterministic summary v2"
+                )
+            sleep_window = _validated_sleep_stage_window(
+                summary,
+                required=has_stage_metrics,
+            )
+            if sleep_window is not None:
+                stage_start, stage_end, duration = sleep_window
+                for metric_id, value in (
+                    ("sleep_stage_coverage_start_at", stage_start.isoformat()),
+                    ("sleep_stage_coverage_end_at", stage_end.isoformat()),
+                ):
+                    facts.append(
+                        ReportSemanticFact.create(
+                            fact_kind="direct_metric",
+                            metric_id=metric_id,
+                            value=value,
+                            window="effective_sleep_stage_coverage",
+                            quality_qualifier=quality,
+                            source_refs=default_refs,
+                            authority="canonical_sleep_stage_intervals",
+                        )
+                    )
+                facts.append(
+                    ReportSemanticFact.create(
+                        fact_kind="direct_metric",
+                        metric_id="sleep_window_minutes",
+                        value=duration,
+                        unit="minutes",
+                        window="effective_sleep_stage_coverage",
+                        quality_qualifier=quality,
+                        source_refs=default_refs,
+                        authority="canonical_sleep_stage_intervals",
+                    )
+                )
             scalar_metrics = (
-                ("sleep_window_minutes", summary.get("sleep_window_minutes"), "minutes"),
                 ("bed_exit_count", summary.get("bed_exit_count"), "count"),
             )
             for metric_id, value, unit in scalar_metrics:
@@ -835,13 +880,12 @@ def build_report_semantic_facts(
                             metric_id=metric_id,
                             value=value,
                             unit=unit,
-                            window="authoritative_sleep_window",
+                            window="authoritative_observation_window",
                             quality_qualifier=quality,
                             source_refs=default_refs,
                             authority="deterministic_product_summary",
                         )
                     )
-            stage_minutes = summary.get("stage_minutes")
             if isinstance(stage_minutes, Mapping):
                 for stage, value in sorted(stage_minutes.items()):
                     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -851,7 +895,7 @@ def build_report_semantic_facts(
                                 metric_id=f"sleep_stage.{stage}_minutes",
                                 value=value,
                                 unit="minutes",
-                                window="authoritative_sleep_window",
+                                window="effective_sleep_stage_coverage",
                                 quality_qualifier=quality,
                                 source_refs=default_refs,
                                 authority="canonical_sleep_stage_intervals",
@@ -872,7 +916,7 @@ def build_report_semantic_facts(
                                 metric_id=f"{metric_id}_mean",
                                 value=value,
                                 unit=unit,
-                                window="authoritative_sleep_window",
+                                window="authoritative_observation_window",
                                 quality_qualifier=quality,
                                 source_refs=default_refs,
                                 authority="canonical_device_observations",
@@ -928,6 +972,51 @@ def build_report_semantic_facts(
                 )
             )
     return tuple(facts)
+
+
+def _validated_sleep_stage_window(
+    summary: Mapping[str, Any],
+    *,
+    required: bool,
+) -> tuple[datetime, datetime, float] | None:
+    """Read one internally consistent UTC stage-coverage window."""
+
+    raw_start = summary.get("sleep_window_start")
+    raw_end = summary.get("sleep_window_end")
+    raw_minutes = summary.get("sleep_window_minutes")
+    if raw_start is None and raw_end is None and raw_minutes is None:
+        if required:
+            raise ValueError("stage metrics require a sleep-stage coverage window")
+        return None
+    if (
+        not isinstance(raw_start, str)
+        or not isinstance(raw_end, str)
+        or not isinstance(raw_minutes, (int, float))
+        or isinstance(raw_minutes, bool)
+    ):
+        raise ValueError("sleep-stage coverage requires typed start, end, and minutes")
+    start = _report_datetime(raw_start)
+    end = _report_datetime(raw_end)
+    if start is None or end is None or end <= start:
+        raise ValueError("sleep-stage coverage requires valid aware boundaries")
+    start = start.astimezone(timezone.utc)
+    end = end.astimezone(timezone.utc)
+    expected = round((end - start).total_seconds() / 60, 1)
+    if float(raw_minutes) != expected:
+        raise ValueError("sleep-stage coverage duration is inconsistent")
+    return start, end, float(raw_minutes)
+
+
+def _report_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def _shared_analysis_hash_material(
@@ -1144,6 +1233,10 @@ class SharedNightAnalysis(StrictContract):
                 raise ValueError(
                     "structured shared analysis requires context and semantic facts"
                 )
+            _validate_sleep_stage_semantic_facts(
+                self.semantic_facts,
+                self.source.reporting_context,
+            )
         expected_hash = stable_hash(
             _shared_analysis_hash_material(
                 source=self.source,
@@ -1172,6 +1265,56 @@ class SharedNightAnalysis(StrictContract):
         if self.safety is not None:
             products[WorkProductKind.SAFETY_DECISION] = self.safety
         return products
+
+
+def _validate_sleep_stage_semantic_facts(
+    facts: tuple[ReportSemanticFact, ...],
+    context: ReportingContextV1,
+) -> None:
+    """Reject stage facts that are detached from their authoritative scope."""
+
+    direct = {
+        item.metric_id: item
+        for item in facts
+        if item.fact_kind == "direct_metric"
+    }
+    stage_facts = tuple(
+        item for key, item in direct.items()
+        if key.startswith("sleep_stage.")
+    )
+    duration = direct.get("sleep_window_minutes")
+    start_fact = direct.get("sleep_stage_coverage_start_at")
+    end_fact = direct.get("sleep_stage_coverage_end_at")
+    if not stage_facts and duration is None and start_fact is None and end_fact is None:
+        return
+    if duration is None or start_fact is None or end_fact is None:
+        raise ValueError("sleep-stage facts require one complete coverage window")
+    start = _report_datetime(start_fact.value)
+    end = _report_datetime(end_fact.value)
+    if (
+        start is None
+        or end is None
+        or end <= start
+        or not isinstance(duration.value, (int, float))
+        or isinstance(duration.value, bool)
+    ):
+        raise ValueError("sleep-stage semantic coverage is malformed")
+    start = start.astimezone(timezone.utc)
+    end = end.astimezone(timezone.utc)
+    expected = round((end - start).total_seconds() / 60, 1)
+    if float(duration.value) != expected:
+        raise ValueError("sleep-stage semantic duration is inconsistent")
+    if (
+        start < context.authoritative_start_at_utc
+        or end > context.authoritative_end_at_utc
+    ):
+        raise ValueError("sleep-stage coverage exceeds authoritative scope")
+    window_facts = (duration, start_fact, end_fact, *stage_facts)
+    if any(
+        item.window != "effective_sleep_stage_coverage"
+        for item in window_facts
+    ):
+        raise ValueError("sleep-stage facts silently conflate reporting windows")
 
 
 def _projection_hash_material(
@@ -1899,7 +2042,6 @@ def role_projection_identity_sha256(
 
 
 _ZH_CN_METRIC_LABELS = {
-    "sleep_window_minutes": "记录时段",
     "bed_exit_count": "离床次数",
     "sleep_stage.light_minutes": "浅睡",
     "sleep_stage.deep_minutes": "深睡",
@@ -1942,6 +2084,31 @@ def _localized_report_span(context: ReportingContextV1) -> str:
     return f"{start:%m月%d日 %H:%M}至{end:%m月%d日 %H:%M}"
 
 
+def _localized_sleep_stage_span(
+    by_metric: Mapping[str, ReportSemanticFact],
+    context: ReportingContextV1 | None,
+) -> str | None:
+    if context is None:
+        return None
+    start_fact = by_metric.get("sleep_stage_coverage_start_at")
+    end_fact = by_metric.get("sleep_stage_coverage_end_at")
+    if start_fact is None or end_fact is None:
+        return None
+    start = _report_datetime(start_fact.value)
+    end = _report_datetime(end_fact.value)
+    if start is None or end is None:
+        return None
+    zone = ZoneInfo(context.timezone_name)
+    local_start = start.astimezone(zone)
+    local_end = end.astimezone(zone)
+    if local_start.date() == local_end.date():
+        return f"{local_start:%m月%d日 %H:%M}至{local_end:%H:%M}"
+    return (
+        f"{local_start:%m月%d日 %H:%M}至"
+        f"{local_end:%m月%d日 %H:%M}"
+    )
+
+
 def _render_zh_cn_role(
     *,
     role: ReportRole,
@@ -1958,6 +2125,8 @@ def _render_zh_cn_role(
         if item.fact_kind == "direct_metric" and item.value is not None
     )
     by_metric = {item.metric_id: item for item in direct}
+    stage_span = _localized_sleep_stage_span(by_metric, context)
+    stage_duration = by_metric.get("sleep_window_minutes")
     care_pending = any(
         item.fact_kind == "care_candidate" and item.value is True
         for item in shared.semantic_facts
@@ -1972,10 +2141,12 @@ def _render_zh_cn_role(
     if role is ReportRole.ELDER:
         lines = [f"您好。我们已为您整理{local_date:%m月%d日}的睡眠观察。"]
         if span is not None:
-            lines.append(f"设备记录时段为{span}。")
-        duration = by_metric.get("sleep_window_minutes")
-        if duration is not None:
-            lines.append(f"本次记录时段约{_report_value_text(duration)}。")
+            lines.append(f"设备观测窗口为{span}。")
+        if stage_span is not None and stage_duration is not None:
+            lines.append(
+                f"睡眠分期覆盖为{stage_span}，"
+                f"共约{_report_value_text(stage_duration)}。"
+            )
         exits = by_metric.get("bed_exit_count")
         if exits is not None:
             lines.append(f"设备记录到离床{_report_value_text(exits)}。")
@@ -1987,10 +2158,14 @@ def _render_zh_cn_role(
     if role is ReportRole.FAMILY:
         lines = [f"{local_date:%Y年%m月%d日}家属睡眠照护摘要"]
         if span is not None:
-            lines.append(f"睡眠记录时段：{span}。")
+            lines.append(f"观测窗口：{span}。")
+        if stage_span is not None and stage_duration is not None:
+            lines.append(
+                f"睡眠分期覆盖：{stage_span}，"
+                f"共约{_report_value_text(stage_duration)}。"
+            )
         lines.append(f"整体状态：{quality_text}；{risk_text}。")
         for metric_id in (
-            "sleep_window_minutes",
             "bed_exit_count",
             "heart_rate_mean",
             "respiratory_rate_mean",
@@ -2014,9 +2189,14 @@ def _render_zh_cn_role(
     if span is not None and context is not None:
         lines.extend(
             (
-                f"权威记录时段：{span}。",
+                f"权威观测窗口：{span}。",
                 f"时区：{context.timezone_name}；本地睡眠日期：{local_date.isoformat()}。",
             )
+        )
+    if stage_span is not None and stage_duration is not None:
+        lines.append(
+            f"睡眠分期覆盖：{stage_span}，"
+            f"共约{_report_value_text(stage_duration)}。"
         )
     lines.append(f"数据质量：{quality_text}；{risk_text}。")
     for fact in direct:
