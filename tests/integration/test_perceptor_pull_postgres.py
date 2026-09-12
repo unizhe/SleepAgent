@@ -2012,6 +2012,73 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         ).canonical_created_count == 4
 
+        finalizer = NightFinalizationService(worker_uow)
+        with psycopg.connect(admin_dsn) as connection:
+            night_b_candidate_authority = connection.execute(
+                "SELECT wake_at, episode_local_date, current_revision_id, "
+                "current_revision_number FROM sleep_domain_night_episodes "
+                "WHERE night_episode_id = %s",
+                (night_b_episode_id,),
+            ).fetchone()
+        assert night_b_candidate_authority is not None
+        assert night_b_candidate_authority[0] is None
+        assert night_b_candidate_authority[1] is None
+        assert night_b_candidate_authority[2] is not None
+        with pytest.raises(
+            NightFinalizationPending,
+            match="no committed date/revision authority",
+        ):
+            finalizer.finalize(
+                final_scope,
+                night_episode_id=night_b_episode_id,
+                evaluated_at=night_b_close_at + timedelta(seconds=1),
+            )
+
+        confirmed_night_b_wake = finalizer.close_overdue_for_binding(
+            final_scope,
+            device_binding_id=BINDING_ID,
+            evaluated_at=(
+                night_b_close_at
+                + timedelta(
+                    seconds=(
+                        default_sleep_slice_policy().boundary.wake_confirmation_seconds
+                    )
+                )
+            ),
+        )
+        assert confirmed_night_b_wake is not None
+        assert confirmed_night_b_wake.revision_cause == "confirmed_observed_wake"
+        assert confirmed_night_b_wake.episode.wake_at == night_b_close_at
+        assert confirmed_night_b_wake.episode.episode_local_date is not None
+        assert confirmed_night_b_wake.parent_revision_id == (
+            night_b_candidate_authority[2]
+        )
+        with psycopg.connect(admin_dsn) as connection:
+            night_b_committed_authority = connection.execute(
+                "SELECT episode.wake_at, episode.episode_local_date, "
+                "episode.current_revision_id, episode.current_revision_number, "
+                "revision.parent_revision_id, "
+                "revision.revision_json ->> 'revision_cause' "
+                "FROM sleep_domain_night_episodes AS episode "
+                "JOIN sleep_domain_night_episode_revisions AS revision "
+                "ON revision.night_episode_revision_id = "
+                "episode.current_revision_id "
+                "WHERE episode.night_episode_id = %s",
+                (night_b_episode_id,),
+            ).fetchone()
+        assert night_b_committed_authority is not None
+        assert night_b_committed_authority[0] == night_b_close_at
+        assert night_b_committed_authority[1] is not None
+        assert night_b_committed_authority[2] == confirmed_night_b_wake.revision_id
+        assert night_b_committed_authority[2] != night_b_candidate_authority[2]
+        assert night_b_committed_authority[3] == (
+            night_b_candidate_authority[3] + 1
+        )
+        assert night_b_committed_authority[4:] == (
+            night_b_candidate_authority[2],
+            "confirmed_observed_wake",
+        )
+
         inside_report_received_at = night_b_close_at + timedelta(hours=1)
         inside_report = ingress.accept(
             _read(
@@ -2038,7 +2105,7 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert inside_report_result.canonical_created_count == 1
-        inside_finalization = NightFinalizationService(worker_uow).finalize(
+        inside_finalization = finalizer.finalize(
             final_scope,
             night_episode_id=night_b_episode_id,
             evaluated_at=inside_report_received_at + timedelta(seconds=1),
@@ -2125,6 +2192,30 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         ).canonical_created_count == 4
 
+        with pytest.raises(
+            NightFinalizationPending,
+            match="no committed date/revision authority",
+        ):
+            finalizer.finalize(
+                final_scope,
+                night_episode_id=night_c_episode_id,
+                evaluated_at=night_c_close_at + timedelta(seconds=1),
+            )
+        confirmed_night_c_wake = finalizer.close_overdue_for_binding(
+            final_scope,
+            device_binding_id=BINDING_ID,
+            evaluated_at=(
+                night_c_close_at
+                + timedelta(
+                    seconds=(
+                        default_sleep_slice_policy().boundary.wake_confirmation_seconds
+                    )
+                )
+            ),
+        )
+        assert confirmed_night_c_wake is not None
+        assert confirmed_night_c_wake.revision_cause == "confirmed_observed_wake"
+
         outside_report_received_at = (
             night_c_close_at
             + timedelta(
@@ -2159,13 +2250,12 @@ def test_push_pull_reconciliation_and_crash_replay_postgres() -> None:
             observation_semantics_version=ObservationSemanticsVersion.V2,
         )
         assert outside_report_result.canonical_created_count == 1
-        with pytest.raises(NightFinalizationPending):
-            NightFinalizationService(worker_uow).finalize(
-                final_scope,
-                night_episode_id=night_c_episode_id,
-                evaluated_at=outside_report_received_at,
-            )
         with psycopg.connect(admin_dsn) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM sleep_domain_night_finalizations "
+                "WHERE night_episode_id = %s",
+                (night_c_episode_id,),
+            ).fetchone() == (0,)
             assert connection.execute(
                 "SELECT count(*) FROM sleep_domain_source_reports "
                 "WHERE namespace_id = %s AND raw_ingress_record_id = %s",

@@ -7264,20 +7264,43 @@ def _shared_metric_material(shared: SharedNightAnalysis) -> tuple[dict[str, Any]
 def _source_metric_material(source: LoadedProductAgentSource) -> tuple[dict[str, Any], ...]:
     summary = source.facts.deterministic_night_summary()
     metrics: list[dict[str, Any]] = []
-    for metric_id, unit in (
-        ("sleep_window_minutes", "minutes"),
-        ("bed_exit_count", "count"),
+    sleep_window_start = summary.get("sleep_window_start")
+    sleep_window_end = summary.get("sleep_window_end")
+    sleep_window_minutes = summary.get("sleep_window_minutes")
+    if (
+        isinstance(sleep_window_start, str)
+        and isinstance(sleep_window_end, str)
+        and isinstance(sleep_window_minutes, (int, float))
+        and not isinstance(sleep_window_minutes, bool)
     ):
-        value = summary.get(metric_id)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        stage_start = datetime.fromisoformat(sleep_window_start).astimezone(UTC)
+        stage_end = datetime.fromisoformat(sleep_window_end).astimezone(UTC)
+        for metric_id, value, unit in (
+            ("sleep_stage_coverage_start_at", stage_start.isoformat(), None),
+            ("sleep_stage_coverage_end_at", stage_end.isoformat(), None),
+            ("sleep_window_minutes", sleep_window_minutes, "minutes"),
+        ):
             metrics.append(
                 {
                     "metric_id": metric_id,
                     "value": value,
                     "unit": unit,
-                    "window": "authoritative_sleep_window",
+                    "window": "effective_sleep_stage_coverage",
                 }
             )
+    bed_exit_count = summary.get("bed_exit_count")
+    if isinstance(bed_exit_count, (int, float)) and not isinstance(
+        bed_exit_count,
+        bool,
+    ):
+        metrics.append(
+            {
+                "metric_id": "bed_exit_count",
+                "value": bed_exit_count,
+                "unit": "count",
+                "window": "authoritative_observation_window",
+            }
+        )
     stages = summary.get("stage_minutes")
     if isinstance(stages, Mapping):
         for stage, value in stages.items():
@@ -7287,7 +7310,7 @@ def _source_metric_material(source: LoadedProductAgentSource) -> tuple[dict[str,
                         "metric_id": f"sleep_stage.{stage}_minutes",
                         "value": value,
                         "unit": "minutes",
-                        "window": "authoritative_sleep_window",
+                        "window": "effective_sleep_stage_coverage",
                     }
                 )
     vital_centers = summary.get("vital_centers")
@@ -7303,7 +7326,7 @@ def _source_metric_material(source: LoadedProductAgentSource) -> tuple[dict[str,
                         "metric_id": f"{metric_id}_mean",
                         "value": value,
                         "unit": unit,
-                        "window": "authoritative_sleep_window",
+                        "window": "authoritative_observation_window",
                     }
                 )
     return tuple(sorted(metrics, key=stable_hash))
